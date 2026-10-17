@@ -321,7 +321,11 @@ https://<owner_domain>/.well-known/agentconnect.json
 - **The knocker's daemon** fetches the file itself before it knocks, and
   shows the result to its human. Heimdall's badge is the operator's
   opinion, and a malicious operator can fake it (§12 row below). The
-  daemon's own fetch is what the knock records.
+  daemon's own fetch is what the knock records. The fetch tells the
+  owner's web server that someone is about to knock, and from which
+  address, before the owner has approved anything. The CLI says so, and
+  `--no-domain-check` skips the fetch; the knock then records the owner
+  state as unchecked.
 
 ### States Heimdall shows
 
@@ -483,7 +487,7 @@ counts toward local rate limiting.
 - **Every knock needs its human's approval. Auto-approval doesn't exist in
   v0.**
   - There is no config switch for it.
-  - `PolicyHook` can reject a knock (for example a blocklist), but its
+  - The local policy layer (`policy.py`, §10.6) can drop a knock (for example a blocklist), but its
     result can't approve one.
   - No agent-scope route, SDK call or MCP tool approves one.
   - Phase 3 tests that each of these is refused.
@@ -658,7 +662,7 @@ Proposed new rows for the SPEC §12 table, in its column order:
 | **Malicious directory operator** | Hides, delays or reorders listings. Serves stale versions. Fakes owner badges. Ignores withdrawals. Logs who reads what. Issues tokens to identities of its own | Listings and withdrawals are signed by IK, and tokens are checked against a key pinned in the daemon, so it **can't forge or alter** a listing. The knocker re-verifies the JWS, the token and the expiry, and fetches the domain file itself. Rollback is bounded by the door's 7-day expiry, and by the owner closing the door at the relay | Censorship and delay. Stale but validly signed listings until their door expires. Reader metadata. Names are operator-assigned, so a name proves nothing about who holds it |
 | **Relay and directory colluding** (same operator) | Joins reads of a listing to knocks on its door, and knocks to their mailboxes | Knocks are sealed (§6.6), so the relay sees a sender mailbox, a door and a time. Heimdall logs no addresses | Who knocked on whom and when, if both sides keep data they're told not to keep. **Metadata**, as for the relay |
 | **Stale door** (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones stop older listings from being re-published | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry |
-| **Knock flooder** | Sends many knocks to tire the owner's human, or to crowd out real knocks | Relay limits per (door, sender) and per sender, and per door, where overflow is dropped silently. Owner caps: one pending knock per identity per door, 32 per door. The 1 h lapse. `PolicyHook` rejection | Denial of service on a popular door. Mailboxes are free, so the relay limits slow Sybils down rather than stop them |
+| **Knock flooder** | Sends many knocks to tire the owner's human, or to crowd out real knocks | Relay limits per (door, sender) and per sender, and per door, where overflow is dropped silently. Owner caps: one pending knock per identity per door, 32 per door. The 1 h lapse. Local policy (§10.6) drops | Denial of service on a popular door. Mailboxes are free, so the relay limits slow Sybils down rather than stop them |
 | **Prompt injection through card text** | Card name, description, skills and examples are attacker-controlled and are read by agents through MCP, `.md`, `llms.txt` and `knock` | Cards are untrusted content (§10.1, §10.5). Directories MUST present card text as data: MCP results carry `untrusted: true`, Markdown escapes card text inside fenced blocks, and `llms.txt` lists names and URLs only. Single-line fields with length caps. No links from card text are rendered. Knock approval is human. Knocking only asks to talk | Behavioural: an agent that obeys card text anyway. Can't be solved with cryptography (as the existing row) |
 
 The "Assets" list gains **listing integrity** (only IK can say what its
@@ -997,7 +1001,7 @@ conversation itself, and nothing stronger.
   `kind: "knock"`. Each shows the listing, the display name and note as
   unverified text, and the fingerprint. `approvals approve` and
   `approvals reject` stay human-only.
-  - `PolicyHook` can reject a knock and can't approve one.
+  - The local policy layer can drop a knock and can't approve one.
   - Phase 3 has tests that no config, hook result, API route, SDK call or
     MCP tool approves a knock.
 - **Docs** that change with it: `docs/cli.md`, `docs/api.md`,
