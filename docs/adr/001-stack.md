@@ -161,6 +161,20 @@ only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
     Apache-2.0 distribution and a hosted relay; if we ever modify their
     files, we must publish those files. MPL-2.0 stays banned for every other
     crate.
+  - **Python dependencies follow the same allowlist**, in `licences-py.toml`
+    (Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, MIT-0, Unicode-3.0,
+    Zlib, plus PSF-2.0 and Python-2.0 for stdlib-adjacent packages such as
+    `typing_extensions`). `scripts/check_licences.py` (`just licences`) runs
+    `pip-licenses` over the third-party packages in `uv.lock` and fails on
+    any disallowed or unknown licence, in `just lint`, the CI `licences` job
+    and the nightly audit. A policy exception that no package uses fails
+    too, so the list can't go stale.
+  - **Two scoped Python exceptions (approved 2026-10-17), MPL-2.0 for
+    `certifi` only and `hypothesis` only.** `certifi` is the CA bundle used
+    by `httpx` (a runtime dependency); we use it unmodified. `hypothesis` is
+    a test-time dependency that isn't shipped. The same file-level copyleft
+    reasoning as for `hpke-rs` applies, and MPL-2.0 stays banned for every
+    other package.
 - **Hosting:** a public repo on the maintainer's personal GitHub
   (`mbocevski/agent-connect`), open from the start.
   - Gating runs in two layers. Locally: hooks plus `just merge`, which

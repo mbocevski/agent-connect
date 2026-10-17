@@ -24,7 +24,7 @@ fmt:
     taplo format
 
 # All static checks: every prek hook on all files + dependency policy
-lint: && deny
+lint: && deny licences
     prek run --all-files
 
 # Python only: ruff (lint + format check) and ty
@@ -45,6 +45,15 @@ lint-rust: && deny
 # Dependency policy: licences, advisories, bans, sources
 deny:
     cargo deny check
+
+# Python dependency licences vs licences-py.toml (a throwaway venv, no Rust build)
+licences:
+    mkdir -p target/licences
+    uv export --all-packages --no-emit-workspace --no-hashes --frozen --quiet --format requirements-txt --output-file target/licences/requirements.txt
+    uv venv --quiet --clear target/licences/venv
+    uv pip install --quiet --python target/licences/venv -r target/licences/requirements.txt
+    uvx pip-licenses==5.5.5 --python target/licences/venv/bin/python --from=mixed --format=json --output-file target/licences/report.json
+    uv run --no-project python scripts/check_licences.py target/licences/report.json
 
 # Fast test tier (< 60 s): unit, property, contract
 test: test-rust test-py contract
