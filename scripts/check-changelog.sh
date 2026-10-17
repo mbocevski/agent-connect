@@ -23,7 +23,8 @@ if ! merge_base="$(git merge-base "$base" HEAD)"; then
     exit 0
 fi
 range="$merge_base..HEAD"
-subjects="$(git log --format=%s "$range")"
+# --no-merges: CI checks out GitHub's synthetic "Merge X into Y" commit.
+subjects="$(git log --no-merges --format=%s "$range")"
 
 if [[ -z "$subjects" ]]; then
     echo "changelog: no commits ahead of $base"
