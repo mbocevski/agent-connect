@@ -11,7 +11,9 @@ from typer.testing import CliRunner
 
 from agentconnect import cli, cli_support
 from agentconnect.apiclient import ApiClientError
+from agentconnect.cli_json import SCHEMAS
 from agentconnect.sas_emoji import SAS_EMOJI
+from agentconnect.shapes import conforms
 
 runner = CliRunner()
 GID = "G" * 43
@@ -20,15 +22,6 @@ ME = "ac:v0:me"
 SAS = {"decimal": "1234-5678-9012", "emoji_indices": [0, 1, 2, 3, 4, 5, 6]}
 BIDI = chr(0x202E)  # right-to-left override
 URL = "https://relay.example/i/abc#v=0&s=xyz"  # not a secret: a fixture
-
-
-def shape(value: Any) -> Any:
-    """The structure of a JSON value: keys and types, not contents."""
-    if isinstance(value, dict):
-        return {k: shape(v) for k, v in sorted(value.items())}
-    if isinstance(value, list):
-        return [shape(value[0])] if value else []
-    return type(value).__name__ if value is not None else "null"
 
 
 def member(identity: str, *, me: bool = False, verified: bool = False) -> dict[str, Any]:
@@ -143,6 +136,7 @@ def test_group_create(fake: Fake) -> None:
     fake.routes["POST /v0/groups"] = lambda b: {"group_id": GID}
     code, out = fake.json("group", "create", "--purpose", "Deploys", "--name", "Ops")
     assert (code, out) == (0, {"group_id": GID, "name": "Ops", "purpose": "Deploys"})
+    assert conforms(out, SCHEMAS["group create"])
     assert fake.posts("/v0/groups")[0][1] == {"name": "Ops", "purpose": "Deploys"}
     assert "Created group x" in fake.run("group", "create", "--purpose", "x").stdout
 
@@ -181,15 +175,7 @@ def test_invite_create_options_and_policy(fake: Fake) -> None:
         "--require-verified",
     )
     assert code == 0
-    assert shape(out) == {
-        "expires_at": "int",
-        "group_id": "str",
-        "invite_id": "str",
-        "max_uses": "int",
-        "reminder": "str",
-        "require_verified": "bool",
-        "url": "str",
-    }
+    assert conforms(out, SCHEMAS["invite create"])
     assert fake.posts("/invites")[0][1] == {"ttl_secs": 7200, "max_uses": 3}
     assert fake.posts("/policy")[0][1] == {"require_verified": True}
 
@@ -207,6 +193,7 @@ def test_purpose_with_group_is_usage_error(fake: Fake) -> None:
 def test_revoke(fake: Fake) -> None:
     fake.routes["DELETE /v0/invites/abc"] = {"revoked": "abc"}
     assert fake.json("invite", "revoke", "abc") == (0, {"revoked": "abc"})
+    assert conforms(fake.json("invite", "revoke", "abc")[1], SCHEMAS["invite revoke"])
     assert "Revoked" in fake.run("invite", "revoke", "abc").stdout
 
 
@@ -258,35 +245,7 @@ def test_accept_json_schema_and_hint(fake: Fake) -> None:
     assert out["hint"] == (
         "ask your human to compare the short code 1234-5678-9012 with the other members"
     )
-    assert shape(out) == {
-        "epoch": "int",
-        "group_id": "str",
-        "hint": "str",
-        "invite_id": "str",
-        "inviter_name": "str",
-        "members": [
-            {
-                "display_name": "str",
-                "display_name_verified": "bool",
-                "fingerprint": "str",
-                "identity": "str",
-                "instances": "int",
-                "role": "str",
-                "self": "bool",
-                "verified": "bool",
-            }
-        ],
-        "name": "str",
-        "out_of_sync": "bool",
-        "out_of_sync_reason": "null",
-        "pending_approvals": "int",
-        "purpose": "str",
-        "require_verified": "bool",
-        "sas": {"decimal": "str", "emoji": "str", "emoji_names": ["str"]},
-        "status": "str",
-        "trust_state": {"members": "int", "self": "str", "verified_members": "int"},
-        "verified_summary": "str",
-    }
+    assert conforms(out, SCHEMAS["accept (approved)"])
 
 
 def test_accept_json_needs_yes(fake: Fake) -> None:
@@ -301,14 +260,7 @@ def test_accept_waits_for_approval_then_times_out_pending(fake: Fake) -> None:
     assert code == 0
     assert out["status"] == "pending"
     assert out["group_id"] is None
-    assert shape(out) == {
-        "group_id": "null",
-        "invite_id": "str",
-        "inviter_name": "str",
-        "name": "str",
-        "purpose": "str",
-        "status": "str",
-    }
+    assert conforms(out, SCHEMAS["accept (still pending)"])
     assert fake.pauses == [1.0, 1.0]
     assert "Not approved yet" in fake.run("accept", URL, "--yes", "--wait", "0").stdout
 
@@ -377,18 +329,7 @@ def test_groups_list_and_default(fake: Fake) -> None:
         assert GID in fake.run(*args).stdout
     code, out = fake.json("groups", "list")
     assert code == 0
-    assert shape(out) == {
-        "groups": [
-            {
-                "epoch": "int",
-                "group_id": "str",
-                "members": "int",
-                "name": "str",
-                "out_of_sync": "bool",
-                "status": "str",
-            }
-        ]
-    }
+    assert conforms(out, SCHEMAS["groups list"])
 
 
 def test_groups_show_human(fake: Fake) -> None:
@@ -404,6 +345,7 @@ def test_groups_show_json_hint_only_while_unverified(fake: Fake) -> None:
     _, out = fake.json("groups", "show", GID)
     assert out["hint"] is not None
     assert out["verified_summary"] == "0 of 1 verified"
+    assert conforms(out, SCHEMAS["groups show"])
     fake.routes[f"GET /v0/groups/{GID}"] = group_info(verified=True)
     _, out = fake.json("groups", "show", "Ops")
     assert out["hint"] is None
@@ -432,21 +374,7 @@ def test_approvals_list_shows_fingerprint_and_sas(fake: Fake) -> None:
     assert BIDI not in out  # bidi control stripped from the claimed name
     code, data = fake.json("approvals", "list")
     assert code == 0
-    assert shape(data) == {
-        "approvals": [
-            {
-                "display_name": "str",
-                "display_name_verified": "bool",
-                "fingerprint": "str",
-                "group_id": "str",
-                "group_name": "str",
-                "group_sas": {"decimal": "str", "emoji": "str", "emoji_names": ["str"]},
-                "identity": "str",
-                "received_at": "int",
-                "request_id": "str",
-            }
-        ]
-    }
+    assert conforms(data, SCHEMAS["approvals list"])
     fake.routes["GET /v0/approvals"] = {"approvals": []}
     assert "No pending" in fake.run("approvals", "list").stdout
 
@@ -462,6 +390,7 @@ def test_approve_uses_the_human_token_and_confirms(fake: Fake) -> None:
     assert fake.posts("/approve")[0][0] is True  # human scope
     code, out = fake.json("approvals", "approve", "r1", "--yes")
     assert (code, out["status"]) == (0, "approving")
+    assert conforms(out, SCHEMAS["approvals approve"])
     assert fake.json("approvals", "approve", "r1")[1]["error"]["code"] == "needs_yes"
 
 
@@ -472,6 +401,7 @@ def test_reject_and_unknown_request(fake: Fake) -> None:
         0,
         {"request_id": "r1", "status": "rejected"},
     )
+    assert conforms(fake.json("approvals", "reject", "r1")[1], SCHEMAS["approvals reject"])
     assert fake.posts("/reject")[0][0] is True
     assert "Rejected" in fake.run("approvals", "reject", "r1").stdout
     assert fake.run("approvals", "reject", "zzz").exit_code == 1
@@ -495,6 +425,7 @@ def test_verify_yes_marks_every_other_member(fake: Fake) -> None:
     assert fake.posts("/verify")[0] == (True, {"verified": True})
     code, out = fake.json("verify", GID, input="y\n")
     assert (code, out) == (0, {"outcome": "verified", "group_id": GID, "verified": [BOB]})
+    assert conforms(out, SCHEMAS["verify (verified)"])
 
 
 def test_verify_default_answer_is_no(fake: Fake) -> None:
@@ -545,6 +476,7 @@ def test_verify_no_reports_the_mismatch_and_handover(fake: Fake) -> None:
         "status": "left",
         "ownership_transfer": {"new_owner": BOB, "confirmed": True, "new_owner_name": "bob"},
     }
+    assert conforms(out, SCHEMAS["verify (mismatch)"])
     assert fake.posts("/mismatch")[0] == (True, {"epoch": 1})
     text = fake.run("verify", GID, input="n\n").stdout
     assert "handed to bob" in text
@@ -559,7 +491,9 @@ def test_verify_no_unconfirmed_handover_and_non_owner(fake: Fake) -> None:
     fake.routes["GET /v0/events?after=0"] = mismatch_event(None)
     out = fake.run("verify", GID, input="n\n").stdout
     assert "don't rejoin" in out
-    assert fake.json("verify", GID, input="n\n")[1]["ownership_transfer"] is None
+    out = fake.json("verify", GID, input="n\n")[1]
+    assert out["ownership_transfer"] is None
+    assert conforms(out, SCHEMAS["verify (mismatch)"])
 
 
 # -- leave, send, events, errors ------------------------------------------------------------
@@ -568,6 +502,7 @@ def test_verify_no_unconfirmed_handover_and_non_owner(fake: Fake) -> None:
 def test_leave(fake: Fake) -> None:
     fake.routes[f"POST /v0/groups/{GID}/leave"] = [{"status": "left"}, {"status": "leaving"}]
     assert fake.json("leave", GID) == (0, {"group_id": GID, "status": "left"})
+    assert conforms(fake.json("leave", GID)[1], SCHEMAS["leave"])
     assert "Leaving" in fake.run("leave", GID).stdout
     fake.routes[f"POST /v0/groups/{GID}/leave"] = ApiClientError(403, "forbidden", "transfer first")
     assert fake.run("leave", GID).exit_code == 3
@@ -577,7 +512,7 @@ def test_send_with_recipients_and_hint(fake: Fake) -> None:
     fake.routes[f"POST /v0/groups/{GID}/messages"] = {"msg_id": "m1"}
     code, out = fake.json("send", GID, "hello", "--to", BOB)
     assert code == 0
-    assert shape(out) == {"group_id": "str", "hint": "str", "msg_id": "str"}
+    assert conforms(out, SCHEMAS["send"])
     assert fake.posts("/messages")[0] == (False, {"text": "hello", "to": [BOB]})
     assert "Note: ask your human" in fake.run("send", GID, "hi").stdout
 
@@ -588,13 +523,7 @@ def test_events_list_follow_and_interrupt(fake: Fake, monkeypatch: pytest.Monkey
     fake.routes["GET /v0/events?after=3"] = {"events": []}
     assert "3  1970-01-01 00:00 UTC  joined" in fake.run("events").stdout
     lines = fake.run("events", "--json").stdout.splitlines()
-    assert shape(json.loads(lines[0])) == {
-        "at": "int",
-        "data": {},
-        "group_id": "str",
-        "seq": "int",
-        "type": "str",
-    }
+    assert conforms(json.loads(lines[0]), SCHEMAS["events (one object per line)"])
 
     def stop(_s: float) -> None:
         raise KeyboardInterrupt

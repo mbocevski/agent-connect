@@ -102,6 +102,88 @@ class Config:
         return replace(self, **kw)
 
 
+@dataclass(frozen=True)
+class ConfigKey:
+    """A key of ``config.toml`` and the :class:`Config` field it fills.
+
+    :data:`CONFIG_KEYS` is what ``docs/config.md`` is generated from
+    (``scripts/gen_reference.py``): the type comes from the dataclass field,
+    the rest is written here, next to the loader that gives it meaning.
+    """
+
+    key: str  # `section.name` in the TOML file
+    field: str  # attribute of Config
+    default: str  # as the docs show it
+    doc: str
+    env: str = ""  # environment variable that overrides it
+
+
+CONFIG_KEYS: tuple[ConfigKey, ...] = (
+    ConfigKey(
+        "relay.url",
+        "relay_url",
+        f"`{DEFAULT_RELAY_URL}`",
+        "Relay base URL. `wss://`, or `ws://` for a loopback relay only.",
+        "AC_RELAY_URL",
+    ),
+    ConfigKey(
+        "relay.host",
+        "relay_host",
+        "the URL's `host[:port]`",
+        "The host string signed into relay authentication. It must match the "
+        "relay's `AC_RELAY_HOST`.",
+        "AC_RELAY_HOST",
+    ),
+    ConfigKey(
+        "daemon.data_dir",
+        "data_dir",
+        "`$XDG_DATA_HOME/agentconnect`",
+        "Keys, databases, API tokens and the API socket. Created 0700.",
+        "AC_DATA_DIR",
+    ),
+    ConfigKey("daemon.display_name", "display_name", "`agent`", "The name other members see."),
+    ConfigKey(
+        "daemon.default_adapter",
+        "default_adapter",
+        "`none`",
+        "The adapter that new groups deliver to.",
+    ),
+    ConfigKey(
+        "daemon.keystore",
+        "keystore",
+        "`auto`",
+        "`keyring` (the OS keyring), `file` (0600 files in the data directory), or "
+        "`auto` (the keyring when one is usable, files otherwise).",
+    ),
+    ConfigKey(
+        "policy.auto_approve",
+        "auto_approve",
+        "`false`",
+        "Approve JoinRequests without asking a human. Leave it off unless every "
+        "holder of your invite links is trusted.",
+    ),
+    ConfigKey(
+        "api.socket",
+        "api_socket",
+        "`<data_dir>/agentconnectd.sock`",
+        "Unix socket for the local API.",
+    ),
+    ConfigKey(
+        "api.tcp_port",
+        "api_tcp_port",
+        "`0`",
+        "When greater than 0, serve the local API on `127.0.0.1:<port>` instead of "
+        "the socket (0 to 65535).",
+    ),
+)
+
+# Environment variables that don't override a single key.
+CONFIG_ENV_EXTRA: tuple[tuple[str, str], ...] = (("AC_CONFIG", "The path of the TOML file."),)
+
+# Config fields with no key in the file (set in code, mostly by tests).
+CONFIG_FIELDS_WITHOUT_KEY = frozenset({"relay_rest_url"})
+
+
 def _check_relay_url(url: str) -> str:
     parts = urlsplit(url)
     if parts.scheme not in ("ws", "wss") or not parts.netloc:
