@@ -654,9 +654,10 @@ Envelope = {
 }
 ```
 
-- A `knock` envelope is `{v, kind: "knock", door_id, msg_id, sender, ct}`:
-  it has no `group_id`, `epoch`, `to` or `routing`, and its `ct` is a
-  `SealedKnock` (§6.6.2) of at most 16 KiB. It is delivered only to the
+- A `knock` envelope is `{v: 0, kind: "knock", door_id, msg_id, sender,
+  ct}`: `group_id`, `epoch`, `to` and `routing` MUST be absent, and its `ct`
+  is a `SealedKnock` (§6.6.2) of at most 16 KiB once decoded. No other kind
+  may carry `door_id`. It is delivered only to the
   mailbox that registered the door, so an instance that never registered a
   door never receives one.
 - Application ciphertext MUST be padded inside MLS (`PrivateMessage` padding)
@@ -765,12 +766,12 @@ MLS commits (§9).
 | `GET /v0/invites/{invite_id}` | Get `InviteMeta`. Public. |
 | `DELETE /v0/invites/{invite_id}` | Revoke the invite. Inviter mailbox only. |
 | `GET /i/{invite_id}` | Landing page (HTML). It MUST NOT read the fragment. |
-| `POST /v0/doors` | Register a door (§6.6.1). Body: `{"door_id", "expires_at", "owner_mailbox"}`. Mailbox auth required. `expires_at` is in the future and at most 7 days away. |
-| `DELETE /v0/doors/{door_id}` | Close the door now. Owner mailbox only. |
+| `POST /v0/doors` | Register a door (§6.6.1). Body: `{"door_id", "expires_at", "owner_mailbox"}`; unknown fields are rejected. The owner chooses `door_id` (16 random bytes, base64url). Mailbox auth required. `expires_at` is in the future and at most 7 days away. Answers `201 {"door_id", "expires_at"}`. |
+| `DELETE /v0/doors/{door_id}` | Close the door now. Owner mailbox only. Answers `204`. Closing changes nothing for a door that is already closed or expired, which answers `door_not_open`. |
 | `GET /healthz`, `GET /metrics` | Operations |
 
-There is no `GET` for doors: everything a knocker needs is in the signed
-listing (§13.1).
+There is no `GET` for doors (`405`): everything a knocker needs is in the
+signed listing (§13.1).
 
 REST errors are JSON `{"code": "<§8.4 code>", "detail": "..."}` with the HTTP
 status 400 (`bad_request`), 401 (`auth_failed`), 404 (`invite_not_open`,
@@ -832,7 +833,7 @@ and for `POST /v0/doors`, `owner_mailbox` MUST equal it (else
    - `{"t": "group.create", "group_id": "...", "epoch": 0, "msg_id": "..."}`
    - `{"t": "invite.consume", "invite_id": "...", "msg_id": "..."}`
    - `{"t": "join", "invite_id": "...", "env": Envelope(kind=join_request)}`, sent from the joiner's mailbox.
-   - `{"t": "knock", "door_id": "...", "env": Envelope(kind=knock)}`, sent from the knocker's mailbox (§6.6). The frame's `door_id` MUST equal the envelope's. There is no new server frame: a knock is `deliver`ed to the door's owner, and the knocker gets `accepted` or `error` for the envelope's `msg_id`.
+   - `{"t": "knock", "door_id": "...", "env": Envelope(kind=knock)}`, sent from the knocker's mailbox (§6.6). The envelope's `door_id` MUST equal the frame's. A `knock` envelope inside `send` or `join` is `bad_request`. There is no new server frame: the owner receives the envelope verbatim in a normal `deliver` (store and forward, with the 7-day TTL of §8.3), and the knocker gets `accepted` or `error` for the envelope's `msg_id`.
 3. **Server → client frames**
    - `{"t": "deliver", "env": Envelope}`
    - `{"t": "accepted", "msg_id": "..."}`
@@ -926,23 +927,33 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   `{door_id → (owner_mailbox, expires_at, open)}`, filled by
   `POST /v0/doors` and closed by `DELETE /v0/doors/{door_id}` (§8.1). A
   mailbox has at most 4 open doors (so renewal can overlap); a fifth is
-  refused with `quota_exceeded`. A `door_id` that is already registered is
-  `bad_request`. The relay forwards knocks and never parses `ct`:
+  refused with `quota_exceeded`. A `door_id` that is already registered,
+  including a closed door's, is `bad_request`: a closed door keeps its id
+  until its `expires_at`, so a public id can't be registered again. The
+  relay forwards knocks and never parses `ct`:
   - The envelope MUST be a `knock` envelope (§7.1) whose `ct` is at most
-    16 KiB (`too_large` otherwise) and whose `sender` is the authenticated
-    mailbox.
+    16 KiB once decoded (`too_large` otherwise) and whose `sender` is the
+    authenticated mailbox.
   - If the door is unknown, expired or closed, the answer is
     `door_not_open`. That state is public anyway: the signed listing
     carries the expiry, and closing is the owner's public act.
   - These limits are answered with `rate_limited`, which tells the knocker
-    only about its own behaviour: 1 knock per (door, sender mailbox) per
-    10 minutes, and 20 knocks per sender mailbox per hour across all doors.
-  - These conditions are answered with **`accepted`**, and the knock is
-    dropped: more than 10 knocks per door per minute, and an owner queue
-    that is full (unlike `join`). Other answers would reveal how busy the
-    door is and whether its owner's queue is full.
+    only about its own behaviour: more than 1 knock per (door, sender
+    mailbox) per 10 minutes, and more than 20 knocks per sender mailbox per
+    hour across all doors. A knock is charged to these limits only if both
+    have room.
+  - Then these conditions are answered with **`accepted`**, and the knock
+    is dropped: more than 10 knocks per door per minute, and an owner queue
+    that is full (unlike `join`; no `queue_overflow` marker is queued).
+    Other answers would reveal how busy the door is and whether its owner's
+    queue is full.
   - Otherwise the knock is queued for the door's `owner_mailbox` and
     delivered like any message.
+  - A knock retried within 10 minutes is `rate_limited`, whether or not the
+    first was delivered. After that, a repeat of the same `msg_id` is
+    `accepted` but not delivered twice (the `msg_id` rule under "Storage").
+    Daemons SHOULD NOT retry a knock answered with `rate_limited`.
+  - Public metrics MUST NOT separate forwarded knocks from dropped ones.
   - Mailboxes cost nothing, so per-mailbox limits can be evaded by creating
     more. The relay MAY also limit knocks per source address, in memory
     only and never logged. The owner's per-identity and per-door caps
@@ -982,8 +993,9 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   instance that stays unresponsive. A direct send to a full mailbox (a `join`
   to the inviter) is instead refused with `quota_exceeded`.
 - **Logging:** the relay MUST NOT log `ct`, and MUST NOT log fragments or
-  secrets. Identifiers in logs SHOULD be hashed. Door ids are identifiers
-  (a listing links them to an identity), so they are hashed in logs too.
+  secrets. Identifiers in logs SHOULD be hashed. Door and knock paths MUST
+  NOT log any identifier, hashed or not: a listing links a door id to an
+  identity, and a hash of a public id is no protection.
 
 ### 8.4 Error codes
 
@@ -998,9 +1010,12 @@ Mapping of the cases above:
 | `invite.consume` or `DELETE` by a mailbox that is not the inviter | `auth_failed` |
 | Unknown, exhausted, expired or revoked invite (consume, `join`, `GET`) | `invite_not_open` |
 | Unknown, expired or closed door (`knock`, `DELETE /v0/doors/{door_id}`) | `door_not_open` (HTTP 404 on REST) |
-| `DELETE /v0/doors/{door_id}` by a mailbox that is not the door's owner | `auth_failed` |
+| `POST /v0/doors` whose `owner_mailbox` isn't the caller; `DELETE /v0/doors/{door_id}` by a mailbox that is not the door's owner; an unsigned or replayed door request | `auth_failed` |
 | `knock` over the per-(door, sender) or per-sender limit (§8.3) | `rate_limited` |
-| `POST /v0/doors` with 4 doors already open for the mailbox | `quota_exceeded` |
+| `POST /v0/doors` with 4 doors already open for the mailbox | `quota_exceeded` (HTTP 429) |
+| `POST /v0/doors` with a registered (or closed) `door_id`, or an `expires_at` that is past or more than 7 days away | `bad_request` |
+| `knock` whose decoded `ct` is over 16 KiB | `too_large` |
+| `knock` envelope inside `send` or `join`; a frame and envelope `door_id` that differ | `bad_request` |
 | Commit that would take a group above 50 instances | `quota_exceeded` |
 | `join` while the inviter's queue is full | `quota_exceeded` |
 | Send from a non-member; welcome from a non-member | `not_member` |
