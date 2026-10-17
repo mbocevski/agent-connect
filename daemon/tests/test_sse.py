@@ -20,8 +20,13 @@ SENDER = Sender("ac:v0:peer", "i1", None, False)
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> Store:
-    return Store(tmp_path / "daemon.sqlite3", secrets.token_bytes(32))
+def db_key() -> bytes:
+    return secrets.token_bytes(32)
+
+
+@pytest.fixture
+def store(tmp_path: Path, db_key: bytes) -> Store:
+    return Store(tmp_path / "daemon.sqlite3", db_key)
 
 
 @pytest.fixture
@@ -194,23 +199,53 @@ def files_bytes(directory: Path) -> bytes:
     return b"".join(f.read_bytes() for f in directory.glob("daemon.sqlite3*"))
 
 
+MARKER = "payload-marker-" + "x" * 8
+
+
+def rows_with_marker(store: Store) -> int:
+    """Rows of the feed whose payload holds the marker, through the real
+    decrypted connection (``LIKE`` on the stored JSON, not a file scan)."""
+    row = store._one("SELECT COUNT(*) FROM feed WHERE payload LIKE ?", f"%{MARKER}%")
+    assert row is not None
+    return int(row[0])
+
+
+def feed_rows(store: Store) -> int:
+    row = store._one("SELECT COUNT(*) FROM feed")
+    assert row is not None
+    return int(row[0])
+
+
 async def test_items_are_purged_after_the_retention_window(
-    store: Store, fake_clock: FakeClock, tmp_path: Path
+    store: Store, db_key: bytes, fake_clock: FakeClock, tmp_path: Path
 ) -> None:
     hub = SseAdapter(fake_clock, 600, store)
     sub = hub.subscribe(None, None)
-    await put(hub, G1, "old-" + "marker" * 3)
+    await put(hub, G1, MARKER)
     fake_clock.advance(599)
     await put(hub, G1, "young")
+
+    # Not vacuous: inside the window the same query finds the payload.
     assert hub.purge() == 0
+    assert rows_with_marker(store) == 1
+    assert feed_rows(store) == 2
+
     fake_clock.advance(2)  # the first is now 601 seconds old
     assert hub.purge() == 1
+    assert rows_with_marker(store) == 0
+    assert feed_rows(store) == 1
     assert [p["msg_id"] for _, _, p in store.feed_since(0)] == ["young"]
     assert store.feed_purged() == 1
-    # Gone from the file, WAL included (deleted rows are overwritten).
-    store.close()
-    assert b"marker" not in files_bytes(tmp_path)
     assert sub.queue.qsize() == 2  # what was already queued for a live consumer stays
+
+    # The same holds when the database is opened again with its key.
+    store.close()
+    reopened = Store(tmp_path / "daemon.sqlite3", db_key)
+    assert rows_with_marker(reopened) == 0
+    assert feed_rows(reopened) == 1
+    # Secondary: the file (encrypted, so this alone proves little) has no marker.
+    reopened.close()
+    assert MARKER.encode() not in files_bytes(tmp_path)
 
 
 async def test_the_purger_runs_on_the_clock(store: Store, fake_clock: FakeClock) -> None:
