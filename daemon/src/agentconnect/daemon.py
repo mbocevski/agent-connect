@@ -753,6 +753,14 @@ class Daemon:
         except ValueError:
             await self._malformed(env, "ct")
             return
+        if env["kind"] == "proposal" and int(env["epoch"]) != self._core_epoch(gid):
+            # SPEC 7.1: a proposal is only valid in the current epoch, so an
+            # envelope epoch that differs is dropped (commits are merged and
+            # flagged instead, see _after_commit).
+            self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
+            await self._ack(msg_id)
+            await self.emit(group_id, "relay_misbehaviour", reason="epoch_mismatch")
+            return
         try:
             event = self.client.process(gid, ct)
         except (ac.AgentConnectError, ac.CoreError) as e:
@@ -784,6 +792,16 @@ class Daemon:
             self._delivery_wake.set()
             if delivery.hop > _max_turns(group.policy) and delivery.origin != "human":
                 await self._loop_guard(group, delivery)
+            if delivery.kind == "control.close":
+                # SPEC 7.3: the owner asks everyone to leave. Leaving is the
+                # human's decision; the daemon never leaves on its own.
+                reason = delivery.body.get("reason")
+                await self.emit(
+                    group_id,
+                    "close_requested",
+                    sender=delivery.sender.identity,
+                    reason=reason[:200] if isinstance(reason, str) else "",
+                )
             return
         if etype in ("commit", "own_commit_confirmed"):
             await self._after_commit(group_id, event, env, own=etype == "own_commit_confirmed")
@@ -841,6 +859,8 @@ class Daemon:
             if origin != "human":
                 return None  # SPEC 7.3: an agent can't resume; ignore it
             self._reset_loop_guard(group.group_id)
+        if inner["kind"] == "control.close" and identity != group.policy.get("owner"):
+            return None  # SPEC 7.3: only the owner may close
         # SPEC 10.3: past max_agent_turns the agent is not triggered.
         addressed = hop <= _max_turns(policy) and addressed_to_me(
             str(policy.get("floor", "free")),

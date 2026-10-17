@@ -88,6 +88,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Daemon: a proposal whose envelope epoch isn't the current epoch is
+  dropped with `relay_misbehaviour` (`epoch_mismatch`), while a commit
+  with a mismatched envelope epoch is still merged and flagged (SPEC
+  §7.1). An owner's `control.close` raises a `close_requested` event
+  for the human and never leaves on its own; a non-owner's is ignored.
 - Relay and daemon: after `ready` and the flush of everything queued for
   the mailbox, the relay sends `{"t": "drained"}` (SPEC §8.2). Messages
   delivered before it, the reconnect drain, are exempt from the §10.2

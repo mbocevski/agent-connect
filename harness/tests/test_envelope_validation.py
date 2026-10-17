@@ -119,3 +119,38 @@ def test_envelope_shapes() -> None:
         ({"routing": {"remove": "x"}}, "routing"),
     ]:
         assert _envelope_problem({**good, **change}) == problem, change
+
+
+async def test_a_proposal_with_a_mismatched_epoch_is_dropped(
+    group: GroupFixture, malicious_relay: Proxy
+) -> None:
+    (a, b), gid = await group(2)
+
+    def bump(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "deliver" and env.get("kind") == "proposal":
+            env["epoch"] += 1
+        return [frame]
+
+    malicious_relay(a).server_filters.append(bump)
+    assert await b.daemon.leave(gid) == "leaving"
+    await a.adapter.wait_for(lambda: bool(a.adapter.of_type("relay_misbehaviour")))
+    (alert,) = a.adapter.of_type("relay_misbehaviour")
+    assert alert.data["reason"] == "epoch_mismatch"
+    await a.idle()
+    assert b.me in {m.identity for m in a.daemon.store.members(gid)}
+
+
+async def test_control_close_prompts_the_human_and_never_leaves(group: GroupFixture) -> None:
+    (a, b, c), gid = await group(3)
+    # A non-owner's close is ignored (SPEC 7.3).
+    b.daemon.send_message(gid, {"reason": "not mine to close"}, kind="control.close")
+    a.daemon.send_message(gid, {"reason": "done here"}, kind="control.close")
+    await c.adapter.wait_for(lambda: bool(c.adapter.of_type("close_requested")))
+    (event,) = c.adapter.of_type("close_requested")
+    assert event.data == {"sender": a.me, "reason": "done here"}
+    await c.idle()
+    assert [d.body for d in c.adapter.deliveries if d.kind == "control.close"] == [
+        {"reason": "done here"}
+    ]
+    assert cached(c, gid).status == "active"
