@@ -88,6 +88,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Protocol (`SPEC.md`): now normative, as decided by the maintainer:
+  pending leaves are committed by the lowest-index leaf that isn't leaving
+  (§9.2); `trust_state.self` is `verified` only when every other current
+  member is, and `require_verified` holds deliveries until then (§10.1,
+  §10.4); `moderated` triggers only the moderator until floor control
+  exists (§9.3); v0 is single-relay and an invite for another relay is
+  rejected (§4.4). Also normative, as implied by the existing text:
+  malformed envelopes are dropped before processing (§7.1), and control
+  messages from senders §7.3 doesn't allow (an agent's `control.resume`)
+  are ignored. Twelve further choices the daemon makes are listed in §15
+  as pending a maintainer decision, each with a recommendation.
 - Daemon: relay `rate_limited` and `internal` replies to a commit are
   retried with backoff under the same bytes and `msg_id` instead of
   discarding the commit (and failing an approved join). A message or commit
