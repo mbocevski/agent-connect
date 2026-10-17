@@ -25,11 +25,11 @@ class FlakyCore:
         self.errors: list[Exception] = []
         self.calls = 0
 
-    def process(self, gid: bytes, message: bytes) -> dict[str, Any]:
+    def process(self, gid: bytes, message: bytes, **journal: Any) -> dict[str, Any]:
         self.calls += 1
         if self.errors:
             raise self.errors.pop(0)
-        return self._client.process(gid, message)
+        return self._client.process(gid, message, **journal)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)

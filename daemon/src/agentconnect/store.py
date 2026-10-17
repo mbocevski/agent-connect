@@ -250,21 +250,35 @@ class Store:
         """
         private_file(path)
         self._db = _Connection(path, db_key)
-        self._db.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        # FULL: a committed transaction survives a power loss. With NORMAL in
+        # WAL mode the last commits can roll back after their effects (frames
+        # sent, acks) went out (ADR-004).
+        self._db.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         self._db.executescript(SCHEMA)
+        self._depth = 0
 
     def close(self) -> None:
         self._db.close()
 
     @contextmanager
     def tx(self) -> Generator[_Connection]:
-        self._db.execute("BEGIN IMMEDIATE")
+        """One transaction; nested calls are savepoints inside it. Rolled
+        back on any exception, a simulated crash included."""
+        depth = self._depth
+        self._db.execute("BEGIN IMMEDIATE" if depth == 0 else f"SAVEPOINT sp{depth}")
+        self._depth += 1
         try:
             yield self._db
         except BaseException:
-            self._db.execute("ROLLBACK")
+            self._depth = depth
+            if depth == 0:
+                self._db.execute("ROLLBACK")
+            else:
+                self._db.execute(f"ROLLBACK TO sp{depth}")
+                self._db.execute(f"RELEASE sp{depth}")
             raise
-        self._db.execute("COMMIT")
+        self._depth = depth
+        self._db.execute("COMMIT" if depth == 0 else f"RELEASE sp{depth}")
 
     def _one(self, sql: str, *args: Any) -> tuple[Any, ...] | None:
         return self._db.execute(sql, args).fetchone()
@@ -410,14 +424,24 @@ class Store:
 
     # -- invites and approvals ---------------------------------------------
 
-    def add_invite(
-        self, invite_id: str, group_id: str, expires_at: int, max_uses: int, now: int
+    def add_invite(  # noqa: PLR0913
+        self,
+        invite_id: str,
+        group_id: str,
+        expires_at: int,
+        max_uses: int,
+        now: int,
+        *,
+        status: str = "open",
     ) -> None:
         self._db.execute(
-            "INSERT INTO invites (invite_id, group_id, expires_at, max_uses, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (invite_id, group_id, expires_at, max_uses, now),
+            "INSERT INTO invites (invite_id, group_id, expires_at, max_uses, created_at, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (invite_id, group_id, expires_at, max_uses, now, status),
         )
+
+    def delete_invite(self, invite_id: str) -> None:
+        self._db.execute("DELETE FROM invites WHERE invite_id = ?", (invite_id,))
 
     def invite(self, invite_id: str) -> dict[str, Any] | None:
         row = self._one(
@@ -525,6 +549,16 @@ class Store:
             "UPDATE joins SET status = ?, group_id = ? WHERE invite_id = ?",
             (status, group_id, invite_id),
         )
+
+    def joined_invites(self) -> list[str]:
+        """Invite ids of joins that ended (joined, failed or expired)."""
+        rows = self._all("SELECT invite_id FROM joins WHERE status != 'pending'")
+        return [str(r[0]) for r in rows]
+
+    def join_name(self, invite_id: str) -> str | None:
+        """The display name a join (in any state) was requested under."""
+        row = self._one("SELECT display_name FROM joins WHERE invite_id = ?", invite_id)
+        return None if row is None else str(row[0])
 
     def join_status(self, invite_id: str) -> tuple[str, str | None] | None:
         row = self._one("SELECT status, group_id FROM joins WHERE invite_id = ?", invite_id)

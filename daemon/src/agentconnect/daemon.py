@@ -14,6 +14,18 @@ Commit handling follows SPEC §8.3 and the core's semantics exactly: a
 commit is sent under its ``msg_id`` and merged on ``accepted`` (or when the
 core recognises its exact bytes in the fan-out); on ``epoch_conflict`` it is
 discarded, the winning commit is processed, and the intent is rebuilt.
+
+Crash consistency (ADR-004): the core and the daemon keep separate
+databases, so every processed message, own-commit confirmation and Welcome
+goes through the core's **journal**. The core stores the result in the same
+transaction as the MLS state change, under the key ``sender/msg_id``. The
+daemon then records everything that follows from it (inbox row, members,
+policy, epoch, events, queued sends) in **one** transaction of its own,
+consumes the journal entry, and only then acks the relay. A crash or an
+exception anywhere in between leaves either a pending journal entry, which
+the daemon finishes on start (and the redelivered frame replays), or the
+inbox row, which marks the entry as applied. Adapters are told about events
+after that transaction commits.
 """
 
 from __future__ import annotations
@@ -43,6 +55,7 @@ from agentconnect.adapter import (
 from agentconnect.backoff import Backoff
 from agentconnect.clock import Clock, SystemClock, unix_seconds
 from agentconnect.config import Config
+from agentconnect.failpoints import FailpointError, Failpoints, SimulatedCrash
 from agentconnect.identity import (
     Seeded,
     load_db_key,
@@ -140,6 +153,8 @@ def _core_error(e: Exception) -> str:
         return "transient"
     if "re-sync required" in text:
         return "own_commit_lost"
+    if text == "message already processed":
+        return "duplicate"
     if text.startswith("unauthorized commit"):
         return "unauthorized_commit"
     return "rejected"
@@ -147,6 +162,28 @@ def _core_error(e: Exception) -> str:
 
 ENVELOPE_KINDS = frozenset({"commit", "proposal", "application", "welcome_wrapped", "join_request"})
 MAX_ID_LEN = 64
+# An internal frame: finish every pending journal entry (ADR-004).
+REPLAY_JOURNAL = "_replay_journal"
+TransientFailure = (TransientError, FailpointError)
+
+
+def journal_key(sender: str, msg_id: str) -> str:
+    """The core journal key of a relay message (ADR-004)."""
+    return f"{sender}/{msg_id}"
+
+
+def journal_context(
+    env: dict[str, Any], *, from_relay: bool, invite_id: str | None = None
+) -> bytes:
+    """What the daemon needs to finish a journal entry after a restart: the
+    envelope without its ciphertext."""
+    ctx: dict[str, Any] = {
+        "env": {k: v for k, v in env.items() if k != "ct"},
+        "from_relay": from_relay,
+    }
+    if invite_id is not None:
+        ctx["invite_id"] = invite_id
+    return canonical(ctx)
 
 
 def _is_int(value: Any) -> bool:
@@ -252,6 +289,11 @@ class Daemon:
         self.adapters: dict[str, Adapter] = {a.name: a for a in adapters}
         self.policy: PolicyHook = policy or PassThroughPolicy()
         self.options = options or Options()
+        self.failpoints = Failpoints()  # inert unless a test arms one
+        # Set while one journal entry's effects are being recorded (_apply).
+        self._batch: list[tuple[str | None, str, dict[str, Any]]] | None = None
+        self._after: list[Callable[[], None]] | None = None
+        self._registering: set[str] = set()
         # Before touching keys or databases: one daemon per data directory.
         self._lock = DataDirLock(config.data_dir)
         try:
@@ -315,6 +357,9 @@ class Daemon:
 
     async def start(self) -> None:
         self._recover()
+        # First thing the inbound worker does: finish what a crash left in
+        # the core's journal.
+        self._frames.put_nowait({"t": REPLAY_JOURNAL})
         loop = asyncio.get_running_loop()
         workers: dict[str, Callable[[], Awaitable[None]]] = {
             "inbound": self._inbound,
@@ -353,7 +398,7 @@ class Daemon:
         for task in self._tasks:
             task.cancel()
         for task in self._tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception, SimulatedCrash):
                 await task
         self._tasks.clear()
         self.store.close()
@@ -371,15 +416,21 @@ class Daemon:
             if row.kind == "commit" and "env" in row.payload
         }
         for group in self.store.groups():
-            if group.status != "active":
-                continue
             gid = unb64(group.group_id)
+            if group.status != "active":
+                # Left or removed: the core state goes after the daemon's
+                # record of it, so a crash in between leaves it behind.
+                with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+                    self.client.delete_group(gid)
+                continue
             with contextlib.suppress(ac.AgentConnectError):
                 if self.client.has_pending_commit(gid) and group.group_id not in built:
                     self.client.discard_pending_commit(gid)
                     LOG.info("discarded_unsent_commit", group=log.hid(group.group_id))
             if self._leaving_state(group):
                 self._leaving.add(group.group_id)
+        # A join recorded as done whose secret a crash left in the keystore.
+        self._forget_join_secrets()
 
     def _leaving_state(self, group: GroupRow) -> bool:
         return self.store.kv_get(f"leaving/{group.group_id}") == "1"
@@ -415,14 +466,30 @@ class Daemon:
 
     async def _on_connected(self) -> None:
         self._drain_exempted = 0
+        # Anything a failure in this run left unfinished in the journal.
+        self._frames.put_nowait({"t": REPLAY_JOURNAL})
         self._outbox_wake.set()
         self._delivery_wake.set()
         self._pulse()
         try:
             await self.expire()
             await self.check_joins()
+            await self._abandon_unregistered_invites()
         except Exception as e:  # never let the reconnect hook die
             LOG.warning("check_joins_failed", error=type(e).__name__)
+
+    async def _abandon_unregistered_invites(self) -> None:
+        """An invite still ``registering`` from an earlier run never reached
+        its caller (the daemon stopped mid-registration), so nobody holds its
+        link: revoke it at the relay (best effort) and drop its secret."""
+        for invite in self.store.invites("registering"):
+            invite_id = str(invite["invite_id"])
+            if invite_id in self._registering:
+                continue  # a registration in progress in this run
+            with contextlib.suppress(RelayError, OSError):
+                await self.rest.revoke_invite(invite_id)
+            self.store.set_invite_status(invite_id, "revoked")
+            self.keystore.delete(f"invite/{invite_id}")
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         await self._frames.put(frame)
@@ -444,9 +511,50 @@ class Daemon:
         return self.adapters.get(name) or next(iter(self.adapters.values()), None)
 
     async def emit(self, group_id: str | None, kind: str, **data: Any) -> None:
-        """Record an event for the local API and tell the group's adapter."""
+        """Record an event for the local API and tell the group's adapter.
+
+        Inside :meth:`_apply` the event is recorded in its transaction and
+        the adapter is told once that commits."""
         self.store.add_event(group_id, kind, data, self.now())
         LOG.info("event", type=kind, group=log.hid(group_id))
+        if self._batch is not None:
+            self._batch.append((group_id, kind, data))
+            return
+        await self._notify(group_id, kind, data)
+
+    def _defer(self, action: Callable[[], None]) -> None:
+        """Run ``action`` once the current :meth:`_apply` transaction has
+        committed (now, outside one): for effects outside the daemon
+        database (the core's state, the keystore)."""
+        if self._after is not None:
+            self._after.append(action)
+        else:
+            action()
+
+    async def _apply(self, path: str, body: Callable[[], Awaitable[str]]) -> str:
+        """Record the effects of one journal entry in one daemon transaction.
+
+        ``body`` must not suspend (it only touches the store and the core and
+        emits events, which are batched), so no other task's writes can
+        interleave with the transaction. Deferred actions run and the
+        adapter hears about the events after it commits."""
+        batch: list[tuple[str | None, str, dict[str, Any]]] = []
+        after: list[Callable[[], None]] = []
+        self._batch, self._after = batch, after
+        try:
+            with self.store.tx():
+                result = await body()
+                self.failpoints.hit(f"{path}.in_tx")
+        finally:
+            self._batch = self._after = None
+        self.failpoints.hit(f"{path}.after_tx")
+        for action in after:
+            action()
+        for group_id, kind, data in batch:
+            await self._notify(group_id, kind, data)
+        return result
+
+    async def _notify(self, group_id: str | None, kind: str, data: dict[str, Any]) -> None:
         adapter = self._adapter_for(group_id)
         if adapter is not None:
             view = None if group_id is None else self._view(group_id)
@@ -517,14 +625,30 @@ class Daemon:
                 return m.display_name
         return None
 
+    def _membership_change(
+        self, group_id: str, summary: dict[str, Any]
+    ) -> tuple[set[str], set[str]]:
+        """Identities a commit added (all their instances are new) and
+        removed (no instance left)."""
+        current: dict[str, set[str]] = {}
+        for m in self.client.members(unb64(group_id)):
+            current.setdefault(m["identity"], set()).add(m["mailbox_id"])
+        added = {m["mailbox_id"] for m in summary.get("added", [])}
+        joined = {i for i, boxes in current.items() if boxes <= added}
+        gone = {str(m["identity"]) for m in summary.get("removed", [])} - current.keys()
+        return joined, gone
+
     async def _after_commit(
         self, group_id: str, summary: dict[str, Any], env: dict[str, Any] | None, own: bool
     ) -> None:
         """Bookkeeping after any merged commit, own or another member's.
 
         The cached members, roles, policy and epoch are re-read from the core
-        first, so nothing that fails later can leave them stale."""
-        joined, gone = self._refresh(group_id)
+        first. Who joined and left comes from the commit's summary, not from
+        the cache's diff, so a replay of the same journal entry (ADR-004)
+        emits the same events."""
+        self._refresh(group_id)
+        joined, gone = self._membership_change(group_id, summary)
         if env is not None:
             # Shapes were checked before processing (_envelope_problem).
             hinted = env.get("routing") or {}
@@ -544,7 +668,12 @@ class Daemon:
                 )
         if own:
             self.store.update_group(group_id, last_own_commit_at=self.now(), msgs_since_commit=0)
-        left = self._proposed_leaves.pop(group_id, set())
+        left = set(self._proposed_leaves.get(group_id, set()))
+
+        def forget_leaves() -> None:
+            self._proposed_leaves.pop(group_id, None)
+
+        self._defer(forget_leaves)
         for identity in sorted(joined):
             await self.emit(group_id, "member_joined", identity=identity)
             await self._send_card(group_id, [identity])
@@ -567,15 +696,23 @@ class Daemon:
             self._enqueue("proposal", group_id, {})
 
     async def _gone(self, group_id: str, kind: str) -> None:
-        """This instance is no longer in the group (removed or left)."""
+        """This instance is no longer in the group (removed or left).
+
+        The daemon's record goes first and the core's state after it (a
+        crash in between is cleaned up by :meth:`_recover`): the other way
+        round, a crash would leave an "active" group with no MLS state."""
         gid = unb64(group_id)
-        with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
-            self.client.delete_group(gid)
         self.store.update_group(group_id, status=kind)
         self.store.delete_group_data(group_id)
         self.store.kv_set(f"leaving/{group_id}", "0")
-        self._leaving.discard(group_id)
         await self.emit(group_id, kind)
+
+        def forget() -> None:
+            self._leaving.discard(group_id)
+            with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+                self.client.delete_group(gid)
+
+        self._defer(forget)
 
     # -- inbound --------------------------------------------------------------
 
@@ -589,18 +726,24 @@ class Daemon:
             for attempt in range(1, MAX_TRANSIENT_RETRIES + 1):
                 try:
                     await self._handle_frame(frame)
-                except TransientError as e:
-                    # Nothing was recorded or acked: retry the same frame, in
-                    # order. The core's replay protection and the inbox's
-                    # (sender, msg_id) dedup mean a retry can't process a
-                    # message twice.
-                    LOG.warning("inbound_transient", reason=e.reason, attempt=attempt)
+                except TransientFailure as e:
+                    # Nothing was acked: retry the same frame, in order. If
+                    # the core already processed it, the retry gets the
+                    # journalled result back (ADR-004), and the inbox's
+                    # (sender, msg_id) dedup means its effects are recorded
+                    # once: a retry can't process or deliver a message twice.
+                    group_id, reason = (
+                        (e.group_id, e.reason)
+                        if isinstance(e, TransientError)
+                        else (None, "failpoint")
+                    )
+                    LOG.warning("inbound_transient", reason=reason, attempt=attempt)
                     if attempt < MAX_TRANSIENT_RETRIES:
                         await self._sleep(backoff.next())
                         continue
                     # Give up for now; unacked, the relay redelivers it after
                     # the next reconnect.
-                    await self.emit(e.group_id, "processing_failed", reason=e.reason)
+                    await self.emit(group_id, "processing_failed", reason=reason)
                 except Exception:
                     LOG.exception("inbound_failed", t=frame.get("t"))
                 backoff.reset()
@@ -645,13 +788,18 @@ class Daemon:
                 await self.emit(None, "join_failed", invite_id=invite_id, reason="expired")
         if self._parked and not self.store.pending_joins():
             self._parked.clear()
-        # Hops are needed only while a reply can still arrive (relay TTL).
+        # Hops are needed only while a reply can still arrive (relay TTL);
+        # so are the journal's tombstones of consumed entries.
         self.store.forget_hops(now - HOP_MEMORY_SECS)
+        with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+            self.client.journal_purge(now - HOP_MEMORY_SECS)
 
     async def _handle_frame(self, frame: dict[str, Any]) -> None:
         await self.expire()
         t = frame.get("t")
-        if t == "deliver" and isinstance(frame.get("env"), dict):
+        if t == REPLAY_JOURNAL:
+            await self._replay_journal()
+        elif t == "deliver" and isinstance(frame.get("env"), dict):
             await self._handle_env(frame["env"])
         elif t == "queue_overflow":
             group_id = str(frame.get("group_id", ""))
@@ -686,6 +834,9 @@ class Daemon:
         if state is not None:
             # A replay or a redelivery after reconnect. Pending rows belong to
             # the delivery worker, which acks them once the adapter has them.
+            # A failure after its effects were recorded may have left the
+            # rest undone: the journal entry, the secret, the wake-up.
+            self._settle_recorded(env)
             if state != "pending":
                 await self._ack(msg_id)
             LOG.debug("duplicate_ignored", msg=log.hid(msg_id))
@@ -696,12 +847,7 @@ class Daemon:
             await self._on_join_request(env)
             self.store.record_inbox(sender, msg_id, None, "done", now)
         elif kind == "welcome_wrapped":
-            joined = await self._on_welcome(env)
-            self.store.record_inbox(sender, msg_id, group_id, "done", now)
-            await self._ack(msg_id)
-            if joined is not None:
-                for parked in self._parked.pop(joined, []):
-                    await self._handle_env(parked)
+            await self._on_welcome_env(env)
             return
         elif kind in ("application", "commit", "proposal") and isinstance(group_id, str):
             group = self.store.group(group_id)
@@ -718,12 +864,48 @@ class Daemon:
             self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
         await self._ack(msg_id)
 
+    def _settle_recorded(self, env: dict[str, Any]) -> None:
+        """Finish what follows an entry's recorded effects (ADR-004); all
+        of it is idempotent."""
+        key = journal_key(str(env.get("sender")), str(env.get("msg_id")))
+        group_id = env.get("group_id")
+        with contextlib.suppress(ac.AgentConnectError, ac.CoreError, ValueError):
+            if env.get("kind") == "welcome_wrapped":
+                self.client.journal_consume(key)
+                self._forget_join_secrets()
+            elif isinstance(group_id, str):
+                self.client.journal_consume(key, unb64(group_id))
+                group = self.store.group(group_id)
+                if group is not None and group.status != "active":
+                    self.client.delete_group(unb64(group_id))
+        self._delivery_wake.set()
+
+    def _forget_join_secrets(self) -> None:
+        """Delete the secrets of joins that ended (SPEC §6.3)."""
+        for invite_id in self.store.joined_invites():
+            self.keystore.delete(f"join/{invite_id}")
+
+    async def _on_welcome_env(self, env: dict[str, Any]) -> None:
+        sender, msg_id = str(env["sender"]), str(env["msg_id"])
+        joined = await self._on_welcome(env)
+        if joined is None:
+            self.store.record_inbox(sender, msg_id, env.get("group_id"), "done", self.now())
+            await self._ack(msg_id)
+            return
+        for parked in self._parked.pop(joined, []):
+            await self._handle_env(parked)
+
     async def _rejected(self, group_id: str, env: dict[str, Any], e: Exception) -> None:
         """The core refused a group message (or failed transiently)."""
         reason = _core_error(e)
         if reason == "transient":
             raise TransientError(group_id, type(e).__name__) from None
         sender, msg_id = str(env["sender"]), str(env["msg_id"])
+        if reason == "duplicate":
+            # Its journal entry was consumed, so its effects are recorded.
+            self.store.record_inbox(sender, msg_id, group_id, "done", self.now())
+            await self._ack(msg_id)
+            return
         self.store.record_inbox(sender, msg_id, group_id, "failed", self.now())
         await self._ack(msg_id)
         LOG.info(
@@ -748,7 +930,6 @@ class Daemon:
     async def _on_group_message(self, group: GroupRow, env: dict[str, Any]) -> None:
         group_id, sender, msg_id = group.group_id, str(env["sender"]), str(env["msg_id"])
         gid = unb64(group_id)
-        now = self.now()
         try:
             ct = unb64(str(env["ct"]))
         except ValueError:
@@ -758,29 +939,92 @@ class Daemon:
             # SPEC 7.1: a proposal is only valid in the current epoch, so an
             # envelope epoch that differs is dropped (commits are merged and
             # flagged instead, see _after_commit).
-            self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
+            self.store.record_inbox(sender, msg_id, group_id, "dropped", self.now())
             await self._ack(msg_id)
             await self.emit(group_id, "relay_misbehaviour", reason="epoch_mismatch")
             return
+        self.failpoints.hit("receive.before_core")
         try:
-            event = self.client.process(gid, ct)
+            # Journalled (ADR-004): after a crash or a failure below, the
+            # same frame gives the same event back instead of failing on its
+            # consumed key.
+            event = self.client.process(
+                gid,
+                ct,
+                key=journal_key(sender, msg_id),
+                context=journal_context(env, from_relay=True),
+            )
         except (ac.AgentConnectError, ac.CoreError) as e:
             await self._rejected(group_id, env, e)
             return
+        self.failpoints.hit("receive.after_core")
+        await self._finish(env, event, from_relay=True, path="receive")
+
+    async def _finish(
+        self, env: dict[str, Any], event: dict[str, Any], *, from_relay: bool, path: str
+    ) -> None:
+        """Record what a journalled group event means, once, then consume
+        its journal entry and ack the relay frame (ADR-004).
+
+        The inbox row ``(sender, msg_id)`` is written in the same daemon
+        transaction as every other effect, so it marks the entry as applied:
+        a replay after a crash that followed that transaction only consumes
+        the entry."""
+        group_id, sender, msg_id = str(env["group_id"]), str(env["sender"]), str(env["msg_id"])
+        state = self.store.inbox_state(sender, msg_id)
+        if state is not None:
+            self._settle_recorded(env)
+        else:
+            group = self.store.group(group_id)
+            if group is None or group.status != "active":
+
+                async def dropped() -> str:
+                    self.store.record_inbox(sender, msg_id, group_id, "dropped", self.now())
+                    return "dropped"
+
+                state = await self._apply(path, dropped)
+            else:
+                try:
+                    state = await self._apply(
+                        path, lambda: self._effects(group, env, event, from_relay=from_relay)
+                    )
+                except Exception:
+                    # The effects rolled back and the entry stays pending (it
+                    # is finished on the next replay), but the cached view
+                    # must follow the core now: local decisions use it.
+                    with contextlib.suppress(Exception):
+                        self._refresh(group_id)
+                    raise
+        with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+            self.client.journal_consume(journal_key(sender, msg_id), unb64(group_id))
+        self.failpoints.hit(f"{path}.after_consume")
+        if state == "pending":
+            self._delivery_wake.set()
+        elif from_relay:
+            await self._ack(msg_id)
+        self._pulse()
+
+    async def _effects(
+        self, group: GroupRow, env: dict[str, Any], event: dict[str, Any], *, from_relay: bool
+    ) -> str:
+        """The daemon-side effects of one group event (inside :meth:`_apply`);
+        returns the inbox state recorded for it."""
+        group_id, sender, msg_id = group.group_id, str(env["sender"]), str(env["msg_id"])
+        now = self.now()
         etype = event["type"]
         if etype == "application":
             if event["epoch"] != env.get("epoch"):
                 # SPEC §7.1: envelope and MLS epochs must agree.
                 self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
-                await self._ack(msg_id)
                 await self.emit(group_id, "relay_misbehaviour", reason="epoch_mismatch")
-                return
+                return "dropped"
             self.store.bump_messages(group_id)
-            delivery = self._make_delivery(group, msg_id, event)
+            delivery = self._make_delivery(
+                group, msg_id, event, replayed=bool(event.get("replayed"))
+            )
             if delivery is None:
                 self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
-                await self._ack(msg_id)
-                return
+                return "dropped"
             self.store.record_inbox(
                 sender,
                 msg_id,
@@ -790,7 +1034,7 @@ class Daemon:
                 delivery=delivery.to_json(),
                 hop=delivery.hop,
             )
-            self._delivery_wake.set()
+            self._defer(self._delivery_wake.set)
             if delivery.hop > _max_turns(group.policy) and delivery.origin != "human":
                 await self._loop_guard(group, delivery)
             if delivery.kind == "control.close":
@@ -803,18 +1047,47 @@ class Daemon:
                     sender=delivery.sender.identity,
                     reason=reason[:200] if isinstance(reason, str) else "",
                 )
-            return
+            return "pending"
         if etype in ("commit", "own_commit_confirmed"):
-            await self._after_commit(group_id, event, env, own=etype == "own_commit_confirmed")
+            await self._after_commit(
+                group_id,
+                event,
+                env if from_relay else None,
+                own=etype == "own_commit_confirmed",
+            )
         elif etype == "removed":
             await self._gone(group_id, "left" if group_id in self._leaving else "removed")
         elif etype == "leave_proposed":
             await self._on_leave_proposed(group_id, event["member"])
         self.store.record_inbox(sender, msg_id, group_id, "done", now)
-        await self._ack(msg_id)
+        return "done"
+
+    async def _replay_journal(self) -> None:
+        """Finish every journal entry the core holds but the daemon hasn't
+        consumed: a crash (or a failure) came after the core committed and
+        before the daemon recorded the result (ADR-004)."""
+        for entry in self.client.journal_pending():
+            try:
+                ctx = json.loads(entry["context"])
+                env = ctx["env"]
+                if not isinstance(env, dict) or _envelope_problem({**env, "ct": ""}) is not None:
+                    raise ValueError("context")
+            except (ValueError, KeyError, TypeError):
+                # Not something this daemon wrote: drop it.
+                self.client.journal_consume(
+                    str(entry["key"]), None if entry["welcome"] else entry["group_id"]
+                )
+                continue
+            LOG.info("journal_replay", kind=env.get("kind"), msg=log.hid(str(env.get("msg_id"))))
+            if entry["welcome"]:
+                await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
+            else:
+                event = {**entry["event"], "replayed": True}
+                path = "receive" if ctx.get("from_relay", True) else "confirm"
+                await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
 
     def _make_delivery(
-        self, group: GroupRow, msg_id: str, event: dict[str, Any]
+        self, group: GroupRow, msg_id: str, event: dict[str, Any], *, replayed: bool = False
     ) -> Delivery | None:
         try:
             inner = json.loads(event["plaintext"])
@@ -826,8 +1099,11 @@ class Daemon:
         identity = sender["identity"]
         # SPEC 7.2 (unknown kinds are ignored) and 10.2 (size, parts, rate).
         problem = content_problem(inner, len(event["plaintext"]))
+        # A replayed journal entry was counted against the rate when the core
+        # first processed it.
         if (
             problem is None
+            and not replayed
             and not self._drain_exempt()
             and not self.limits.allow(group.group_id, identity)
         ):
@@ -1063,7 +1339,11 @@ class Daemon:
             )
 
     async def _on_welcome(self, env: dict[str, Any]) -> str | None:
+        """Join from a wrapped Welcome; returns the group id (recorded and
+        acked), or ``None`` if it matched no pending join (the caller records
+        and acks it)."""
         wrapped = unb64(str(env.get("ct", "")))
+        sender, msg_id = str(env["sender"]), str(env["msg_id"])
         for pending in self.store.pending_joins():
             invite_id = pending["invite_id"]
             url = self.keystore.get(f"join/{invite_id}")
@@ -1074,42 +1354,77 @@ class Daemon:
                 ac.unwrap_welcome(link.invite_id, link.secret_bytes(), wrapped)
             except ac.AgentConnectError:
                 continue
+            self.failpoints.hit("welcome.before_core")
             try:
-                gid = self.client.join(link, canonical(pending["meta"]), wrapped)
+                # Journalled (ADR-004): the same Welcome after a crash gives
+                # the joined group back instead of failing on the spent
+                # KeyPackage.
+                gid = self.client.join(
+                    link,
+                    canonical(pending["meta"]),
+                    wrapped,
+                    key=journal_key(sender, msg_id),
+                    context=journal_context(env, from_relay=True, invite_id=invite_id),
+                )
             except (ac.AgentConnectError, ac.CoreError) as e:
+                reason = _core_error(e)
+                if reason == "transient":
+                    raise TransientError(None, type(e).__name__) from None
+                if reason == "duplicate":
+                    return None
                 # The KeyPackage is used up; a retry needs a new JoinRequest.
                 self.store.finish_join(invite_id, "failed")
                 self.keystore.delete(f"join/{invite_id}")
                 await self.emit(None, "join_failed", invite_id=invite_id, reason=str(e)[:80])
                 return None
-            group_id = gid_b64(gid)
-            meta = json.loads(self.client.meta(gid))
-            self.store.add_group(
-                GroupRow(
-                    group_id=group_id,
-                    name=meta["name"],
-                    purpose=meta["purpose"],
-                    policy={},
-                    adapter=self.config.default_adapter,
-                    status="active",
-                    out_of_sync=False,
-                    out_of_sync_reason=None,
-                    epoch=self.client.epoch(gid),
-                    created_at=self.now(),
-                    last_own_commit_at=self.now(),
-                    msgs_since_commit=0,
-                )
-            )
-            self._refresh(group_id)
-            self.store.set_display_name(group_id, self.me, pending["display_name"])
-            self.store.finish_join(invite_id, "joined", group_id)
-            # SPEC §6.3: the invite secret goes once the join succeeded.
-            self.keystore.delete(f"join/{invite_id}")
-            await self.emit(group_id, "joined", invite_id=invite_id, sas=self._sas(gid))
-            await self._send_card(group_id, ["*"])
-            return group_id
+            self.failpoints.hit("welcome.after_core")
+            return await self._finish_welcome(env, invite_id, gid)
         LOG.info("welcome_unmatched")
         return None
+
+    async def _finish_welcome(self, env: dict[str, Any], invite_id: str, gid: bytes) -> str:
+        """Record a journalled join once, consume the entry, ack (ADR-004)."""
+        sender, msg_id = str(env["sender"]), str(env["msg_id"])
+        group_id = gid_b64(gid)
+
+        async def body() -> str:
+            if self.store.group(group_id) is None:
+                meta = json.loads(self.client.meta(gid))
+                self.store.add_group(
+                    GroupRow(
+                        group_id=group_id,
+                        name=meta["name"],
+                        purpose=meta["purpose"],
+                        policy={},
+                        adapter=self.config.default_adapter,
+                        status="active",
+                        out_of_sync=False,
+                        out_of_sync_reason=None,
+                        epoch=self.client.epoch(gid),
+                        created_at=self.now(),
+                        last_own_commit_at=self.now(),
+                        msgs_since_commit=0,
+                    )
+                )
+            self._refresh(group_id)
+            name = self.store.join_name(invite_id) or self.config.display_name
+            self.store.set_display_name(group_id, self.me, name)
+            self.store.finish_join(invite_id, "joined", group_id)
+            self.store.record_inbox(sender, msg_id, group_id, "done", self.now())
+            # SPEC §6.3: the invite secret goes once the join succeeded.
+            self._defer(lambda: self.keystore.delete(f"join/{invite_id}"))
+            await self.emit(group_id, "joined", invite_id=invite_id, sas=self._sas(gid))
+            await self._send_card(group_id, ["*"])
+            return "done"
+
+        if self.store.inbox_state(sender, msg_id) is None:
+            await self._apply("welcome", body)
+        with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+            self.client.journal_consume(journal_key(sender, msg_id))
+        self.failpoints.hit("welcome.after_consume")
+        await self._ack(msg_id)
+        self._pulse()
+        return group_id
 
     # -- delivery -------------------------------------------------------------
 
@@ -1199,6 +1514,7 @@ class Daemon:
         return seq
 
     async def _outbox(self) -> None:
+        backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
         while True:
             row = self.store.next_outbox()
             if row is None:
@@ -1210,9 +1526,16 @@ class Daemon:
                 state = await self._run_row(row)
             except NotConnectedError:
                 continue
+            except TransientFailure:
+                # The row stays queued and runs again from what it recorded;
+                # a confirmed commit is finished from the core's journal.
+                LOG.warning("outbox_transient", kind=row.kind)
+                await self._sleep(backoff.next())
+                continue
             except Exception:
                 LOG.exception("outbox_failed", kind=row.kind)
                 state = "failed"
+            backoff.reset()
             msg_id = row.payload.get("msg_id")
             self.store.update_outbox(row.seq, state=state)
             code = self._fail_codes.pop(row.seq, "failed")
@@ -1400,6 +1723,12 @@ class Daemon:
             if "env" not in payload and not self._build_commit(row, group, payload):
                 return "failed"
             env = payload["env"]
+            if not payload.get("confirmed") and self._own_commit_landed(env):
+                # A crash came after the relay accepted it (ADR-004): finish
+                # it from the journal instead of sending it again.
+                await self._confirm_own(gid, group.group_id, env)
+                payload["confirmed"] = True
+                self.store.update_outbox(row.seq, payload=payload)
             if not payload.get("confirmed"):
                 try:
                     await self._request({"t": "send", "env": env}, str(env["msg_id"]))
@@ -1425,12 +1754,7 @@ class Daemon:
                     LOG.info("epoch_conflict", group=log.hid(group.group_id))
                     await self._await_epoch(group.group_id, built_epoch)
                     continue
-                try:
-                    summary = self.client.confirm_pending_commit(gid, str(env["msg_id"]))
-                except ac.AgentConnectError:
-                    summary = None  # already merged from the fan-out echo
-                if summary is not None:
-                    await self._after_commit(group.group_id, summary, None, own=True)
+                await self._confirm_own(gid, group.group_id, env)
                 payload["confirmed"] = True
                 self.store.update_outbox(row.seq, payload=payload)
             if not payload.get("consume_queued"):
@@ -1443,6 +1767,42 @@ class Daemon:
         self._fail_codes[row.seq] = "attempts_exhausted"
         self._fail_intent(intent)
         return "failed"
+
+    def _own_commit_landed(self, env: dict[str, Any]) -> bool:
+        """Whether this own commit was already confirmed (finished, or
+        journalled by the core and not yet finished)."""
+        msg_id = str(env["msg_id"])
+        if self.store.inbox_state(self.mailbox, msg_id) is not None:
+            return True
+        key = journal_key(self.mailbox, msg_id)
+        return any(e["key"] == key for e in self.client.journal_pending())
+
+    async def _confirm_own(self, gid: bytes, group_id: str, env: dict[str, Any]) -> None:
+        """Merge an own commit the relay accepted, journalled under the key
+        its fan-out copy is processed under, so whichever comes first
+        confirms it and the other finds it done (ADR-004)."""
+        msg_id = str(env["msg_id"])
+        if self.store.inbox_state(self.mailbox, msg_id) is not None:
+            self._settle_recorded(env)
+            return
+        self.failpoints.hit("confirm.before_core")
+        try:
+            summary = self.client.confirm_pending_commit(
+                gid,
+                msg_id,
+                key=journal_key(self.mailbox, msg_id),
+                context=journal_context(env, from_relay=False),
+            )
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            if _core_error(e) == "transient":
+                raise TransientError(group_id, type(e).__name__) from None
+            # Merged from the fan-out copy and finished there already.
+            LOG.info("own_commit_already_merged", reason=str(e)[:60])
+            return
+        self.failpoints.hit("confirm.after_core")
+        await self._finish(
+            env, {**summary, "type": "own_commit_confirmed"}, from_relay=False, path="confirm"
+        )
 
     def _build_commit(self, row: OutboxRow, group: GroupRow, payload: dict[str, Any]) -> bool:
         """Build the row's commit and persist it (envelope, Welcome) before
@@ -1620,21 +1980,30 @@ class Daemon:
             "member_count": members,
             "protocol": 0,
         }
+        invite_id = invite.invite_id_b64
+        # Recorded before the relay hears of it (ADR-004): after a crash
+        # mid-registration the row says so, and the next connect revokes
+        # the invite and drops its secret instead of orphaning them.
+        self.store.add_invite(
+            invite_id, group_id, invite.expires_at, max_uses, self.now(), status="registering"
+        )
         # The secret stays local; only public metadata goes to the relay.
-        self.keystore.put(f"invite/{invite.invite_id_b64}", invite.secret_bytes())
-        registered = False
+        self.keystore.put(f"invite/{invite_id}", invite.secret_bytes())
+        self._registering.add(invite_id)
         try:
             await self.rest.create_invite(meta)
-            self.store.add_invite(
-                invite.invite_id_b64, group_id, invite.expires_at, max_uses, self.now()
-            )
-            registered = True
-        except RelayError as e:
-            raise DaemonError("relay", f"invite registration failed: {e.code}") from None
+            self.failpoints.hit("invite.after_register")
+            self.store.set_invite_status(invite_id, "open")
+        except Exception as e:
+            # Never leave a secret for an invite we don't track. (A crash or
+            # a cancellation leaves the row "registering" for the sweep.)
+            self.store.delete_invite(invite_id)
+            self.keystore.delete(f"invite/{invite_id}")
+            if isinstance(e, RelayError):
+                raise DaemonError("relay", f"invite registration failed: {e.code}") from None
+            raise
         finally:
-            if not registered:
-                # Never leave a secret for an invite we don't track.
-                self.keystore.delete(f"invite/{invite.invite_id_b64}")
+            self._registering.discard(invite_id)
         return {
             "url": invite.url,
             "invite_id": invite.invite_id_b64,
