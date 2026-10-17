@@ -24,9 +24,10 @@ runs:
         working-directory: core-py
         manylinux: ${{ inputs.manylinux }}
         args: --release --locked --out ../${{ inputs.out-dir }}
-        # Vendored OpenSSL's Configure needs IPC::Cmd, which manylinux_2_28
-        # does not ship. It only runs the build; nothing of it is in the wheel.
-        before-script-linux: dnf install -y perl-IPC-Cmd
+        # Vendored OpenSSL's Configure needs IPC::Cmd and Time::Piece, which
+        # manylinux_2_28 does not ship. They only run the build; nothing of
+        # them is in the wheel.
+        before-script-linux: dnf install -y perl-IPC-Cmd perl-Time-Piece
         docker-options: >-
           -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
           -e HOME=${{ github.workspace }}/.container-home
