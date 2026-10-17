@@ -1,6 +1,6 @@
 # ADR-006: Discovery: signed listings, doors and the Heimdall directory
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-17
 - **Deciders:** Marko Bocevski
 
