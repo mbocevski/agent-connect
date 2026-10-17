@@ -96,3 +96,35 @@ async def test_an_agent_resume_is_ignored(group: GroupFixture) -> None:
     await b.wait_texts(gid, 2)
     assert not [d for d in b.adapter.deliveries if d.kind == "control.resume"]
     assert b.daemon.store.kv_get(f"loop_paused/{gid}") == "1"
+
+
+async def test_replies_name_what_they_reply_to(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    await reply(a, gid, None, "first")
+    await b.wait_texts(gid, 1)
+    first = last(b)
+    await reply(b, gid, first, "explicit")
+    await a.wait_texts(gid, 1)
+    assert last(a).inner["reply_to"] == [first.msg_id]
+    # Without reply_to, the daemon names the last message that triggered it.
+    await reply(a, gid, None, "implicit")
+    await b.wait_texts(gid, 2)
+    assert last(b).inner["reply_to"] == [last(a).msg_id]
+
+
+async def test_a_hop_below_the_referenced_messages_is_raised(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.set_policy(gid, loop_guard={"max_agent_turns": 1})
+    await a.idle()
+    await b.wait(lambda: max_turns(b, gid) == 1)
+    # b's agent speaks first (hop 1, below the limit)...
+    await reply(b, gid, None, "from b")
+    await a.wait_texts(gid, 1)
+    from_b = last(a).msg_id
+    # ...and a's daemon lies: hop 0 on a reply to b's hop-1 message.
+    inner = a.daemon.inner("a2a.message", {"text": "forged"}, ["*"], hop=0, reply_to=[from_b])
+    a.daemon._enqueue("app", gid, {"inner": inner, "msg_id": new_msg_id()})
+    await b.wait_texts(gid, 1)
+    # b knows its own message had hop 1, so this is at least hop 2 > 1.
+    assert (last(b).hop, last(b).addressed_to_me) == (2, False)
+    await b.adapter.wait_for(lambda: bool(b.adapter.of_type("loop_guard")))

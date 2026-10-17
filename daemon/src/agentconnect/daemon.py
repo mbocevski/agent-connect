@@ -63,6 +63,8 @@ APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
 JOIN_CLOSED_GRACE_SECS = 60
 MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
+MAX_REPLY_TO = 16  # SPEC 7.2
+HOP_MEMORY_SECS = 7 * 24 * 3600
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
 # SPEC 7.3: controls only a human-originated message may carry.
@@ -619,6 +621,8 @@ class Daemon:
                 await self.emit(None, "join_failed", invite_id=invite_id, reason="expired")
         if self._parked and not self.store.pending_joins():
             self._parked.clear()
+        # Hops are needed only while a reply can still arrive (relay TTL).
+        self.store.forget_hops(now - HOP_MEMORY_SECS)
 
     async def _handle_frame(self, frame: dict[str, Any]) -> None:
         await self.expire()
@@ -794,6 +798,17 @@ class Daemon:
         raw_hop = inner.get("hop")
         hop = raw_hop if isinstance(raw_hop, int) and not isinstance(raw_hop, bool) else 0
         hop = max(hop, 0)
+        # SPEC 7.2/10.3: a reply names what it replies to. If we know those
+        # messages, the hop is at least one more than theirs, whatever the
+        # sender claims.
+        refs = inner.get("reply_to")
+        if isinstance(refs, list):
+            known = self.store.inbox_hops(
+                group.group_id, [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)]
+            )
+            if known:
+                hop = max(hop, max(known) + 1)
+        self.store.record_hop(group.group_id, msg_id, hop, self.now())
         origin = "human" if inner.get("origin") == "human" else "agent"
         if inner["kind"] in HUMAN_ONLY_KINDS:
             if origin != "human":
@@ -811,6 +826,7 @@ class Daemon:
             # The default "message replied to" for this instance's next
             # agent message in the group (see _reply_hop).
             self.store.kv_set(f"trigger_hop/{group.group_id}", str(hop))
+            self.store.kv_set(f"trigger_msg/{group.group_id}", msg_id)
         return Delivery(
             group_id=group.group_id,
             msg_id=msg_id,
@@ -833,7 +849,7 @@ class Daemon:
 
     # -- loop guard (SPEC 10.3) ---------------------------------------------
 
-    def _reply_hop(self, group_id: str, reply_to: list[str] | None) -> int:
+    def _reply_hop(self, group_id: str, reply_to: list[str] | None) -> tuple[int, list[str]]:
         """``hop`` for an agent message: one more than the largest ``hop`` of
         the messages it replies to.
 
@@ -841,15 +857,23 @@ class Daemon:
         ``msg_id``s) when the agent says; otherwise the last message that
         triggered this instance in the group (0 before any, so a fresh agent
         message has hop 1). A ``control.resume`` resets that to 0.
+
+        Also returns the ``msg_id``s replied to, for the inner ``reply_to``.
         """
-        hops = self.store.inbox_hops(group_id, reply_to or [])
+        refs: list[str] = [str(r) for r in (reply_to or [])][:MAX_REPLY_TO]
+        hops = self.store.inbox_hops(group_id, refs)
         if hops:
-            return max(hops) + 1
-        return int(self.store.kv_get(f"trigger_hop/{group_id}") or "0") + 1
+            return int(max(hops)) + 1, refs
+        last = self.store.kv_get(f"trigger_msg/{group_id}") or ""
+        hop = int(self.store.kv_get(f"trigger_hop/{group_id}") or "0") + 1
+        if not refs and last != "":
+            refs = [last]
+        return hop, refs
 
     def _reset_loop_guard(self, group_id: str) -> None:
         """A human ``control.resume`` (sent or received) resets the counter."""
         self.store.kv_set(f"trigger_hop/{group_id}", "0")
+        self.store.kv_set(f"trigger_msg/{group_id}", "")
         self.store.kv_set(f"loop_paused/{group_id}", "0")
 
     async def _loop_guard(self, group: GroupRow, delivery: Delivery) -> None:
@@ -1680,15 +1704,17 @@ class Daemon:
             raise DaemonError("not_found", "no such pending request")
         self.store.set_approval_status(request_id, "rejected")
 
-    def inner(
+    def inner(  # noqa: PLR0913
         self,
         kind: str,
         body: dict[str, Any],
         to: list[str],
+        *,
         origin: str = "agent",
         hop: int = 0,
+        reply_to: list[str] | None = None,
     ) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "v": 0,
             "seq": self.store.next_seq(),
             "sender": self.me,
@@ -1699,6 +1725,9 @@ class Daemon:
             "kind": kind,
             "body": body,
         }
+        if reply_to is not None and len(reply_to) > 0:
+            out["reply_to"] = reply_to
+        return out
 
     def send_message(  # noqa: PLR0913
         self,
@@ -1725,8 +1754,11 @@ class Daemon:
             raise DaemonError("bad_request", "origin must be agent or human")
         if kind in HUMAN_ONLY_KINDS and origin != "human":
             raise DaemonError("forbidden", f"{kind} must come from the human")
-        hop = 0 if origin == "human" else self._reply_hop(group.group_id, reply_to)
-        inner = self.inner(kind, body, to or ["*"], origin, hop)
+        if origin == "human":
+            hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
+        else:
+            hop, refs = self._reply_hop(group.group_id, reply_to)
+        inner = self.inner(kind, body, to or ["*"], origin=origin, hop=hop, reply_to=refs)
         view = self._view(group_id)
         if view is not None and self.policy.outbound(view, inner) is PolicyDecision.DROP:
             raise DaemonError("forbidden", "blocked by policy")
@@ -1738,6 +1770,7 @@ class Daemon:
             raise DaemonError("rate_limited", "over the SPEC 10.2 message rate")
         msg_id = new_msg_id()
         self._enqueue("app", group.group_id, {"inner": inner, "msg_id": msg_id})
+        self.store.record_hop(group.group_id, msg_id, hop, self.now())
         if kind in HUMAN_ONLY_KINDS:
             self._reset_loop_guard(group.group_id)
         return msg_id

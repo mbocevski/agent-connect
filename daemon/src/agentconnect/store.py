@@ -166,6 +166,13 @@ CREATE TABLE IF NOT EXISTS events (
     data TEXT NOT NULL,
     at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS hops (
+    group_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    hop INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, msg_id)
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -602,17 +609,26 @@ class Store:
             ),
         )
 
+    def record_hop(self, group_id: str, msg_id: str, hop: int, now: int) -> None:
+        """Remember the SPEC 10.3 ``hop`` of a message sent or received."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO hops (group_id, msg_id, hop, at) VALUES (?, ?, ?, ?)",
+            (group_id, msg_id, hop, now),
+        )
+
     def inbox_hops(self, group_id: str, msg_ids: Sequence[str]) -> list[int]:
-        """The SPEC 10.3 ``hop`` of received application messages in a group."""
+        """The known ``hop`` of messages (sent or received) in a group."""
         out: list[int] = []
         for msg_id in msg_ids:
-            rows = self._all(
-                "SELECT hop FROM inbox WHERE group_id = ? AND msg_id = ? AND hop IS NOT NULL",
-                group_id,
-                msg_id,
+            row = self._one(
+                "SELECT hop FROM hops WHERE group_id = ? AND msg_id = ?", group_id, msg_id
             )
-            out.extend(int(r[0]) for r in rows)
+            if row is not None:
+                out.append(int(row[0]))
         return out
+
+    def forget_hops(self, before: int) -> None:
+        self._db.execute("DELETE FROM hops WHERE at < ?", (before,))
 
     def pending_deliveries(self) -> list[InboxRow]:
         rows = self._all(

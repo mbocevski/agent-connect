@@ -150,6 +150,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: agent messages carry the `msg_id`s they reply to in a new inner
+  `reply_to` field (SPEC §7.2, at most 16). A receiver that knows any of
+  them treats the message's `hop` as at least one more than theirs, so a
+  peer can't reset the loop guard by understating `hop`.
 - Core, relay and daemon: the relay host signed into relay authentication
   has one canonical form (`canonical_relay_host`: no userinfo, ASCII
   lower-case, explicit port kept), applied inside the core's signing
