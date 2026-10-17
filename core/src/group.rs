@@ -190,6 +190,22 @@ pub enum Event {
     OwnEcho,
 }
 
+impl Event {
+    /// The variant name, for logs and error messages. Unlike `Debug`, it
+    /// carries no message content at all.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Event::Application(_) => "application",
+            Event::Commit(_) => "commit",
+            Event::OwnCommitConfirmed(_) => "own_commit_confirmed",
+            Event::Removed(_) => "removed",
+            Event::LeaveProposed(_) => "leave_proposed",
+            Event::OwnEcho => "own_echo",
+        }
+    }
+}
+
 /// A JoinRequest that passed every check of SPEC §6.2 steps 1–3.
 #[derive(Debug)]
 pub struct VerifiedJoinRequest {

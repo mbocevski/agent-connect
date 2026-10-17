@@ -128,7 +128,7 @@ pub fn group_of_seeded(n: usize, base: u64, clock: &Arc<FakeClock>) -> (Vec<Peer
 pub fn expect_commit(event: Event) -> agentconnect_core::CommitSummary {
     match event {
         Event::Commit(s) => s,
-        other => panic!("expected a commit, got {other:?}"),
+        other => panic!("expected a commit, got {}", other.kind()),
     }
 }
 

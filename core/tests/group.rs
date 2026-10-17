@@ -1000,7 +1000,10 @@ fn largest_application_message_fits_the_relay_frame() {
         let ct = groups[0].seal(&peers[0].client, &msg).unwrap();
         // The relay test of the same limit assumes at most 256 bytes of MLS
         // framing around the 1 MiB bucket.
-        assert!(ct.len() <= (1 << 20) + 256, "{}", ct.len());
+        assert!(
+            ct.len() <= (1 << 20) + 256,
+            "sealed message exceeds the 1 MiB bucket plus framing"
+        );
         let frame = serde_json::json!({
             "t": "send",
             "env": {
@@ -1108,4 +1111,24 @@ fn real_ciphertexts_follow_padding_vectors() {
         overheads.insert(ct.len() - bucket);
     }
     assert_eq!(overheads.len(), 1, "{overheads:?}");
+}
+
+#[test]
+fn event_kind_names_the_variant_without_content() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "secret body"))
+        .unwrap();
+    let event = groups[1].process(&peers[1].client, &ct).unwrap();
+    assert_eq!(event.kind(), "application");
+
+    let out = groups[0]
+        .remove(&peers[0].client, &peers[2].identity.id())
+        .unwrap();
+    let seen = groups[1].process(&peers[1].client, &out.commit).unwrap();
+    assert_eq!(seen.kind(), "commit");
+    let removed = groups[2].process(&peers[2].client, &out.commit).unwrap();
+    assert_eq!(removed.kind(), "removed");
+    assert_eq!(Event::OwnEcho.kind(), "own_echo");
 }

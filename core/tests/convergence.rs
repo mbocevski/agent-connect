@@ -73,7 +73,7 @@ impl World {
             {
                 Event::Commit(_) => {}
                 Event::Removed(_) => removed.push(i),
-                other => panic!("unexpected {other:?}"),
+                other => panic!("unexpected event: {}", other.kind()),
             }
         }
         for i in removed.into_iter().rev() {
@@ -92,7 +92,11 @@ impl World {
                 let (g, out) = join(&self.peers[0], &mut head[0], &joiner);
                 for i in 1..n {
                     let e = self.groups[i].process(&self.peers[i].client, &out.commit);
-                    assert!(matches!(e, Ok(Event::Commit(_))), "{e:?}");
+                    assert!(
+                        matches!(e, Ok(Event::Commit(_))),
+                        "expected a commit, got {}",
+                        e.as_ref().map_or("an error", Event::kind)
+                    );
                 }
                 self.peers.push(joiner);
                 self.groups.push(g);
