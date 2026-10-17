@@ -132,8 +132,13 @@ mod tests {
     use super::*;
     use crate::proto::b64_encode;
 
+    /// Per-run random seed: keys are stable within a run (same `n`, same
+    /// key) but never hard-coded.
+    static KEY_SEED: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(random_bytes);
+
     fn key(n: u8) -> SigningKey {
-        SigningKey::from_bytes(&[n; 32])
+        let secret: [u8; 32] = Sha256::digest([KEY_SEED.as_slice(), &[n]].concat()).into();
+        SigningKey::from_bytes(&secret)
     }
 
     fn pub_b64(k: &SigningKey) -> String {
@@ -143,11 +148,12 @@ mod tests {
     #[test]
     fn ws_auth_roundtrip_and_failures() {
         let k = key(1);
-        let nonce = [9_u8; 32];
+        let nonce = random_bytes::<32>();
         let sig = b64_encode(&k.sign(&ws_auth_message(&nonce, "relay.test")).to_bytes());
         let id = verify_ws_auth(&nonce, "relay.test", &pub_b64(&k), &sig).unwrap();
         assert_eq!(id, mailbox_id_from_key(k.verifying_key().as_bytes()));
-        assert!(verify_ws_auth(&[8; 32], "relay.test", &pub_b64(&k), &sig).is_none());
+        let other_nonce = random_bytes::<32>();
+        assert!(verify_ws_auth(&other_nonce, "relay.test", &pub_b64(&k), &sig).is_none());
         assert!(verify_ws_auth(&nonce, "other.test", &pub_b64(&k), &sig).is_none());
         assert!(verify_ws_auth(&nonce, "relay.test", &pub_b64(&key(2)), &sig).is_none());
         assert!(verify_ws_auth(&nonce, "relay.test", "short", &sig).is_none());

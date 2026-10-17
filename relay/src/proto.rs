@@ -439,10 +439,11 @@ mod tests {
 
     #[test]
     fn mailbox_id_is_22_chars_of_the_key_hash() {
-        let id = mailbox_id_from_key(&[7; 32]);
+        let key = crate::auth::random_bytes::<32>();
+        let id = mailbox_id_from_key(&key);
         assert_eq!(id.len(), 22);
         assert!(is_mailbox_id(&id));
-        assert!(b64_encode(&Sha256::digest([7; 32])).starts_with(&id));
+        assert!(b64_encode(&Sha256::digest(key)).starts_with(&id));
     }
 
     #[test]

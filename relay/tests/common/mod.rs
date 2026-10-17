@@ -18,6 +18,7 @@ use axum::serve::ListenerExt;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use sha2::Digest;
 use tokio_tungstenite::tungstenite::Message;
 
 pub const HOST: &str = "relay.test";
@@ -82,8 +83,17 @@ impl Harness {
     }
 }
 
+/// Per-run key seed: `AC_TEST_SEED` when set (TESTING.md), otherwise random.
+/// Keys are stable within a run (same `n`, same key) but never hard-coded.
+static KEY_SEED: std::sync::LazyLock<[u8; 32]> =
+    std::sync::LazyLock::new(|| match std::env::var("AC_TEST_SEED") {
+        Ok(seed) => sha2::Sha256::digest(seed.as_bytes()).into(),
+        Err(_) => agentconnect_relay::auth::random_bytes(),
+    });
+
 pub fn signing_key(n: u8) -> SigningKey {
-    SigningKey::from_bytes(&[n; 32])
+    let secret: [u8; 32] = sha2::Sha256::digest([KEY_SEED.as_slice(), &[n]].concat()).into();
+    SigningKey::from_bytes(&secret)
 }
 
 pub fn mailbox_of(key: &SigningKey) -> String {
