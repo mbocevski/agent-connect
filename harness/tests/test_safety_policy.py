@@ -455,6 +455,7 @@ async def test_held_items_edge_cases(
         ({"set": []}, "bad_request"),
         ({"set": {}, "sender": 5}, "bad_request"),
         ({"set": {"sender_per_minute": 0}}, "bad_request"),
+        ({"set": {"sender_per_minute": 31}}, "bad_request"),  # stricter only
     ):
         status, err = await h.human_call("POST", f"/v0/groups/{gid}/safety", body)
         assert (status, err["code"]) == (400, code), body
@@ -463,3 +464,49 @@ async def test_held_items_edge_cases(
     for who in ("ac:v0:nobody", a.me):
         status, err = await h.human_call("POST", f"/v0/groups/{gid}/members/{who}/remove")
         assert (status, err["code"]) == (404, "not_found")
+
+
+async def replicas_and_receiver(cluster: Cluster, n: int) -> tuple[Node, list[Node], str]:
+    """A receiver and ``n`` instances of one other identity, all joined."""
+    receiver = await cluster.node("receiver")
+    gid = receiver.daemon.create_group("Ops", "Replicas")
+    await receiver.idle()
+    first = await cluster.node("r0")
+    await cluster.invite(receiver, first, gid)
+    replicas = [first]
+    for i in range(1, n):
+        replica = await cluster.node(f"r{i}", identity_of=first)
+        await cluster.invite(receiver, replica, gid)
+        replicas.append(replica)
+    receiver.daemon.update_safety(gid, {"sender_per_minute": 3, "identity_rate_multiple": 2})
+    return receiver, replicas, gid
+
+
+def delivered_from(node: Node, identity: str) -> list[str]:
+    return [
+        d.msg_id
+        for d in node.adapter.deliveries
+        if d.kind == "a2a.message" and d.sender.identity == identity
+    ]
+
+
+async def test_an_honest_replica_pair_gets_a_rate_each(cluster: Cluster) -> None:
+    receiver, replicas, gid = await replicas_and_receiver(cluster, 2)
+    sent = [raw_send(r, gid, {"text": f"{r.name} {i}"}) for r in replicas for i in range(3)]
+    for r, msg_id in zip([r for r in replicas for _ in range(3)], sent, strict=True):
+        assert await settled(receiver, r, msg_id) == "done"
+    assert sorted(delivered_from(receiver, replicas[0].me)) == sorted(sent)
+    assert events(receiver, "repeated_violations") == []
+
+
+async def test_a_replica_flood_stops_at_the_identity_cap(cluster: Cluster) -> None:
+    receiver, replicas, gid = await replicas_and_receiver(cluster, 3)
+    sent = [(r, raw_send(r, gid, {"text": f"{r.name} {i}"})) for r in replicas for i in range(3)]
+    states = [await settled(receiver, r, msg_id) for r, msg_id in sent]
+    # Each instance is within its own rate (3), but the identity may send
+    # only 2 x 3 a minute however many replicas it runs.
+    assert states.count("done") == 6
+    assert states.count("dropped") == 3
+    assert len(delivered_from(receiver, replicas[0].me)) == 6
+    reasons = {r["reason"] for r in receiver.daemon.store.audit(gid) if r["decision"] == "drop"}
+    assert reasons == {"rate_limited"}

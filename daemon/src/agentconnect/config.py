@@ -138,6 +138,7 @@ class Config:
     policy_max_message_bytes: int = KNOB["max_message_bytes"].default
     policy_sender_per_minute: int = KNOB["sender_per_minute"].default
     policy_group_per_minute: int = KNOB["group_per_minute"].default
+    policy_identity_rate_multiple: int = KNOB["identity_rate_multiple"].default
     policy_task_per_minute: int = KNOB["task_per_minute"].default
     policy_allow_files: bool = KNOB["allow_files"].default
     policy_max_file_bytes: int = KNOB["max_file_bytes"].default

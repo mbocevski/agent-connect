@@ -1285,6 +1285,7 @@ class Daemon:
             Inbound(
                 group.group_id,
                 identity,
+                str(sender["instance_id_hex"]),
                 inner,
                 len(event["plaintext"]),
                 policy.get("owner"),
@@ -2583,7 +2584,14 @@ class Daemon:
         )
         size = len(canonical(inner))
         decision = self.safety.outbound(
-            Outbound(group.group_id, self.me, inner, size, internal=internal)
+            Outbound(
+                group.group_id,
+                self.me,
+                self.instance.instance_id_hex,
+                inner,
+                size,
+                internal=internal,
+            )
         )
         if decision.verdict is Verdict.DROP:
             self.safety.audit(

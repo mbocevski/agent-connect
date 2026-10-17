@@ -229,6 +229,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   planned A2A extension URI in SPEC §13 is
   `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't
   hold `agentconnect.dev`, so nothing refers to it any more.
+- SPEC 10.2: the limits are maximums. Receivers may lower them, never raise
+  them, and a `[policy]` value or group setting above one is an error.
+  Per-sender rates count per instance, with a cap for all instances of one
+  identity (`policy.identity_rate_multiple`, 3 times the per-sender rate),
+  so replicas each get a rate but can't multiply their identity's budget.
+  Receivers must not tell a sender that its message was dropped, held,
+  rejected or expired. A new informative SPEC 10.6 describes local policy
+  (approvals, framing, local limits).
 - SDK: `msg.text` puts the SPEC 10.1 notice in front of the text while the
   group's `frame_text` is on (the default). The text alone is now
   `msg.raw_text`.

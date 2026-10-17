@@ -74,10 +74,12 @@ def inbound(  # noqa: PLR0913
     replayed: bool = False,
     drain: bool = False,
     owner: str = BOB,
+    instance: str | None = None,
 ) -> Inbound:
     return Inbound(
         G,
         sender,
+        instance or f"{sender}/i1",
         inner or message(),
         size,
         owner,
@@ -90,7 +92,7 @@ def inbound(  # noqa: PLR0913
 
 
 def outbound(inner: dict[str, Any] | None = None, *, internal: bool = False) -> Outbound:
-    return Outbound(G, BOB, inner or message(), 100, internal=internal)
+    return Outbound(G, BOB, "bob/i1", inner or message(), 100, internal=internal)
 
 
 # -- decisions -----------------------------------------------------------------------
@@ -286,7 +288,11 @@ def test_settings_merge_group_and_sender_overrides(policy: SafetyPolicy) -> None
         ({"nope": 1}, False, "unknown setting"),
         ({"sender_per_minute": "10"}, False, "must be int"),
         ({"sender_per_minute": True}, False, "must be int"),
-        ({"sender_per_minute": 0}, False, "1..1000"),
+        ({"sender_per_minute": 0}, False, "1..30"),
+        ({"sender_per_minute": 31}, False, "1..30"),
+        ({"group_per_minute": 121}, False, "1..120"),
+        ({"task_per_minute": 301}, False, "1..300"),
+        ({"identity_rate_multiple": 4}, False, "1..3"),
         ({"max_message_bytes": MAX_MESSAGE_BYTES + 1}, False, "1024..262144"),
         ({"require_approval": "sometimes"}, False, "one of off"),
         ({"frame_text": 1}, False, "must be bool"),
@@ -471,3 +477,24 @@ def test_decision_helpers() -> None:
     assert Decision(Verdict.DROP, "x") == drop("x")
     assert hold("x").verdict == "hold_for_approval"
     assert not hold("x").delivered
+
+
+def test_rates_count_per_instance_with_an_identity_cap(policy: SafetyPolicy) -> None:
+    policy.update(G, {"sender_per_minute": 4, "identity_rate_multiple": 2})
+    # Two replicas of one identity each get the per-sender rate...
+    for replica in ("r1", "r2"):
+        assert all(policy.inbound(inbound(instance=replica)).delivered for _ in range(4))
+        assert policy.inbound(inbound(instance=replica)) == drop("rate_limited")
+    # ...and a third finds the identity at its cap (2 x 4).
+    assert policy.inbound(inbound(instance="r3")) == drop("rate_limited")
+    assert policy.inbound(inbound(sender=BOB)).delivered, "other identities are not affected"
+
+
+@pytest.mark.parametrize(
+    "line", ["sender_per_minute = 31", "group_per_minute = 121", "max_message_bytes = 262145"]
+)
+def test_limits_can_only_be_lowered(tmp_path: Path, line: str) -> None:
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(f"[policy]\n{line}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="policy"):
+        load_config(cfg, environ={})

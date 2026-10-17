@@ -45,6 +45,7 @@ from agentconnect.clock import Clock, unix_seconds
 from agentconnect.limits import (
     DEFAULT_MAX_FILE_BYTES,
     GROUP_PER_MINUTE,
+    IDENTITY_RATE_MULTIPLE,
     MAX_MESSAGE_BYTES,
     SENDER_PER_MINUTE,
     TASK_PER_MINUTE,
@@ -157,7 +158,8 @@ KNOBS: tuple[Knob, ...] = (
         "max_message_bytes",
         int,
         MAX_MESSAGE_BYTES,
-        "Largest inner message accepted, in bytes (1024 to 262144, the SPEC 10.2 maximum).",
+        "Largest inner message accepted, in bytes (1024 to 262144, the SPEC 10.2 default; "
+        "never more).",
         1024,
         MAX_MESSAGE_BYTES,
         per_sender=True,
@@ -166,26 +168,39 @@ KNOBS: tuple[Knob, ...] = (
         "sender_per_minute",
         int,
         SENDER_PER_MINUTE,
-        "Messages a minute accepted from one sender (1 to 1000).",
+        "Messages a minute accepted from one sender instance (1 to 30, the SPEC 10.2 "
+        "default; never more).",
         1,
-        1000,
+        SENDER_PER_MINUTE,
         per_sender=True,
     ),
     Knob(
         "group_per_minute",
         int,
         GROUP_PER_MINUTE,
-        "Messages a minute accepted from the whole group (1 to 10000).",
+        "Messages a minute accepted from the whole group (1 to 120, the SPEC 10.2 "
+        "default; never more).",
         1,
-        10_000,
+        GROUP_PER_MINUTE,
+    ),
+    Knob(
+        "identity_rate_multiple",
+        int,
+        IDENTITY_RATE_MULTIPLE,
+        "All instances of one identity together may send this many times "
+        "`sender_per_minute` (1 to 3, the SPEC 10.2 default), so replicas can't multiply "
+        "an identity's budget.",
+        1,
+        IDENTITY_RATE_MULTIPLE,
     ),
     Knob(
         "task_per_minute",
         int,
         TASK_PER_MINUTE,
-        "Updates a minute accepted for one task of one sender (1 to 3000).",
+        "Updates a minute accepted for one task of one sender instance (1 to 300, the "
+        "SPEC 10.2 default; never more).",
         1,
-        3000,
+        TASK_PER_MINUTE,
         per_sender=True,
     ),
     Knob(
@@ -273,6 +288,7 @@ class Settings:
     max_message_bytes: int = MAX_MESSAGE_BYTES
     sender_per_minute: int = SENDER_PER_MINUTE
     group_per_minute: int = GROUP_PER_MINUTE
+    identity_rate_multiple: int = IDENTITY_RATE_MULTIPLE
     task_per_minute: int = TASK_PER_MINUTE
     allow_files: bool = False
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
@@ -370,6 +386,7 @@ class Inbound:
 
     group_id: str
     sender: str  # the authenticated identity
+    instance: str  # its instance (SPEC 3.3): rates count per instance
     inner: dict[str, Any]
     size: int  # bytes of the inner message's JSON
     owner: str | None  # the group's owner (SPEC 7.3: only it may close)
@@ -394,6 +411,7 @@ class Outbound:
 
     group_id: str
     sender: str
+    instance: str
     inner: dict[str, Any]
     size: int
     internal: bool  # the daemon's own (Agent Cards, loop-guard pauses)
@@ -458,7 +476,7 @@ class SafetyPolicy:
             not m.replayed
             and not m.drain_exempt()
             and not self.limiter.allow_inner(
-                m.group_id, m.sender, m.kind, m.inner.get("body"), limits
+                m.group_id, m.instance, m.kind, m.inner.get("body"), limits, identity=m.sender
             )
         ):
             return drop("rate_limited")
@@ -483,7 +501,7 @@ class SafetyPolicy:
         if problem is not None:
             return drop(problem)
         if not m.internal and not self.limiter.allow_inner(
-            m.group_id, m.sender, m.kind, m.inner.get("body"), limits
+            m.group_id, m.instance, m.kind, m.inner.get("body"), limits, identity=m.sender
         ):
             return drop("rate_limited")
         human = m.inner.get("origin") == "human"
