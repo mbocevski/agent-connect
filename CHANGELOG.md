@@ -10,6 +10,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Generated reference docs: `just docs-gen` writes the CLI commands and
+  options, exit codes, `--json` shapes, local API routes and errors, and
+  config keys into `docs/cli.md`, `docs/api.md` and `docs/config.md` from the
+  code, and a fast-tier test fails when the committed docs are stale.
 - Docs gate: `docs/MAP.toml` maps user-facing code (CLI, local API, daemon
   config, relay protocol, `testdata/` wire formats) to the docs that must
   change with it, checked by `scripts/check_docs.py` in the pre-push hook,

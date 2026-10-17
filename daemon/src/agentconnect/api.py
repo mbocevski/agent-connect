@@ -347,6 +347,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
                     "type": "str",
                     "data": "object",
                     "at": "int",
+                    "event_id": "str",
                 }
             ]
         },

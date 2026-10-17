@@ -518,7 +518,7 @@ def test_send_with_recipients_and_hint(fake: Fake) -> None:
 
 
 def test_events_list_follow_and_interrupt(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
-    ev = {"seq": 3, "group_id": GID, "type": "joined", "data": {}, "at": 0}
+    ev = {"seq": 3, "group_id": GID, "type": "joined", "data": {}, "at": 0, "event_id": "e3"}
     fake.routes["GET /v0/events?after=0"] = {"events": [ev]}
     fake.routes["GET /v0/events?after=3"] = {"events": []}
     assert "3  1970-01-01 00:00 UTC  joined" in fake.run("events").stdout

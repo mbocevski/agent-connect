@@ -118,6 +118,10 @@ changelog-check base="origin/main":
 docs-check base="origin/main":
     uv run --no-project python scripts/check_docs.py {{ base }}
 
+# Regenerate the reference sections of docs/cli.md, api.md and config.md from the code
+docs-gen:
+    uv run --all-packages --frozen python scripts/gen_reference.py
+
 # Everything PR CI runs
 ci: lint test cov changelog-check docs-check
 

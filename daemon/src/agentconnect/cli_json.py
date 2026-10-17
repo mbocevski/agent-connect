@@ -117,6 +117,7 @@ SCHEMAS: dict[str, Any] = {
         "type": "str",
         "data": "object",
         "at": "int",
+        "event_id": "str",
     },
 }
 
