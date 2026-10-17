@@ -1847,10 +1847,7 @@ class Daemon:
         """Human-gated: drop a held message. Nothing tells the peer; an
         outbound one fails like any send (``send_failed``)."""
         item = self._pending_hold(hold_id)
-        events = self._drop_hold(item, "rejected", "rejected")
-        if not events and item["direction"] == "out":
-            raise DaemonError("not_found", "no such held message")
-        for event in events:
+        for event in self._drop_hold(item, "rejected", "rejected"):
             await self._notify(event)
         return {"hold_id": hold_id, "group_id": item["group_id"], "status": "rejected"}
 

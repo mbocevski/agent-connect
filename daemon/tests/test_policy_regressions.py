@@ -16,6 +16,7 @@ from a2a.types import AgentCard, CancelTaskRequest
 
 from agentconnect.adapter import notice
 from agentconnect.clock import FakeClock
+from agentconnect.limits import RateLimiter
 from agentconnect.policy import (
     VIOLATIONS,
     Inbound,
@@ -397,3 +398,40 @@ def test_the_audit_log_is_capped_on_every_row(store: Store) -> None:
     for i in range(5):
         store.audit_add(G, at=0, direction="in", msg_id=f"m{i}", reason="", keep=2, **meta)
     assert [r["msg_id"] for r in store.audit()] == ["m3", "m4"]
+
+
+# -- bounds and edges ----------------------------------------------------------
+
+
+def test_violation_counters_evict_the_least_recently_seen(
+    policy: SafetyPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("agentconnect.policy.MAX_TRACKED", 2)
+    for who in ("ac:v0:a", "ac:v0:b", "ac:v0:c"):
+        policy.violation(G, who, "too_large")
+    assert policy.tracked_senders() == 2
+    assert policy.violations(G, "ac:v0:a") == 0, "the oldest went first"
+
+
+def test_the_limiter_evicts_past_its_key_cap(fake_clock: FakeClock) -> None:
+    limiter = RateLimiter(fake_clock, max_keys=100)
+    for i in range(300):
+        limiter.allow(G, f"s{i}")
+    assert limiter.size() < 300
+
+
+def test_a_too_deep_card_is_malformed(policy: SafetyPolicy) -> None:
+    deep: dict[str, Any] = {"id": "s"}
+    for _ in range(40):
+        deep = {"inner": deep}
+    card = {"kind": "a2a.agent_card", "body": {"name": "x", "capabilities": deep}}
+    assert policy.inbound(inb(card, owner=MALLORY)) == drop("malformed")
+
+
+def test_an_approved_outbound_task_is_not_held_again(policy: SafetyPolicy) -> None:
+    policy.update(G, {"require_approval": "outbound"})
+    update = task("mine")
+    assert policy.outbound(out(update)) == hold("require_approval")
+    assert policy.outbound(out(update)) == drop("task_pending")
+    policy.decide_task(G, ME, "mine", approved=True)
+    assert policy.outbound(out(update)).delivered

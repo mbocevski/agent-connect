@@ -585,6 +585,18 @@ async def test_a_task_is_held_once_and_decided_as_a_whole(group: GroupFixture) -
     statuses = [d.msg_id for d in a.adapter.deliveries if d.kind == "a2a.task_status"]
     assert statuses == [first, done]
     assert events(a, "repeated_violations") == [], "a pending task is not a violation"
+    # Rejecting a task's first update rejects the task.
+    other = raw_send(b, gid, update("TASK_STATE_WORKING") | {"taskId": "t2"}, "a2a.task_status")
+    assert await settled(a, b, other) == "held"
+    (second,) = a.daemon.held_messages()
+    await a.daemon.reject_message(second["hold_id"])
+    after = raw_send(b, gid, update("TASK_STATE_COMPLETED") | {"taskId": "t2"}, "a2a.task_status")
+    assert await settled(a, b, after) == "dropped"
+    (row,) = [r for r in a.daemon.store.audit(gid) if r["msg_id"] == after]
+    assert row["reason"] == "task_rejected"
+    decided = a.daemon.store.held(second["hold_id"])
+    assert decided is not None
+    assert a.daemon._drop_hold(decided, "expired", "expired") == [], "decided once"
 
 
 async def test_holds_are_capped_and_overflow_is_a_violation(group: GroupFixture) -> None:
