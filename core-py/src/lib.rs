@@ -430,10 +430,17 @@ struct VerifiedJoinRequest {
     instance_id: u64,
     display_name: String,
     mailbox_id: String,
+    key_package_ref: Vec<u8>,
 }
 
 #[pymethods]
 impl VerifiedJoinRequest {
+    /// The KeyPackageRef (RFC 9420 §5.2): identical for a replayed request.
+    #[getter]
+    fn key_package_ref<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.key_package_ref)
+    }
+
     #[getter]
     fn identity(&self) -> String {
         self.identity.clone()
@@ -779,6 +786,7 @@ impl Client {
             instance_id: v.instance_id(),
             display_name: v.display_name().to_owned(),
             mailbox_id: v.mailbox_id().to_owned(),
+            key_package_ref: v.key_package_ref().to_vec(),
             inner: v,
         })
     }

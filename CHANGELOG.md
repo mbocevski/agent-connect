@@ -150,6 +150,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core and daemon: `VerifiedJoinRequest.key_package_ref` exposes the
+  KeyPackageRef, and the inviter keeps one pending approval per
+  KeyPackage, so a relay replaying a JoinRequest under fresh `msg_id`s no
+  longer stacks up approvals for the human.
 - Daemon: a peer's Agent Card, and the display name it sets, are kept only
   once the card's delivery has passed the `require_verified` gate and the
   policy hook, and `GET /v0/groups/{id}` returns each card as

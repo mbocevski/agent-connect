@@ -265,6 +265,14 @@ fn wrong_invite_secret_fails_mac_and_welcome() {
     assert_eq!(verified.display_name(), "b");
     assert_eq!(verified.mailbox_id(), b.client.instance().mailbox_id());
     assert_eq!(verified.instance_id(), b.client.instance().instance_id());
+    // The same request verified twice (a replay) has the same ref; another
+    // request (fresh KeyPackage) has another.
+    let again = a.client.verify_join_request(&req, &inv).unwrap();
+    assert_eq!(again.key_package_ref(), verified.key_package_ref());
+    assert!(!verified.key_package_ref().is_empty());
+    let other = b.client.create_join_request(inv.secret(), "b").unwrap();
+    let other = a.client.verify_join_request(&other, &inv).unwrap();
+    assert_ne!(other.key_package_ref(), verified.key_package_ref());
     let out = ga.add_member(&a.client, &verified, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let wrapped = out.welcome.unwrap();

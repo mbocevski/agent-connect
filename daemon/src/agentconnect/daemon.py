@@ -914,6 +914,12 @@ class Daemon:
         except (ac.AgentConnectError, ac.CoreError) as e:
             LOG.info("join_request_rejected", invite=log.hid(invite_id), reason=str(e)[:60])
             return
+        kp_ref = b64(verified.key_package_ref)
+        if self.store.open_approval_for(kp_ref) is not None:
+            # The same JoinRequest again under a fresh msg_id (a relay
+            # replay): one approval per KeyPackage.
+            LOG.info("join_request_replayed", invite=log.hid(invite_id))
+            return
         request_id = str(env["msg_id"])
         self.store.add_approval(
             {
@@ -925,6 +931,7 @@ class Daemon:
                 "display_name": verified.display_name,
                 "mailbox_id": verified.mailbox_id,
                 "received_at": self.now(),
+                "kp_ref": kp_ref,
             }
         )
         await self.emit(

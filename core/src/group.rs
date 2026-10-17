@@ -213,10 +213,18 @@ pub struct VerifiedJoinRequest {
     display_name: String,
     mailbox_id: String,
     key_package: KeyPackage,
+    key_package_ref: Vec<u8>,
     info: LeafInfo,
 }
 
 impl VerifiedJoinRequest {
+    /// The `KeyPackageRef` (RFC 9420 §5.2) of the joiner's KeyPackage: the
+    /// same request replayed under another `msg_id` has the same ref.
+    #[must_use]
+    pub fn key_package_ref(&self) -> &[u8] {
+        &self.key_package_ref
+    }
+
     /// The joiner's identity.
     #[must_use]
     pub fn identity(&self) -> &str {
@@ -398,10 +406,8 @@ impl<S: Store> Client<S> {
                 "mailbox_id != key package signature key",
             ));
         }
-        if records::key_package_used(
-            self.provider.records(),
-            &key_package_ref(self, &key_package)?,
-        )? {
+        let kp_ref = key_package_ref(self, &key_package)?;
+        if records::key_package_used(self.provider.records(), &kp_ref)? {
             return Err(Error::KeyPackageReused);
         }
         Ok(VerifiedJoinRequest {
@@ -409,6 +415,7 @@ impl<S: Store> Client<S> {
             display_name: request.display_name.clone(),
             mailbox_id: request.mailbox_id.clone(),
             key_package,
+            key_package_ref: kp_ref,
             info,
         })
     }

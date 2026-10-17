@@ -129,7 +129,8 @@ CREATE TABLE IF NOT EXISTS approvals (
     display_name TEXT NOT NULL,
     mailbox_id TEXT NOT NULL,
     received_at INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending'
+    status TEXT NOT NULL DEFAULT 'pending',
+    kp_ref TEXT
 );
 CREATE TABLE IF NOT EXISTS joins (
     invite_id TEXT PRIMARY KEY,
@@ -437,8 +438,8 @@ class Store:
     def add_approval(self, row: dict[str, Any]) -> bool:
         cur = self._db.execute(
             "INSERT OR IGNORE INTO approvals (request_id, invite_id, group_id, request, identity, "
-            "display_name, mailbox_id, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [row[k] for k in self._APPROVAL_KEYS[:-1]],
+            "display_name, mailbox_id, received_at, kp_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [*(row[k] for k in self._APPROVAL_KEYS[:-1]), row.get("kp_ref")],
         )
         return cur.rowcount == 1
 
@@ -468,6 +469,15 @@ class Store:
             status,
         )
         return [dict(zip(self._APPROVAL_KEYS, r, strict=True)) for r in rows]
+
+    def open_approval_for(self, kp_ref: str) -> str | None:
+        """A pending or approving request with this KeyPackageRef, if any."""
+        row = self._one(
+            "SELECT request_id FROM approvals WHERE kp_ref = ? "
+            "AND status IN ('pending', 'approving')",
+            kp_ref,
+        )
+        return None if row is None else str(row[0])
 
     def uses_taken(self, invite_id: str) -> int:
         """Approvals that hold one of the invite's uses (approving or done)."""

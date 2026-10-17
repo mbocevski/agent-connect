@@ -5,12 +5,13 @@ was already used."""
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
-from agentconnect.daemon import INVITE_WARNING, JOIN_CLOSED_GRACE_SECS, DaemonError
+from agentconnect.daemon import INVITE_WARNING, JOIN_CLOSED_GRACE_SECS, DaemonError, new_msg_id
 from agentconnect.relay import RelayError
 from agentconnect_harness.cluster import Cluster, Node
 
@@ -115,3 +116,23 @@ async def test_check_joins_tolerates_relay_trouble(
     await advance(1)
     await b.daemon.check_joins()
     assert b.daemon.store.join_status(invite["invite_id"]) == ("failed", None)
+
+
+async def test_a_replayed_join_request_yields_one_approval(cluster: Cluster) -> None:
+    a = await cluster.node("a", auto_approve=False)
+    gid = a.daemon.create_group("Replay", "")
+    await a.idle()
+    b = await cluster.node("b")
+    invite = await a.daemon.create_invite(gid, max_uses=3)
+    await b.daemon.accept_invite(invite["url"])
+    await a.wait(lambda: len(a.daemon.approvals()) == 1)
+    # The relay replays the JoinRequest under fresh msg_ids.
+    original = a.proxy.last_delivered("join_request")
+    for _ in range(3):
+        frame = json.loads(json.dumps(original))
+        frame["env"]["msg_id"] = new_msg_id()
+        await a.proxy.inject(frame)
+    last = frame["env"]["msg_id"]
+    await a.wait(lambda: a.daemon.store.inbox_state(b.daemon.mailbox, last) is not None)
+    assert len(a.daemon.approvals()) == 1
+    assert len([e for e in a.daemon.store.events() if e["type"] == "pending_approval"]) == 1
