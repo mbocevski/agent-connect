@@ -476,6 +476,11 @@ Envelope = {
   raise `relay_misbehaviour`. A **commit** whose envelope epoch differs is
   still processed (dropping an authenticated commit would fork the member),
   and the receiver MUST raise `relay_misbehaviour` (`epoch_mismatch`).
+  The receiver compares the envelope with the unprotected `PrivateMessage`
+  header (`group_id`, `epoch`, `content_type`) before any MLS processing,
+  so a dropped message consumes no key. An envelope `group_id` that differs
+  from the header's raises `relay_misbehaviour` (`group_mismatch`); the
+  message is not processed in the envelope's group.
 - A receiver MUST drop, before any MLS processing, an envelope whose fields
   don't have the types above (for example an `epoch` that isn't an
   integer, or `routing` that isn't an object of mailbox lists). The relay

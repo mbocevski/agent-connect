@@ -232,6 +232,16 @@ def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911
     return None
 
 
+def _header_mismatch(env: dict[str, Any], group_id: bytes, head: dict[str, Any]) -> str | None:
+    """How a group envelope disagrees with its MLS header (SPEC 7.1), or
+    None. ``head`` is ``agentconnect_core.peek_header`` of its ``ct``."""
+    if head["group_id"] != group_id:
+        return "group_mismatch"
+    if head["epoch"] != env["epoch"]:
+        return "epoch_mismatch"
+    return None
+
+
 def _same_relay(a: str, b: str) -> bool:
     """SPEC 4.4/8.1.1: compare relay hosts in canonical form."""
     try:
@@ -1012,6 +1022,25 @@ class Daemon:
         except ValueError:
             await self._malformed(env, "ct")
             return
+        try:
+            # SPEC 7.1: compare the envelope with the unprotected MLS header
+            # first. Peeking uses no key, so a dropped message consumes none.
+            head = ac.peek_header(ct)
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            await self._rejected(group_id, env, e)
+            return
+        mismatch = _header_mismatch(env, gid, head)
+        if mismatch is not None and head["content_type"] != "commit":
+            # An application message or a proposal is dropped unprocessed. A
+            # commit is still processed (dropping an authenticated commit
+            # would fork us); its epoch mismatch is flagged in _after_commit.
+            self.store.record_inbox(sender, msg_id, group_id, "dropped", self.now())
+            await self._ack(msg_id)
+            await self.emit(group_id, "relay_misbehaviour", reason=mismatch)
+            return
+        if mismatch == "group_mismatch":
+            # A commit of another group: flagged here, rejected by the core.
+            await self.emit(group_id, "relay_misbehaviour", reason=mismatch)
         if env["kind"] == "proposal" and int(env["epoch"]) != self._core_epoch(gid):
             # SPEC 7.1: a proposal is only valid in the current epoch, so an
             # envelope epoch that differs is dropped (commits are merged and

@@ -278,6 +278,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   for a winning commit, the ownership hand-over, `stop()`, and closing the
   webhook and SSE adapters) no longer swallows the cancellation; the task
   stops. `stop()` still releases its databases and data-directory lock.
+- Daemon: an application message or proposal whose envelope `epoch` or
+  `group_id` disagrees with its MLS header is now dropped before the core
+  processes it (SPEC §7.1), so it no longer consumes the message's key; a
+  wrong `group_id` raises `relay_misbehaviour` (`group_mismatch`). The core
+  and its bindings gain `peek_header`, which parses only the unprotected
+  `PrivateMessage` header and touches no keys or storage.
 - The daemon no longer freezes at 100% CPU when the relay connection closes
   while the outbox has work queued (on a relay drop or on shutdown). A send
   on the closed socket now takes the link down at once, so the outbox waits

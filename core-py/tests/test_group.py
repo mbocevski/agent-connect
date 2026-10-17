@@ -200,5 +200,35 @@ def test_persistence_and_invite_parts(rng: random.Random, tmp_path: Path) -> Non
     assert repr(identity).startswith("Identity(")
 
 
+def test_peek_header_reads_the_header_and_consumes_nothing(rng: random.Random) -> None:
+    a, b = make_client(rng), make_client(rng)
+    gid = a.create_group(NAME, PURPOSE)
+    join(a, gid, b)
+    epoch = b.epoch(gid)
+    ct = a.seal(gid, inner(a, "peeked"))
+    head = ac.peek_header(ct)
+    assert head == {"group_id": gid, "epoch": epoch, "content_type": "application"}
+    # An envelope claiming another epoch is caught before processing; the
+    # key is untouched, so the original still opens (once).
+    assert head["epoch"] != epoch + 1
+    assert ac.peek_header(ct) == head
+    assert b.open(gid, ct)["plaintext"] == inner(a, "peeked")
+    with pytest.raises(ac.AgentConnectError):
+        b.open(gid, ct)
+    assert ac.peek_header(b.propose_leave(gid))["content_type"] == "proposal"
+    commit = a.update(gid)["commit"]
+    assert ac.peek_header(commit) == {"group_id": gid, "epoch": epoch, "content_type": "commit"}
+
+
+@pytest.mark.parametrize("bad", [b"", b"junk", b"\x00\x01"])
+def test_peek_header_rejects_what_process_rejects(rng: random.Random, bad: bytes) -> None:
+    with pytest.raises(ac.AgentConnectError, match="malformed"):
+        ac.peek_header(bad)
+    a = make_client(rng)
+    gid = a.create_group(NAME, PURPOSE)
+    with pytest.raises(ac.AgentConnectError, match="malformed"):
+        a.process(gid, bad)
+
+
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()

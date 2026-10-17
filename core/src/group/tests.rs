@@ -397,6 +397,11 @@ fn processing_after_eviction_and_public_messages() {
         gs[1].process(&cs[1], &wire(&kp_msg).unwrap()),
         Err(Error::UnexpectedMessage("only PrivateMessage is accepted"))
     );
+    // The header peek validates its input exactly as `process` does.
+    assert_eq!(
+        peek_header(&wire(&kp_msg).unwrap()),
+        Err(Error::UnexpectedMessage("only PrivateMessage is accepted"))
+    );
     assert_eq!(
         gs[1].open(&cs[1], &out.commit),
         Err(Error::UnexpectedMessage("not an application message"))
