@@ -1,4 +1,4 @@
-//! REST endpoints (SPEC §8.1).
+//! REST endpoints (SPEC §8.1) and the door registry (ADR-006).
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::auth::verify_rest_auth;
 use crate::proto::ErrorCode;
-use crate::relay::{NewInviteRequest, Relay, RelayError};
+use crate::relay::{NewDoorRequest, NewInviteRequest, Relay, RelayError};
 use crate::store::{InviteRecord, Store};
 
 /// Largest accepted REST body.
@@ -145,6 +145,45 @@ async fn delete_invite<S: Store>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /v0/doors` reply: what was registered, minus the owner's mailbox.
+#[derive(Debug, Serialize)]
+pub struct DoorRegistered {
+    door_id: String,
+    expires_at: u64,
+}
+
+async fn create_door<S: Store>(
+    State(relay): State<Arc<Relay<S>>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<DoorRegistered>), RestError> {
+    let mailbox = authenticate(&relay, &headers, &method, &uri, &body)?;
+    let req: NewDoorRequest = serde_json::from_slice(&body)
+        .map_err(|_| RestError(RelayError::new(ErrorCode::BadRequest, "malformed door")))?;
+    let door = relay.create_door(&mailbox, req).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(DoorRegistered {
+            door_id: door.door_id,
+            expires_at: door.expires_at,
+        }),
+    ))
+}
+
+async fn delete_door<S: Store>(
+    State(relay): State<Arc<Relay<S>>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(door_id): Path<String>,
+) -> Result<StatusCode, RestError> {
+    let mailbox = authenticate(&relay, &headers, &method, &uri, &[])?;
+    relay.close_door(&mailbox, &door_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn healthz() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
@@ -172,6 +211,12 @@ pub fn routes<S: Store>() -> Router<Arc<Relay<S>>> {
         .route(
             "/v0/invites/{invite_id}",
             get(get_invite::<S>).delete(delete_invite::<S>),
+        )
+        // No GET: everything a knocker needs is in the signed listing.
+        .route("/v0/doors", axum::routing::post(create_door::<S>))
+        .route(
+            "/v0/doors/{door_id}",
+            axum::routing::delete(delete_door::<S>),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY))
 }

@@ -14,9 +14,9 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 use crate::proto::{Kind, ServerFrame};
 use crate::store::{
-    ConsumeOutcome, CreateGroupOutcome, DirectOutcome, GroupOutcome, GroupSend, GroupState,
-    InviteRecord, Limits, NewMessage, PurgeStats, RevokeOutcome, Store, StoreError, StoreResult,
-    StoredMessage,
+    CloseDoorOutcome, ConsumeOutcome, CreateDoorOutcome, CreateGroupOutcome, DirectOutcome,
+    DoorRecord, GroupOutcome, GroupSend, GroupState, InviteRecord, Limits, NewMessage, PurgeStats,
+    RevokeOutcome, Store, StoreError, StoreResult, StoredMessage,
 };
 
 /// Grace period during which an expired invite stays readable so its landing
@@ -243,7 +243,84 @@ fn invite_from_row(r: &sqlx::sqlite::SqliteRow) -> StoreResult<InviteRecord> {
     })
 }
 
+fn door_from_row(r: &sqlx::sqlite::SqliteRow) -> StoreResult<DoorRecord> {
+    Ok(DoorRecord {
+        door_id: r.try_get("door_id")?,
+        owner_mailbox: r.try_get("owner_mailbox")?,
+        expires_at: u64_of(r.try_get("expires_at")?),
+        closed: r.try_get::<i64, _>("closed")? != 0,
+    })
+}
+
 impl Store for SqliteStore {
+    async fn create_door(
+        &self,
+        door: &DoorRecord,
+        max_open: usize,
+        now_ms: u64,
+    ) -> StoreResult<CreateDoorOutcome> {
+        let mut tx = self.pool.begin().await?;
+        let exists = sqlx::query("SELECT 1 FROM doors WHERE door_id = ?")
+            .bind(&door.door_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+        if exists {
+            return Ok(CreateDoorOutcome::Exists);
+        }
+        let open: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM doors WHERE owner_mailbox = ? AND closed = 0 AND expires_at > ?",
+        )
+        .bind(&door.owner_mailbox)
+        .bind(i64_of(now_ms / 1000))
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+        if u64_of(open) >= u64::try_from(max_open).unwrap_or(u64::MAX) {
+            return Ok(CreateDoorOutcome::TooMany);
+        }
+        sqlx::query(
+            "INSERT INTO doors (door_id, owner_mailbox, expires_at, closed, created_at) \
+             VALUES (?, ?, ?, 0, ?)",
+        )
+        .bind(&door.door_id)
+        .bind(&door.owner_mailbox)
+        .bind(i64_of(door.expires_at))
+        .bind(i64_of(now_ms))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(CreateDoorOutcome::Created)
+    }
+
+    async fn get_door(&self, door_id: &str) -> StoreResult<Option<DoorRecord>> {
+        let row = sqlx::query("SELECT * FROM doors WHERE door_id = ?")
+            .bind(door_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(door_from_row).transpose()
+    }
+
+    async fn close_door(&self, door_id: &str, caller: &str) -> StoreResult<CloseDoorOutcome> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT owner_mailbox FROM doors WHERE door_id = ?")
+            .bind(door_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            return Ok(CloseDoorOutcome::NotFound);
+        };
+        if row.try_get::<String, _>(0)? != caller {
+            return Ok(CloseDoorOutcome::NotOwner);
+        }
+        sqlx::query("UPDATE doors SET closed = 1 WHERE door_id = ?")
+            .bind(door_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(CloseDoorOutcome::Closed)
+    }
+
     async fn create_invite(&self, inv: &InviteRecord, now_ms: u64) -> StoreResult<bool> {
         let res = sqlx::query(
             "INSERT OR IGNORE INTO invites (invite_id, group_name, inviter_name, purpose, \
@@ -398,7 +475,7 @@ impl Store for SqliteStore {
             Kind::Application => {
                 send.epoch == current || current.checked_sub(1) == Some(send.epoch)
             }
-            Kind::WelcomeWrapped | Kind::JoinRequest => true,
+            Kind::WelcomeWrapped | Kind::JoinRequest | Kind::Knock => true,
         };
         if !epoch_ok {
             return Ok(GroupOutcome::EpochConflict {
@@ -426,7 +503,9 @@ impl Store for SqliteStore {
                 .filter(|m| m.as_str() != send.sender)
                 .cloned()
                 .collect(),
-            Kind::WelcomeWrapped | Kind::JoinRequest => send.to.iter().cloned().collect(),
+            Kind::WelcomeWrapped | Kind::JoinRequest | Kind::Knock => {
+                send.to.iter().cloned().collect()
+            }
         };
         let info = MarkerInfo {
             group_id: send.group_id,
@@ -553,10 +632,18 @@ impl Store for SqliteStore {
             .execute(&self.pool)
             .await?
             .rows_affected();
+        // Doors go as soon as they expire: the mapping is kept no longer
+        // than a knock could use it.
+        let doors = sqlx::query("DELETE FROM doors WHERE expires_at <= ?")
+            .bind(i64_of(now_ms / 1000))
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
         Ok(PurgeStats {
             messages,
             seen,
             invites,
+            doors,
         })
     }
 }

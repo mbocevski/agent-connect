@@ -239,6 +239,11 @@ impl Client {
         self.delivers.pop_front().unwrap()["env"].clone()
     }
 
+    /// `deliver` frames received but not yet taken with [`Client::deliver`].
+    pub fn buffered_delivers(&self) -> usize {
+        self.delivers.len()
+    }
+
     /// Send an envelope and wait for the reply.
     pub async fn send(&mut self, env: &Value) -> Value {
         self.send_raw(&json!({"t": "send", "env": env})).await;

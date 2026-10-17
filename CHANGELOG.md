@@ -23,6 +23,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `sudo -u agentconnect agentconnect ...`. `packaging/` has a systemd unit,
   sysusers.d and tmpfiles.d snippets, a sudoers drop-in and a launchd plist.
   See `docs/isolation.md`.
+- Relay: doors and knocks (ADR-006). `POST /v0/doors` (signed) registers a
+  door that maps a public `door_id` to the owner's mailbox for at most 7
+  days, with at most 4 open doors per mailbox. `DELETE /v0/doors/{door_id}`
+  (signed, owner only) closes it at once. The WebSocket `knock` frame
+  forwards a sealed `knock` envelope (`ct` at most 16 KiB, never parsed) to
+  the owner as a normal `deliver`. The new error `door_not_open` answers
+  knocks to unknown, expired or closed doors. Knocks are limited to 1 per
+  door and sender per 10 minutes and 20 per sender per hour
+  (`rate_limited`). Past 10 per door per minute, or when the owner's queue
+  is full, a knock is dropped but still answered `accepted`. There are no
+  delivery receipts and no reject frame.
 - Linux arm64 and macOS arm64 support. CI runs the fast tier on both and
   builds the relay container image for `linux/amd64` and `linux/arm64`.
   Releases add an aarch64 manylinux 2.28 `agentconnect-core` wheel, an

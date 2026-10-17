@@ -15,6 +15,8 @@ pub const MAILBOX_ID_LEN: usize = 22;
 pub const MAX_WELCOME_RECIPIENTS: usize = 50;
 /// Maximum number of hints in a commit's `routing` object.
 pub const MAX_ROUTING_HINTS: usize = 50;
+/// Largest `ct` of a `knock` envelope, in decoded bytes (16 KiB).
+pub const MAX_KNOCK_CT: usize = 16 * 1024;
 
 /// Encode bytes as base64url without padding.
 #[must_use]
@@ -77,6 +79,8 @@ pub enum ErrorCode {
     UnknownGroup,
     /// The invite is unknown, exhausted, expired or revoked.
     InviteNotOpen,
+    /// The door is unknown, expired or closed.
+    DoorNotOpen,
     /// Too many requests.
     RateLimited,
     /// The frame exceeds the size limit.
@@ -91,12 +95,13 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, in a stable order.
-    pub const ALL: [ErrorCode; 10] = [
+    pub const ALL: [ErrorCode; 11] = [
         ErrorCode::AuthFailed,
         ErrorCode::EpochConflict,
         ErrorCode::NotMember,
         ErrorCode::UnknownGroup,
         ErrorCode::InviteNotOpen,
+        ErrorCode::DoorNotOpen,
         ErrorCode::RateLimited,
         ErrorCode::TooLarge,
         ErrorCode::QuotaExceeded,
@@ -113,6 +118,7 @@ impl ErrorCode {
             ErrorCode::NotMember => "not_member",
             ErrorCode::UnknownGroup => "unknown_group",
             ErrorCode::InviteNotOpen => "invite_not_open",
+            ErrorCode::DoorNotOpen => "door_not_open",
             ErrorCode::RateLimited => "rate_limited",
             ErrorCode::TooLarge => "too_large",
             ErrorCode::QuotaExceeded => "quota_exceeded",
@@ -127,7 +133,7 @@ impl ErrorCode {
         match self {
             ErrorCode::AuthFailed => 401,
             ErrorCode::NotMember => 403,
-            ErrorCode::UnknownGroup | ErrorCode::InviteNotOpen => 404,
+            ErrorCode::UnknownGroup | ErrorCode::InviteNotOpen | ErrorCode::DoorNotOpen => 404,
             ErrorCode::EpochConflict => 409,
             ErrorCode::TooLarge => 413,
             ErrorCode::RateLimited | ErrorCode::QuotaExceeded => 429,
@@ -151,6 +157,8 @@ pub enum Kind {
     WelcomeWrapped,
     /// A join request addressed to an invite's inviter.
     JoinRequest,
+    /// A sealed knock addressed to a door's owner (ADR-006).
+    Knock,
 }
 
 /// Fan-out table hints on a commit.
@@ -171,9 +179,12 @@ pub struct Envelope {
     pub v: u32,
     /// Message kind.
     pub kind: Kind,
-    /// Group id; absent for `join_request`.
+    /// Group id; absent for `join_request` and `knock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// The door a `knock` is for; absent for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub door_id: Option<String>,
     /// Epoch for commit, proposal and application messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<u64>,
@@ -236,6 +247,17 @@ impl Envelope {
                 }
             }
             Kind::JoinRequest => {}
+            Kind::Knock => {
+                if self.group_id.is_some() || self.epoch.is_some() || !self.to.is_empty() {
+                    return Err("a knock has no group_id, epoch or recipients");
+                }
+                if !self.door_id.as_deref().is_some_and(is_id16) {
+                    return Err("a knock needs a door_id of 16 random bytes, base64url");
+                }
+            }
+        }
+        if self.kind != Kind::Knock && self.door_id.is_some() {
+            return Err("door_id is only valid on knocks");
         }
         if let Some(r) = &self.routing {
             if self.kind != Kind::Commit {
@@ -302,6 +324,14 @@ pub enum ClientFrame {
         /// The invite.
         invite_id: String,
         /// A `join_request` envelope.
+        env: Envelope,
+    },
+    /// Forward a sealed knock to a door's owner (ADR-006).
+    #[serde(rename = "knock")]
+    Knock {
+        /// The door; must equal the envelope's `door_id`.
+        door_id: String,
+        /// A `knock` envelope.
         env: Envelope,
     },
 }
@@ -387,6 +417,14 @@ impl ServerFrame {
     }
 }
 
+/// True if base64url `ct` decodes to at most [`MAX_KNOCK_CT`] bytes. Only the
+/// length is looked at: the relay never decodes a knock.
+#[must_use]
+pub fn knock_ct_fits(ct: &str) -> bool {
+    // Unpadded base64url carries 6 bits per character.
+    ct.len().saturating_mul(3) / 4 <= MAX_KNOCK_CT
+}
+
 /// Parse a client text frame, enforcing the size limit first.
 ///
 /// # Errors
@@ -400,7 +438,12 @@ pub fn parse_client_frame(text: &str, max_len: usize) -> Result<ClientFrame, (Er
     let frame: ClientFrame = serde_json::from_str(text)
         .map_err(|_| (ErrorCode::BadRequest, "malformed frame".to_owned()))?;
     match &frame {
-        ClientFrame::Send { env } | ClientFrame::Join { env, .. } => env
+        ClientFrame::Knock { env, .. } if !knock_ct_fits(&env.ct) => {
+            return Err((ErrorCode::TooLarge, "knock ct exceeds 16 KiB".into()));
+        }
+        ClientFrame::Send { env }
+        | ClientFrame::Join { env, .. }
+        | ClientFrame::Knock { env, .. } => env
             .validate()
             .map_err(|e| (ErrorCode::BadRequest, e.to_owned()))?,
         ClientFrame::Ack { msg_id } if !is_id16(msg_id) => {
@@ -432,6 +475,7 @@ mod tests {
             v: 0,
             kind,
             group_id: Some(id16(1)),
+            door_id: None,
             epoch: Some(0),
             msg_id: id16(2),
             sender: mailbox_id_from_key(b"k"),
@@ -531,6 +575,93 @@ mod tests {
             remove: vec![],
         });
         assert!(e.validate().is_err());
+    }
+
+    fn knock() -> Envelope {
+        Envelope {
+            group_id: None,
+            epoch: None,
+            door_id: Some(id16(7)),
+            ..env(Kind::Knock)
+        }
+    }
+
+    #[test]
+    fn knock_envelopes_carry_a_door_and_nothing_group_bound() {
+        assert_eq!(knock().validate(), Ok(()));
+        let json = serde_json::to_value(knock()).unwrap();
+        assert_eq!(json["kind"], "knock");
+        assert_eq!(json["door_id"], id16(7));
+        assert!(json.get("group_id").is_none() && json.get("to").is_none());
+        let bad = [
+            Envelope {
+                door_id: None,
+                ..knock()
+            },
+            Envelope {
+                door_id: Some("short".into()),
+                ..knock()
+            },
+            Envelope {
+                group_id: Some(id16(1)),
+                ..knock()
+            },
+            Envelope {
+                epoch: Some(0),
+                ..knock()
+            },
+            Envelope {
+                to: vec![mailbox_id_from_key(b"x")],
+                ..knock()
+            },
+            Envelope {
+                routing: Some(Routing::default()),
+                ..knock()
+            },
+            Envelope {
+                door_id: Some(id16(7)),
+                ..env(Kind::Application)
+            },
+        ];
+        for e in bad {
+            assert!(e.validate().is_err(), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn knock_frames_parse_and_their_ct_is_capped() {
+        let frame = |ct: &[u8]| {
+            let e = Envelope {
+                ct: b64_encode(ct),
+                ..knock()
+            };
+            format!(
+                r#"{{"t":"knock","door_id":"{}","env":{}}}"#,
+                id16(7),
+                serde_json::to_string(&e).unwrap()
+            )
+        };
+        let max = crate::store::DEFAULT_FRAME_MAX;
+        assert!(matches!(
+            parse_client_frame(&frame(&vec![1; MAX_KNOCK_CT]), max),
+            Ok(ClientFrame::Knock { .. })
+        ));
+        let err = parse_client_frame(&frame(&vec![1; MAX_KNOCK_CT + 1]), max).unwrap_err();
+        assert_eq!(err.0, ErrorCode::TooLarge);
+        assert!(knock_ct_fits(""));
+        let no_door = format!(
+            r#"{{"t":"knock","door_id":"{}","env":{}}}"#,
+            id16(7),
+            serde_json::to_string(&Envelope {
+                door_id: None,
+                ..knock()
+            })
+            .unwrap()
+        );
+        assert_eq!(
+            parse_client_frame(&no_door, max).unwrap_err().0,
+            ErrorCode::BadRequest
+        );
     }
 
     #[test]

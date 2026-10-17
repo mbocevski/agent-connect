@@ -1,5 +1,5 @@
-//! The relay service: Delivery Service rules, invite registry and mailbox
-//! hub. Transport-agnostic; `ws.rs` and `rest.rs` are thin adapters.
+//! The relay service: Delivery Service rules, invite and door registries and
+//! mailbox hub. Transport-agnostic; `ws.rs` and `rest.rs` are thin adapters.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -14,8 +14,9 @@ use crate::proto::{
     ClientFrame, Envelope, ErrorCode, Kind, ServerFrame, is_id16, is_mailbox_id, log_tag,
 };
 use crate::store::{
-    ConsumeOutcome, CreateGroupOutcome, DirectOutcome, GroupOutcome, GroupSend, InviteRecord,
-    InviteStatus, Limits, NewMessage, PurgeStats, RevokeOutcome, Store, StoredMessage,
+    CloseDoorOutcome, ConsumeOutcome, CreateDoorOutcome, CreateGroupOutcome, DirectOutcome,
+    DoorRecord, GroupOutcome, GroupSend, InviteRecord, InviteStatus, Limits, NewMessage,
+    PurgeStats, RevokeOutcome, Store, StoredMessage, Window,
 };
 
 /// Maximum length of `group_name` and `inviter_name`, in characters.
@@ -43,6 +44,9 @@ pub struct Metrics {
     joins_forwarded: AtomicU64,
     invites_created: AtomicU64,
     invites_consumed: AtomicU64,
+    doors_registered: AtomicU64,
+    doors_closed: AtomicU64,
+    knocks_accepted: AtomicU64,
     errors: [AtomicU64; ErrorCode::ALL.len()],
 }
 
@@ -145,6 +149,23 @@ impl Metrics {
             "Invite uses consumed.",
             &self.invites_consumed,
         );
+        counter(
+            "agentconnect_relay_doors_registered_total",
+            "Doors registered.",
+            &self.doors_registered,
+        );
+        counter(
+            "agentconnect_relay_doors_closed_total",
+            "Door close requests accepted.",
+            &self.doors_closed,
+        );
+        // Forwarded and silently dropped knocks are one number: /metrics is
+        // public, and a split would tell a knocker what `accepted` hides.
+        counter(
+            "agentconnect_relay_knocks_accepted_total",
+            "Knocks answered with accepted.",
+            &self.knocks_accepted,
+        );
         let _ = writeln!(
             out,
             "# HELP agentconnect_relay_errors_total Errors returned, by code.\n\
@@ -193,34 +214,58 @@ impl Drop for Registration {
     }
 }
 
-/// Sliding-window rate limiter state, keyed by arbitrary strings.
+/// Sliding-window rate limiter state, keyed by arbitrary strings. Held in
+/// memory only; keys hold identifiers and are never logged.
 #[derive(Debug, Default)]
 struct Rates {
-    windows: HashMap<String, VecDeque<u64>>,
+    /// key -> (window length in ms, event times in ms, oldest first).
+    windows: HashMap<String, (u64, VecDeque<u64>)>,
 }
 
 impl Rates {
-    fn allow(&mut self, key: &str, max: usize, window_ms: u64, now_ms: u64) -> bool {
-        let w = self.windows.entry(key.to_owned()).or_default();
+    /// The events for `key` that are still inside `window_ms`.
+    fn current(&mut self, key: &str, window_ms: u64, now_ms: u64) -> &mut VecDeque<u64> {
+        let (len, w) = self
+            .windows
+            .entry(key.to_owned())
+            .or_insert_with(|| (window_ms, VecDeque::new()));
+        *len = window_ms;
         while w
             .front()
             .is_some_and(|t| now_ms.saturating_sub(*t) >= window_ms)
         {
             w.pop_front();
         }
-        if w.len() >= max {
-            return false;
-        }
-        w.push_back(now_ms);
-        true
+        w
     }
 
-    fn sweep(&mut self, window_ms: u64, now_ms: u64) {
-        self.windows.retain(|_, w| {
-            w.back()
-                .is_some_and(|t| now_ms.saturating_sub(*t) < window_ms)
-        });
+    fn allow(&mut self, key: &str, max: usize, window_ms: u64, now_ms: u64) -> bool {
+        self.allow_all(&[(key, max, window_ms)], now_ms)
     }
+
+    /// Record one event under every key if each has room; otherwise record
+    /// nothing, so a refused request uses up no budget.
+    fn allow_all(&mut self, checks: &[(&str, usize, u64)], now_ms: u64) -> bool {
+        let room = checks
+            .iter()
+            .all(|(key, max, window_ms)| self.current(key, *window_ms, now_ms).len() < *max);
+        if room {
+            for (key, _, window_ms) in checks {
+                self.current(key, *window_ms, now_ms).push_back(now_ms);
+            }
+        }
+        room
+    }
+
+    /// Forget keys whose newest event has left that key's own window.
+    fn sweep(&mut self, now_ms: u64) {
+        self.windows
+            .retain(|_, (len, w)| w.back().is_some_and(|t| now_ms.saturating_sub(*t) < *len));
+    }
+}
+
+fn window_ms(w: Window) -> u64 {
+    u64::try_from(w.per.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Maximum number of live entries in the REST replay cache.
@@ -258,6 +303,19 @@ pub struct NewInviteRequest {
     /// Protocol version, if given must be 0.
     #[serde(default)]
     pub protocol: Option<u32>,
+}
+
+/// `POST /v0/doors` body (ADR-006): the mapping and nothing else. Unknown
+/// fields are refused, so a door key or card text can't end up stored here.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewDoorRequest {
+    /// Public door id (16 random bytes, base64url), chosen by the owner.
+    pub door_id: String,
+    /// Expiry, unix seconds; at most 7 days away.
+    pub expires_at: u64,
+    /// The owner's mailbox; must match the authenticated mailbox.
+    pub owner_mailbox: String,
 }
 
 /// An error with its protocol code.
@@ -458,7 +516,7 @@ impl<S: Store> Relay<S> {
     /// Storage failures.
     pub async fn purge(&self) -> Result<PurgeStats, RelayError> {
         let now = self.now_ms();
-        lock(&self.rates).sweep(60_000, now);
+        lock(&self.rates).sweep(now);
         self.store
             .purge_expired(now)
             .await
@@ -489,6 +547,10 @@ impl<S: Store> Relay<S> {
             ClientFrame::Join { invite_id, env } => {
                 let id = env.msg_id.clone();
                 (Some(id), self.join(mailbox, &invite_id, env).await)
+            }
+            ClientFrame::Knock { door_id, env } => {
+                let id = env.msg_id.clone();
+                (Some(id), self.knock(mailbox, &door_id, env).await)
             }
             ClientFrame::GroupCreate {
                 group_id,
@@ -532,8 +594,10 @@ impl<S: Store> Relay<S> {
                 "sender does not match the authenticated mailbox",
             ));
         }
-        if env.kind == Kind::JoinRequest {
-            return Err(E::new(ErrorCode::BadRequest, "use the join frame"));
+        match env.kind {
+            Kind::JoinRequest => return Err(E::new(ErrorCode::BadRequest, "use the join frame")),
+            Kind::Knock => return Err(E::new(ErrorCode::BadRequest, "use the knock frame")),
+            _ => {}
         }
         if !self.rate_check(&format!("mb:{mailbox}"), self.limits.sends_per_sec, 1000) {
             return Err(E::new(ErrorCode::RateLimited, "send rate exceeded"));
@@ -737,6 +801,180 @@ impl<S: Store> Relay<S> {
         }
     }
 
+    /// Forward a sealed knock to its door's owner (ADR-006, "Relay rules for
+    /// `knock`"). The knocker hears `accepted`, `door_not_open` or
+    /// `rate_limited` and nothing else: a busy door or a full owner queue
+    /// drops the knock behind an `accepted`. Nothing here is logged with an
+    /// identifier.
+    async fn knock(
+        &self,
+        mailbox: &str,
+        door_id: &str,
+        env: Envelope,
+    ) -> Result<String, RelayError> {
+        use RelayError as E;
+        if env.kind != Kind::Knock {
+            return Err(E::new(
+                ErrorCode::BadRequest,
+                "knock needs a knock envelope",
+            ));
+        }
+        if env.sender != mailbox {
+            return Err(E::new(
+                ErrorCode::BadRequest,
+                "sender does not match the authenticated mailbox",
+            ));
+        }
+        if env.door_id.as_deref() != Some(door_id) {
+            return Err(E::new(
+                ErrorCode::BadRequest,
+                "door_id does not match the envelope",
+            ));
+        }
+        if !self.rate_check(&format!("mb:{mailbox}"), self.limits.sends_per_sec, 1000) {
+            return Err(E::new(ErrorCode::RateLimited, "send rate exceeded"));
+        }
+        let door = self
+            .store
+            .get_door(door_id)
+            .await
+            .map_err(|e| internal(&e))?
+            .filter(|d| d.is_open(self.now_secs()))
+            .ok_or_else(|| E::new(ErrorCode::DoorNotOpen, "door is not open"))?;
+        // Limits on the knocker's own behaviour: the only ones it is told of.
+        let pair = self.limits.knocks_per_door_sender;
+        let sender = self.limits.knocks_per_sender;
+        let pair_key = format!("kp:{door_id}:{mailbox}");
+        let sender_key = format!("ks:{mailbox}");
+        if !lock(&self.rates).allow_all(
+            &[
+                (&pair_key, pair.max, window_ms(pair)),
+                (&sender_key, sender.max, window_ms(sender)),
+            ],
+            self.now_ms(),
+        ) {
+            return Err(E::new(ErrorCode::RateLimited, "too many knocks"));
+        }
+        Metrics::inc(&self.metrics.accepted);
+        Metrics::inc(&self.metrics.knocks_accepted);
+        let busy = self.limits.knocks_per_door;
+        if !self.rate_check(&format!("kd:{door_id}"), busy.max, window_ms(busy)) {
+            tracing::debug!(reason = "door_busy", "knock dropped");
+            return Ok(env.msg_id);
+        }
+        let msg = NewMessage {
+            msg_id: env.msg_id.clone(),
+            sender: mailbox.to_owned(),
+            json: serde_json::to_string(&env)
+                .map_err(|_| E::new(ErrorCode::Internal, "internal error"))?,
+        };
+        match self
+            .store
+            .deliver_direct(&door.owner_mailbox, &msg, &self.limits, self.now_ms())
+            .await
+            .map_err(|e| internal(&e))?
+        {
+            DirectOutcome::Delivered => {
+                tracing::debug!("knock forwarded");
+                self.wake([&door.owner_mailbox]);
+            }
+            DirectOutcome::Duplicate => tracing::debug!("knock repeated"),
+            // Unlike `join`: a refusal would tell the knocker that the
+            // owner's queue is full.
+            DirectOutcome::QuotaExceeded => {
+                tracing::debug!(reason = "queue_full", "knock dropped");
+            }
+        }
+        Ok(env.msg_id)
+    }
+
+    /// Register a door on behalf of the authenticated `mailbox` (ADR-006).
+    ///
+    /// # Errors
+    ///
+    /// `bad_request` for invalid fields or an id already registered,
+    /// `auth_failed` if `owner_mailbox` is not the caller, `quota_exceeded`
+    /// if the mailbox already holds the maximum number of open doors.
+    pub async fn create_door(
+        &self,
+        mailbox: &str,
+        req: NewDoorRequest,
+    ) -> Result<DoorRecord, RelayError> {
+        use RelayError as E;
+        let bad = |d: &str| Err(E::new(ErrorCode::BadRequest, d));
+        if !is_id16(&req.door_id) {
+            return bad("malformed door_id");
+        }
+        if !is_mailbox_id(&req.owner_mailbox) {
+            return bad("malformed owner_mailbox");
+        }
+        if req.owner_mailbox != mailbox {
+            return Err(E::new(
+                ErrorCode::AuthFailed,
+                "owner_mailbox does not match the authenticated mailbox",
+            ));
+        }
+        let now = self.now_secs();
+        if req.expires_at <= now || req.expires_at > now + self.limits.door_max_ttl.as_secs() {
+            return bad("expires_at must be in the future and at most 7 days away");
+        }
+        let door = DoorRecord {
+            door_id: req.door_id,
+            owner_mailbox: req.owner_mailbox,
+            expires_at: req.expires_at,
+            closed: false,
+        };
+        match self
+            .store
+            .create_door(&door, self.limits.doors_per_mailbox, self.now_ms())
+            .await
+            .map_err(|e| internal(&e))?
+        {
+            CreateDoorOutcome::Created => {
+                Metrics::inc(&self.metrics.doors_registered);
+                tracing::debug!("door registered");
+                Ok(door)
+            }
+            CreateDoorOutcome::Exists => bad("door already exists"),
+            CreateDoorOutcome::TooMany => Err(E::new(
+                ErrorCode::QuotaExceeded,
+                format!(
+                    "a mailbox holds at most {} open doors",
+                    self.limits.doors_per_mailbox
+                ),
+            )),
+        }
+    }
+
+    /// Close a door on behalf of the authenticated `mailbox`, at once.
+    ///
+    /// # Errors
+    ///
+    /// `door_not_open` if unknown, `auth_failed` if not the owner.
+    pub async fn close_door(&self, mailbox: &str, door_id: &str) -> Result<(), RelayError> {
+        let unknown = || RelayError::new(ErrorCode::DoorNotOpen, "unknown door");
+        if !is_id16(door_id) {
+            return Err(unknown());
+        }
+        match self
+            .store
+            .close_door(door_id, mailbox)
+            .await
+            .map_err(|e| internal(&e))?
+        {
+            CloseDoorOutcome::Closed => {
+                Metrics::inc(&self.metrics.doors_closed);
+                tracing::debug!("door closed");
+                Ok(())
+            }
+            CloseDoorOutcome::NotFound => Err(unknown()),
+            CloseDoorOutcome::NotOwner => Err(RelayError::new(
+                ErrorCode::AuthFailed,
+                "only the owner mailbox may close a door",
+            )),
+        }
+    }
+
     /// Register an invite on behalf of the authenticated `mailbox`.
     ///
     /// # Errors
@@ -845,5 +1083,34 @@ impl<S: Store> Relay<S> {
                 "only the inviter mailbox may revoke an invite",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_refills_only_after_its_own_length() {
+        let mut r = Rates::default();
+        assert!(r.allow("k", 1, 600_000, 0));
+        assert!(!r.allow("k", 1, 600_000, 1));
+        // A sweep at two minutes keeps a ten-minute window.
+        r.sweep(120_000);
+        assert!(!r.allow("k", 1, 600_000, 599_999));
+        assert!(r.allow("k", 1, 600_000, 600_000));
+        r.sweep(1_200_000);
+        assert!(r.windows.is_empty());
+    }
+
+    #[test]
+    fn a_refused_request_uses_up_no_budget() {
+        let mut r = Rates::default();
+        assert!(r.allow("b", 1, 1000, 0));
+        // "a" has room, "b" does not: neither is charged.
+        assert!(!r.allow_all(&[("a", 1, 1000), ("b", 1, 1000)], 1));
+        assert!(r.allow("a", 1, 1000, 2));
+        assert!(r.allow_all(&[("c", 1, 1000), ("b", 1, 1000)], 1000));
+        assert!(!r.allow("c", 1, 1000, 1001));
     }
 }

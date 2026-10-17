@@ -1,7 +1,7 @@
 //! Storage seam for the relay.
 //!
 //! Every method that decides something (commit ordering, invite consumption,
-//! queue quota, `msg_id` idempotency) is a single atomic operation, so
+//! queue quota, `msg_id` idempotency, the door cap) is a single atomic operation, so
 //! implementations own the race-safety. SQLite is the shipped backend; a
 //! Postgres backend only needs to implement this trait.
 
@@ -42,7 +42,16 @@ pub type StoreResult<T> = Result<T, StoreError>;
 /// envelope, so it fits with room to spare.
 pub const DEFAULT_FRAME_MAX: usize = 2 << 20;
 
-/// Operating limits (SPEC §8.3 defaults).
+/// A sliding-window rate: at most `max` events per `per`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    /// Events allowed in the window.
+    pub max: usize,
+    /// The window's length.
+    pub per: Duration,
+}
+
+/// Operating limits (SPEC §8.3 and ADR-006 defaults).
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Maximum frame size in bytes.
@@ -59,6 +68,16 @@ pub struct Limits {
     pub message_ttl: Duration,
     /// The longest invite lifetime.
     pub invite_max_ttl: Duration,
+    /// The longest door lifetime.
+    pub door_max_ttl: Duration,
+    /// Open doors one mailbox may hold at once (so renewal can overlap).
+    pub doors_per_mailbox: usize,
+    /// Knocks per (door, sender mailbox); over it is `rate_limited`.
+    pub knocks_per_door_sender: Window,
+    /// Knocks per sender mailbox across all doors; over it is `rate_limited`.
+    pub knocks_per_sender: Window,
+    /// Knocks per door; over it the knock is accepted and dropped.
+    pub knocks_per_door: Window,
 }
 
 impl Default for Limits {
@@ -71,6 +90,20 @@ impl Default for Limits {
             joins_per_min: 10,
             message_ttl: Duration::from_hours(168),
             invite_max_ttl: Duration::from_hours(168),
+            door_max_ttl: Duration::from_hours(168),
+            doors_per_mailbox: 4,
+            knocks_per_door_sender: Window {
+                max: 1,
+                per: Duration::from_mins(10),
+            },
+            knocks_per_sender: Window {
+                max: 20,
+                per: Duration::from_hours(1),
+            },
+            knocks_per_door: Window {
+                max: 10,
+                per: Duration::from_mins(1),
+            },
         }
     }
 }
@@ -141,6 +174,50 @@ impl InviteRecord {
             InviteStatus::Open
         }
     }
+}
+
+/// A registered door (ADR-006): a public handle mapped to its owner's
+/// mailbox. The relay holds nothing else about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoorRecord {
+    /// Public door id (16 random bytes, base64url).
+    pub door_id: String,
+    /// The mailbox knocks are forwarded to.
+    pub owner_mailbox: String,
+    /// Expiry, unix seconds.
+    pub expires_at: u64,
+    /// Whether the owner closed it.
+    pub closed: bool,
+}
+
+impl DoorRecord {
+    /// True if the door takes knocks at `now_secs`.
+    #[must_use]
+    pub fn is_open(&self, now_secs: u64) -> bool {
+        !self.closed && now_secs < self.expires_at
+    }
+}
+
+/// Outcome of registering a door.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateDoorOutcome {
+    /// Registered.
+    Created,
+    /// A door with that id exists (open, closed or expired but not purged).
+    Exists,
+    /// The owner already holds the maximum number of open doors.
+    TooMany,
+}
+
+/// Outcome of closing a door.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseDoorOutcome {
+    /// Closed (or already closed).
+    Closed,
+    /// No such door.
+    NotFound,
+    /// The caller is not the owner mailbox.
+    NotOwner,
 }
 
 /// Outcome of consuming an invite use.
@@ -284,6 +361,8 @@ pub struct PurgeStats {
     pub seen: u64,
     /// Long-expired invites.
     pub invites: u64,
+    /// Expired doors.
+    pub doors: u64,
 }
 
 /// The relay's persistent state. All times are unix milliseconds supplied by
@@ -317,6 +396,28 @@ pub trait Store: Send + Sync + 'static {
         now_ms: u64,
     ) -> impl Future<Output = StoreResult<ConsumeOutcome>> + Send;
 
+    /// Register a door unless its id exists or `door.owner_mailbox` already
+    /// holds `max_open` open doors, atomically.
+    fn create_door(
+        &self,
+        door: &DoorRecord,
+        max_open: usize,
+        now_ms: u64,
+    ) -> impl Future<Output = StoreResult<CreateDoorOutcome>> + Send;
+
+    /// Fetch a door.
+    fn get_door(
+        &self,
+        door_id: &str,
+    ) -> impl Future<Output = StoreResult<Option<DoorRecord>>> + Send;
+
+    /// Close a door (owner only).
+    fn close_door(
+        &self,
+        door_id: &str,
+        caller: &str,
+    ) -> impl Future<Output = StoreResult<CloseDoorOutcome>> + Send;
+
     /// Register a group at epoch 0 with `creator` as its only member.
     fn create_group(
         &self,
@@ -341,7 +442,7 @@ pub trait Store: Send + Sync + 'static {
         now_ms: u64,
     ) -> impl Future<Output = StoreResult<GroupOutcome>> + Send;
 
-    /// Queue a message for one mailbox (join requests), idempotent on
+    /// Queue a message for one mailbox (join requests, knocks), idempotent on
     /// `(sender, msg_id)`.
     fn deliver_direct(
         &self,
