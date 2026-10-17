@@ -29,3 +29,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Tooling: justfile, prek hooks (pre-commit, commit-msg, pre-push), CI,
   nightly audit/mutation runs, reproducibility check, signed release workflow,
   and local merge gating (`just merge`).
+- Test strategy (`TESTING.md`): tiers, placement and flaky-test rules, a
+  `Clock`/`FakeClock` in `agentconnect-core` and `agentconnect.clock`, seeded
+  randomness via `AC_TEST_SEED` and Hypothesis profiles, cross-language
+  contract data in `testdata/` (with the Matrix SAS emoji table) checked by
+  `just contract`, and a coverage ratchet (`coverage-baseline.json`).
