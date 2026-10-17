@@ -130,6 +130,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: invite and join secrets no longer outlive their invites. An open
+  invite past `expires_at` is marked expired and its secret deleted, and a
+  pending join past its invite's expiry fails (`join_failed`, reason
+  `expired`) and deletes the URL it kept. Frames parked for a pending
+  join are deduplicated, capped per group and in total, and dropped once
+  no join is pending, so a relay can't grow them without bound.
 - Daemon API: `POST /v0/groups/{gid}/sas/mismatch` (human token only)
   records that the codes differ for the current epoch. Per SPEC §11 the
   daemon raises `sas_mismatch`, sends a leave proposal when one is

@@ -63,6 +63,8 @@ UPDATE_AFTER_SECS = 24 * 3600  # SPEC §3.1 update cadence
 UPDATE_AFTER_MESSAGES = 1000
 APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
 JOIN_CLOSED_GRACE_SECS = 60
+MAX_PARKED_GROUPS = 8
+MAX_PARKED_PER_GROUP = 256
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
 # SPEC 7.3: controls only a human-originated message may carry.
@@ -384,6 +386,7 @@ class Daemon:
         self._delivery_wake.set()
         self._pulse()
         try:
+            await self.expire()
             await self.check_joins()
         except Exception as e:  # never let the reconnect hook die
             LOG.warning("check_joins_failed", error=type(e).__name__)
@@ -572,7 +575,43 @@ class Daemon:
         with contextlib.suppress(NotConnectedError):
             await self.link.send({"t": "ack", "msg_id": msg_id})
 
+    def _park(self, group_id: str, env: dict[str, Any]) -> None:
+        """Hold a frame for a group we may be about to join (unacked, so the
+        relay keeps it). Bounded, and deduplicated by (sender, msg_id): a
+        relay can't grow it without limit."""
+        if group_id not in self._parked and len(self._parked) >= MAX_PARKED_GROUPS:
+            return
+        held = self._parked.setdefault(group_id, [])
+        key = (env.get("sender"), env.get("msg_id"))
+        if len(held) < MAX_PARKED_PER_GROUP and all(
+            (e.get("sender"), e.get("msg_id")) != key for e in held
+        ):
+            held.append(env)
+
+    async def expire(self) -> None:
+        """SPEC 6.1/4.3: secrets don't outlive their invites. An open invite
+        past ``expires_at`` is marked expired and its secret deleted; a
+        pending join past its invite's expiry (plus a grace period for an
+        in-flight Welcome) fails and its secret goes. With no join pending,
+        parked frames are dropped. Runs before each inbound frame and on
+        (re)connect."""
+        now = self.now()
+        for invite in self.store.invites("open"):
+            if now >= int(invite["expires_at"]):
+                self.store.set_invite_status(invite["invite_id"], "expired")
+                self.keystore.delete(f"invite/{invite['invite_id']}")
+        for pending in self.store.pending_joins():
+            expires = pending["meta"].get("expires_at")
+            if isinstance(expires, int) and now >= expires + JOIN_CLOSED_GRACE_SECS:
+                invite_id = pending["invite_id"]
+                self.store.finish_join(invite_id, "expired")
+                self.keystore.delete(f"join/{invite_id}")
+                await self.emit(None, "join_failed", invite_id=invite_id, reason="expired")
+        if self._parked and not self.store.pending_joins():
+            self._parked.clear()
+
     async def _handle_frame(self, frame: dict[str, Any]) -> None:
+        await self.expire()
         t = frame.get("t")
         if t == "deliver" and isinstance(frame.get("env"), dict):
             await self._handle_env(frame["env"])
@@ -631,7 +670,7 @@ class Daemon:
             if group is None or group.status != "active":
                 if group is None and self.store.pending_joins():
                     # Sent after our Add but before the Welcome reached us.
-                    self._parked.setdefault(group_id, []).append(env)
+                    self._park(group_id, env)
                     return
                 self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
             else:

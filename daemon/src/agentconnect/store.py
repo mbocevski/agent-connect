@@ -422,6 +422,15 @@ class Store:
         keys = ("invite_id", "group_id", "expires_at", "max_uses", "status")
         return dict(zip(keys, row, strict=True))
 
+    def invites(self, status: str) -> list[dict[str, Any]]:
+        rows = self._all(
+            "SELECT invite_id, group_id, expires_at, max_uses, status FROM invites "
+            "WHERE status = ? ORDER BY created_at",
+            status,
+        )
+        keys = ("invite_id", "group_id", "expires_at", "max_uses", "status")
+        return [dict(zip(keys, r, strict=True)) for r in rows]
+
     def set_invite_status(self, invite_id: str, status: str) -> None:
         self._db.execute("UPDATE invites SET status = ? WHERE invite_id = ?", (status, invite_id))
 
