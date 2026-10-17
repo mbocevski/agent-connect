@@ -164,7 +164,9 @@ CREATE TABLE IF NOT EXISTS events (
     group_id TEXT,
     type TEXT NOT NULL,
     data TEXT NOT NULL,
-    at INTEGER NOT NULL
+    at INTEGER NOT NULL,
+    event_id TEXT,
+    notified INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS hops (
     group_id TEXT NOT NULL,
@@ -256,6 +258,14 @@ class Store:
         self._db.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         self._db.executescript(SCHEMA)
         self._depth = 0
+        # Columns added after the first schema (development files).
+        columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('events')")}
+        for column, decl in (("event_id", "TEXT"), ("notified", "INTEGER NOT NULL DEFAULT 0")):
+            if column not in columns:
+                self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {decl}")
+        self._db.executescript(
+            "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
+        )
 
     def close(self) -> None:
         self._db.close()
@@ -685,20 +695,54 @@ class Store:
 
     # -- events -------------------------------------------------------------
 
-    def add_event(self, group_id: str | None, kind: str, data: dict[str, Any], now: int) -> int:
+    def add_event(
+        self,
+        group_id: str | None,
+        kind: str,
+        data: dict[str, Any],
+        now: int,
+        event_id: str,
+    ) -> bool:
+        """Record an event, not yet notified. ``False`` if an event with this
+        id is already recorded (the same cause, regenerated after a crash)."""
         cur = self._db.execute(
-            "INSERT INTO events (group_id, type, data, at) VALUES (?, ?, ?, ?)",
-            (group_id, kind, json.dumps(data), now),
+            "INSERT OR IGNORE INTO events (group_id, type, data, at, event_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_id, kind, json.dumps(data), now, event_id),
         )
-        return int(cur.lastrowid or 0)
+        return cur.rowcount == 1
+
+    def unnotified_events(self) -> list[dict[str, Any]]:
+        """Recorded events the adapter has not accepted yet, oldest first."""
+        rows = self._all(
+            "SELECT seq, group_id, type, data, at, event_id FROM events "
+            "WHERE notified = 0 ORDER BY seq"
+        )
+        return [self._event(r) for r in rows]
+
+    def event_notified(self, event_id: str) -> bool:
+        row = self._one("SELECT notified FROM events WHERE event_id = ?", event_id)
+        return row is not None and bool(row[0])
+
+    def mark_notified(self, event_id: str) -> None:
+        self._db.execute("UPDATE events SET notified = 1 WHERE event_id = ?", (event_id,))
+
+    @staticmethod
+    def _event(r: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "seq": r[0],
+            "group_id": r[1],
+            "type": r[2],
+            "data": json.loads(r[3]),
+            "at": r[4],
+            "event_id": r[5],
+        }
 
     def events(self, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT seq, group_id, type, data, at FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+            "SELECT seq, group_id, type, data, at, event_id FROM events WHERE seq > ? "
+            "ORDER BY seq LIMIT ?",
             after,
             limit,
         )
-        return [
-            {"seq": r[0], "group_id": r[1], "type": r[2], "data": json.loads(r[3]), "at": r[4]}
-            for r in rows
-        ]
+        return [self._event(r) for r in rows]

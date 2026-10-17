@@ -8,6 +8,14 @@ Every delivery is **untrusted input** and carries the SPEC §10.1 framing:
 ``untrusted``, ``scope``, ``sender``, ``to``, ``addressed_to_me`` and
 ``trust_state``. Adapters must treat ``body`` as data, not instructions.
 
+**Delivery contract: at least once.** Both :meth:`Adapter.deliver` and
+:meth:`Adapter.on_event` may repeat the same message or event after a crash
+(ADR-004). Every delivery has a stable ``msg_id`` and every event a stable
+``event_id``: adapters deduplicate by them. Nothing is lost: a delivery is
+acked to the relay only after ``deliver`` returned ``ACK``, and an event is
+marked notified only after ``on_event`` returned (an exception makes the
+daemon send it again later).
+
 There is deliberately no way for an adapter to mark a member verified or to
 approve a join: both are human actions (SPEC §11, §6.2) and only exist on the
 local control API's human scope.
@@ -111,11 +119,15 @@ class Event:
     ``epoch_changed`` (with the new SAS), ``policy_changed``, ``out_of_sync``,
     ``relay_misbehaviour``, ``unauthorized_commit``, ``pending_approval``,
     ``joined``, ``removed``, ``loop_guard`` (SPEC 10.3: a message past
-    ``max_agent_turns`` did not trigger the agent and the group was paused)."""
+    ``max_agent_turns`` did not trigger the agent and the group was paused).
+
+    ``event_id`` is stable: the same event sent again after a crash has the
+    same id. Deduplicate by it."""
 
     type: str
     group_id: str | None
     data: dict[str, Any] = field(default_factory=dict)
+    event_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -213,6 +225,17 @@ class RecordingAdapter:
 
     async def on_outbound(self, send: OutboundSend) -> None:
         self.send = send
+
+    def unique_events(self) -> list[Event]:
+        """The events after deduplication by ``event_id``, as an adapter
+        should see them."""
+        seen: set[str] = set()
+        out = []
+        for e in self.events:
+            if e.event_id not in seen:
+                seen.add(e.event_id)
+                out.append(e)
+        return out
 
     def texts(self, group_id: str | None = None) -> list[str]:
         return [

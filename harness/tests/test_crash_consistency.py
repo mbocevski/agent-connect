@@ -24,6 +24,7 @@ from agentconnect_harness.proxy import RelayProxy
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
 Advance = Callable[[float], Awaitable[None]]
 Proxy = Callable[[Node], RelayProxy]
+Cut = Callable[[Node], Awaitable[None]]
 
 STEPS = ("before_core", "after_core", "in_tx", "after_tx", "after_consume")
 MODES = ("raise", "crash")
@@ -184,6 +185,51 @@ async def test_a_welcome_joins_once(
     assert c.daemon.store.join_status(invite["invite_id"]) == ("joined", gid)
     a.daemon.send_message(gid, {"text": "welcome"})
     await exactly(c, gid, ["welcome"])
+
+
+@pytest.mark.parametrize("point", ["event.after_record", "event.after_notify"])
+async def test_a_security_alert_survives_a_crash_around_notifying(
+    group: GroupFixture, advance: Advance, malicious_relay: Proxy, point: str
+) -> None:
+    (a, b), gid = await group(2)
+    epoch = b.epoch(gid)
+    # The relay lies about the routing of the next commit b receives: b
+    # raises relay_misbehaviour, the first event the commit causes.
+    malicious_relay(b).rewrite_routing(add=[a.daemon.mailbox])
+    fired = daemon_point(b, point, "crash")
+    a.daemon.update(gid)
+    await recover(b, advance, "crash", fired)
+    await settled([a, b], gid)
+    await until(lambda: b.daemon.store.unnotified_events() == [])
+    sent = [e for e in b.adapter.events if e.type == "relay_misbehaviour"]
+    # Recorded before notifying: a crash before the adapter heard of it,
+    # or before the daemon marked it heard, means it is sent again, with
+    # the same id. After deduplication by event_id it arrives once.
+    assert len(sent) == (2 if point == "event.after_notify" else 1)
+    assert len({e.event_id for e in sent}) == 1
+    (alert,) = [e for e in b.adapter.unique_events() if e.type == "relay_misbehaviour"]
+    assert alert.data["reason"] == "routing_mismatch"
+    changed = [e for e in b.adapter.unique_events() if e.type == "epoch_changed"]
+    assert [e.data["epoch"] for e in changed].count(epoch + 1) == 1
+    # The local API's event log has the same ids.
+    logged = {e["event_id"] for e in b.daemon.store.events() if e["type"] == "relay_misbehaviour"}
+    assert logged == {alert.event_id}
+
+
+async def test_a_failing_adapter_hears_about_events_again(
+    group: GroupFixture, partition: Cut, heal: Cut
+) -> None:
+    (a, b), gid = await group(2)
+    b.daemon.failpoints.arm("event.after_record", "raise")
+    a.daemon.update(gid)
+    await until(lambda: "event.after_record" in b.daemon.failpoints.fired)
+    await b.idle()
+    assert b.daemon.store.unnotified_events() != []
+    # The next (re)connect sends unnotified events again.
+    await partition(b)
+    await heal(b)
+    await until(lambda: b.daemon.store.unnotified_events() == [])
+    assert len({e.event_id for e in b.adapter.events}) == len(b.adapter.unique_events())
 
 
 async def test_a_removal_survives_a_crash_before_the_core_state_goes(

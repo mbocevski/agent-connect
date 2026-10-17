@@ -32,10 +32,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import random
 import secrets
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Generator, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -291,8 +292,10 @@ class Daemon:
         self.options = options or Options()
         self.failpoints = Failpoints()  # inert unless a test arms one
         # Set while one journal entry's effects are being recorded (_apply).
-        self._batch: list[tuple[str | None, str, dict[str, Any]]] | None = None
+        self._batch: list[Event] | None = None
         self._after: list[Callable[[], None]] | None = None
+        # (scope, n): where the ids of events emitted now come from.
+        self._cause: tuple[str, int] | None = None
         self._registering: set[str] = set()
         # Before touching keys or databases: one daemon per data directory.
         self._lock = DataDirLock(config.data_dir)
@@ -510,17 +513,57 @@ class Daemon:
                 name = g.adapter
         return self.adapters.get(name) or next(iter(self.adapters.values()), None)
 
-    async def emit(self, group_id: str | None, kind: str, **data: Any) -> None:
-        """Record an event for the local API and tell the group's adapter.
+    async def emit(
+        self, group_id: str | None, kind: str, *, cause: str | None = None, **data: Any
+    ) -> None:
+        """Record an event for the local API, then tell the group's adapter.
 
-        Inside :meth:`_apply` the event is recorded in its transaction and
-        the adapter is told once that commits."""
-        self.store.add_event(group_id, kind, data, self.now())
-        LOG.info("event", type=kind, group=log.hid(group_id))
+        Events are at-least-once with a stable ``event_id`` (ADR-004): the id
+        is derived from the event's cause (``cause``, else the message being
+        handled and the event's place among those it caused, else an id in
+        ``data``), so an event regenerated after a crash has the same id. An
+        event is recorded before the adapter hears of it and marked
+        notified once the adapter accepted it; unnotified events are sent
+        again on start and on every reconnect. Inside :meth:`_apply` the
+        event is recorded in its transaction and the adapter is told once
+        that commits."""
+        event_id = self._event_id(group_id, kind, cause, data)
+        new = self.store.add_event(group_id, kind, data, self.now(), event_id)
+        LOG.info("event", type=kind, group=log.hid(group_id), event_id=log.hid(event_id))
+        if not new and self.store.event_notified(event_id):
+            return  # regenerated after a crash, and the adapter already has it
+        event = Event(kind, group_id, data, event_id)
         if self._batch is not None:
-            self._batch.append((group_id, kind, data))
+            self._batch.append(event)
             return
-        await self._notify(group_id, kind, data)
+        await self._notify(event)
+
+    def _event_id(
+        self, group_id: str | None, kind: str, cause: str | None, data: dict[str, Any]
+    ) -> str:
+        if cause is None and self._cause is not None:
+            scope, n = self._cause
+            self._cause = (scope, n + 1)
+            cause = f"{scope}#{n}"
+        if cause is None:
+            for field in ("msg_id", "request_id", "invite_id", "epoch"):
+                if data.get(field) is not None:
+                    cause = f"{field}={data[field]}"
+                    break
+        if cause is None:
+            return new_msg_id()  # no cause to derive from: a one-off event
+        digest = hashlib.sha256(canonical([group_id, kind, cause])).digest()
+        return b64(digest[:16])
+
+    @contextlib.contextmanager
+    def _causing(self, scope: str) -> Generator[None]:
+        """Events emitted inside take their ids from ``scope`` (the journal
+        key of the message being handled) and their order."""
+        saved, self._cause = self._cause, (scope, 0)
+        try:
+            yield
+        finally:
+            self._cause = saved
 
     def _defer(self, action: Callable[[], None]) -> None:
         """Run ``action`` once the current :meth:`_apply` transaction has
@@ -538,7 +581,7 @@ class Daemon:
         emits events, which are batched), so no other task's writes can
         interleave with the transaction. Deferred actions run and the
         adapter hears about the events after it commits."""
-        batch: list[tuple[str | None, str, dict[str, Any]]] = []
+        batch: list[Event] = []
         after: list[Callable[[], None]] = []
         self._batch, self._after = batch, after
         try:
@@ -550,19 +593,32 @@ class Daemon:
         self.failpoints.hit(f"{path}.after_tx")
         for action in after:
             action()
-        for group_id, kind, data in batch:
-            await self._notify(group_id, kind, data)
+        for event in batch:
+            await self._notify(event)
         return result
 
-    async def _notify(self, group_id: str | None, kind: str, data: dict[str, Any]) -> None:
-        adapter = self._adapter_for(group_id)
-        if adapter is not None:
-            view = None if group_id is None else self._view(group_id)
-            try:
-                await adapter.on_event(view, Event(kind, group_id, data))
-            except Exception:
-                LOG.warning("adapter_event_failed", type=kind)
+    async def _notify(self, event: Event) -> None:
+        """Tell the adapter about a recorded event; mark it notified once
+        the adapter accepted it. A failure leaves it for :meth:`_renotify`."""
+        adapter = self._adapter_for(event.group_id)
+        try:
+            self.failpoints.hit("event.after_record")
+            if adapter is not None:
+                view = None if event.group_id is None else self._view(event.group_id)
+                await adapter.on_event(view, event)
+            self.failpoints.hit("event.after_notify")
+            self.store.mark_notified(event.event_id)
+        except Exception:
+            LOG.warning("adapter_event_failed", type=event.type)
         self._pulse()
+
+    async def _renotify(self) -> None:
+        """Send again every recorded event the adapter has not accepted
+        (a crash between recording and notifying, or a failing adapter)."""
+        for row in self.store.unnotified_events():
+            await self._notify(
+                Event(row["type"], row["group_id"], row["data"], str(row["event_id"]))
+            )
 
     async def mark_out_of_sync(self, group_id: str, reason: str, **data: Any) -> None:
         self.store.update_group(group_id, out_of_sync=True, out_of_sync_reason=reason)
@@ -799,6 +855,7 @@ class Daemon:
         t = frame.get("t")
         if t == REPLAY_JOURNAL:
             await self._replay_journal()
+            await self._renotify()
         elif t == "deliver" and isinstance(frame.get("env"), dict):
             await self._handle_env(frame["env"])
         elif t == "queue_overflow":
@@ -825,6 +882,10 @@ class Daemon:
             await self._ack(str(env["msg_id"]))
 
     async def _handle_env(self, env: dict[str, Any]) -> None:
+        with self._causing(journal_key(str(env.get("sender")), str(env.get("msg_id"))) + "/env"):
+            await self._handle_env_inner(env)
+
+    async def _handle_env_inner(self, env: dict[str, Any]) -> None:
         sender, msg_id, kind = str(env.get("sender")), str(env.get("msg_id")), env.get("kind")
         problem = _envelope_problem(env)
         if problem is not None:
@@ -972,6 +1033,7 @@ class Daemon:
         the entry."""
         group_id, sender, msg_id = str(env["group_id"]), str(env["sender"]), str(env["msg_id"])
         state = self.store.inbox_state(sender, msg_id)
+        scope = journal_key(sender, msg_id) + "/apply"
         if state is not None:
             self._settle_recorded(env)
         else:
@@ -982,12 +1044,14 @@ class Daemon:
                     self.store.record_inbox(sender, msg_id, group_id, "dropped", self.now())
                     return "dropped"
 
-                state = await self._apply(path, dropped)
+                with self._causing(scope):
+                    state = await self._apply(path, dropped)
             else:
                 try:
-                    state = await self._apply(
-                        path, lambda: self._effects(group, env, event, from_relay=from_relay)
-                    )
+                    with self._causing(scope):
+                        state = await self._apply(
+                            path, lambda: self._effects(group, env, event, from_relay=from_relay)
+                        )
                 except Exception:
                     # The effects rolled back and the entry stays pending (it
                     # is finished on the next replay), but the cached view
@@ -1418,7 +1482,8 @@ class Daemon:
             return "done"
 
         if self.store.inbox_state(sender, msg_id) is None:
-            await self._apply("welcome", body)
+            with self._causing(journal_key(sender, msg_id) + "/apply"):
+                await self._apply("welcome", body)
         with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
             self.client.journal_consume(journal_key(sender, msg_id))
         self.failpoints.hit("welcome.after_consume")
@@ -1547,7 +1612,11 @@ class Daemon:
                 elif row.kind == "commit" and code != BENIGN:
                     intent = row.payload.get("intent") or {}
                     await self.emit(
-                        row.group_id, "commit_failed", intent=intent.get("type"), code=code
+                        row.group_id,
+                        "commit_failed",
+                        cause=f"outbox/{row.seq}",
+                        intent=intent.get("type"),
+                        code=code,
                     )
             self._pulse()
 

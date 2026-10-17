@@ -157,10 +157,19 @@ def test_invites_approvals_joins_events_kv(tmp_path: Path, opened: Opener) -> No
     assert s.join_status("nope") is None
     assert s.pending_joins() == []
 
-    first = s.add_event("g1", "joined", {"a": 1}, 7)
-    s.add_event(None, "x", {}, 8)
-    assert [e["type"] for e in s.events()] == ["joined", "x"]
+    assert s.add_event("g1", "joined", {"a": 1}, 7, "e1")
+    assert s.add_event(None, "x", {}, 8, "e2")
+    # The same event id again (regenerated after a crash) is recorded once.
+    assert not s.add_event(None, "x", {}, 9, "e2")
+    first = s.events()[0]["seq"]
+    assert [(e["type"], e["event_id"]) for e in s.events()] == [("joined", "e1"), ("x", "e2")]
     assert [e["type"] for e in s.events(after=first)] == ["x"]
+    assert [e["event_id"] for e in s.unnotified_events()] == ["e1", "e2"]
+    assert not s.event_notified("e1")
+    s.mark_notified("e1")
+    assert s.event_notified("e1")
+    assert not s.event_notified("nope")
+    assert [e["event_id"] for e in s.unnotified_events()] == ["e2"]
 
     assert s.kv_get("k") is None
     s.kv_set("k", "v")
