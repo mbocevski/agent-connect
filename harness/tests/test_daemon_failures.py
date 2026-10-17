@@ -21,6 +21,7 @@ from agentconnect.adapter import (
 )
 from agentconnect.daemon import Daemon, DaemonError, new_msg_id
 from agentconnect.keystore import FileKeystore
+from agentconnect.relay import RelayError
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
 
@@ -49,17 +50,49 @@ async def test_relay_errors_on_sends(
     proxy.fail_next("send", "not_member", kind="application")
     lost = a.daemon.send_message(gid, {"text": "lost"})
     await a.idle()
-    # The failed row keeps its msg_id, not its plaintext.
+    # The failed row keeps its msg_id, not its plaintext, and the caller
+    # hears about it.
     assert [r.payload for r in a.daemon.store.outbox("failed")] == [{"msg_id": lost}]
+    (failed,) = a.adapter.of_type("send_failed")
+    assert failed.data == {"msg_id": lost, "code": "not_member"}
+    # A relay hiccup on a commit (rate_limited, internal) is retried with
+    # the same bytes and msg_id after a backoff.
+    epoch = a.epoch(gid)
+    proxy.fail_next("send", "rate_limited", kind="commit")
+    proxy.fail_next("send", "internal", kind="commit")
+    a.daemon.update(gid)
+    for _ in range(2):
+        await a.wait(lambda: a.clock.sleepers > 0)
+        await advance(60)
+    await a.idle()
+    assert a.epoch(gid) == epoch + 1
+    assert not a.adapter.of_type("commit_failed")
     # A commit the relay rejects outright is discarded, not merged.
     epoch = a.epoch(gid)
     proxy.fail_next("send", "quota_exceeded", kind="commit")
     a.daemon.update(gid)
     await a.idle()
     assert a.epoch(gid) == epoch
+    (commit_failed,) = a.adapter.of_type("commit_failed")
+    assert commit_failed.data == {"intent": "update", "code": "quota_exceeded"}
     assert not a.daemon.client.has_pending_commit(bytes(base64.urlsafe_b64decode(gid + "==")))
     a.daemon.send_message(gid, {"text": "still in sync"})
     assert await b.wait_texts(gid, 3) == ["resealed", "later", "still in sync"]
+
+
+async def test_invite_registration_failures_keep_no_secret(
+    group: GroupFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (a, _b), gid = await group(2)
+
+    async def down(_meta: dict[str, Any]) -> dict[str, Any]:
+        raise RelayError("relay_unreachable", "ConnectError")
+
+    monkeypatch.setattr(a.daemon.rest, "create_invite", down)
+    before = set((a.config.data_dir / "keys").iterdir())
+    with pytest.raises(DaemonError, match="relay_unreachable"):
+        await a.daemon.create_invite(gid)
+    assert set((a.config.data_dir / "keys").iterdir()) == before
 
 
 async def test_join_and_proposal_errors(

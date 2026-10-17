@@ -29,7 +29,9 @@ async def test_expired_invites_and_joins_lose_their_secrets(
     await a.wait(lambda: len(a.daemon.approvals()) == 1)
     assert a.daemon.keystore.get(f"invite/{iid}") is not None
     assert b.daemon.keystore.get(f"join/{iid}") is not None
-    await advance(600)
+    # The core stamps expires_at from the system clock, a little ahead of
+    # the cluster's fake clock: leave some slack.
+    await advance(600 + 30)
     await a.daemon.expire()
     assert (a.daemon.store.invite(iid) or {})["status"] == "expired"
     assert a.daemon.keystore.get(f"invite/{iid}") is None

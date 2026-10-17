@@ -258,3 +258,28 @@ async def test_rest_signs_every_request_with_a_fresh_ts(
     )
     assert unb64(sig) == expected
     assert "authorization" not in seen[-1].headers  # GET is public
+
+
+async def test_rest_maps_transport_and_body_errors(
+    rng: random.Random, fake_clock: FakeClock
+) -> None:
+    inst = instance(rng)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/down"):
+            raise httpx.ConnectError("refused", request=request)
+        if request.url.path.endswith("/html"):
+            return httpx.Response(502, text="<html>bad gateway</html>")
+        return httpx.Response(200, json=[1])
+
+    rest = RelayRest(
+        "http://relay.test/", "relay.test", inst, fake_clock, httpx.MockTransport(handle)
+    )
+    for path, code in (
+        ("down", "relay_unreachable"),
+        ("html", "internal"),
+        ("list", "bad_response"),
+    ):
+        with pytest.raises(RelayError) as err:
+            await rest.invite_meta(path)
+        assert err.value.code == code

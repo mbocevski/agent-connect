@@ -8,7 +8,6 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
 import pytest
 
 from agentconnect.daemon import INVITE_WARNING, JOIN_CLOSED_GRACE_SECS, DaemonError
@@ -90,7 +89,7 @@ async def test_check_joins_tolerates_relay_trouble(
     invite = await a.daemon.create_invite(gid)
     await b.daemon.accept_invite(invite["url"])
     answers: list[Any] = [
-        httpx.ConnectError("down"),
+        RelayError("relay_unreachable"),
         RelayError("internal"),
         {"status": "open"},
         RelayError("invite_not_open"),

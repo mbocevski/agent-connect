@@ -27,8 +27,6 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
-import httpx
-
 import agentconnect_core as ac
 from agentconnect import log
 from agentconnect.adapter import (
@@ -114,6 +112,9 @@ TRANSIENT_PREFIXES = (
     "internal error",
 )
 MAX_TRANSIENT_RETRIES = 8
+# Relay errors that say "not now" rather than "no" (SPEC 8.4).
+RETRYABLE_RELAY_ERRORS = frozenset({"rate_limited", "internal"})
+BENIGN = "benign"  # a failed outbox row nobody needs to hear about
 OUTBOUND_PROBLEMS = {
     "unknown_kind": ("bad_request", "unknown message kind"),
     "too_large": ("too_large", "message too large (SPEC 10.2: 256 KiB)"),
@@ -274,6 +275,7 @@ class Daemon:
         self._tasks: list[asyncio.Task[None]] = []
         self._delivery_backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         self.limits = RateLimiter(self.clock)
+        self._fail_codes: dict[int, str] = {}
         self.running = False
 
     # -- lifecycle ------------------------------------------------------------
@@ -957,8 +959,6 @@ class Daemon:
                 status = (await self.rest.invite_meta(invite_id)).get("status")
             except RelayError as e:
                 status = "revoked" if e.code == "invite_not_open" else None
-            except (OSError, httpx.HTTPError, ValueError):
-                status = None
             key = f"join_closed/{invite_id}"
             if status not in ("exhausted", "revoked", "expired"):
                 continue
@@ -1118,7 +1118,19 @@ class Daemon:
             except Exception:
                 LOG.exception("outbox_failed", kind=row.kind)
                 state = "failed"
+            msg_id = row.payload.get("msg_id")
             self.store.update_outbox(row.seq, state=state)
+            code = self._fail_codes.pop(row.seq, "failed")
+            if state == "failed" and row.group_id is not None:
+                # Tell the caller: it holds a msg_id (or an intent) that will
+                # never be delivered.
+                if row.kind == "app":
+                    await self.emit(row.group_id, "send_failed", msg_id=msg_id, code=code)
+                elif row.kind == "commit" and code != BENIGN:
+                    intent = row.payload.get("intent") or {}
+                    await self.emit(
+                        row.group_id, "commit_failed", intent=intent.get("type"), code=code
+                    )
             self._pulse()
 
     async def _run_row(self, row: OutboxRow) -> str:
@@ -1173,6 +1185,7 @@ class Daemon:
 
     async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:
         if group.out_of_sync:
+            self._fail_codes[row.seq] = "out_of_sync"
             return "failed"
         gid = unb64(group.group_id)
         payload = dict(row.payload)
@@ -1198,13 +1211,15 @@ class Daemon:
                 if e.code == "epoch_conflict":
                     payload.pop("env")  # too old an epoch: seal again
                     continue
-                if e.code == "rate_limited":
+                if e.code in RETRYABLE_RELAY_ERRORS:
                     await self._sleep(1.0)
                     continue
                 LOG.info("send_failed", code=e.code)
+                self._fail_codes[row.seq] = e.code
                 return "failed"
             self.store.bump_messages(group.group_id)
             return "done"
+        self._fail_codes[row.seq] = "attempts_exhausted"
         return "failed"
 
     async def _run_proposal(self, row: OutboxRow, group: GroupRow) -> str:
@@ -1281,36 +1296,26 @@ class Daemon:
         gid = unb64(group.group_id)
         payload = dict(row.payload)
         intent = payload["intent"]
+        backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
         for _ in range(MAX_COMMIT_ATTEMPTS):
             current = self.store.group(group.group_id)
             if current is None or current.status != "active" or current.out_of_sync:
+                self._fail_codes[row.seq] = "out_of_sync"
                 return "failed"
-            if "env" not in payload:
-                try:
-                    out = self._build(gid, intent)
-                except (ac.AgentConnectError, DaemonError) as e:
-                    if "no pending proposals" not in str(e):
-                        LOG.info("commit_not_built", intent=intent["type"], reason=str(e)[:80])
-                    self._fail_intent(intent)
-                    return "failed"
-                payload["env"] = {
-                    "v": 0,
-                    "kind": "commit",
-                    "group_id": group.group_id,
-                    "epoch": out["epoch"],
-                    "msg_id": out["msg_id"],
-                    "sender": self.mailbox,
-                    "routing": out["routing"],
-                    "ct": b64(out["commit"]),
-                }
-                if out.get("welcome") is not None:
-                    payload["welcome"] = b64(out["welcome"])
-                self.store.update_outbox(row.seq, payload=payload)
+            if "env" not in payload and not self._build_commit(row, group, payload):
+                return "failed"
             env = payload["env"]
             if not payload.get("confirmed"):
                 try:
                     await self._request({"t": "send", "env": env}, str(env["msg_id"]))
                 except RelayError as e:
+                    if e.code in RETRYABLE_RELAY_ERRORS:
+                        # SPEC 8.3: resend the same bytes under the same
+                        # msg_id; the relay didn't take it (a rejected send
+                        # doesn't consume its msg_id).
+                        LOG.info("commit_retry", code=e.code)
+                        await self._sleep(backoff.next())
+                        continue
                     with contextlib.suppress(ac.AgentConnectError):
                         self.client.discard_pending_commit(gid)
                     built_epoch = int(env["epoch"])
@@ -1319,6 +1324,7 @@ class Daemon:
                     self.store.update_outbox(row.seq, payload=payload)
                     if e.code != "epoch_conflict":
                         LOG.info("commit_rejected", code=e.code)
+                        self._fail_codes[row.seq] = e.code
                         self._fail_intent(intent)
                         return "failed"
                     LOG.info("epoch_conflict", group=log.hid(group.group_id))
@@ -1335,8 +1341,41 @@ class Daemon:
             if not payload.get("consume_queued"):
                 await self._commit_followups(row, group, intent, payload)
             return "done"
+        if "env" in payload and not payload.get("confirmed"):
+            # Still unconfirmed after every attempt: give it up.
+            with contextlib.suppress(ac.AgentConnectError):
+                self.client.discard_pending_commit(gid)
+        self._fail_codes[row.seq] = "attempts_exhausted"
         self._fail_intent(intent)
         return "failed"
+
+    def _build_commit(self, row: OutboxRow, group: GroupRow, payload: dict[str, Any]) -> bool:
+        """Build the row's commit and persist it (envelope, Welcome) before
+        it is sent, so a restart resends the same bytes."""
+        intent = payload["intent"]
+        try:
+            out = self._build(unb64(group.group_id), intent)
+        except (ac.AgentConnectError, DaemonError) as e:
+            benign = "no pending proposals" in str(e)
+            if not benign:
+                LOG.info("commit_not_built", intent=intent["type"], reason=str(e)[:80])
+            self._fail_codes[row.seq] = BENIGN if benign else "not_built"
+            self._fail_intent(intent)
+            return False
+        payload["env"] = {
+            "v": 0,
+            "kind": "commit",
+            "group_id": group.group_id,
+            "epoch": out["epoch"],
+            "msg_id": out["msg_id"],
+            "sender": self.mailbox,
+            "routing": out["routing"],
+            "ct": b64(out["commit"]),
+        }
+        if out.get("welcome") is not None:
+            payload["welcome"] = b64(out["welcome"])
+        self.store.update_outbox(row.seq, payload=payload)
+        return True
 
     async def _await_epoch(self, group_id: str, built_epoch: int) -> None:
         """Wait until the winning commit has been processed (or give up after
@@ -1488,14 +1527,19 @@ class Daemon:
         }
         # The secret stays local; only public metadata goes to the relay.
         self.keystore.put(f"invite/{invite.invite_id_b64}", invite.secret_bytes())
+        registered = False
         try:
             await self.rest.create_invite(meta)
-        except (RelayError, OSError) as e:
-            self.keystore.delete(f"invite/{invite.invite_id_b64}")
-            raise DaemonError("relay", f"invite registration failed: {e}") from None
-        self.store.add_invite(
-            invite.invite_id_b64, group_id, invite.expires_at, max_uses, self.now()
-        )
+            self.store.add_invite(
+                invite.invite_id_b64, group_id, invite.expires_at, max_uses, self.now()
+            )
+            registered = True
+        except RelayError as e:
+            raise DaemonError("relay", f"invite registration failed: {e.code}") from None
+        finally:
+            if not registered:
+                # Never leave a secret for an invite we don't track.
+                self.keystore.delete(f"invite/{invite.invite_id_b64}")
         return {
             "url": invite.url,
             "invite_id": invite.invite_id_b64,

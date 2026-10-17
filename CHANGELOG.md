@@ -86,6 +86,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Daemon: relay `rate_limited` and `internal` replies to a commit are
+  retried with backoff under the same bytes and `msg_id` instead of
+  discarding the commit (and failing an approved join). A message or commit
+  that finally fails raises `send_failed{msg_id, code}` or
+  `commit_failed{intent, code}`. REST transport errors and non-JSON
+  replies become `RelayError` (`relay_unreachable`, `internal`), and a
+  failed invite registration never leaves its secret behind.
 - Daemon: core errors are classified. Storage, RNG and internal errors and
   core panics are transient: the frame is neither recorded nor acked and is
   retried in order with backoff (`processing_failed` after 8 attempts,

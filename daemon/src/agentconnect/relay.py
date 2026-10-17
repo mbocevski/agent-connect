@@ -264,15 +264,28 @@ class RelayRest:
         if signed:
             headers["authorization"] = self.authorization(method, path, body)
         started = time.monotonic()
-        async with httpx.AsyncClient(transport=self._transport, timeout=REQUEST_TIMEOUT) as http:
-            resp = await http.request(method, self._base + path, content=body, headers=headers)
+        try:
+            async with httpx.AsyncClient(
+                transport=self._transport, timeout=REQUEST_TIMEOUT
+            ) as http:
+                resp = await http.request(method, self._base + path, content=body, headers=headers)
+        except httpx.HTTPError as e:
+            # Connection refused, DNS, timeouts: all "relay unreachable".
+            raise RelayError("relay_unreachable", type(e).__name__) from None
         LOG.debug(
             "relay_rest",
             method=method,
             status=resp.status_code,
             ms=round((time.monotonic() - started) * 1000),
         )
-        data = resp.json() if resp.content else {}
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            # A proxy's HTML error page, or a non-object body.
+            code = "internal" if resp.status_code >= 400 else "bad_response"  # noqa: PLR2004
+            raise RelayError(code, f"HTTP {resp.status_code} without a JSON object")
         if resp.status_code >= 400:  # noqa: PLR2004
             raise RelayError(str(data.get("code", "internal")), str(data.get("detail", "")))
         return data
