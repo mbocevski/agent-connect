@@ -47,9 +47,11 @@ HELD: dict[str, Any] = {
     "group_id": "str",
     "direction": "str",
     "sender": "str",
+    "instance": "str",
     "msg_id": "str",
     "kind": "str",
     "size": "int",
+    "task_id": Opt("str"),
     "created_at": "int",
     "expires_at": "int",
 }

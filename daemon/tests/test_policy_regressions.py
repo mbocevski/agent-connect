@@ -15,6 +15,7 @@ from a2a.types import AgentCard, CancelTaskRequest
 
 from agentconnect.clock import FakeClock
 from agentconnect.policy import (
+    VIOLATIONS,
     Inbound,
     Outbound,
     SafetyPolicy,
@@ -265,3 +266,69 @@ def test_limiter_and_violation_state_stay_bounded(
     policy.inbound(inb(msg()))
     policy.forget_group(G)
     assert (policy.tracked_senders(), policy.limiter.size()) == (0, 0)
+
+
+# -- H1: the held queue is bounded ----------------------------------------------------
+
+
+def test_task_updates_are_held_once_per_task(policy: SafetyPolicy) -> None:
+    policy.update(G, {"require_approval": "inbound"})
+    verdicts = [policy.inbound(inb(task(f"t{t}"))) for _ in range(300) for t in range(30)]
+    held = [d for d in verdicts if d.verdict is Verdict.HOLD_FOR_APPROVAL]
+    assert len(held) == 30, "one hold per task, not one per update"
+    assert {d.reason for d in verdicts if d.verdict is Verdict.DROP} <= {
+        "task_pending",
+        "rate_limited",
+    }
+
+
+def test_task_decisions_apply_to_later_updates(policy: SafetyPolicy, store: Store) -> None:
+    policy.update(G, {"require_approval": "inbound"})
+    assert policy.inbound(inb(task("ok"))) == hold("require_approval")
+    assert policy.inbound(inb(task("ok"))) == drop("task_pending")
+    policy.decide_task(G, MALLORY, "ok", approved=True)
+    assert policy.inbound(inb(task("ok"))).delivered
+    assert policy.inbound(inb(task("no"))) == hold("require_approval")
+    policy.decide_task(G, MALLORY, "no", approved=False)
+    assert policy.inbound(inb(task("no"))) == drop("task_rejected")
+    assert store.task_state(G, MALLORY, "ok") == "approved"
+
+
+def held_row(store: Store, n: int, instance: str = "m/i1", size: int = 100) -> None:
+    store.add_held(
+        {
+            "hold_id": f"h{n}-{instance}",
+            "group_id": G,
+            "direction": "in",
+            "sender": MALLORY,
+            "instance": instance,
+            "msg_id": f"m{n}-{instance}",
+            "kind": "a2a.message",
+            "size": size,
+            "created_at": 0,
+            "expires_at": 10**10,
+        }
+    )
+
+
+def test_holds_are_capped_per_sender_group_and_bytes(policy: SafetyPolicy, store: Store) -> None:
+    policy.update(
+        G,
+        {
+            "require_approval": "inbound",
+            "max_held_per_sender": 2,
+            "max_held_per_group": 3,
+            "max_held_bytes": 2048,
+        },
+    )
+    for n in range(2):
+        held_row(store, n)
+    assert policy.inbound(inb(msg())) == drop("hold_overflow")
+    assert policy.inbound(inb(msg(), inst="m/i2")) == hold("require_approval")
+    held_row(store, 9, "m/i2")
+    assert policy.inbound(inb(msg(), inst="m/i3")) == drop("hold_overflow"), "group cap"
+    store.set_held_status("h0-m/i1", "approved")
+    store.set_held_status("h1-m/i1", "approved")
+    held_row(store, 7, "m/i4", size=1950)
+    assert policy.inbound(inb(msg(), inst="m/i5")) == drop("hold_overflow"), "bytes cap"
+    assert "hold_overflow" in VIOLATIONS

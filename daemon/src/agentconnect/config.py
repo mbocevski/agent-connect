@@ -146,6 +146,9 @@ class Config:
     policy_frame_text: bool = KNOB["frame_text"].default
     policy_require_approval: str = KNOB["require_approval"].default
     policy_approval_ttl_secs: int = KNOB["approval_ttl_secs"].default
+    policy_max_held_per_group: int = KNOB["max_held_per_group"].default
+    policy_max_held_per_sender: int = KNOB["max_held_per_sender"].default
+    policy_max_held_bytes: int = KNOB["max_held_bytes"].default
     policy_violation_threshold: int = KNOB["violation_threshold"].default
     policy_violation_window_secs: int = KNOB["violation_window_secs"].default
     policy_transcript: bool = KNOB["transcript"].default

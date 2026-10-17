@@ -45,6 +45,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `hold_for_approval` or `drop` with a reason), and every message the agent
   sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
   the loop guard moved into it unchanged. See `docs/safety.md`.
+- Held messages: the queue is capped per group (100), per sender instance
+  (20) and in bytes (8 MiB; `policy.max_held_per_group`,
+  `max_held_per_sender`, `max_held_bytes`), and a message over a cap is
+  dropped as `hold_overflow` and counts as a violation. A task is held once,
+  on its first update, and decided whole. Holds expire on a timer, are
+  decided exactly once, and fail with `send_failed` code `group_gone` when
+  the group ends. `message_held` is recorded with the hold. The policy's
+  events are the human's: they no longer reach the agent's adapter, and
+  `GET /v0/events` leaves them out for the agent token.
 - Rate limits: received and sent messages have separate budgets, so a
   member's own sends no longer make honest peers look like violators and
   peer traffic can't stop the human's sends; the human's control messages

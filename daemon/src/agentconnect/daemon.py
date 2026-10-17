@@ -72,6 +72,7 @@ from agentconnect.policy import (
     SafetyPolicy,
     Verdict,
     drop,
+    task_of,
     verification_holds,
 )
 from agentconnect.relay import (
@@ -101,6 +102,11 @@ MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain
 TRANSFER_TIMEOUT_SECS = 10.0  # owner hand-over before a SAS-mismatch exit
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
+# Safety-policy events that reveal what the policy did with a peer's message:
+# recorded for the human (GET /v0/events with the human token, the CLI), never
+# passed to the agent's adapter.
+HELD_PRIVATE = ("payload", "inbox_seq", "status")  # never in held listings
+HUMAN_EVENTS = frozenset({"message_held", "held_expired", "repeated_violations"})
 INVITE_WARNING = (
     "This invite was already used or revoked. If you didn't expect this, "
     "the link may have been intercepted. Tell the sender."
@@ -159,6 +165,9 @@ OUTBOUND_PROBLEMS = {
     ),
     "file_too_large": ("too_large", "file part larger than the group's max_file_bytes"),
     "rate_limited": ("rate_limited", "over the SPEC 10.2 message rate"),
+    "hold_overflow": ("rate_limited", "too many messages already wait for the human's approval"),
+    "task_pending": ("forbidden", "the task's first update waits for the human's approval"),
+    "task_rejected": ("forbidden", "the human rejected this task"),
     "not_for_agents": (
         "forbidden",
         "control messages and Agent Cards come from the daemon or the human, not the agent",
@@ -375,6 +384,7 @@ class Daemon:
             config.safety_defaults(), self.store, self.clock, config.policy_audit_retention_days
         )
         self._background: set[asyncio.Task[None]] = set()
+        self._held_wake = asyncio.Event()
         self._fail_codes: dict[int, str] = {}
         self._drain_frame = False
         self._drain_exempted = 0
@@ -403,6 +413,7 @@ class Daemon:
             "inbound": self._inbound,
             "outbox": self._outbox,
             "delivery": self._delivery,
+            "held_timer": self._held_timer,
             "relay_link": self.link.run,
         }
         for name, worker in workers.items():
@@ -571,16 +582,43 @@ class Daemon:
         again on start and on every reconnect. Inside :meth:`_apply` the
         event is recorded in its transaction and the adapter is told once
         that commits."""
-        event_id = self._event_id(group_id, kind, cause, data)
-        new = self.store.add_event(group_id, kind, data, self.now(), event_id)
-        LOG.info("event", type=kind, group=log.hid(group_id), event_id=log.hid(event_id))
-        if not new and self.store.event_notified(event_id):
-            return  # regenerated after a crash, and the adapter already has it
-        event = Event(kind, group_id, data, event_id)
+        event = self._record(group_id, kind, cause, data)
+        if event is None:
+            return
         if self._batch is not None:
             self._batch.append(event)
             return
         await self._notify(event)
+
+    def _record(
+        self, group_id: str | None, kind: str, cause: str | None, data: dict[str, Any]
+    ) -> Event | None:
+        """Record an event (in the current transaction, if any); the event to
+        notify, or None if the adapter already has it."""
+        event_id = self._event_id(group_id, kind, cause, data)
+        new = self.store.add_event(group_id, kind, data, self.now(), event_id)
+        LOG.info("event", type=kind, group=log.hid(group_id), event_id=log.hid(event_id))
+        if not new and self.store.event_notified(event_id):
+            return None  # regenerated after a crash, and the adapter already has it
+        return Event(kind, group_id, data, event_id)
+
+    def _notify_soon(self, events: list[Event]) -> None:
+        """Tell the adapter about recorded events from synchronous code. They
+        are durable already: if this never runs, :meth:`_renotify` sends them."""
+        if not events:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (never in the daemon): the next renotify sends them
+
+        async def notify() -> None:
+            for event in events:
+                await self._notify(event)
+
+        task = loop.create_task(notify())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def _event_id(
         self, group_id: str | None, kind: str, cause: str | None, data: dict[str, Any]
@@ -647,7 +685,9 @@ class Daemon:
         adapter = self._adapter_for(event.group_id)
         try:
             self.failpoints.hit("event.after_record")
-            if adapter is not None:
+            # The policy's own events are for the human only: an agent that
+            # heard of a hold could tell the sender (SPEC 10.2).
+            if adapter is not None and event.type not in HUMAN_EVENTS:
                 view = None if event.group_id is None else self._view(event.group_id)
                 await adapter.on_event(view, event)
             self.failpoints.hit("event.after_notify")
@@ -803,6 +843,7 @@ class Daemon:
         round, a crash would leave an "active" group with no MLS state."""
         gid = unb64(group_id)
         self.store.update_group(group_id, status=kind)
+        await self._drop_group_holds(group_id)
         self.store.delete_group_data(group_id)
         self.store.kv_set(f"leaving/{group_id}", "0")
         await self.emit(group_id, kind)
@@ -1609,61 +1650,70 @@ class Daemon:
         keys = ("hold_id", "direction", "sender", "msg_id", "size", "expires_at")
         return {k: item[k] for k in keys} | {"message_kind": item["kind"]}
 
+    def _new_hold(
+        self, group_id: str, direction: str, inner: dict[str, Any], **row: Any
+    ) -> dict[str, Any]:
+        now = self.now()
+        item = {
+            "hold_id": self._hold_id(group_id, direction, row["msg_id"]),
+            "group_id": group_id,
+            "direction": direction,
+            "kind": str(inner.get("kind")),
+            "task_id": task_of(inner),
+            "created_at": now,
+            "expires_at": now + self.safety.settings(group_id).approval_ttl_secs,
+            **row,
+        }
+        self.store.add_held(item)
+        self._held_wake.set()
+        return item
+
     async def _hold_inbound(
         self, group: GroupRow, mailbox: str, delivery: Delivery, size: int
     ) -> None:
         """Inside :meth:`_apply`: the inbox row (state ``held``) keeps the
         message; this records the approval item and tells the human."""
-        now = self.now()
-        item = {
-            "hold_id": self._hold_id(group.group_id, "in", delivery.msg_id),
-            "group_id": group.group_id,
-            "direction": "in",
-            "sender": delivery.sender.identity,
-            "msg_id": delivery.msg_id,
-            "kind": delivery.kind,
-            "size": size,
-            "inbox_seq": self.store.inbox_seq(mailbox, delivery.msg_id),
-            "created_at": now,
-            "expires_at": now + self.safety.settings(group.group_id).approval_ttl_secs,
-        }
-        self.store.add_held(item)
-        await self.emit(group.group_id, "message_held", **self._held_event(item))
+        item = self._new_hold(
+            group.group_id,
+            "in",
+            delivery.inner,
+            sender=delivery.sender.identity,
+            instance=delivery.sender.instance_id,
+            msg_id=delivery.msg_id,
+            size=size,
+            inbox_seq=self.store.inbox_seq(mailbox, delivery.msg_id),
+        )
+        await self.emit(
+            group.group_id,
+            "message_held",
+            cause=f"hold={item['hold_id']}",
+            **self._held_event(item),
+        )
 
-    def _hold_outbound(self, group: GroupRow, payload: dict[str, Any], size: int) -> dict[str, Any]:
-        """Keep a send for the human's approval; returns the event data."""
-        now = self.now()
-        inner = payload["inner"]
-        item = {
-            "hold_id": self._hold_id(group.group_id, "out", payload["msg_id"]),
-            "group_id": group.group_id,
-            "direction": "out",
-            "sender": self.me,
-            "msg_id": payload["msg_id"],
-            "kind": str(inner["kind"]),
-            "size": size,
-            "payload": payload,
-            "created_at": now,
-            "expires_at": now + self.safety.settings(group.group_id).approval_ttl_secs,
-        }
-        self.store.add_held(item)
-        return self._held_event(item)
-
-    def _emit_soon(self, group_id: str | None, kind: str, **data: Any) -> None:
-        """:meth:`emit` from synchronous code (a send queued by the API)."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # no loop (never in the daemon): nothing to notify
-        task = loop.create_task(self.emit(group_id, kind, **data))
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
+    def _hold_outbound(self, group: GroupRow, payload: dict[str, Any], size: int) -> list[Event]:
+        """Inside :meth:`queue_message`'s transaction: keep a send for the
+        human's approval and record ``message_held`` with it, so a crash
+        can't lose the event. Returns the events to notify."""
+        item = self._new_hold(
+            group.group_id,
+            "out",
+            payload["inner"],
+            sender=self.me,
+            instance=self.instance.instance_id_hex,
+            msg_id=payload["msg_id"],
+            size=size,
+            payload=payload,
+        )
+        event = self._record(
+            group.group_id, "message_held", f"hold={item['hold_id']}", self._held_event(item)
+        )
+        return [] if event is None else [event]
 
     def held_messages(self) -> list[dict[str, Any]]:
         """Messages waiting for the human's approval, metadata only."""
         now = self.now()
         return [
-            {k: v for k, v in item.items() if k not in ("payload", "inbox_seq", "status")}
+            {k: v for k, v in item.items() if k not in HELD_PRIVATE}
             for item in self.store.held_items()
             if now < int(item["expires_at"])
         ]
@@ -1676,34 +1726,44 @@ class Daemon:
             raise DaemonError("expired", "the approval window has passed")
         return item
 
-    def _held_inner(self, item: dict[str, Any]) -> dict[str, Any] | None:
+    def _held_inner(self, item: dict[str, Any]) -> dict[str, Any]:
         if item["direction"] == "out":
             payload = item["payload"] or {}
-            return payload.get("inner")
+            return dict(payload.get("inner") or {})
         row = self.store.inbox_row(int(item["inbox_seq"] or 0))
         if row is None or row.delivery is None:
-            return None
+            return {}
         return dict(row.delivery["inner"])
 
     def held_message(self, hold_id: str) -> dict[str, Any]:
-        """One held message with its content (human scope only: the content
-        is what the human decides on). Peer content stays untrusted."""
+        """One held message with everything the agent (or the group) would
+        get: the whole body, ``to``, ``addressee`` and ``reply_to`` (human
+        scope only: the content is what the human decides on). Peer content
+        stays untrusted."""
         item = self._pending_hold(hold_id)
-        inner = self._held_inner(item) or {}
+        inner = self._held_inner(item)
         body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
-        out = {k: v for k, v in item.items() if k not in ("payload", "inbox_seq", "status")}
-        return out | {"untrusted": item["direction"] == "in", "to": inner.get("to"), "body": body}
+        out = {k: v for k, v in item.items() if k not in HELD_PRIVATE}
+        return out | {
+            "untrusted": item["direction"] == "in",
+            "to": inner.get("to"),
+            "addressee": inner.get("addressee"),
+            "reply_to": inner.get("reply_to"),
+            "body": body,
+        }
 
     def approve_message(self, hold_id: str) -> dict[str, Any]:
         """Human-gated: release a held message, to the adapter (inbound) or
-        to the relay (outbound)."""
+        to the relay (outbound). Approving a task's first update approves the
+        task's later updates too."""
         item = self._pending_hold(hold_id)
         group_id = str(item["group_id"])
         group = self.store.group(group_id)
         if group is None or group.status != "active":
-            self.store.set_held_status(hold_id, "dropped")
             raise DaemonError("not_found", "the group is no longer active")
         with self.store.tx():
+            if not self.store.set_held_status(hold_id, "approved"):
+                raise DaemonError("not_found", "no such held message")
             if item["direction"] == "in":
                 row = self.store.inbox_row(int(item["inbox_seq"] or 0))
                 if row is not None and row.state == "held" and row.delivery is not None:
@@ -1718,9 +1778,11 @@ class Daemon:
                 payload = item["payload"] or {}
                 self._enqueue("app", group_id, payload)
                 self.safety.transcribe(group_id, "out", self.me, item["msg_id"], payload["inner"])
-            self.store.set_held_status(hold_id, "approved")
+            if item["task_id"] is not None:
+                self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=True)
             self._audit_hold(item, "approved")
         self._delivery_wake.set()
+        self._held_wake.set()
         self._pulse()
         return {"hold_id": hold_id, "group_id": group_id, "status": "approved"}
 
@@ -1735,38 +1797,94 @@ class Daemon:
             decision=decision,
         )
 
-    def _drop_hold(self, item: dict[str, Any], status: str) -> None:
+    def _drop_hold(self, item: dict[str, Any], status: str, code: str) -> list[Event]:
+        """Drop a held item once (a concurrent caller that decided it first
+        wins): its plaintext goes, the audit log records it, its task is
+        rejected, and the events are recorded in the same transaction (the
+        human's ``held_expired`` on expiry, the agent's ``send_failed`` for
+        its own send). Nothing reaches the peer (SPEC 10.2). Returns the
+        events to notify."""
+        hold_id, group_id = str(item["hold_id"]), str(item["group_id"])
+        events: list[Event | None] = []
         with self.store.tx():
+            if not self.store.set_held_status(hold_id, status):
+                return []
             if item["direction"] == "in" and item["inbox_seq"] is not None:
                 row = self.store.inbox_row(int(item["inbox_seq"]))
                 if row is not None and row.state == "held":
                     self.store.set_inbox_state(row.seq, "dropped")
-            self.store.set_held_status(str(item["hold_id"]), status)
+            if item["task_id"] is not None:
+                self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=False)
             self._audit_hold(item, status)
+            if status == "expired":
+                events.append(
+                    self._record(
+                        group_id, "held_expired", f"hold={hold_id}/expired", self._held_event(item)
+                    )
+                )
+            if item["direction"] == "out":
+                data = {"msg_id": item["msg_id"], "code": code}
+                events.append(
+                    self._record(group_id, "send_failed", f"hold={hold_id}/{status}", data)
+                )
+        self._held_wake.set()
+        return [e for e in events if e is not None]
 
     async def reject_message(self, hold_id: str) -> dict[str, Any]:
         """Human-gated: drop a held message. Nothing tells the peer; an
         outbound one fails like any send (``send_failed``)."""
         item = self._pending_hold(hold_id)
-        self._drop_hold(item, "rejected")
-        if item["direction"] == "out":
-            await self.emit(
-                str(item["group_id"]), "send_failed", msg_id=item["msg_id"], code="rejected"
-            )
+        events = self._drop_hold(item, "rejected", "rejected")
+        if not events and item["direction"] == "out":
+            raise DaemonError("not_found", "no such held message")
+        for event in events:
+            await self._notify(event)
         return {"hold_id": hold_id, "group_id": item["group_id"], "status": "rejected"}
 
     async def expire_held(self) -> None:
         """Held messages past ``approval_ttl_secs`` are dropped silently (the
-        peer is not told) and the human gets ``held_expired``."""
+        peer is not told) and the human gets ``held_expired``. Runs on a timer
+        (:meth:`_held_timer`), so plaintext doesn't outlive the window."""
         now = self.now()
         for item in self.store.held_items():
             if now < int(item["expires_at"]):
                 continue
-            self._drop_hold(item, "expired")
-            group_id = str(item["group_id"])
-            await self.emit(group_id, "held_expired", **self._held_event(item))
-            if item["direction"] == "out":
-                await self.emit(group_id, "send_failed", msg_id=item["msg_id"], code="expired")
+            for event in self._drop_hold(item, "expired", "expired"):
+                await self._notify(event)
+
+    async def _drop_group_holds(self, group_id: str) -> None:
+        """The group ended: its held messages are dropped, and the agent's own
+        held sends fail with ``group_gone`` (inside :meth:`_apply` the
+        events join its batch)."""
+        for item in self.store.held_items():
+            if item["group_id"] != group_id:
+                continue
+            for event in self._drop_hold(item, "dropped", "group_gone"):
+                if self._batch is not None:
+                    self._batch.append(event)
+                else:
+                    await self._notify(event)
+
+    async def _held_timer(self) -> None:
+        """Expire held messages when their window ends, traffic or not (the
+        plaintext of a held message must not outlive it)."""
+        while True:
+            self._held_wake.clear()
+            pending = self.store.held_items()
+            if not pending:
+                await self._held_wake.wait()
+                continue
+            delay = min(int(item["expires_at"]) for item in pending) - self.now()
+            if delay > 0:
+                sleep = asyncio.ensure_future(self.clock.sleep(delay))
+                woken = asyncio.ensure_future(self._held_wake.wait())
+                try:
+                    await asyncio.wait({sleep, woken}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for waiter in (sleep, woken):
+                        waiter.cancel()
+                continue
+            await self.expire_held()
 
     def safety_settings(self, group_id: str) -> dict[str, Any]:
         group = self._group_or_raise(group_id)
@@ -2625,14 +2743,15 @@ class Daemon:
                 decision=decision.verdict,
                 reason=decision.reason,
             )
-            if decision.verdict is Verdict.HOLD_FOR_APPROVAL:
-                held = self._hold_outbound(group, payload, size)
+            held = decision.verdict is Verdict.HOLD_FOR_APPROVAL
+            events: list[Event] = []
+            if held:
+                events = self._hold_outbound(group, payload, size)
             else:
                 self._enqueue("app", group.group_id, payload)
                 self.safety.transcribe(group.group_id, "out", self.me, msg_id, inner)
-                held = None
-        if held is not None:
-            self._emit_soon(group.group_id, "message_held", **held)
+        if held:
+            self._notify_soon(events)
             return msg_id, "held"
         if kind in HUMAN_ONLY_KINDS:
             self._reset_loop_guard(group.group_id)

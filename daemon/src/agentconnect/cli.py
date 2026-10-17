@@ -767,9 +767,11 @@ def events(
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
-    """Print daemon events (one JSON object per line with --json)."""
+    """Print daemon events (one JSON object per line with --json). Uses the
+    human token: the safety policy's events (held messages, violations) are
+    the human's."""
     with guard(as_json):
-        api = connect(config)
+        api = connect(config, human=True)
         try:
             while True:
                 for ev in events_after(api, after):

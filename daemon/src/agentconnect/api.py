@@ -42,7 +42,8 @@ from pathlib import Path
 from typing import Any
 
 from agentconnect import log
-from agentconnect.daemon import HUMAN_ONLY_KINDS, Daemon, DaemonError, new_msg_id
+from agentconnect.cli_json import HELD
+from agentconnect.daemon import HUMAN_EVENTS, HUMAN_ONLY_KINDS, Daemon, DaemonError, new_msg_id
 from agentconnect.isolation import PeerGate
 from agentconnect.keystore import write_private
 from agentconnect.relay import RelayError
@@ -214,17 +215,7 @@ _GROUP_INFO: dict[str, Any] = {
     "sas?": {"decimal": "str", "emoji_indices": ["int"]},
 }
 
-_HELD: dict[str, Any] = {
-    "hold_id": "str",
-    "group_id": "str",
-    "direction": "str",
-    "sender": "str",
-    "msg_id": "str",
-    "kind": "str",
-    "size": "int",
-    "created_at": "int",
-    "expires_at": "int",
-}
+_HELD: dict[str, Any] = HELD
 
 _SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}
 
@@ -388,7 +379,14 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "_held_message",
         "One held message with its content, for the human to decide on. A message "
         "from a peer is `untrusted`.",
-        response={**_HELD, "untrusted": "bool", "to": Opt(["str"]), "body": "object"},
+        response={
+            **_HELD,
+            "untrusted": "bool",
+            "to": Opt(["str"]),
+            "addressee": Opt(["str"]),
+            "reply_to": Opt(["str"]),
+            "body": "object",
+        },
         human=True,
     ),
     RouteSpec(
@@ -526,7 +524,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "GET",
         "/v0/events",
         "_events",
-        "Daemon events in order, at most 200 per call. With "
+        "Daemon events in order, at most 200 per call. The agent token doesn't see the "
+        "safety policy's events (`message_held`, `held_expired`, `repeated_violations`): "
+        "they would tell the agent, and so a peer, what the policy did. With "
         "`Accept: text/event-stream` it is instead a Server-Sent Events stream "
         "of messages and events from a durable feed (needs "
         '`daemon.default_adapter = "sse"`, else `409 no_sse_adapter`): each '
@@ -804,7 +804,10 @@ class ApiServer:
         group = p.get("group") or None
         if "text/event-stream" not in p.get(ACCEPT, ""):
             after = int(p.get("after", "0") or 0)
-            return {"events": self.daemon.store.events(after, group_id=group)}
+            # The safety policy's events are the human's (SPEC 10.2): an agent
+            # that heard of a hold could tell the sender.
+            hidden = () if p.get(SCOPE) == "human" else tuple(HUMAN_EVENTS)
+            return {"events": self.daemon.store.events(after, group_id=group, exclude=hidden)}
         hub = self.daemon.adapters.get("sse")
         if not isinstance(hub, SseAdapter):
             raise ApiError(409, "no_sse_adapter", 'set daemon.default_adapter = "sse"')

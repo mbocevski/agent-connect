@@ -48,8 +48,10 @@ from agentconnect.limits import (
     GROUP_TASK_PER_MINUTE,
     IDENTITY_RATE_MULTIPLE,
     MAX_MESSAGE_BYTES,
+    MAX_TASK_ID,
     SENDER_PER_MINUTE,
     TASK_PER_MINUTE,
+    TASK_UPDATE_KINDS,
     Limits,
     RateLimiter,
     content_problem,
@@ -78,12 +80,17 @@ VIOLATIONS = frozenset(
         "rate_limited",
         "not_human",
         "not_owner",
+        "hold_overflow",
     }
 )
 APPROVAL_MODES = ("off", "inbound", "outbound", "both")
 DAY_SECS = 86_400
 PURGE_EVERY_SECS = 60
 MAX_AUDIT_ROWS = 100_000
+DEFAULT_MAX_HELD_PER_GROUP = 100
+DEFAULT_MAX_HELD_PER_SENDER = 20
+DEFAULT_MAX_HELD_BYTES = 8 * 1024 * 1024
+TASK_DECISION_DAYS = 7  # decided tasks are forgotten after a week untouched
 MAX_TRACKED = 10_000  # (group, sender) violation counters kept at most
 DEFAULT_VIOLATION_THRESHOLD = 10
 DEFAULT_VIOLATION_WINDOW_SECS = 600
@@ -258,6 +265,32 @@ KNOBS: tuple[Knob, ...] = (
         604_800,
     ),
     Knob(
+        "max_held_per_group",
+        int,
+        DEFAULT_MAX_HELD_PER_GROUP,
+        "Messages that may wait for approval in one group at a time (1 to 100). Past it, "
+        "another is dropped, not held, and counts as a violation.",
+        1,
+        DEFAULT_MAX_HELD_PER_GROUP,
+    ),
+    Knob(
+        "max_held_per_sender",
+        int,
+        DEFAULT_MAX_HELD_PER_SENDER,
+        "Messages from one sender instance that may wait for approval at a time (1 to 20).",
+        1,
+        DEFAULT_MAX_HELD_PER_SENDER,
+    ),
+    Knob(
+        "max_held_bytes",
+        int,
+        DEFAULT_MAX_HELD_BYTES,
+        "Bytes of messages that may wait for approval in one group at a time "
+        "(1024 to 8388608, 8 MiB).",
+        1024,
+        DEFAULT_MAX_HELD_BYTES,
+    ),
+    Knob(
         "violation_threshold",
         int,
         DEFAULT_VIOLATION_THRESHOLD,
@@ -310,6 +343,9 @@ class Settings:
     frame_text: bool = True
     require_approval: str = "off"
     approval_ttl_secs: int = 3600
+    max_held_per_group: int = DEFAULT_MAX_HELD_PER_GROUP
+    max_held_per_sender: int = DEFAULT_MAX_HELD_PER_SENDER
+    max_held_bytes: int = DEFAULT_MAX_HELD_BYTES
     violation_threshold: int = DEFAULT_VIOLATION_THRESHOLD
     violation_window_secs: int = DEFAULT_VIOLATION_WINDOW_SECS
     transcript: bool = False
@@ -387,6 +423,19 @@ def apply_changes(
     if senders:
         out["senders"] = senders
     return out
+
+
+def task_of(inner: dict[str, Any]) -> str | None:
+    """The ``taskId`` of a task status or artifact update, else None."""
+    body = inner.get("body")
+    task = body.get("taskId") if isinstance(body, dict) else None
+    if (
+        inner.get("kind") in TASK_UPDATE_KINDS
+        and isinstance(task, str)
+        and 0 < len(task) <= MAX_TASK_ID
+    ):
+        return task
+    return None
 
 
 def verification_holds(require_verified: bool, trust_state: Mapping[str, Any]) -> bool:
@@ -506,7 +555,16 @@ class SafetyPolicy:
             # never trigger the agent, so there is nothing to hold.
             return as_context("not_content")
         if settings.approve_inbound and m.kind in HOLDABLE_KINDS:
-            return hold("require_approval")
+            decision = self._hold(
+                m.group_id,
+                sender=m.sender,
+                instance=m.instance,
+                inner=m.inner,
+                size=m.size,
+                settings=settings,
+            )
+            if decision is not None:
+                return decision
         if m.hop > m.max_turns:
             return as_context("loop_guard")  # SPEC 10.3: don't trigger the agent
         if not m.addressed:
@@ -540,8 +598,61 @@ class SafetyPolicy:
         ):
             return drop("rate_limited")
         if not m.internal and not human and settings.approve_outbound and m.kind in HOLDABLE_KINDS:
-            return hold("require_approval")
+            decision = self._hold(
+                m.group_id,
+                sender=m.sender,
+                instance=m.instance,
+                inner=m.inner,
+                size=m.size,
+                settings=settings,
+            )
+            if decision is not None:
+                return decision
         return DELIVER
+
+    def _hold(  # noqa: PLR0913
+        self,
+        group_id: str,
+        *,
+        sender: str,
+        instance: str,
+        inner: dict[str, Any],
+        size: int,
+        settings: Settings,
+    ) -> Decision | None:
+        """What ``require_approval`` does with one message: hold it, drop it,
+        or nothing (``None``: a task the human already approved).
+
+        A task is decided once, on its first update: the later updates of a
+        task waiting for approval are dropped (``task_pending``), those of
+        an approved task go through, and those of a rejected or expired one
+        are dropped (``task_rejected``). The held messages are capped per
+        group, per sender instance and in bytes; past a cap a message is
+        dropped (``hold_overflow``), never held."""
+        task = task_of(inner)
+        if task is not None:
+            state = self.store.task_state(group_id, sender, task)
+            if state == "approved":
+                return None
+            if state == "pending":
+                return drop("task_pending")
+            if state == "rejected":
+                return drop("task_rejected")
+        total, mine, held_bytes = self.store.held_load(group_id, instance)
+        if (
+            total >= settings.max_held_per_group
+            or mine >= settings.max_held_per_sender
+            or held_bytes + size > settings.max_held_bytes
+        ):
+            return drop("hold_overflow")
+        if task is not None:
+            self.store.set_task_state(group_id, sender, task, "pending", self._now())
+        return hold("require_approval")
+
+    def decide_task(self, group_id: str, sender: str, task: str, *, approved: bool) -> None:
+        """Record the human's decision on a task's first update."""
+        state = "approved" if approved else "rejected"
+        self.store.set_task_state(group_id, sender, task, state, self._now())
 
     # -- violations -----------------------------------------------------------
 
@@ -657,6 +768,7 @@ class SafetyPolicy:
             return
         self._purged_at = now
         self._prune_violations(now)
+        self.store.task_states_purge(now - TASK_DECISION_DAYS * DAY_SECS)
         self.store.audit_purge(now - self.audit_retention_days * DAY_SECS, MAX_AUDIT_ROWS)
         for group_id in self.store.transcript_groups():
             days = self.settings(group_id).transcript_retention_days

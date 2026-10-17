@@ -673,9 +673,11 @@ HELD_ITEM = {
     "group_id": GID,
     "direction": "in",
     "sender": BOB,
+    "instance": "i1",
     "msg_id": "m1",
     "kind": "a2a.message",
     "size": 42,
+    "task_id": None,
     "created_at": 1000,
     "expires_at": 4600,
 }

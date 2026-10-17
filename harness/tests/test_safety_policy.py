@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 from typer.testing import CliRunner
 
+from agentconnect.adapter import Event
 from agentconnect.api import ApiServer
 from agentconnect.cli import app
 from agentconnect.daemon import DaemonError, new_msg_id
@@ -123,7 +124,7 @@ async def test_a_flooding_peer_is_rate_limited_reported_and_removed(
     (alert,) = events(owner, "repeated_violations")
     assert alert["sender"] == flooder.me
     assert (alert["count"], alert["threshold"], alert["last_reason"]) == (4, 4, "rate_limited")
-    assert owner.adapter.of_type("repeated_violations")
+    assert not owner.adapter.of_type("repeated_violations"), "the human's, not the agent's"
     assert flooder.me in {m.identity for m in owner.daemon.store.members(gid)}
     drops = [r for r in owner.daemon.store.audit(gid) if r["decision"] == "drop"]
     assert len(drops) == 7
@@ -432,14 +433,26 @@ async def test_held_items_edge_cases(
     d.store.set_inbox_state(seq, "dropped")
     assert d.held_message(holds[gone])["body"] == {}
     await d.reject_message(holds[gone])
-    # Offline, nothing runs the expiry before the human answers.
+    # A hold past its window can't be approved, even before the timer ran.
+    late_hold = d.send_message(gid, {"text": "too late"})
+    (late_item,) = [m for m in d.held_messages() if m["msg_id"] == late_hold]
+    d.store._db.execute(
+        "UPDATE held SET expires_at = ? WHERE hold_id = ?", (d.now(), late_item["hold_id"])
+    )
+    with pytest.raises(DaemonError, match="approval window"):
+        d.approve_message(late_item["hold_id"])
+    # Offline, with no traffic at all, the timer still expires the holds
+    # when their window ends: their plaintext doesn't outlive it.
     await partition(a)
     await advance(61)
-    with pytest.raises(DaemonError, match="approval window"):
-        d.approve_message(holds[out_id])
-    await d.expire_held()
+    await a.wait(lambda: {e["msg_id"] for e in events(a, "held_expired")} >= {out_id, late_hold})
     assert any(e["msg_id"] == out_id and e["code"] == "expired" for e in events(a, "send_failed"))
-    assert [e["direction"] for e in events(a, "held_expired")] == ["out"]
+    assert {e["direction"] for e in events(a, "held_expired")} == {"out"}
+    expired_item = d.store.held(holds[out_id])
+    assert expired_item is not None
+    assert expired_item["payload"] is None
+    await d.expire_held()  # idempotent: nothing is expired twice
+    assert len([e for e in events(a, "held_expired") if e["msg_id"] == out_id]) == 1
     # A hold in a group that is no longer active can't be approved.
     another = d.send_message(gid, {"text": "orphan"})
     (orphan,) = [m for m in d.held_messages() if m["msg_id"] == another]
@@ -447,9 +460,14 @@ async def test_held_items_edge_cases(
     with pytest.raises(DaemonError, match="no longer active"):
         d.approve_message(orphan["hold_id"])
     d.store.update_group(gid, status="active")
-    # Events from code without a running loop are recorded later, not lost.
-    await asyncio.to_thread(d._emit_soon, gid, "message_held")
+    # Without a running loop, recorded events wait for the next renotify.
+    await asyncio.to_thread(d._notify_soon, [Event("x", gid, {}, "e1")])
 
+
+async def test_the_safety_api_refuses_bad_requests(
+    group: GroupFixture, human: Callable[[Node], Awaitable[Human]]
+) -> None:
+    (a, _b), gid = await group(2)
     h = await human(a)
     for body, code in (
         ({"set": []}, "bad_request"),
@@ -542,3 +560,63 @@ async def test_content_under_control_or_card_kinds_never_reaches_the_agent(
             "POST", f"/v0/groups/{gid}/messages", {"kind": kind, "body": body}
         )
         assert (status, err["code"]) == (403, "forbidden"), kind
+
+
+async def test_a_task_is_held_once_and_decided_as_a_whole(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.update_safety(gid, {"require_approval": "inbound"})
+
+    def update(state: str) -> dict[str, Any]:
+        return {"taskId": "t1", "contextId": gid, "status": {"state": state}}
+
+    first = raw_send(b, gid, update("TASK_STATE_WORKING"), "a2a.task_status")
+    assert await settled(a, b, first) == "held"
+    later = [raw_send(b, gid, update("TASK_STATE_WORKING"), "a2a.task_status") for _ in range(5)]
+    for msg_id in later:
+        assert await settled(a, b, msg_id) == "dropped"
+    assert {r["reason"] for r in a.daemon.store.audit(gid) if r["msg_id"] in later} == {
+        "task_pending"
+    }
+    (item,) = a.daemon.held_messages()
+    assert item["task_id"] == "t1"
+    a.daemon.approve_message(item["hold_id"])
+    done = raw_send(b, gid, update("TASK_STATE_COMPLETED"), "a2a.task_status")
+    assert await settled(a, b, done) == "done", "an approved task's updates go through"
+    statuses = [d.msg_id for d in a.adapter.deliveries if d.kind == "a2a.task_status"]
+    assert statuses == [first, done]
+    assert events(a, "repeated_violations") == [], "a pending task is not a violation"
+
+
+async def test_holds_are_capped_and_overflow_is_a_violation(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.update_safety(
+        gid, {"require_approval": "inbound", "max_held_per_sender": 2, "violation_threshold": 3}
+    )
+    ids = [raw_send(b, gid, {"parts": [{"text": f"m{i}"}]}) for i in range(5)]
+    states = [await settled(a, b, msg_id) for msg_id in ids]
+    assert states == ["held", "held", "dropped", "dropped", "dropped"]
+    assert len(a.daemon.held_messages()) == 2
+    (alert,) = events(a, "repeated_violations")
+    assert alert["last_reason"] == "hold_overflow"
+    assert len(events(a, "message_held")) == 2
+
+
+async def test_a_held_send_is_recorded_durably_and_fails_when_the_group_ends(
+    group: GroupFixture,
+) -> None:
+    (_a, b), gid = await group(2)
+    b.daemon.update_safety(gid, {"require_approval": "outbound"})
+    sent = b.daemon.send_message(gid, {"text": "for later"})
+    # Recorded in the same transaction as the hold, before anything awaits.
+    (held,) = events(b, "message_held")
+    assert held["msg_id"] == sent
+    assert not b.adapter.of_type("message_held"), "the human's event, not the agent's"
+    await b.daemon.leave(gid)
+    await b.wait(lambda: any(e["msg_id"] == sent for e in events(b, "send_failed")))
+    (failed,) = [e for e in events(b, "send_failed") if e["msg_id"] == sent]
+    assert failed["code"] == "group_gone"
+    assert [r["decision"] for r in b.daemon.store.audit(gid) if r["msg_id"] == sent] == [
+        "hold_for_approval",
+        "dropped",
+    ]
+    assert b.daemon.held_messages() == []

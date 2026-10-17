@@ -195,14 +195,24 @@ CREATE TABLE IF NOT EXISTS held (
     group_id TEXT NOT NULL,
     direction TEXT NOT NULL,
     sender TEXT NOT NULL,
+    instance TEXT NOT NULL DEFAULT '',
     msg_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     size INTEGER NOT NULL,
+    task_id TEXT,
     inbox_seq INTEGER,
     payload TEXT,
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE TABLE IF NOT EXISTS task_decisions (
+    group_id TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, sender, task_id)
 );
 CREATE TABLE IF NOT EXISTS audit (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -482,7 +492,7 @@ class Store:
         messages are dropped. Audit rows and transcript entries stay until
         their retention ends."""
         with self.tx() as db:
-            for table in ("members", "agent_cards", "group_safety"):
+            for table in ("members", "agent_cards", "group_safety", "task_decisions"):
                 db.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))  # noqa: S608
             db.execute(
                 "UPDATE inbox SET state = 'dropped', delivery = NULL "
@@ -517,17 +527,19 @@ class Store:
         only) is the queued send; an inbound one waits in its inbox row."""
         payload = row.get("payload")
         self._db.execute(
-            "INSERT OR IGNORE INTO held (hold_id, group_id, direction, sender, msg_id, kind, "
-            "size, inbox_seq, payload, created_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO held (hold_id, group_id, direction, sender, instance, msg_id, "
+            "kind, size, task_id, inbox_seq, payload, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row["hold_id"],
                 row["group_id"],
                 row["direction"],
                 row["sender"],
+                row.get("instance", ""),
                 row["msg_id"],
                 row["kind"],
                 row["size"],
+                row.get("task_id"),
                 row.get("inbox_seq"),
                 None if payload is None else json.dumps(payload),
                 row["created_at"],
@@ -540,9 +552,11 @@ class Store:
         "group_id",
         "direction",
         "sender",
+        "instance",
         "msg_id",
         "kind",
         "size",
+        "task_id",
         "inbox_seq",
         "payload",
         "created_at",
@@ -570,10 +584,51 @@ class Store:
         )
         return [self._held(r) for r in rows]
 
-    def set_held_status(self, hold_id: str, status: str) -> None:
-        """Decide a held item; its payload (plaintext) is no longer needed."""
+    def set_held_status(self, hold_id: str, status: str) -> bool:
+        """Decide a pending held item; its payload (plaintext) is no longer
+        needed. False if it was already decided (by a concurrent caller)."""
+        cur = self._db.execute(
+            "UPDATE held SET status = ?, payload = NULL WHERE hold_id = ? AND status = 'pending'",
+            (status, hold_id),
+        )
+        return cur.rowcount == 1
+
+    def held_load(self, group_id: str, instance: str) -> tuple[int, int, int]:
+        """Pending holds of a group: how many, how many from ``instance``, and
+        their bytes."""
+        row = self._one(
+            "SELECT COUNT(*), COALESCE(SUM(instance = ?), 0), COALESCE(SUM(size), 0) FROM held "
+            "WHERE group_id = ? AND status = 'pending'",
+            instance,
+            group_id,
+        )
+        return (0, 0, 0) if row is None else (int(row[0]), int(row[1]), int(row[2]))
+
+    def task_state(self, group_id: str, sender: str, task_id: str) -> str | None:
+        """``pending``, ``approved`` or ``rejected``: the human's decision on a
+        task's first update (held with require_approval), or None."""
+        row = self._one(
+            "SELECT state FROM task_decisions WHERE group_id = ? AND sender = ? AND task_id = ?",
+            group_id,
+            sender,
+            task_id,
+        )
+        return None if row is None else str(row[0])
+
+    def set_task_state(
+        self, group_id: str, sender: str, task_id: str, state: str, now: int
+    ) -> None:
         self._db.execute(
-            "UPDATE held SET status = ?, payload = NULL WHERE hold_id = ?", (status, hold_id)
+            "INSERT INTO task_decisions (group_id, sender, task_id, state, at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(group_id, sender, task_id) "
+            "DO UPDATE SET state = excluded.state, at = excluded.at",
+            (group_id, sender, task_id, state, now),
+        )
+
+    def task_states_purge(self, before: int) -> None:
+        """Forget decided tasks not touched since ``before``."""
+        self._db.execute(
+            "DELETE FROM task_decisions WHERE at < ? AND state != 'pending'", (before,)
         )
 
     def audit_add(  # noqa: PLR0913
@@ -1047,14 +1102,21 @@ class Store:
         }
 
     def events(
-        self, after: int = 0, limit: int = 200, group_id: str | None = None
+        self,
+        after: int = 0,
+        limit: int = 200,
+        group_id: str | None = None,
+        exclude: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
+        """Events after ``after``, oldest first; ``exclude`` leaves out types."""
         rows = self._all(
             "SELECT seq, group_id, type, data, at, event_id FROM events WHERE seq > ? "
-            "AND (? IS NULL OR group_id = ?) ORDER BY seq LIMIT ?",
+            "AND (? IS NULL OR group_id = ?) "
+            "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq LIMIT ?",
             after,
             group_id,
             group_id,
+            json.dumps(list(exclude)),
             limit,
         )
         return [self._event(r) for r in rows]

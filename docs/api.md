@@ -410,9 +410,11 @@ Response:
     "group_id": str,
     "direction": str,
     "sender": str,
+    "instance": str,
     "msg_id": str,
     "kind": str,
     "size": int,
+    "task_id": str | null,
     "created_at": int,
     "expires_at": int
   }]
@@ -433,13 +435,17 @@ Response:
   "group_id": str,
   "direction": str,
   "sender": str,
+  "instance": str,
   "msg_id": str,
   "kind": str,
   "size": int,
+  "task_id": str | null,
   "created_at": int,
   "expires_at": int,
   "untrusted": bool,
   "to": [str] | null,
+  "addressee": [str] | null,
+  "reply_to": [str] | null,
   "body": object
 }
 ```
@@ -658,7 +664,7 @@ Response:
 
 ### `GET /v0/events`
 
-Daemon events in order, at most 200 per call. With `Accept: text/event-stream` it is instead a Server-Sent Events stream of messages and events from a durable feed (needs `daemon.default_adapter = "sse"`, else `409 no_sse_adapter`): each frame has `id` (the feed sequence number), `event` and one line of JSON `data`, in the payload shape of the webhook adapter. Send `Last-Event-ID` to resume after that id, also after a daemon restart; without it the stream starts live.
+Daemon events in order, at most 200 per call. The agent token doesn't see the safety policy's events (`message_held`, `held_expired`, `repeated_violations`): they would tell the agent, and so a peer, what the policy did. With `Accept: text/event-stream` it is instead a Server-Sent Events stream of messages and events from a durable feed (needs `daemon.default_adapter = "sse"`, else `409 no_sse_adapter`): each frame has `id` (the feed sequence number), `event` and one line of JSON `data`, in the payload shape of the webhook adapter. Send `Last-Event-ID` to resume after that id, also after a daemon restart; without it the stream starts live.
 
 Accepts the api token or the human token.
 
