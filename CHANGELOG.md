@@ -34,6 +34,16 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`rate_limited`). Past 10 per door per minute, or when the owner's queue
   is full, a knock is dropped but still answered `accepted`. There are no
   delivery receipts and no reject frame.
+- Protocol: discovery (ADR-006). SPEC gains signed listings, a closed A2A
+  AgentCard profile carrying the `e2e` extension
+  (`https://yggdrasill.network/ext/agentconnect/e2e/v0`) and one `EdDSA`
+  JWS by the identity key (§13.1); directories with operator-signed
+  listing tokens, token revocations, signed withdrawals, the owner
+  `/.well-known/agentconnect.json` file and its states, and the cache and
+  mirror rules (§13.2); doors and sealed, signed knocks that become new
+  two-member groups on human approval only (§6.6); the `knock` envelope
+  and frame, `POST`/`DELETE /v0/doors` and `door_not_open` (§7.1, §8); and
+  the new threat-model rows (§12).
 - Linux arm64 and macOS arm64 support. CI runs the fast tier on both and
   builds the relay container image for `linux/amd64` and `linux/arm64`.
   Releases add an aarch64 manylinux 2.28 `agentconnect-core` wheel, an
