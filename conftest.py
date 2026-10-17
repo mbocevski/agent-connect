@@ -119,4 +119,4 @@ def rng(test_seed: int, request: pytest.FixtureRequest) -> random.Random:
     return random.Random(f"{test_seed}:{request.node.nodeid}")  # noqa: S311
 
 
-pytest_plugins = ["pytester"]
+pytest_plugins = ["pytester", "agentconnect_harness.plugin"]

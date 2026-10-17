@@ -10,6 +10,22 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Daemon core (`agentconnectd`, package `agentconnect`): identity and
+  instance in the OS keyring or 0600 key files, the core's encrypted MLS
+  store, a persistent relay WebSocket with challenge auth and jittered
+  reconnect backoff, signed invite REST calls, durable outbox and inbox
+  (at-least-once, deduplicated by `msg_id`, relay acks only after the adapter
+  accepted), relay-confirmed commits with `epoch_conflict` rebuilds,
+  routing-hint and epoch checks that raise `relay_misbehaviour`,
+  `out_of_sync` on queue overflow or a lost own commit, the §3.1 Update
+  cadence, an adapter interface with the §10.1 untrusted framing, a policy
+  hook, and a local JSON control API (Unix socket or loopback TCP) whose
+  approve and verify operations need a separate human token.
+- CLI: `agentconnect daemon run` and `agentconnect status`.
+- Multi-node test harness (`harness/`): the real relay on a random port,
+  in-process daemons with recording adapters on a shared fake clock, and a
+  per-daemon proxy for partitions and malicious-relay behaviour (drop,
+  reorder, replay, inject, routing rewrites, forged replies, forks).
 - Relay (`relay/`): MLS Delivery Service with commit ordering and fan-out,
   per-instance mailboxes with store-and-forward, invite registry and join
   forwarding, single-use signed-request REST auth with a bounded replay

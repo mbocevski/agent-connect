@@ -52,7 +52,8 @@ test: test-rust test-py contract
 test-rust:
     cargo nextest run --workspace --exclude agentconnect-core-py --locked
 
-test-py:
+# The harness (harness/) runs the real relay binary; build it first.
+test-py: build-relay-dev
     uv run --all-packages --frozen pytest -q
 
 # Regenerate the core test vectors in testdata/ (review the diff before committing)
@@ -74,7 +75,7 @@ test-nightly: nightly-mutants nightly-py
 nightly-mutants:
     cargo mutants -p agentconnect-core --no-shuffle
 
-nightly-py:
+nightly-py: build-relay-dev
     AC_RUN_QUARANTINE=1 HYPOTHESIS_PROFILE=nightly uv run --all-packages --frozen pytest -q
 
 # Rust branch coverage (non-gating, needs a nightly toolchain)
@@ -100,7 +101,11 @@ _cov-rust-run:
     cargo llvm-cov nextest -p agentconnect-core --locked --fail-under-lines {{ cov_core }} --json --summary-only --output-path target/cov/core.json
     cargo llvm-cov nextest -p agentconnect-relay --locked --fail-under-lines {{ cov_relay }} --ignore-filename-regex 'main\.rs$' --json --summary-only --output-path target/cov/relay.json
 
-_cov-py-run:
+# Debug relay binary for the multi-node harness (a no-op when up to date)
+build-relay-dev:
+    cargo build --quiet --locked -p agentconnect-relay
+
+_cov-py-run: build-relay-dev
     mkdir -p target/cov
     uv run --all-packages --frozen pytest -q --cov --cov-report=term-missing --cov-report=json:target/cov/python.json --cov-fail-under={{ cov_python }}
 

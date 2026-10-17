@@ -5,7 +5,14 @@ description = "AgentConnect daemon (agentconnectd) and CLI"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["agentconnect-core", "typer>=0.27.3"]
+dependencies = [
+    "agentconnect-core",
+    "httpx>=0.28.1",
+    "keyring>=25.7.0",
+    "structlog>=26.1.0",
+    "typer>=0.27.3",
+    "websockets>=17.2",
+]
 
 [project.scripts]
 agentconnect = "agentconnect.cli:app"

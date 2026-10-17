@@ -1,9 +1,10 @@
+import asyncio
 import threading
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from agentconnect.clock import DEFAULT_FAKE_START, Clock, FakeClock, SystemClock
+from agentconnect.clock import DEFAULT_FAKE_START, Clock, FakeClock, SystemClock, unix_seconds
 
 
 def test_system_clock_satisfies_protocol_and_is_recent() -> None:
@@ -45,6 +46,43 @@ def test_other_timezones_normalise_to_utc() -> None:
     clock = FakeClock(datetime(2025, 1, 1, 1, tzinfo=timezone(timedelta(hours=1))))
     assert clock.now() == DEFAULT_FAKE_START
     assert clock.now().tzinfo is UTC
+
+
+async def test_fake_sleep_wakes_only_when_time_passes(fake_clock: FakeClock) -> None:
+    done: list[str] = []
+
+    async def nap(name: str, secs: float) -> None:
+        await fake_clock.sleep(secs)
+        done.append(name)
+
+    tasks = [asyncio.ensure_future(nap("short", 1)), asyncio.ensure_future(nap("long", 10))]
+    await asyncio.sleep(0)
+    assert fake_clock.sleepers == 2
+    fake_clock.advance(0.5)
+    await asyncio.sleep(0)
+    assert done == []
+    fake_clock.advance(0.5)
+    await tasks[0]
+    assert done == ["short"]
+    fake_clock.set(DEFAULT_FAKE_START + timedelta(hours=1))
+    await tasks[1]
+    assert done == ["short", "long"]
+    assert fake_clock.sleepers == 0
+    await fake_clock.sleep(0)  # returns at once
+
+
+async def test_cancelled_sleep_is_unregistered(fake_clock: FakeClock) -> None:
+    task = asyncio.ensure_future(fake_clock.sleep(5))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert fake_clock.sleepers == 0
+
+
+async def test_system_sleep_and_unix_seconds() -> None:
+    await SystemClock().sleep(0)
+    assert unix_seconds(FakeClock()) == 1_735_689_600
 
 
 def test_fake_clock_is_thread_safe() -> None:

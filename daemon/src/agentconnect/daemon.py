@@ -1,0 +1,1412 @@
+"""``agentconnectd``: identity, MLS state, relay link, queues and adapters.
+
+Three workers run on one event loop:
+
+* **inbound**: takes relay frames in order, runs them through the core and
+  records the outcome in the inbox (dedup by ``(sender, msg_id)``);
+* **outbox**: sends queued work in order (group creation, joins,
+  application messages, commits, proposals, Welcomes). Because there is
+  one outbox, local commits are serialised;
+* **delivery**: hands pending inbox rows to the adapter and acks the relay
+  frame only once the adapter accepted it.
+
+Commit handling follows SPEC §8.3 and the core's semantics exactly: a
+commit is sent under its ``msg_id`` and merged on ``accepted`` (or when the
+core recognises its exact bytes in the fan-out); on ``epoch_conflict`` it is
+discarded, the winning commit is processed, and the intent is rebuilt.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import random
+import secrets
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
+from typing import Any
+
+import agentconnect_core as ac
+from agentconnect import log
+from agentconnect.adapter import (
+    Adapter,
+    Delivery,
+    DeliveryResult,
+    Event,
+    GroupView,
+    PassThroughPolicy,
+    PolicyDecision,
+    PolicyHook,
+    Sender,
+)
+from agentconnect.backoff import Backoff
+from agentconnect.clock import Clock, SystemClock, unix_seconds
+from agentconnect.config import Config
+from agentconnect.identity import (
+    Seeded,
+    load_db_key,
+    load_identity,
+    load_instance,
+    open_core_client,
+)
+from agentconnect.keystore import Keystore, open_keystore, private_dir
+from agentconnect.relay import NotConnectedError, RelayError, RelayLink, RelayRest, b64, unb64
+from agentconnect.store import GroupRow, OutboxRow, Store
+
+LOG = log.get("agentconnect.daemon")
+
+UPDATE_AFTER_SECS = 24 * 3600  # SPEC §3.1 update cadence
+UPDATE_AFTER_MESSAGES = 1000
+APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
+REBUILD_WAIT_SECS = 60.0
+MAX_COMMIT_ATTEMPTS = 8
+INVITE_WARNING = (
+    "This invite was already used or revoked. If you didn't expect this, "
+    "the link may have been intercepted. Tell the sender."
+)
+
+
+class DaemonError(Exception):
+    """A local operation failed; ``code`` is a short machine-readable reason."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def canonical(obj: Any) -> bytes:
+    """JCS for the JSON values the protocol uses (no floats)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def gid_b64(gid: bytes) -> str:
+    return b64(gid)
+
+
+def new_msg_id() -> str:
+    return b64(secrets.token_bytes(16))
+
+
+def _core_error(e: Exception) -> str:
+    text = str(e)
+    if "re-sync required" in text:
+        return "own_commit_lost"
+    if text.startswith("unauthorized commit"):
+        return "unauthorized_commit"
+    return "rejected"
+
+
+def addressed_to_me(
+    floor: str, inner: dict[str, Any], me: str, my_instance: str, moderator: str | None
+) -> bool:
+    """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?"""
+    to = inner.get("to") or ["*"]
+    if floor == "free":
+        hit = True
+    elif floor == "mention":
+        hit = me in to or (to == ["*"] and inner.get("origin") == "human")
+    else:  # moderated: floor control is a later task; only the moderator
+        hit = moderator == me
+    if not hit:
+        return False
+    body = inner.get("body")
+    metadata = body.get("metadata") if isinstance(body, dict) else None
+    target = metadata.get("instance") if isinstance(metadata, dict) else None
+    return target in (None, my_instance)
+
+
+@dataclass(frozen=True)
+class Options:
+    """Test seams; production uses the defaults."""
+
+    testing: Seeded | None = None
+    backoff_rng: random.Random | None = None
+    keyring_backend: Any = None
+
+
+class Daemon:
+    """One daemon: one identity, one instance, one relay connection."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        config: Config,
+        adapters: Iterable[Adapter] = (),
+        *,
+        clock: Clock | None = None,
+        keystore: Keystore | None = None,
+        policy: PolicyHook | None = None,
+        options: Options | None = None,
+    ) -> None:
+        self.config = config
+        self.clock: Clock = clock or SystemClock()
+        self.adapters: dict[str, Adapter] = {a.name: a for a in adapters}
+        self.policy: PolicyHook = policy or PassThroughPolicy()
+        self.options = options or Options()
+        private_dir(config.data_dir)
+        self.keystore = keystore or open_keystore(
+            config.keystore, config.data_dir, self.options.keyring_backend
+        )
+        self.identity = load_identity(self.keystore, self.options.testing)
+        self.instance = load_instance(self.keystore, self.identity, self.options.testing)
+        self.store = Store(config.data_dir / "daemon.sqlite3")
+        self.client: ac.Client = open_core_client(
+            config.data_dir / "mls.sqlite3",
+            self.instance,
+            load_db_key(self.keystore),
+            self.options.testing,
+        )
+        self.link = RelayLink(
+            config.relay_ws,
+            config.relay_host,
+            self.instance,
+            self.clock,
+            self._on_frame,
+            backoff=Backoff(rng=self.options.backoff_rng),
+            on_connected=self._on_connected,
+            on_state=self._pulse,
+        )
+        self.rest = RelayRest(config.relay_http, config.relay_host, self.instance, self.clock)
+        self._frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._outbox_wake = asyncio.Event()
+        self._delivery_wake = asyncio.Event()
+        self._changed = asyncio.Event()
+        self._parked: dict[str, list[dict[str, Any]]] = {}
+        self._leaving: set[str] = set()
+        self._proposed_leaves: dict[str, set[str]] = {}
+        self._tasks: list[asyncio.Task[None]] = []
+        self._delivery_backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
+        self.running = False
+
+    # -- lifecycle ------------------------------------------------------------
+
+    @property
+    def me(self) -> str:
+        return self.identity.id
+
+    @property
+    def mailbox(self) -> str:
+        return self.instance.mailbox_id
+
+    def now(self) -> int:
+        return unix_seconds(self.clock)
+
+    async def start(self) -> None:
+        self._recover()
+        loop = asyncio.get_running_loop()
+        for coro in (self._inbound(), self._outbox(), self._delivery(), self.link.run()):
+            self._tasks.append(loop.create_task(coro))
+        for adapter in self.adapters.values():
+            await adapter.on_outbound(self.adapter_send)
+        self.running = True
+        LOG.info("daemon_started", identity=log.hid(self.me), keystore=self.keystore.kind)
+
+    async def stop(self) -> None:
+        """Stop the workers and close the databases (also used to simulate a
+        crash in tests: nothing is flushed that isn't already durable)."""
+        self.running = False
+        await self.link.stop()
+        for task in self._tasks:
+            task.cancel()
+        for task in self._tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._tasks.clear()
+        self.store.close()
+        # Drop the core client so its SQLite connections close.
+        del self.client
+        LOG.info("daemon_stopped")
+
+    def _recover(self) -> None:
+        """After a restart: a commit built but never persisted for sending
+        was never sent, so it is safe to discard (SPEC §8.3)."""
+        built = {
+            row.group_id
+            for row in self.store.outbox()
+            if row.kind == "commit" and "env" in row.payload
+        }
+        for group in self.store.groups():
+            if group.status != "active":
+                continue
+            gid = unb64(group.group_id)
+            with contextlib.suppress(ac.AgentConnectError):
+                if self.client.has_pending_commit(gid) and group.group_id not in built:
+                    self.client.discard_pending_commit(gid)
+                    LOG.info("discarded_unsent_commit", group=log.hid(group.group_id))
+            if self._leaving_state(group):
+                self._leaving.add(group.group_id)
+
+    def _leaving_state(self, group: GroupRow) -> bool:
+        return self.store.kv_get(f"leaving/{group.group_id}") == "1"
+
+    def _pulse(self) -> None:
+        self._changed.set()
+
+    async def _sleep(self, seconds: float) -> None:
+        """Sleep on the daemon clock, announcing it (tests advance time once
+        the daemon is waiting)."""
+        nap = asyncio.ensure_future(self.clock.sleep(seconds))
+        await asyncio.sleep(0)
+        self._pulse()
+        await nap
+
+    async def wait_until(self, predicate: Callable[[], bool], within: float = 5.0) -> None:
+        """Wait (with a real-time guard) until ``predicate`` holds."""
+
+        async def loop() -> None:
+            while not predicate():
+                self._changed.clear()
+                await self._changed.wait()
+
+        await asyncio.wait_for(loop(), within)
+
+    async def _on_connected(self) -> None:
+        self._outbox_wake.set()
+        self._delivery_wake.set()
+        self._pulse()
+
+    async def _on_frame(self, frame: dict[str, Any]) -> None:
+        await self._frames.put(frame)
+
+    # -- events -------------------------------------------------------------
+
+    def _view(self, group_id: str) -> GroupView | None:
+        g = self.store.group(group_id)
+        if g is None:
+            return None
+        return GroupView(g.group_id, g.name, g.purpose, g.epoch, str(g.policy.get("floor", "free")))
+
+    def _adapter_for(self, group_id: str | None) -> Adapter | None:
+        name = self.config.default_adapter
+        if group_id is not None:
+            g = self.store.group(group_id)
+            if g is not None:
+                name = g.adapter
+        return self.adapters.get(name) or next(iter(self.adapters.values()), None)
+
+    async def emit(self, group_id: str | None, kind: str, **data: Any) -> None:
+        """Record an event for the local API and tell the group's adapter."""
+        self.store.add_event(group_id, kind, data, self.now())
+        LOG.info("event", type=kind, group=log.hid(group_id))
+        adapter = self._adapter_for(group_id)
+        if adapter is not None:
+            view = None if group_id is None else self._view(group_id)
+            try:
+                await adapter.on_event(view, Event(kind, group_id, data))
+            except Exception:
+                LOG.warning("adapter_event_failed", type=kind)
+        self._pulse()
+
+    async def mark_out_of_sync(self, group_id: str, reason: str, **data: Any) -> None:
+        self.store.update_group(group_id, out_of_sync=True, out_of_sync_reason=reason)
+        await self.emit(group_id, "out_of_sync", reason=reason, **data)
+
+    # -- group state ----------------------------------------------------------
+
+    def _sas(self, gid: bytes) -> dict[str, Any]:
+        sas = self.client.sas(gid)
+        return {"decimal": sas.decimal, "emoji_indices": sas.emoji_indices}
+
+    def _refresh(self, group_id: str) -> tuple[set[str], set[str]]:
+        """Re-read members, roles, policy and epoch from the core."""
+        gid = unb64(group_id)
+        policy = json.loads(self.client.policy(gid))
+        admins = set(policy.get("admins", []))
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for m in self.client.members(gid):
+            grouped.setdefault(m["identity"], []).append(
+                {
+                    "instance_id": m["instance_id_hex"],
+                    "mailbox_id": m["mailbox_id"],
+                    "leaf_index": m["leaf_index"],
+                }
+            )
+        members = {
+            identity: (
+                "owner"
+                if identity == policy["owner"]
+                else "admin"
+                if identity in admins
+                else "member",
+                instances,
+            )
+            for identity, instances in grouped.items()
+        }
+        joined, gone = self.store.set_members(group_id, members)
+        self.store.update_group(group_id, policy=policy, epoch=self.client.epoch(gid))
+        return joined, gone
+
+    def _trust_state(self, group_id: str) -> dict[str, Any]:
+        members = self.store.members(group_id)
+        others = [m for m in members if m.identity != self.me]
+        verified = sum(1 for m in others if m.verified)
+        return {
+            "self": "verified" if others and verified == len(others) else "unverified",
+            "verified_members": verified,
+            "members": len(members),
+        }
+
+    def _display_name(self, group_id: str, identity: str) -> str | None:
+        for m in self.store.members(group_id):
+            if m.identity == identity:
+                return m.display_name
+        return None
+
+    async def _after_commit(
+        self, group_id: str, summary: dict[str, Any], env: dict[str, Any] | None, own: bool
+    ) -> None:
+        """Bookkeeping after any merged commit, own or another member's."""
+        if env is not None:
+            hinted = env.get("routing") or {}
+            expected = summary["routing"]
+            if sorted(hinted.get("add", [])) != sorted(expected["add"]) or sorted(
+                hinted.get("remove", [])
+            ) != sorted(expected["remove"]):
+                await self.emit(
+                    group_id,
+                    "relay_misbehaviour",
+                    reason="routing_mismatch",
+                    epoch=summary["epoch"],
+                )
+            if env.get("epoch") is not None and env["epoch"] + 1 != summary["epoch"]:
+                await self.emit(
+                    group_id, "relay_misbehaviour", reason="epoch_mismatch", epoch=summary["epoch"]
+                )
+        joined, gone = self._refresh(group_id)
+        if own:
+            self.store.update_group(group_id, last_own_commit_at=self.now(), msgs_since_commit=0)
+        left = self._proposed_leaves.pop(group_id, set())
+        for identity in sorted(joined):
+            await self.emit(group_id, "member_joined", identity=identity)
+            await self._send_card(group_id, [identity])
+        for identity in sorted(gone):
+            kind = "member_left" if identity in left else "member_removed"
+            await self.emit(group_id, kind, identity=identity)
+        if summary.get("policy_changed"):
+            await self.emit(
+                group_id, "policy_changed", policy=json.loads(self.client.policy(unb64(group_id)))
+            )
+        trust = self._trust_state(group_id)
+        await self.emit(
+            group_id,
+            "epoch_changed",
+            epoch=summary["epoch"],
+            sas=self._sas(unb64(group_id)),
+            verified=f"{trust['verified_members']} of {trust['members'] - 1} verified",
+        )
+        if group_id in self._leaving:
+            self._enqueue("proposal", group_id, {})
+
+    async def _gone(self, group_id: str, kind: str) -> None:
+        """This instance is no longer in the group (removed or left)."""
+        gid = unb64(group_id)
+        with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+            self.client.delete_group(gid)
+        self.store.update_group(group_id, status=kind)
+        self.store.delete_group_data(group_id)
+        self.store.kv_set(f"leaving/{group_id}", "0")
+        self._leaving.discard(group_id)
+        await self.emit(group_id, kind)
+
+    # -- inbound --------------------------------------------------------------
+
+    async def _inbound(self) -> None:
+        while True:
+            frame = await self._frames.get()
+            try:
+                await self._handle_frame(frame)
+            except Exception:
+                LOG.exception("inbound_failed", t=frame.get("t"))
+            self._pulse()
+
+    async def _ack(self, msg_id: str) -> None:
+        with contextlib.suppress(NotConnectedError):
+            await self.link.send({"t": "ack", "msg_id": msg_id})
+
+    async def _handle_frame(self, frame: dict[str, Any]) -> None:
+        t = frame.get("t")
+        if t == "deliver" and isinstance(frame.get("env"), dict):
+            await self._handle_env(frame["env"])
+        elif t == "queue_overflow":
+            group_id = str(frame.get("group_id", ""))
+            if self.store.group(group_id) is not None:
+                await self.mark_out_of_sync(
+                    group_id, "queue_overflow", msg_id=frame.get("msg_id"), epoch=frame.get("epoch")
+                )
+            await self._ack(str(frame.get("msg_id", "")))
+        else:
+            LOG.info("relay_frame_ignored", t=t, code=frame.get("code"))
+
+    async def _handle_env(self, env: dict[str, Any]) -> None:
+        sender, msg_id, kind = str(env.get("sender")), str(env.get("msg_id")), env.get("kind")
+        if env.get("v") != 0:
+            await self._ack(msg_id)
+            return
+        state = self.store.inbox_state(sender, msg_id)
+        if state is not None:
+            # A replay or a redelivery after reconnect. Pending rows belong to
+            # the delivery worker, which acks them once the adapter has them.
+            if state != "pending":
+                await self._ack(msg_id)
+            LOG.debug("duplicate_ignored", msg=log.hid(msg_id))
+            return
+        group_id = env.get("group_id")
+        now = self.now()
+        if kind == "join_request":
+            await self._on_join_request(env)
+            self.store.record_inbox(sender, msg_id, None, "done", now)
+        elif kind == "welcome_wrapped":
+            joined = await self._on_welcome(env)
+            self.store.record_inbox(sender, msg_id, group_id, "done", now)
+            await self._ack(msg_id)
+            if joined is not None:
+                for parked in self._parked.pop(joined, []):
+                    await self._handle_env(parked)
+            return
+        elif kind in ("application", "commit", "proposal") and isinstance(group_id, str):
+            group = self.store.group(group_id)
+            if group is None or group.status != "active":
+                if group is None and self.store.pending_joins():
+                    # Sent after our Add but before the Welcome reached us.
+                    self._parked.setdefault(group_id, []).append(env)
+                    return
+                self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
+            else:
+                await self._on_group_message(group, env)
+                return
+        else:
+            self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
+        await self._ack(msg_id)
+
+    async def _on_group_message(self, group: GroupRow, env: dict[str, Any]) -> None:
+        group_id, sender, msg_id = group.group_id, str(env["sender"]), str(env["msg_id"])
+        gid = unb64(group_id)
+        now = self.now()
+        try:
+            event = self.client.process(gid, unb64(str(env.get("ct", ""))))
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            reason = _core_error(e)
+            self.store.record_inbox(sender, msg_id, group_id, "failed", now)
+            await self._ack(msg_id)
+            LOG.info(
+                "message_rejected",
+                group=log.hid(group_id),
+                kind=env.get("kind"),
+                reason=reason,
+                # Core errors never carry key material or plaintext.
+                detail=str(e)[:100],
+            )
+            if reason == "own_commit_lost":
+                await self.mark_out_of_sync(group_id, "own_commit_lost")
+            elif reason == "unauthorized_commit":
+                await self.emit(group_id, "unauthorized_commit", detail=str(e))
+            return
+        etype = event["type"]
+        if etype == "application":
+            if event["epoch"] != env.get("epoch"):
+                # SPEC §7.1: envelope and MLS epochs must agree.
+                self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
+                await self._ack(msg_id)
+                await self.emit(group_id, "relay_misbehaviour", reason="epoch_mismatch")
+                return
+            self.store.bump_messages(group_id)
+            delivery = self._make_delivery(group, msg_id, event)
+            if delivery is None:
+                self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
+                await self._ack(msg_id)
+                return
+            self.store.record_inbox(
+                sender, msg_id, group_id, "pending", now, delivery=delivery.to_json()
+            )
+            self._delivery_wake.set()
+            return
+        if etype in ("commit", "own_commit_confirmed"):
+            await self._after_commit(group_id, event, env, own=etype == "own_commit_confirmed")
+        elif etype == "removed":
+            await self._gone(group_id, "left" if group_id in self._leaving else "removed")
+        elif etype == "leave_proposed":
+            await self._on_leave_proposed(group_id, event["member"])
+        self.store.record_inbox(sender, msg_id, group_id, "done", now)
+        await self._ack(msg_id)
+
+    def _make_delivery(
+        self, group: GroupRow, msg_id: str, event: dict[str, Any]
+    ) -> Delivery | None:
+        try:
+            inner = json.loads(event["plaintext"])
+        except ValueError:
+            return None
+        if not isinstance(inner, dict) or not isinstance(inner.get("kind"), str):
+            return None
+        sender = event["sender"]
+        identity = sender["identity"]
+        body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
+        if inner["kind"] == "a2a.agent_card" and identity != self.me:
+            self.store.put_card(group.group_id, identity, body)
+            name = body.get("name")
+            if isinstance(name, str) and name:
+                self.store.set_display_name(group.group_id, identity, name[:80])
+        verified = any(
+            m.identity == identity and m.verified for m in self.store.members(group.group_id)
+        )
+        policy = group.policy
+        to = inner.get("to") if isinstance(inner.get("to"), list) else ["*"]
+        hop = inner.get("hop") if isinstance(inner.get("hop"), int) else 0
+        max_turns = int((policy.get("loop_guard") or {}).get("max_agent_turns", 20))
+        addressed = hop <= max_turns and addressed_to_me(
+            str(policy.get("floor", "free")),
+            inner,
+            self.me,
+            self.instance.instance_id_hex,
+            policy.get("floor_moderator"),
+        )
+        return Delivery(
+            group_id=group.group_id,
+            msg_id=msg_id,
+            kind=inner["kind"],
+            body=body,
+            sender=Sender(
+                identity,
+                sender["instance_id_hex"],
+                self._display_name(group.group_id, identity),
+                verified,
+            ),
+            to=[str(x) for x in to],
+            addressed_to_me=addressed,
+            scope=group.purpose,
+            trust_state=self._trust_state(group.group_id),
+            origin=str(inner.get("origin", "agent")),
+            hop=hop,
+            inner=inner,
+        )
+
+    async def _on_leave_proposed(self, group_id: str, member: dict[str, Any]) -> None:
+        self._proposed_leaves.setdefault(group_id, set()).add(member["identity"])
+        # One designated member commits pending leaves (the lowest leaf that
+        # isn't leaving), so members don't race each other into conflicts.
+        leaving = self._proposed_leaves[group_id]
+        candidates = sorted(
+            (m for m in self.client.members(unb64(group_id)) if m["identity"] not in leaving),
+            key=lambda m: m["leaf_index"],
+        )
+        if candidates and candidates[0]["mailbox_id"] == self.mailbox:
+            self._enqueue("commit", group_id, {"intent": {"type": "proposals"}})
+
+    # -- joins ----------------------------------------------------------------
+
+    def _invite_object(self, invite: dict[str, Any]) -> ac.Invite | None:
+        secret = self.keystore.get(f"invite/{invite['invite_id']}")
+        if secret is None:
+            return None
+        return ac.Invite.from_parts(
+            self.config.relay_host, unb64(invite["invite_id"]), secret, invite["expires_at"]
+        )
+
+    async def _on_join_request(self, env: dict[str, Any]) -> None:
+        raw = unb64(str(env.get("ct", "")))
+        try:
+            invite_id = str(json.loads(raw)["invite_id"])
+        except (ValueError, KeyError, TypeError):
+            LOG.info("join_request_malformed")
+            return
+        invite = self.store.invite(invite_id)
+        obj = None if invite is None or invite["status"] != "open" else self._invite_object(invite)
+        if invite is None or obj is None:
+            LOG.info("join_request_unknown_invite", invite=log.hid(invite_id))
+            return
+        try:
+            verified = self.client.verify_join_request(raw, obj)
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            LOG.info("join_request_rejected", invite=log.hid(invite_id), reason=str(e)[:60])
+            return
+        request_id = str(env["msg_id"])
+        self.store.add_approval(
+            {
+                "request_id": request_id,
+                "invite_id": invite_id,
+                "group_id": invite["group_id"],
+                "request": b64(raw),
+                "identity": verified.identity,
+                "display_name": verified.display_name,
+                "mailbox_id": verified.mailbox_id,
+                "received_at": self.now(),
+            }
+        )
+        await self.emit(
+            invite["group_id"],
+            "pending_approval",
+            request_id=request_id,
+            identity=verified.identity,
+            display_name=verified.display_name,
+            display_name_verified=False,
+        )
+        if self.config.auto_approve:
+            self.approve(request_id)
+
+    async def _on_welcome(self, env: dict[str, Any]) -> str | None:
+        wrapped = unb64(str(env.get("ct", "")))
+        for pending in self.store.pending_joins():
+            invite_id = pending["invite_id"]
+            url = self.keystore.get(f"join/{invite_id}")
+            if url is None:
+                continue
+            link = ac.parse_invite_url(url.decode())
+            try:
+                ac.unwrap_welcome(link.invite_id, link.secret_bytes(), wrapped)
+            except ac.AgentConnectError:
+                continue
+            try:
+                gid = self.client.join(link, canonical(pending["meta"]), wrapped)
+            except (ac.AgentConnectError, ac.CoreError) as e:
+                # The KeyPackage is used up; a retry needs a new JoinRequest.
+                self.store.finish_join(invite_id, "failed")
+                self.keystore.delete(f"join/{invite_id}")
+                await self.emit(None, "join_failed", invite_id=invite_id, reason=str(e)[:80])
+                return None
+            group_id = gid_b64(gid)
+            meta = json.loads(self.client.meta(gid))
+            self.store.add_group(
+                GroupRow(
+                    group_id=group_id,
+                    name=meta["name"],
+                    purpose=meta["purpose"],
+                    policy={},
+                    adapter=self.config.default_adapter,
+                    status="active",
+                    out_of_sync=False,
+                    out_of_sync_reason=None,
+                    epoch=self.client.epoch(gid),
+                    created_at=self.now(),
+                    last_own_commit_at=self.now(),
+                    msgs_since_commit=0,
+                )
+            )
+            self._refresh(group_id)
+            self.store.set_display_name(group_id, self.me, pending["display_name"])
+            self.store.finish_join(invite_id, "joined", group_id)
+            # SPEC §6.3: the invite secret goes once the join succeeded.
+            self.keystore.delete(f"join/{invite_id}")
+            await self.emit(group_id, "joined", invite_id=invite_id, sas=self._sas(gid))
+            await self._send_card(group_id, ["*"])
+            return group_id
+        LOG.info("welcome_unmatched")
+        return None
+
+    # -- delivery -------------------------------------------------------------
+
+    def _gated(self, group_id: str | None) -> bool:
+        """SPEC §10.4: hold deliveries until the human verified the epoch."""
+        if group_id is None:
+            return False
+        g = self.store.group(group_id)
+        if g is None or not g.policy.get("require_verified"):
+            return False
+        return bool(self._trust_state(group_id)["self"] != "verified")
+
+    async def _delivery(self) -> None:
+        while True:
+            self._delivery_wake.clear()
+            retry = False
+            for row in self.store.pending_deliveries():
+                if row.delivery is None or self._gated(row.group_id):
+                    continue
+                stored = Delivery.from_json(row.delivery)
+                # Trust can change between reception and delivery (a human
+                # verified a member meanwhile): frame with the current state.
+                members = {m.identity: m for m in self.store.members(stored.group_id)}
+                known = members.get(stored.sender.identity)
+                sender = replace(
+                    stored.sender,
+                    verified=known is not None and known.verified,
+                    display_name=stored.sender.display_name
+                    if known is None
+                    else known.display_name,
+                )
+                delivery = replace(
+                    stored, sender=sender, trust_state=self._trust_state(stored.group_id)
+                )
+                view = self._view(delivery.group_id)
+                adapter = self._adapter_for(delivery.group_id)
+                if view is None or adapter is None:
+                    continue
+                if self.policy.inbound(view, delivery) is PolicyDecision.DROP:
+                    self.store.set_inbox_state(row.seq, "dropped")
+                    await self._ack(row.msg_id)
+                    continue
+                try:
+                    result = await adapter.deliver(view, delivery.sender, delivery.to, delivery)
+                except Exception:
+                    LOG.warning("adapter_deliver_failed")
+                    result = DeliveryResult.RETRY
+                if result is DeliveryResult.ACK:
+                    self.store.set_inbox_state(row.seq, "done")
+                    self._delivery_backoff.reset()
+                    await self._ack(row.msg_id)
+                    self._pulse()
+                else:
+                    retry = True
+                    break
+            if retry:
+                await self._sleep(self._delivery_backoff.next())
+                continue
+            await self._delivery_wake.wait()
+
+    # -- outbox ---------------------------------------------------------------
+
+    def _enqueue(self, kind: str, group_id: str | None, payload: dict[str, Any]) -> int:
+        seq = self.store.enqueue(kind, group_id, payload, self.now())
+        self._outbox_wake.set()
+        return seq
+
+    async def _outbox(self) -> None:
+        while True:
+            row = self.store.next_outbox()
+            if row is None:
+                self._outbox_wake.clear()
+                await self._outbox_wake.wait()
+                continue
+            await self.link.wait_connected()
+            try:
+                state = await self._run_row(row)
+            except NotConnectedError:
+                continue
+            except Exception:
+                LOG.exception("outbox_failed", kind=row.kind)
+                state = "failed"
+            self.store.update_outbox(row.seq, state=state)
+            self._pulse()
+
+    async def _run_row(self, row: OutboxRow) -> str:
+        if row.kind == "frame":
+            return await self._run_frame(row)
+        group = self.store.group(row.group_id or "")
+        if group is None or group.status != "active":
+            return "failed"
+        if row.kind == "app":
+            return await self._run_app(row, group)
+        if row.kind == "commit":
+            return await self._run_commit(row, group)
+        if row.kind == "proposal":
+            return await self._run_proposal(row, group)
+        return "failed"
+
+    async def _request(self, frame: dict[str, Any], msg_id: str) -> dict[str, Any]:
+        return await self.link.request(frame, msg_id)
+
+    async def _run_frame(self, row: OutboxRow) -> str:
+        frame, msg_id = row.payload["frame"], row.payload["msg_id"]
+        try:
+            await self._request(frame, msg_id)
+        except RelayError as e:
+            LOG.info("relay_request_failed", t=frame.get("t"), code=e.code)
+            if frame.get("t") == "join":
+                invite_id = str(frame.get("invite_id"))
+                self.store.finish_join(invite_id, "failed")
+                self.keystore.delete(f"join/{invite_id}")
+                await self.emit(None, "join_failed", invite_id=invite_id, reason=e.code)
+            return "failed"
+        if frame.get("t") == "invite.consume":
+            invite = self.store.invite(str(frame["invite_id"]))
+            if invite is not None:
+                used = len(
+                    [
+                        a
+                        for a in self.store.approvals("approved")
+                        if a["invite_id"] == invite["invite_id"]
+                    ]
+                )
+                if used >= invite["max_uses"]:
+                    self.store.set_invite_status(invite["invite_id"], "exhausted")
+                    self.keystore.delete(f"invite/{invite['invite_id']}")
+        return "done"
+
+    def _update_due(self, group: GroupRow) -> bool:
+        return (
+            self.now() - group.last_own_commit_at >= UPDATE_AFTER_SECS
+            or group.msgs_since_commit >= UPDATE_AFTER_MESSAGES
+        )
+
+    async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:
+        if group.out_of_sync:
+            return "failed"
+        gid = unb64(group.group_id)
+        payload = dict(row.payload)
+        for _ in range(MAX_COMMIT_ATTEMPTS):
+            if "env" not in payload:
+                if self._update_due(group):
+                    # SPEC §3.1: renew keys just before the next send.
+                    group = await self._cadence_update(row, payload, group)
+                inner = canonical(payload["inner"])
+                payload["env"] = {
+                    "v": 0,
+                    "kind": "application",
+                    "group_id": group.group_id,
+                    "epoch": self.client.epoch(gid),
+                    "msg_id": payload["msg_id"],
+                    "sender": self.mailbox,
+                    "ct": b64(self.client.seal(gid, inner)),
+                }
+                self.store.update_outbox(row.seq, payload=payload)
+            try:
+                await self._request({"t": "send", "env": payload["env"]}, payload["msg_id"])
+            except RelayError as e:
+                if e.code == "epoch_conflict":
+                    payload.pop("env")  # too old an epoch: seal again
+                    continue
+                if e.code == "rate_limited":
+                    await self._sleep(1.0)
+                    continue
+                LOG.info("send_failed", code=e.code)
+                return "failed"
+            self.store.bump_messages(group.group_id)
+            return "done"
+        return "failed"
+
+    async def _run_proposal(self, row: OutboxRow, group: GroupRow) -> str:
+        gid = unb64(group.group_id)
+        payload = dict(row.payload)
+        if "env" not in payload:
+            try:
+                proposal = self.client.propose_leave(gid)
+            except ac.AgentConnectError as e:
+                LOG.info("leave_not_possible", reason=str(e)[:60])
+                return "failed"
+            payload["env"] = {
+                "v": 0,
+                "kind": "proposal",
+                "group_id": group.group_id,
+                "epoch": self.client.epoch(gid),
+                "msg_id": new_msg_id(),
+                "sender": self.mailbox,
+                "ct": b64(proposal),
+            }
+            self.store.update_outbox(row.seq, payload=payload)
+        try:
+            await self._request({"t": "send", "env": payload["env"]}, str(payload["env"]["msg_id"]))
+        except RelayError as e:
+            # A stale proposal: the next commit we process triggers a resend.
+            LOG.info("proposal_failed", code=e.code)
+            return "failed"
+        return "done"
+
+    def _build(self, gid: bytes, intent: dict[str, Any]) -> dict[str, Any]:
+        t = intent["type"]
+        if t == "update":
+            return self.client.update(gid)
+        if t == "proposals":
+            return self.client.commit_pending_proposals(gid)
+        if t == "remove":
+            return self.client.remove(gid, intent["identity"])
+        if t == "policy":
+            return self.client.set_policy(gid, canonical(intent["policy"]))
+        if t == "add":
+            approval = self.store.approval(intent["request_id"])
+            invite = None if approval is None else self.store.invite(approval["invite_id"])
+            obj = None if invite is None else self._invite_object(invite)
+            if approval is None or obj is None:
+                msg = "approval or invite no longer available"
+                raise DaemonError("gone", msg)
+            verified = self.client.verify_join_request(unb64(approval["request"]), obj)
+            return self.client.add_member(gid, verified, obj)
+        msg = f"unknown commit intent {t}"
+        raise DaemonError("bad_intent", msg)
+
+    async def _cadence_update(
+        self, row: OutboxRow, payload: dict[str, Any], group: GroupRow
+    ) -> GroupRow:
+        """Run the cadence Update before an application send. The commit has
+        its own outbox row (remembered in the app row) so a reconnect or a
+        restart resumes the same commit instead of building a second one."""
+        seq = payload.get("update_row")
+        if seq is None:
+            seq = self.store.enqueue(
+                "commit", group.group_id, {"intent": {"type": "update"}}, self.now()
+            )
+            payload["update_row"] = seq
+            self.store.update_outbox(row.seq, payload=payload)
+        update = self.store.outbox_row(int(seq))
+        if update is not None and update.state == "queued":
+            state = await self._run_commit(update, group)
+            self.store.update_outbox(update.seq, state=state)
+        payload.pop("update_row", None)
+        self.store.update_outbox(row.seq, payload=payload)
+        return self.store.group(group.group_id) or group
+
+    async def _run_commit(self, row: OutboxRow, group: GroupRow) -> str:
+        gid = unb64(group.group_id)
+        payload = dict(row.payload)
+        intent = payload["intent"]
+        for _ in range(MAX_COMMIT_ATTEMPTS):
+            current = self.store.group(group.group_id)
+            if current is None or current.status != "active" or current.out_of_sync:
+                return "failed"
+            if "env" not in payload:
+                try:
+                    out = self._build(gid, intent)
+                except (ac.AgentConnectError, DaemonError) as e:
+                    if "no pending proposals" not in str(e):
+                        LOG.info("commit_not_built", intent=intent["type"], reason=str(e)[:80])
+                    self._fail_intent(intent)
+                    return "failed"
+                payload["env"] = {
+                    "v": 0,
+                    "kind": "commit",
+                    "group_id": group.group_id,
+                    "epoch": out["epoch"],
+                    "msg_id": out["msg_id"],
+                    "sender": self.mailbox,
+                    "routing": out["routing"],
+                    "ct": b64(out["commit"]),
+                }
+                if out.get("welcome") is not None:
+                    payload["welcome"] = b64(out["welcome"])
+                self.store.update_outbox(row.seq, payload=payload)
+            env = payload["env"]
+            if not payload.get("confirmed"):
+                try:
+                    await self._request({"t": "send", "env": env}, str(env["msg_id"]))
+                except RelayError as e:
+                    with contextlib.suppress(ac.AgentConnectError):
+                        self.client.discard_pending_commit(gid)
+                    built_epoch = int(env["epoch"])
+                    payload.pop("env")
+                    payload.pop("welcome", None)
+                    self.store.update_outbox(row.seq, payload=payload)
+                    if e.code != "epoch_conflict":
+                        LOG.info("commit_rejected", code=e.code)
+                        self._fail_intent(intent)
+                        return "failed"
+                    LOG.info("epoch_conflict", group=log.hid(group.group_id))
+                    await self._await_epoch(group.group_id, built_epoch)
+                    continue
+                try:
+                    summary = self.client.confirm_pending_commit(gid, str(env["msg_id"]))
+                except ac.AgentConnectError:
+                    summary = None  # already merged from the fan-out echo
+                if summary is not None:
+                    await self._after_commit(group.group_id, summary, None, own=True)
+                payload["confirmed"] = True
+                self.store.update_outbox(row.seq, payload=payload)
+            if not payload.get("consume_queued"):
+                await self._commit_followups(row, group, intent, payload)
+            return "done"
+        self._fail_intent(intent)
+        return "failed"
+
+    async def _await_epoch(self, group_id: str, built_epoch: int) -> None:
+        """Wait until the winning commit has been processed (or give up after
+        a while and let the caller rebuild anyway)."""
+
+        def moved() -> bool:
+            g = self.store.group(group_id)
+            return g is None or g.status != "active" or g.out_of_sync or g.epoch > built_epoch
+
+        if moved():
+            return
+        waiter = asyncio.ensure_future(self.wait_until(moved, within=REBUILD_WAIT_SECS * 10))
+        timer = asyncio.ensure_future(self._sleep(REBUILD_WAIT_SECS))
+        await asyncio.wait({waiter, timer}, return_when=asyncio.FIRST_COMPLETED)
+        for t in (waiter, timer):
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await t
+
+    def _fail_intent(self, intent: dict[str, Any]) -> None:
+        if intent["type"] == "add":
+            self.store.set_approval_status(intent["request_id"], "failed")
+
+    async def _commit_followups(
+        self, row: OutboxRow, group: GroupRow, intent: dict[str, Any], payload: dict[str, Any]
+    ) -> None:
+        """After an Add is confirmed: send the Welcome, then consume the
+        invite. Each step is recorded in the row, so a retry after a dropped
+        connection neither sends a second Welcome nor consumes a second use."""
+        if intent["type"] != "add":
+            return
+        approval = self.store.approval(intent["request_id"])
+        if approval is None:
+            return
+        if "welcome" in payload and not payload.get("welcome_sent"):
+            if "welcome_msg_id" not in payload:
+                payload["welcome_msg_id"] = new_msg_id()
+                self.store.update_outbox(row.seq, payload=payload)
+            welcome = {
+                "v": 0,
+                "kind": "welcome_wrapped",
+                "group_id": group.group_id,
+                "msg_id": payload["welcome_msg_id"],
+                "sender": self.mailbox,
+                "to": [approval["mailbox_id"]],
+                "ct": payload["welcome"],
+            }
+            await self._request({"t": "send", "env": welcome}, str(welcome["msg_id"]))
+            payload["welcome_sent"] = True
+            self.store.update_outbox(row.seq, payload=payload)
+        self.store.set_approval_status(intent["request_id"], "approved")
+        self.store.set_display_name(group.group_id, approval["identity"], approval["display_name"])
+        consume_id = new_msg_id()
+        with self.store.tx():
+            self.store.enqueue(
+                "frame",
+                None,
+                {
+                    "frame": {
+                        "t": "invite.consume",
+                        "invite_id": approval["invite_id"],
+                        "msg_id": consume_id,
+                    },
+                    "msg_id": consume_id,
+                },
+                self.now(),
+            )
+            payload["consume_queued"] = True
+            self.store.update_outbox(row.seq, payload=payload)
+        self._outbox_wake.set()
+
+    async def _send_card(self, group_id: str, to: list[str]) -> None:
+        adapter = self._adapter_for(group_id)
+        card = adapter.capabilities().agent_card if adapter is not None else None
+        if card is not None:
+            self.send_message(group_id, card, to=to, kind="a2a.agent_card")
+
+    # -- operations (local API and adapters) --------------------------------
+
+    def _group_or_raise(self, group_id: str) -> GroupRow:
+        group = self.store.group(group_id)
+        if group is None or group.status != "active":
+            raise DaemonError("not_found", "no such active group")
+        return group
+
+    def create_group(self, name: str, purpose: str) -> str:
+        try:
+            gid = self.client.create_group(name, purpose)
+        except ac.AgentConnectError as e:
+            raise DaemonError("bad_request", str(e)) from None
+        group_id = gid_b64(gid)
+        now = self.now()
+        self.store.add_group(
+            GroupRow(
+                group_id,
+                name,
+                purpose,
+                {},
+                self.config.default_adapter,
+                "active",
+                False,
+                None,
+                0,
+                now,
+                now,
+                0,
+            )
+        )
+        self._refresh(group_id)
+        self.store.set_display_name(group_id, self.me, self.config.display_name)
+        msg_id = new_msg_id()
+        self._enqueue(
+            "frame",
+            None,
+            {
+                "frame": {"t": "group.create", "group_id": group_id, "epoch": 0, "msg_id": msg_id},
+                "msg_id": msg_id,
+            },
+        )
+        LOG.info("group_created", group=log.hid(group_id))
+        return group_id
+
+    async def create_invite(
+        self,
+        group_id: str,
+        ttl_secs: int = 86_400,
+        max_uses: int = 1,
+        inviter_name: str | None = None,
+    ) -> dict[str, Any]:
+        group = self._group_or_raise(group_id)
+        policy = group.policy
+        allowed = {
+            "owner": {policy.get("owner")},
+            "admins": {policy.get("owner"), *policy.get("admins", [])},
+        }.get(str(policy.get("invite")))
+        if allowed is not None and self.me not in allowed:
+            raise DaemonError("forbidden", "the group policy does not let this identity invite")
+        invite = self.client.create_invite(self.config.relay_host, ttl_secs)
+        members = len(self.client.members(unb64(group_id)))
+        meta = {
+            "invite_id": invite.invite_id_b64,
+            "group_name": group.name,
+            "inviter_name": inviter_name or self.config.display_name,
+            "purpose": group.purpose,
+            "expires_at": invite.expires_at,
+            "max_uses": max_uses,
+            "member_count": members,
+            "protocol": 0,
+        }
+        # The secret stays local; only public metadata goes to the relay.
+        self.keystore.put(f"invite/{invite.invite_id_b64}", invite.secret_bytes())
+        try:
+            await self.rest.create_invite(meta)
+        except (RelayError, OSError) as e:
+            self.keystore.delete(f"invite/{invite.invite_id_b64}")
+            raise DaemonError("relay", f"invite registration failed: {e}") from None
+        self.store.add_invite(
+            invite.invite_id_b64, group_id, invite.expires_at, max_uses, self.now()
+        )
+        return {
+            "url": invite.url,
+            "invite_id": invite.invite_id_b64,
+            "expires_at": invite.expires_at,
+        }
+
+    async def revoke_invite(self, invite_id: str) -> None:
+        if self.store.invite(invite_id) is None:
+            raise DaemonError("not_found", "no such invite")
+        await self.rest.revoke_invite(invite_id)
+        self.store.set_invite_status(invite_id, "revoked")
+        self.keystore.delete(f"invite/{invite_id}")
+
+    def _link(self, url: str) -> ac.InviteLink:
+        try:
+            link = ac.parse_invite_url(url)
+        except ac.AgentConnectError as e:
+            raise DaemonError("bad_request", str(e)) from None
+        if link.relay_host != self.config.relay_host:
+            raise DaemonError("bad_request", "the invite is for a different relay")
+        return link
+
+    async def inspect_invite(self, url: str) -> dict[str, Any]:
+        """Parse the URL locally and fetch the public metadata (§6.1)."""
+        link = self._link(url)
+        try:
+            meta = await self.rest.invite_meta(link.invite_id_b64)
+        except RelayError as e:
+            raise DaemonError(
+                "invite_not_open", INVITE_WARNING if e.code == "invite_not_open" else str(e)
+            ) from None
+        warning = INVITE_WARNING if meta.get("status") in ("exhausted", "revoked") else None
+        return {"meta": meta, "warning": warning, "untrusted": True}
+
+    async def accept_invite(self, url: str, display_name: str | None = None) -> dict[str, Any]:
+        """Send the JoinRequest; the Welcome is processed when it arrives."""
+        link = self._link(url)
+        info = await self.inspect_invite(url)
+        meta = info["meta"]
+        if meta.get("status") != "open":
+            raise DaemonError("invite_not_open", info["warning"] or "invite is not open")
+        name = display_name or self.config.display_name
+        try:
+            request = self.client.create_join_request(link, name)
+        except ac.AgentConnectError as e:
+            raise DaemonError("bad_request", str(e)) from None
+        invite_id = link.invite_id_b64
+        self.keystore.put(f"join/{invite_id}", url.encode())
+        self.store.add_join(invite_id, meta, name, self.now())
+        msg_id = new_msg_id()
+        env = {
+            "v": 0,
+            "kind": "join_request",
+            "msg_id": msg_id,
+            "sender": self.mailbox,
+            "ct": b64(request),
+        }
+        self._enqueue(
+            "frame",
+            None,
+            {"frame": {"t": "join", "invite_id": invite_id, "env": env}, "msg_id": msg_id},
+        )
+        return {"invite_id": invite_id, "status": "pending", "meta": meta}
+
+    def approvals(self) -> list[dict[str, Any]]:
+        out = []
+        for a in self.store.approvals():
+            if self.now() - a["received_at"] > APPROVAL_TIMEOUT_SECS:
+                self.store.set_approval_status(a["request_id"], "expired")
+                continue
+            out.append(
+                {
+                    k: a[k]
+                    for k in ("request_id", "group_id", "identity", "display_name", "received_at")
+                }
+                | {"display_name_verified": False}
+            )
+        return out
+
+    def approve(self, request_id: str) -> None:
+        """Human-gated: commit the Add for a verified JoinRequest."""
+        approval = self.store.approval(request_id)
+        if approval is None or approval["status"] != "pending":
+            raise DaemonError("not_found", "no such pending request")
+        if self.now() - approval["received_at"] > APPROVAL_TIMEOUT_SECS:
+            self.store.set_approval_status(request_id, "expired")
+            raise DaemonError("expired", "the approval window (1 hour) has passed")
+        self.store.set_approval_status(request_id, "approving")
+        self._enqueue(
+            "commit", approval["group_id"], {"intent": {"type": "add", "request_id": request_id}}
+        )
+
+    def reject(self, request_id: str) -> None:
+        approval = self.store.approval(request_id)
+        if approval is None or approval["status"] != "pending":
+            raise DaemonError("not_found", "no such pending request")
+        self.store.set_approval_status(request_id, "rejected")
+
+    def inner(
+        self,
+        kind: str,
+        body: dict[str, Any],
+        to: list[str],
+        origin: str = "agent",
+        hop: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "v": 0,
+            "seq": self.store.next_seq(),
+            "sender": self.me,
+            "instance_id": self.instance.instance_id_hex,
+            "to": to,
+            "hop": hop,
+            "origin": origin,
+            "kind": kind,
+            "body": body,
+        }
+
+    def send_message(  # noqa: PLR0913
+        self,
+        group_id: str,
+        body: dict[str, Any],
+        *,
+        to: list[str] | None = None,
+        kind: str = "a2a.message",
+        origin: str = "agent",
+        hop: int = 0,
+    ) -> str:
+        group = self._group_or_raise(group_id)
+        if not kind.startswith(("a2a.", "control.")):
+            raise DaemonError("bad_request", "unknown message kind")
+        inner = self.inner(kind, body, to or ["*"], origin, hop)
+        view = self._view(group_id)
+        if view is not None and self.policy.outbound(view, inner) is PolicyDecision.DROP:
+            raise DaemonError("forbidden", "blocked by policy")
+        if ac.padding_bucket(len(canonical(inner))) is None:
+            raise DaemonError("too_large", "message too large")
+        msg_id = new_msg_id()
+        self._enqueue("app", group.group_id, {"inner": inner, "msg_id": msg_id})
+        return msg_id
+
+    async def adapter_send(
+        self,
+        group_id: str,
+        body: dict[str, Any],
+        to: list[str] | None = None,
+        kind: str = "a2a.message",
+    ) -> str:
+        """What adapters get through ``on_outbound``: agent-originated only."""
+        return self.send_message(group_id, body, to=to, kind=kind, origin="agent")
+
+    def update(self, group_id: str) -> None:
+        group = self._group_or_raise(group_id)
+        self._enqueue("commit", group.group_id, {"intent": {"type": "update"}})
+
+    def remove_member(self, group_id: str, identity: str) -> None:
+        group = self._group_or_raise(group_id)
+        self._enqueue(
+            "commit", group.group_id, {"intent": {"type": "remove", "identity": identity}}
+        )
+
+    def set_policy(self, group_id: str, **changes: Any) -> None:
+        """Commit a policy change (the core checks this instance's role)."""
+        group = self._group_or_raise(group_id)
+        policy = {**group.policy, **changes}
+        self._enqueue("commit", group.group_id, {"intent": {"type": "policy", "policy": policy}})
+
+    async def leave(self, group_id: str) -> str:
+        group = self._group_or_raise(group_id)
+        members = self.store.members(group_id)
+        if len(members) == 1 and len(members[0].instances) == 1:
+            await self._gone(group_id, "left")  # sole member: just delete (§9.2)
+            return "left"
+        mine = next((m for m in members if m.identity == self.me), None)
+        if group.policy.get("owner") == self.me and mine is not None and len(mine.instances) == 1:
+            raise DaemonError("forbidden", "transfer ownership before leaving (SPEC 9.2)")
+        self._leaving.add(group_id)
+        self.store.kv_set(f"leaving/{group_id}", "1")
+        self._enqueue("proposal", group_id, {})
+        return "leaving"
+
+    def mark_verified(self, group_id: str, identity: str, verified: bool = True) -> None:
+        """**Human-only.** Records that the human compared the SAS with this
+        member over an independent channel. Never reachable by agents: an
+        agent that could mark verification would defeat the SAS check, which
+        exists precisely to catch a relay or link thief in the middle."""
+        self._group_or_raise(group_id)
+        if identity == self.me or not self.store.set_verified(group_id, identity, verified):
+            raise DaemonError("not_found", "no such member")
+        self._delivery_wake.set()
+        self._pulse()
+
+    def group_info(self, group_id: str) -> dict[str, Any]:
+        group = self.store.group(group_id)
+        if group is None:
+            raise DaemonError("not_found", "no such group")
+        info: dict[str, Any] = {
+            "group_id": group.group_id,
+            "name": group.name,
+            "purpose": group.purpose,
+            "status": group.status,
+            "epoch": group.epoch,
+            "policy": group.policy,
+            "out_of_sync": group.out_of_sync,
+            "out_of_sync_reason": group.out_of_sync_reason,
+            "adapter": group.adapter,
+            "trust_state": self._trust_state(group_id),
+            "members": [
+                {
+                    "identity": m.identity,
+                    "fingerprint": ac.fingerprint(ac_identity_key(m.identity)),
+                    "display_name": m.display_name,
+                    "display_name_verified": False,
+                    "role": m.role,
+                    "verified": m.verified,
+                    "instances": m.instances,
+                    "self": m.identity == self.me,
+                }
+                for m in self.store.members(group_id)
+            ],
+            "agent_cards": self.store.cards(group_id),
+        }
+        if group.status == "active":
+            info["sas"] = self._sas(unb64(group_id))
+        return info
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "group_id": g.group_id,
+                "name": g.name,
+                "status": g.status,
+                "epoch": g.epoch,
+                "members": len(self.store.members(g.group_id)),
+                "out_of_sync": g.out_of_sync,
+            }
+            for g in self.store.groups()
+        ]
+
+    def status(self) -> dict[str, Any]:
+        groups = self.store.groups()
+        return {
+            "identity": self.me,
+            "fingerprint": self.identity.fingerprint,
+            "instance_id": self.instance.instance_id_hex,
+            "mailbox_id": self.mailbox,
+            "relay": {"url": self.config.relay_url, "connected": self.link.connected},
+            "keystore": self.keystore.kind,
+            "groups": len([g for g in groups if g.status == "active"]),
+            "out_of_sync": [g.group_id for g in groups if g.out_of_sync],
+            "outbox_queued": len(self.store.outbox()),
+            "inbox_pending": len(self.store.pending_deliveries()),
+            "pending_approvals": len(self.approvals()),
+        }
+
+
+def ac_identity_key(identity: str) -> bytes:
+    """IK.pub from an ``ac:v0:`` identifier."""
+    return unb64(identity.removeprefix("ac:v0:"))

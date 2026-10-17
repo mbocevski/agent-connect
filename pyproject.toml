@@ -1,7 +1,7 @@
 # uv workspace root (virtual: not a package itself).
 
 [tool.uv.workspace]
-members = ["core-py", "daemon", "sdk/python"]
+members = ["core-py", "daemon", "harness", "sdk/python"]
 
 [dependency-groups]
 dev = [
@@ -23,7 +23,12 @@ target-version = "py312"
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "ASYNC", "PT", "N", "PL"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["agentconnect", "agentconnect_core", "agentconnect_sdk"]
+known-first-party = [
+    "agentconnect",
+    "agentconnect_core",
+    "agentconnect_harness",
+    "agentconnect_sdk",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S101", "PLR2004"]
@@ -37,6 +42,8 @@ include = [
     "core-py/tests",
     "daemon/src",
     "daemon/tests",
+    "harness/src",
+    "harness/tests",
     "sdk/python/src",
     "sdk/python/tests",
     "scripts",
@@ -50,7 +57,7 @@ all = "error"
 error-on-warning = true
 
 [tool.pytest.ini_options]
-testpaths = ["core-py/tests", "daemon/tests", "sdk/python/tests", "scripts/tests"]
+testpaths = ["core-py/tests", "daemon/tests", "harness/tests", "sdk/python/tests", "scripts/tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
 asyncio_mode = "auto"
 timeout = 10
