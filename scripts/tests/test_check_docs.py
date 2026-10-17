@@ -114,7 +114,7 @@ def test_repository_map_is_valid_and_honest() -> None:
     repo = check_docs.REPO
     rules = check_docs.parse_map((repo / check_docs.MAP_PATH).read_text(encoding="utf-8"))
     tracked = subprocess.run(
-        ["git", "ls-files"],  # noqa: S607
+        ["git", "ls-files"],
         cwd=repo,
         env=check_docs.git_env(),
         capture_output=True,
@@ -145,7 +145,7 @@ GIT = [
 
 
 def git(repo: Path, *args: str) -> None:
-    subprocess.run(  # noqa: S603
+    subprocess.run(
         [*GIT, *args], cwd=repo, env=check_docs.git_env(), check=True, capture_output=True
     )
 

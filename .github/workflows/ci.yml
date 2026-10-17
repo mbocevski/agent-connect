@@ -74,6 +74,17 @@ jobs:
       - run: uv run --all-packages ty check
       - run: just cov-py
 
+  # Python dependency licences (licences-py.toml), the counterpart of cargo-deny.
+  licences:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: just
+      - run: just licences
+
   # Cross-language contract data: testdata/MANIFEST.json vs. the test suites.
   contract:
     runs-on: ubuntu-24.04
@@ -151,7 +162,7 @@ jobs:
   # Single required check for merge gating (.github/required-checks.txt).
   ci-ok:
     if: always()
-    needs: [lint, rust, python, contract, changelog, docs, hygiene]
+    needs: [lint, rust, python, licences, contract, changelog, docs, hygiene]
     runs-on: ubuntu-24.04
     steps:
       - name: All required jobs passed

@@ -15,3 +15,5 @@ extend-exclude = [
 [default.extend-words]
 # hax: the verification toolchain libcrux is built with (hax-lib crates).
 hax = "hax"
+# certifi: the Python CA-bundle package (licences-py.toml, ADR-001 section 4).
+certifi = "certifi"
