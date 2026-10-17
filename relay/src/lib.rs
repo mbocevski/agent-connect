@@ -10,6 +10,7 @@ use axum::routing::get;
 
 pub mod auth;
 pub mod config;
+pub mod landing;
 pub mod proto;
 pub mod relay;
 pub mod rest;
@@ -25,6 +26,7 @@ pub use store::{Limits, Store};
 pub fn app<S: Store>(relay: Arc<Relay<S>>) -> Router {
     Router::new()
         .merge(rest::routes::<S>())
+        .merge(landing::routes::<S>())
         .route("/v0/ws", get(ws::ws_handler::<S>))
         .with_state(relay)
 }

@@ -14,6 +14,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   per-instance mailboxes with store-and-forward, invite registry and join
   forwarding, signed-request REST auth, Prometheus counters, SQLite storage
   behind a `Store` trait, and a container image (`relay/Dockerfile`).
+- Invite landing page served by the relay at `GET /i/{invite_id}`: no
+  JavaScript, strict CSP, light and dark themes.
 - Spike validating OpenMLS 0.9 with post-quantum hybrid ciphersuites
   (`spikes/mls-xwing`), with findings and decisions in
   `docs/spikes/mls-xwing.md`.
