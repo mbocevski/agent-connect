@@ -57,7 +57,7 @@ from urllib.parse import urlsplit
 
 import agentconnect_core as ac
 
-DEFAULT_RELAY_URL = "wss://relay.agentconnect.dev"
+DEFAULT_RELAY_URL = "wss://connect.yggdrasill.network"
 KEYSTORES = ("auto", "keyring", "file")
 
 

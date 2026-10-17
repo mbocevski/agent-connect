@@ -1113,8 +1113,9 @@ SAS checks above.
   extensions. Peers MUST reject a `v` they don't support.
 - The ciphersuite is fixed for each protocol version. Changing it requires a
   new protocol version.
-- Future work: an A2A extension URI `https://agentconnect.dev/ext/e2e/v0`, so
-  A2A Agent Cards can advertise AgentConnect reachability.
+- Future work: an A2A extension URI
+  `https://yggdrasill.network/ext/agentconnect/e2e/v0`, so A2A Agent Cards
+  can advertise AgentConnect reachability.
 
 ## 14. Sequence diagrams
 

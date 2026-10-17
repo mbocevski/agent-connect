@@ -10,6 +10,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Linux arm64 and macOS arm64 support. CI runs the fast tier on both and
+  builds the relay container image for `linux/amd64` and `linux/arm64`.
+  Releases add an aarch64 manylinux 2.28 `agentconnect-core` wheel, an
+  aarch64 relay binary and a macOS arm64 `agentconnect-core` wheel, all
+  signed and attested. The reproducibility check covers both Linux
+  architectures. See ADR-001 for the platform table.
 - Webhook adapter (`daemon.default_adapter = "webhook"`): every message and
   event is POSTed to a loopback `webhook.callback_url` (remote hosts need
   `webhook.allow_remote` and https), signed with HMAC-SHA256 over
@@ -162,6 +168,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- The default relay is now `wss://connect.yggdrasill.network`, and the
+  planned A2A extension URI in SPEC §13 is
+  `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't
+  hold `agentconnect.dev`, so nothing refers to it any more.
 - The `text` shorthand of `POST /v0/groups/{id}/messages` (and so `agentconnect
   send`) now sends an A2A v1.0 `Message` (`messageId`, `contextId`, `role`,
   `parts`) instead of a bare `{"text": ...}` body (SPEC 7.2).
