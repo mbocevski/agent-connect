@@ -124,6 +124,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: envelope fields the relay controls (`v`, `kind`, ids, `epoch`,
+  `to`, `routing`) are type-checked before the core processes anything;
+  a malformed envelope is dropped with `relay_misbehaviour`, and a dropped
+  commit marks the group `out_of_sync`. After every merge the cached
+  members, policy and epoch are re-read from the core first, and
+  `require_verified` gating reads the core's policy. Previously a relay
+  could replace `routing` with a string so that bookkeeping failed after
+  the merge, leaving a stale policy that let unverified traffic through.
 - Daemon: `max_uses` is enforced when a join is approved, not only by the
   relay's later `invite.consume`. Each approval reserves a use (a failed
   Add releases it), further JoinRequests for a used-up invite are dropped,

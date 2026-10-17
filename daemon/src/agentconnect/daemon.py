@@ -102,6 +102,53 @@ def _core_error(e: Exception) -> str:
     return "rejected"
 
 
+ENVELOPE_KINDS = frozenset({"commit", "proposal", "application", "welcome_wrapped", "join_request"})
+MAX_ID_LEN = 64
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _short_str(value: Any) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= MAX_ID_LEN
+
+
+def _str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(_short_str(x) for x in value)
+
+
+def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911
+    """Why a delivered envelope is malformed (SPEC 7.1), or None.
+
+    Checked before anything reaches the core: the relay controls every
+    field here, and a wrong type must not surface after a commit merged."""
+    if not _is_int(env.get("v")) or env.get("v") != 0:
+        return "version"
+    kind = env.get("kind")
+    if kind not in ENVELOPE_KINDS:
+        return "kind"
+    if not _short_str(env.get("msg_id")) or not _short_str(env.get("sender")):
+        return "ids"
+    if not isinstance(env.get("ct"), str):
+        return "ct"
+    if kind != "join_request" and not _short_str(env.get("group_id")):
+        return "group_id"
+    if kind in ("commit", "proposal", "application"):
+        epoch = env.get("epoch")
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+            return "epoch"
+    if "to" in env and not _str_list(env["to"]):
+        return "to"
+    if kind == "commit" and "routing" in env:
+        routing = env["routing"]
+        if not isinstance(routing, dict) or not all(
+            _str_list(routing.get(k, [])) for k in ("add", "remove")
+        ):
+            return "routing"
+    return None
+
+
 def _max_turns(policy: dict[str, Any]) -> int:
     guard = policy.get("loop_guard")
     turns = guard.get("max_agent_turns") if isinstance(guard, dict) else None
@@ -370,8 +417,13 @@ class Daemon:
     async def _after_commit(
         self, group_id: str, summary: dict[str, Any], env: dict[str, Any] | None, own: bool
     ) -> None:
-        """Bookkeeping after any merged commit, own or another member's."""
+        """Bookkeeping after any merged commit, own or another member's.
+
+        The cached members, roles, policy and epoch are re-read from the core
+        first, so nothing that fails later can leave them stale."""
+        joined, gone = self._refresh(group_id)
         if env is not None:
+            # Shapes were checked before processing (_envelope_problem).
             hinted = env.get("routing") or {}
             expected = summary["routing"]
             if sorted(hinted.get("add", [])) != sorted(expected["add"]) or sorted(
@@ -387,7 +439,6 @@ class Daemon:
                 await self.emit(
                     group_id, "relay_misbehaviour", reason="epoch_mismatch", epoch=summary["epoch"]
                 )
-        joined, gone = self._refresh(group_id)
         if own:
             self.store.update_group(group_id, last_own_commit_at=self.now(), msgs_since_commit=0)
         left = self._proposed_leaves.pop(group_id, set())
@@ -452,10 +503,24 @@ class Daemon:
         else:
             LOG.info("relay_frame_ignored", t=t, code=frame.get("code"))
 
+    async def _malformed(self, env: dict[str, Any], problem: str) -> None:
+        """SPEC 7.1: relay-visible fields are unauthenticated. A malformed
+        envelope is dropped before the core sees it."""
+        LOG.info("envelope_malformed", problem=problem)
+        group_id = env.get("group_id")
+        if isinstance(group_id, str) and self.store.group(group_id) is not None:
+            await self.emit(group_id, "relay_misbehaviour", reason="malformed_envelope")
+            if env.get("kind") == "commit":
+                # A commit we can't process leaves us behind the group.
+                await self.mark_out_of_sync(group_id, "commit_dropped")
+        if isinstance(env.get("msg_id"), str):
+            await self._ack(str(env["msg_id"]))
+
     async def _handle_env(self, env: dict[str, Any]) -> None:
         sender, msg_id, kind = str(env.get("sender")), str(env.get("msg_id")), env.get("kind")
-        if env.get("v") != 0:
-            await self._ack(msg_id)
+        problem = _envelope_problem(env)
+        if problem is not None:
+            await self._malformed(env, problem)
             return
         state = self.store.inbox_state(sender, msg_id)
         if state is not None:
@@ -823,7 +888,15 @@ class Daemon:
         if group_id is None:
             return False
         g = self.store.group(group_id)
-        if g is None or not g.policy.get("require_verified"):
+        if g is None:
+            return False
+        if g.status == "active":
+            # The core's policy is the source of truth; the cache follows it.
+            with contextlib.suppress(ac.AgentConnectError, ac.CoreError, ValueError):
+                if json.loads(self.client.policy(unb64(group_id))).get("require_verified"):
+                    return bool(self._trust_state(group_id)["self"] != "verified")
+                return False
+        if not g.policy.get("require_verified"):
             return False
         return bool(self._trust_state(group_id)["self"] != "verified")
 
