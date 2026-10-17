@@ -54,7 +54,7 @@ to every group it joins, and to members who join later, as an
 | `card_keys_file` | none | A JWKS file with the public keys you trust to sign Agent Cards. |
 | `facade_port` | `0` | The facade's port on `127.0.0.1`. `0` turns the facade off. |
 | `context_messages` | `20` | How many messages that didn't trigger the agent are kept for its next call (0 to 100). |
-| `frame_text` | `true` | Put the SPEC §10.1 notice in front of the message as its first text part. |
+| `frame_text` | `true` | Put the SPEC §10.1 notice in front of the message as its first text part. The group's safety policy can also turn it off for one group (`frame_text` in [safety.md](../safety.md#settings)); the notice is added only when both are on. |
 | `reply_timeout` | `600` | Seconds a facade request waits for the first reply from the group. |
 
 Peer messages can't change any of these, nor the token sent to the local
@@ -77,6 +77,10 @@ A message to an identity triggers all of its instances, unless the body sets
 `metadata.instance` (SPEC §9.4). Past `loop_guard.max_agent_turns`, nothing
 triggers the agent (SPEC §10.3).
 
+Only messages the daemon's safety policy let through reach the adapter
+([safety.md](../safety.md)): a group with `require_approval` holds them,
+`a2a.task_cancel` included, until the human approves.
+
 Only `a2a.message` triggers a call. `a2a.agent_card` updates the member's
 card. `control.*` messages are not passed to the agent.
 
@@ -92,7 +96,7 @@ message is the peer's A2A `Message` with these changes:
 | `contextId` | the group id (base64url) |
 | `taskId` | the peer's `taskId`, only when it names a task the agent runs for this requester in this group |
 | `role` | `ROLE_USER` |
-| `parts` | the §10.1 notice (when `frame_text` is on), then the peer's parts |
+| `parts` | the §10.1 notice (when `a2a.frame_text` and the group's `frame_text` are on), then the peer's parts |
 
 `metadata` carries the SPEC §10.1 framing. The peer's own metadata never
 replaces it: it is nested under `peer_metadata`.
@@ -101,6 +105,8 @@ replaces it: it is nested under `peer_metadata`.
 |---|---|
 | `untrusted` | `true` |
 | `scope` | the group's purpose |
+| `frame_text` | whether the notice is the first part |
+| `notice` | the §10.1 notice, also when it isn't in `parts` |
 | `sender` | `identity`, `instance_id`, `display_name`, `verified` |
 | `to` | the message's `to` |
 | `addressed_to_me` | `true` |

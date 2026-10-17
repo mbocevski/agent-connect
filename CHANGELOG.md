@@ -66,6 +66,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`agentconnect audit`, `GET /v0/audit`, human token). An opt-in
   per-group transcript keeps full messages, also encrypted, for
   `transcript_retention_days` (`agentconnect transcript`).
+- The A2A adapter honours the group's `frame_text` (the notice is the first
+  part only while both `a2a.frame_text` and the group's setting are on) and
+  adds `frame_text` and `notice` to the call's `metadata`, next to
+  `scope`. `require_approval` also holds `a2a.task_cancel`.
 - Webhook and SSE payloads carry `frame_text` and `notice` (the SPEC 10.1
   sentence); `POST /v0/groups/{gid}/messages` answers with `status`
   (`queued` or `held`); `GET /v0/status` counts `held_messages`.

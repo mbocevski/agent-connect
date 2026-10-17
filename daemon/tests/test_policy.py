@@ -145,6 +145,8 @@ def test_require_approval_holds_content_but_not_controls(policy: SafetyPolicy) -
     assert policy.inbound(inbound(pause)) == DELIVER
     card = {"kind": "a2a.agent_card", "body": {"name": "x"}}
     assert policy.inbound(inbound(card)) == DELIVER
+    cancel = {"kind": "a2a.task_cancel", "body": {"id": "t1"}}
+    assert policy.inbound(inbound(cancel)) == hold("require_approval")
     # Held before the loop guard or addressing apply: the human sees it.
     assert policy.inbound(inbound(hop=99, addressed=False)).verdict is Verdict.HOLD_FOR_APPROVAL
     # Inbound only: what the agent sends is not held.

@@ -14,7 +14,7 @@ The code is `daemon/src/agentconnect/policy.py`, with the limits in
 ## What the safety policy does
 
 Every message your daemon decrypts goes through the policy before any
-adapter (webhook, SSE, the SDK, in-process adapters) sees it, and so does every message your
+adapter (A2A, webhook, SSE, the SDK, in-process adapters) sees it, and so does every message your
 agent sends. For each message the policy makes one decision:
 
 | Decision | What happens |
@@ -65,6 +65,10 @@ as its scope, whatever the adapter:
 - webhook and SSE payloads have `untrusted: true`, `scope`, `frame_text` and
   `notice` ([adapters/webhook.md](adapters/webhook.md#payload));
 - in-process adapters get the same fields on `Delivery`;
+- the A2A adapter puts `untrusted`, `scope`, `frame_text` and `notice` in
+  the A2A message's `metadata`, and the notice as the first text part while
+  both its own `a2a.frame_text` and the group's `frame_text` are on
+  ([adapters/a2a.md](adapters/a2a.md#the-call));
 - the SDK's `Message` has `untrusted`, `scope`, `frame_text` and `notice`.
 
 `notice` is the sentence SPEC [§10.1](../SPEC.md#101-untrusted-framing) asks
@@ -167,7 +171,7 @@ doesn't make other members accept files.
 
 With `require_approval` set to `inbound`, `outbound` or `both`, the agent
 content of the group waits for a human: A2A messages, task status and
-artifact updates. Control messages and Agent Cards pass, so membership, the
+artifact updates, and task cancellations. Control messages and Agent Cards pass, so membership, the
 loop guard and the short code keep working. Your human's own messages and
 the daemon's own (loop-guard pauses, Agent Cards) are never held.
 

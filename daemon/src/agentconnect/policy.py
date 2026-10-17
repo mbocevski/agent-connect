@@ -60,7 +60,9 @@ if TYPE_CHECKING:
 HUMAN_ONLY_KINDS = frozenset({"control.resume"})
 # What require_approval holds: content from (or for) an agent. Controls and
 # Agent Cards pass, so membership, the loop guard and capabilities keep working.
-HOLDABLE_KINDS = frozenset({"a2a.message", "a2a.task_status", "a2a.task_artifact"})
+HOLDABLE_KINDS = frozenset(
+    {"a2a.message", "a2a.task_status", "a2a.task_artifact", "a2a.task_cancel"}
+)
 # Drop reasons that count against the sender (an unknown kind doesn't: SPEC
 # 7.2 makes ignoring it the forward-compatible behaviour).
 VIOLATIONS = frozenset(

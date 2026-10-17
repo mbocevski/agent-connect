@@ -308,7 +308,10 @@ class A2AAdapter:
     def _local_message(self, d: Delivery) -> Message:
         peer = convert.parse_message(d.body)
         msg = Message(role=Role.ROLE_USER, message_id=f"ac-{d.msg_id}", context_id=d.group_id)
-        if self.options.frame_text:
+        # The notice goes first unless the adapter (a2a.frame_text) or the
+        # group's safety policy (frame_text) turned it off.
+        framed = self.options.frame_text and d.frame_text
+        if framed:
             msg.parts.append(Part(text=d.framed_text()))
         msg.parts.extend(peer.parts)
         ref = self._tasks.get(peer.task_id) if peer.task_id else None
@@ -317,6 +320,8 @@ class A2AAdapter:
         meta: dict[str, Any] = {
             "untrusted": True,
             "scope": d.scope,
+            "frame_text": framed,
+            "notice": d.framed_text(),
             "sender": {
                 "identity": d.sender.identity,
                 "instance_id": d.sender.instance_id,
