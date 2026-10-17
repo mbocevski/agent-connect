@@ -124,6 +124,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core and relay: the relay challenge nonce must be exactly 32 bytes
+  (SPEC §8.2). `Instance.sign_relay_challenge` refuses any other length,
+  and the relay never verifies one. The signed bytes don't delimit the
+  host, so a longer nonce let a relay at `relay.test` obtain an `auth`
+  signature valid at `x.relay.test`.
 - The daemon's MLS state is now encrypted at rest. `SqliteStore` is a
   SQLCipher database (whole-file encryption with vendored OpenSSL, ADR-002)
   and `SqliteStore::open` requires a 32-byte `DbKey`; there is no

@@ -159,3 +159,15 @@ def test_relay_auth_vectors() -> None:
         assert r["authorization"] == f"AgentConnect-Ed25519 {v['sig_key']}.{r['ts']}.{r['sig']}"
     # Only domain-separated signing is exposed, never a generic signer.
     assert not hasattr(instance, "sign")
+
+
+def test_relay_challenge_nonce_must_be_32_bytes() -> None:
+    # SPEC 8.2: the nonce is 32 bytes. Any other length is refused, because
+    # nonce `X || "x."` at `relay.test` would sign the same bytes as nonce
+    # `X` at `x.relay.test`.
+    v = load("relay-auth.json")
+    instance = ac.Instance.from_secret_bytes(v["instance"].encode())
+    nonce = _unb64(v["challenges"][0]["nonce"])
+    for bad in (b"", nonce[:31], nonce + b"x", nonce + b"x."):
+        with pytest.raises(ac.AgentConnectError, match="nonce"):
+            instance.sign_relay_challenge(bad, "relay.test")

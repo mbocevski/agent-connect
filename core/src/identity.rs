@@ -24,12 +24,25 @@ pub const RELAY_AUTH_LABEL: &[u8] = b"agentconnect/v0/relay-auth";
 /// Domain-separation label of signed relay REST requests (SPEC §8.1.1).
 pub const RELAY_REST_LABEL: &[u8] = b"agentconnect/v0/relay-rest";
 
+/// Length of the relay's WebSocket challenge nonce (SPEC §8.2).
+pub const RELAY_NONCE_LEN: usize = 32;
+
 /// The bytes signed to answer the relay's WebSocket challenge (SPEC §8.2):
 /// `"agentconnect/v0/relay-auth" || nonce || relay_host`. The relay verifies
 /// against the same function, so the layouts can't drift.
-#[must_use]
-pub fn relay_auth_message(nonce: &[u8], relay_host: &str) -> Vec<u8> {
-    [RELAY_AUTH_LABEL, nonce, relay_host.as_bytes()].concat()
+///
+/// The nonce must be exactly [`RELAY_NONCE_LEN`] bytes. The host is not
+/// delimited, so a longer "nonce" would let a relay at `relay.test` obtain a
+/// signature that also verifies for `x.relay.test` (nonce `X || "x."`).
+///
+/// # Errors
+///
+/// [`Error::Malformed`] if `nonce` is not 32 bytes long.
+pub fn relay_auth_message(nonce: &[u8], relay_host: &str) -> Result<Vec<u8>> {
+    if nonce.len() != RELAY_NONCE_LEN {
+        return Err(Error::Malformed("relay challenge nonce (must be 32 bytes)"));
+    }
+    Ok([RELAY_AUTH_LABEL, nonce, relay_host.as_bytes()].concat())
 }
 
 /// The bytes signed for a relay REST request (SPEC §8.1.1):
@@ -359,9 +372,12 @@ impl Instance {
 
     /// Answers the relay's WebSocket challenge (SPEC §8.2):
     /// `Ed25519(SK, "agentconnect/v0/relay-auth" || nonce || relay_host)`.
-    #[must_use]
-    pub fn sign_relay_challenge(&self, nonce: &[u8], relay_host: &str) -> [u8; 64] {
-        self.sign(&relay_auth_message(nonce, relay_host))
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] if `nonce` is not [`RELAY_NONCE_LEN`] bytes.
+    pub fn sign_relay_challenge(&self, nonce: &[u8], relay_host: &str) -> Result<[u8; 64]> {
+        Ok(self.sign(&relay_auth_message(nonce, relay_host)?))
     }
 
     /// Signs a relay REST request (SPEC §8.1.1):
@@ -485,7 +501,7 @@ mod tests {
         let nonce: [u8; 32] = rng.array().unwrap();
         let ok = |msg: &[u8], sig: [u8; 64]| key.verify_strict(msg, &Signature::from_bytes(&sig));
 
-        let sig = inst.sign_relay_challenge(&nonce, "relay.test");
+        let sig = inst.sign_relay_challenge(&nonce, "relay.test").unwrap();
         let expected = [
             b"agentconnect/v0/relay-auth".as_slice(),
             &nonce,
@@ -518,8 +534,33 @@ mod tests {
         }
         // The two labels never produce interchangeable signatures.
         assert_ne!(
-            inst.sign_relay_challenge(&nonce, "h"),
+            inst.sign_relay_challenge(&nonce, "h").unwrap(),
             inst.sign_relay_request("", "", 0, b"", "h")
+        );
+    }
+
+    #[test]
+    fn relay_challenge_nonces_must_be_32_bytes() {
+        let (_, inst) = instance();
+        let rng = Rng::for_test("relay-nonce-length");
+        let long: [u8; 34] = rng.array().unwrap();
+        for len in [0, 16, 31, 33, 34] {
+            let nonce = &long[..len];
+            assert_eq!(
+                inst.sign_relay_challenge(nonce, "relay.test").err(),
+                Some(Error::Malformed("relay challenge nonce (must be 32 bytes)")),
+                "{len}-byte nonce"
+            );
+            assert!(relay_auth_message(nonce, "relay.test").is_err());
+        }
+        // Without the check, nonce `X || "x."` for host `relay.test` would
+        // sign the same bytes as nonce `X` for host `x.relay.test`.
+        let mut suffixed = long[..32].to_vec();
+        suffixed.extend_from_slice(b"x.");
+        assert!(inst.sign_relay_challenge(&suffixed, "relay.test").is_err());
+        assert!(
+            inst.sign_relay_challenge(&long[..32], "x.relay.test")
+                .is_ok()
         );
     }
 

@@ -30,9 +30,10 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
 
 /// The bytes a client signs to answer the WebSocket challenge. Built by
 /// `agentconnect_core`, which also signs them, so the layouts can't drift.
+/// `None` unless `nonce` is 32 bytes (SPEC §8.2).
 #[must_use]
-pub fn ws_auth_message(nonce: &[u8], relay_host: &str) -> Vec<u8> {
-    agentconnect_core::identity::relay_auth_message(nonce, relay_host)
+pub fn ws_auth_message(nonce: &[u8], relay_host: &str) -> Option<Vec<u8>> {
+    agentconnect_core::identity::relay_auth_message(nonce, relay_host).ok()
 }
 
 /// The bytes a client signs for a REST request (built by `agentconnect_core`).
@@ -66,7 +67,7 @@ pub fn verify_ws_auth(
     sig_key_b64: &str,
     sig_b64: &str,
 ) -> Option<String> {
-    verify(sig_key_b64, sig_b64, &ws_auth_message(nonce, relay_host))
+    verify(sig_key_b64, sig_b64, &ws_auth_message(nonce, relay_host)?)
 }
 
 /// Verify an `Authorization: AgentConnect-Ed25519 <sig_key>.<ts>.<sig>` header
@@ -146,7 +147,10 @@ mod tests {
     fn ws_auth_roundtrip_and_failures() {
         let k = key(1);
         let nonce = random_bytes::<32>();
-        let sig = b64_encode(&k.sign(&ws_auth_message(&nonce, "relay.test")).to_bytes());
+        let sig = b64_encode(
+            &k.sign(&ws_auth_message(&nonce, "relay.test").unwrap())
+                .to_bytes(),
+        );
         let id = verify_ws_auth(&nonce, "relay.test", &pub_b64(&k), &sig).unwrap();
         assert_eq!(id, mailbox_id_from_key(k.verifying_key().as_bytes()));
         let other_nonce = random_bytes::<32>();
@@ -155,6 +159,26 @@ mod tests {
         assert!(verify_ws_auth(&nonce, "relay.test", &pub_b64(&key(2)), &sig).is_none());
         assert!(verify_ws_auth(&nonce, "relay.test", "short", &sig).is_none());
         assert!(verify_ws_auth(&nonce, "relay.test", &pub_b64(&k), "short").is_none());
+    }
+
+    #[test]
+    fn ws_auth_refuses_nonces_that_are_not_32_bytes() {
+        // A signature over `label || X || "x." || "relay.test"` must not be
+        // accepted as the answer to nonce `X` at `x.relay.test`, nor the
+        // other way round: only 32-byte nonces are ever verified.
+        let k = key(3);
+        let nonce = random_bytes::<32>();
+        let mut long = nonce.to_vec();
+        long.extend_from_slice(b"x.");
+        let forged = [WS_LABEL, &long, b"relay.test"].concat();
+        let sig = b64_encode(&k.sign(&forged).to_bytes());
+        assert!(verify_ws_auth(&long, "relay.test", &pub_b64(&k), &sig).is_none());
+        assert!(ws_auth_message(&long, "relay.test").is_none());
+        assert!(ws_auth_message(&nonce[..31], "relay.test").is_none());
+        assert!(verify_ws_auth(&nonce[..31], "relay.test", &pub_b64(&k), &sig).is_none());
+        // The same bytes do verify as nonce `X` for the suffixed host: that
+        // is why the signer and the verifier both insist on 32 bytes.
+        assert!(verify_ws_auth(&nonce, "x.relay.test", &pub_b64(&k), &sig).is_some());
     }
 
     fn rest_header(k: &SigningKey, method: &str, path: &str, ts: u64, body: &[u8]) -> String {

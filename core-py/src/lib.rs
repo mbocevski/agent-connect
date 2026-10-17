@@ -254,7 +254,7 @@ impl Instance {
         nonce: &[u8],
         relay_host: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let sig = guarded(|| Ok(self.0.sign_relay_challenge(nonce, relay_host)))?;
+        let sig = guarded(|| self.0.sign_relay_challenge(nonce, relay_host).map_err(err))?;
         Ok(PyBytes::new(py, &sig))
     }
 

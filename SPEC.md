@@ -554,6 +554,11 @@ sig = Ed25519(SK, "agentconnect/v0/relay-rest"
    - The server sends `{"t": "challenge", "nonce": "<32 B>"}`.
    - The client replies `{"t": "auth", "sig_key": "<SK.pub>", "sig": Ed25519(SK, "agentconnect/v0/relay-auth" || nonce || relay_host)}`.
    - The server derives the `mailbox_id` and replies `{"t": "ready", "mailbox_id": "..."}`.
+   - The nonce is exactly 32 bytes. A client MUST refuse to sign, and a
+     server MUST refuse to verify, a challenge with a nonce of any other
+     length: `relay_host` is not delimited, so a longer nonce ending in
+     `x.` would yield a signature that is also valid for the host
+     `x.<relay_host>`.
 2. **Client → server frames**
    - `{"t": "send", "env": Envelope}`
    - `{"t": "ack", "msg_id": "..."}`

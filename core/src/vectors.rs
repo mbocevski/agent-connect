@@ -262,8 +262,8 @@ fn relay_auth_vectors() {
             json!({
                 "nonce": b64(&nonce),
                 "relay_host": host,
-                "message": hex(&relay_auth_message(&nonce, host)),
-                "sig": b64(&instance.sign_relay_challenge(&nonce, host)),
+                "message": hex(&relay_auth_message(&nonce, host).unwrap()),
+                "sig": b64(&instance.sign_relay_challenge(&nonce, host).unwrap()),
             })
         })
         .collect();

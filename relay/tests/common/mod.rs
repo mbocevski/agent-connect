@@ -117,7 +117,7 @@ pub fn id_from(n: u64) -> String {
 
 pub fn auth_frame(key: &SigningKey, nonce_b64: &str, host: &str) -> Value {
     let nonce = b64_decode(nonce_b64).unwrap();
-    let sig = key.sign(&ws_auth_message(&nonce, host));
+    let sig = key.sign(&ws_auth_message(&nonce, host).unwrap());
     json!({
         "t": "auth",
         "sig_key": b64_encode(key.verifying_key().as_bytes()),
