@@ -1,0 +1,44 @@
+{
+  "challenges": [
+    {
+      "message": "6167656e74636f6e6e6563742f76302f72656c61792d61757468bd7de853c0b8be62cf782938c2f43612e029d12cc45a43a144e848b948c97f7872656c61792e74657374",
+      "nonce": "vX3oU8C4vmLPeCk4wvQ2EuAp0SzEWkOhROhIuUjJf3g",
+      "relay_host": "relay.test",
+      "sig": "mrrM5jy_CF0iDwy3UnrnVvJ6gC8dxdQw0HmFSbFLbLcvnULa4KMcmRJ5DOcvk6fmRNYPDq5z9PFdkGg6BNCSAw"
+    },
+    {
+      "message": "6167656e74636f6e6e6563742f76302f72656c61792d6175746862bfd305ce58d5bf3a2085c1b299c85b5578a8b81960d4cdb2cd0160e07392fd3132372e302e302e313a38303830",
+      "nonce": "Yr_TBc5Y1b86IIXBspnIW1V4qLgZYNTNss0BYOBzkv0",
+      "relay_host": "127.0.0.1:8080",
+      "sig": "Lo4rVxfJXmcIfm55g_tO-viazFH6y8vofQ4mJUt6dIKg-yauyWaERh38ylieHkXzkCQWBQPjSQ4spRveB0yhAA"
+    }
+  ],
+  "description": "SPEC 8.1.1/8.2 relay authentication by the instance key SK: challenge sig = Ed25519(SK, 'agentconnect/v0/relay-auth' || nonce || relay_host); REST sig = Ed25519(SK, 'agentconnect/v0/relay-rest' || METHOD '\\n' || PATH '\\n' || ts '\\n' || SHA-256(body) || relay_host). instance is Instance.to_secret_bytes of a seeded test instance.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "instance": "{\"cert\":\"{\\\"created_at\\\":1735689600,\\\"identity\\\":\\\"ac:v0:9HJ2ugpKr8_Qk0Q6t7aTbBUi8uTuoQfUfMgXbuiL6IA\\\",\\\"instance_id\\\":\\\"06bde3c0a9e772c3\\\",\\\"sig\\\":\\\"OHhTIxyoDBDW7-EdbAIQJoQp9lbMzLr5KUDuCfl9DvKfOhEZPDDrX0NpL_qVhAieGtP6y3ju2AV58yrAQxMcAw\\\",\\\"sig_key\\\":\\\"9a1DdD3d18bicbzflD4MdJoFNoRDBndMjyLQ9xIYL-E\\\",\\\"v\\\":0}\",\"sk\":\"-4-5BuXWoSwzKYJXX1UsgrpIWHWGWdmQzoOQ7WAiI28\",\"v\":0}",
+  "mailbox_id": "Rpd2dBpOPBn88XzWYV0v3p",
+  "requests": [
+    {
+      "authorization": "AgentConnect-Ed25519 9a1DdD3d18bicbzflD4MdJoFNoRDBndMjyLQ9xIYL-E.1735689600.1Iygk8P6m1MW6vyZy0fwwVpoqYYkBwe09iJ5k539vcniVyJhj5g3-SE3XOPrOHSlkWn1BOfhYgN6n7_ZebnNAQ",
+      "body": "{\"invite_id\":\"x\"}",
+      "message": "6167656e74636f6e6e6563742f76302f72656c61792d72657374504f53540a2f76302f696e76697465730a313733353638393630300ae615249572ad23f7833f5e2cc6fe85459d3c8a070556acaac11cfb5ef7d3547872656c61792e74657374",
+      "method": "POST",
+      "path": "/v0/invites",
+      "relay_host": "relay.test",
+      "sig": "1Iygk8P6m1MW6vyZy0fwwVpoqYYkBwe09iJ5k539vcniVyJhj5g3-SE3XOPrOHSlkWn1BOfhYgN6n7_ZebnNAQ",
+      "ts": 1735689600
+    },
+    {
+      "authorization": "AgentConnect-Ed25519 9a1DdD3d18bicbzflD4MdJoFNoRDBndMjyLQ9xIYL-E.1735689900.yXRNr1qbT8ejBfmamzPhSoelzLNpgc3TtpARJ7YZJh5Bf8f96Xc8kEHzC94Oq5ABObN5gjB_Kac7EyU_dmDzDA",
+      "body": "",
+      "message": "6167656e74636f6e6e6563742f76302f72656c61792d7265737444454c4554450a2f76302f696e76697465732f414141414141414141414141414141414141414141410a313733353638393930300ae3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85572656c61792e74657374",
+      "method": "DELETE",
+      "path": "/v0/invites/AAAAAAAAAAAAAAAAAAAAAA",
+      "relay_host": "relay.test",
+      "sig": "yXRNr1qbT8ejBfmamzPhSoelzLNpgc3TtpARJ7YZJh5Bf8f96Xc8kEHzC94Oq5ABObN5gjB_Kac7EyU_dmDzDA",
+      "ts": 1735689900
+    }
+  ],
+  "seed": "4ed87d67e7e970f82aab823a9b8c81f47cb413aca8fc717014d60a5dc9269a4d",
+  "sig_key": "9a1DdD3d18bicbzflD4MdJoFNoRDBndMjyLQ9xIYL-E"
+}

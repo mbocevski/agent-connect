@@ -246,6 +246,36 @@ impl Instance {
         guarded(|| Ok(PyBytes::new(py, &self.0.cert().to_json().map_err(err)?)))
     }
 
+    /// Answers the relay's WebSocket challenge (SPEC §8.2). The signing key
+    /// never leaves the core; only domain-separated relay messages are signed.
+    fn sign_relay_challenge<'py>(
+        &self,
+        py: Python<'py>,
+        nonce: &[u8],
+        relay_host: &str,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let sig = guarded(|| Ok(self.0.sign_relay_challenge(nonce, relay_host)))?;
+        Ok(PyBytes::new(py, &sig))
+    }
+
+    /// Signs a relay REST request (SPEC §8.1.1). Use a fresh `ts` per request.
+    fn sign_relay_request<'py>(
+        &self,
+        py: Python<'py>,
+        method: &str,
+        path: &str,
+        ts: u64,
+        body: &[u8],
+        relay_host: &str,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let sig = guarded(|| {
+            Ok(self
+                .0
+                .sign_relay_request(method, path, ts, body, relay_host))
+        })?;
+        Ok(PyBytes::new(py, &sig))
+    }
+
     fn __repr__(&self) -> PyResult<String> {
         guarded(|| Ok(format!("{:?}", self.0)))
     }

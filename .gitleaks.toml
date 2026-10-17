@@ -11,4 +11,6 @@ paths = ['''(^|/)Cargo\.lock$''', '''(^|/)uv\.lock$''']
 # file (core/src/vectors.rs), so these are test inputs, not credentials.
 [[allowlists]]
 description = "generated test vectors"
-paths = ['''^testdata/(instance-cert|invite-kdf|invite-urls|padding-vectors|sas-vectors)\.json$''']
+paths = [
+    '''^testdata/(instance-cert|invite-kdf|invite-urls|padding-vectors|relay-auth|sas-vectors)\.json$''',
+]

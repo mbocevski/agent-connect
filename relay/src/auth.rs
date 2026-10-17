@@ -4,14 +4,13 @@
 //! domain-separation label and a signed request header (see `README.md`).
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use sha2::{Digest, Sha256};
 
 use crate::proto::{b64_decode, mailbox_id_from_key};
 
 /// Domain-separation label for the WebSocket challenge (SPEC §8.2).
-pub const WS_LABEL: &[u8] = b"agentconnect/v0/relay-auth";
+pub const WS_LABEL: &[u8] = agentconnect_core::identity::RELAY_AUTH_LABEL;
 /// Domain-separation label for signed REST requests.
-pub const REST_LABEL: &[u8] = b"agentconnect/v0/relay-rest";
+pub const REST_LABEL: &[u8] = agentconnect_core::identity::RELAY_REST_LABEL;
 /// The `Authorization` scheme for signed REST requests.
 pub const REST_SCHEME: &str = "AgentConnect-Ed25519";
 /// Accepted clock skew for signed REST requests, in seconds.
@@ -29,13 +28,14 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     buf
 }
 
-/// The bytes a client signs to answer the WebSocket challenge.
+/// The bytes a client signs to answer the WebSocket challenge. Built by
+/// `agentconnect_core`, which also signs them, so the layouts can't drift.
 #[must_use]
 pub fn ws_auth_message(nonce: &[u8], relay_host: &str) -> Vec<u8> {
-    [WS_LABEL, nonce, relay_host.as_bytes()].concat()
+    agentconnect_core::identity::relay_auth_message(nonce, relay_host)
 }
 
-/// The bytes a client signs for a REST request.
+/// The bytes a client signs for a REST request (built by `agentconnect_core`).
 ///
 /// `label || method \n path \n ts \n SHA-256(body) || relay_host`
 #[must_use]
@@ -46,11 +46,7 @@ pub fn rest_auth_message(
     body: &[u8],
     relay_host: &str,
 ) -> Vec<u8> {
-    let mut m = REST_LABEL.to_vec();
-    m.extend_from_slice(format!("{method}\n{path}\n{ts}\n").as_bytes());
-    m.extend_from_slice(&Sha256::digest(body));
-    m.extend_from_slice(relay_host.as_bytes());
-    m
+    agentconnect_core::identity::relay_rest_message(method, path, ts, body, relay_host)
 }
 
 fn verify(sig_key_b64: &str, sig_b64: &str, message: &[u8]) -> Option<String> {
@@ -128,6 +124,7 @@ pub struct RestCredentials {
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::proto::b64_encode;

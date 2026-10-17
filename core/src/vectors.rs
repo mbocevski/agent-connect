@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use crate::Error;
 use crate::clock::FakeClock;
 use crate::encoding::{b64, hex, hex_decode};
-use crate::identity::{Identity, fingerprint, mailbox_id};
+use crate::identity::{Identity, fingerprint, mailbox_id, relay_auth_message, relay_rest_message};
 use crate::invite::{InviteLink, InviteSecret, derive_join_key, derive_welcome_key};
 use crate::join::{MacInput, join_request_mac};
 use crate::padding::{BUCKETS, bucket_for, max_plaintext_len};
@@ -246,6 +246,62 @@ fn instance_cert_vectors() {
     );
     v["cases"] = cases.into();
     check_or_write("instance-cert.json", &v);
+}
+
+#[test]
+fn relay_auth_vectors() {
+    let (seed, rng) = vector_rng("relay-auth.json");
+    let identity = Identity::from_secret_bytes(&rng.array().unwrap());
+    let instance = identity
+        .create_instance(&rng, &FakeClock::default())
+        .unwrap();
+    let challenges: Vec<Value> = ["relay.test", "127.0.0.1:8080"]
+        .into_iter()
+        .map(|host| {
+            let nonce: [u8; 32] = rng.array().unwrap();
+            json!({
+                "nonce": b64(&nonce),
+                "relay_host": host,
+                "message": hex(&relay_auth_message(&nonce, host)),
+                "sig": b64(&instance.sign_relay_challenge(&nonce, host)),
+            })
+        })
+        .collect();
+    let requests: Vec<Value> = [
+        ("POST", "/v0/invites", "{\"invite_id\":\"x\"}"),
+        ("DELETE", "/v0/invites/AAAAAAAAAAAAAAAAAAAAAA", ""),
+    ]
+    .into_iter()
+    .zip([1_735_689_600_u64, 1_735_689_900])
+    .map(|((method, path, body), ts)| {
+        let sig =
+            b64(&instance.sign_relay_request(method, path, ts, body.as_bytes(), "relay.test"));
+        json!({
+            "method": method,
+            "path": path,
+            "ts": ts,
+            "body": body,
+            "relay_host": "relay.test",
+            "message": hex(&relay_rest_message(method, path, ts, body.as_bytes(), "relay.test")),
+            "sig": sig,
+            "authorization": format!(
+                "AgentConnect-Ed25519 {}.{ts}.{sig}",
+                b64(&instance.public_key())
+            ),
+        })
+    })
+    .collect();
+    let secret = instance.to_secret_bytes().unwrap();
+    let mut v = header(
+        "SPEC 8.1.1/8.2 relay authentication by the instance key SK: challenge sig = Ed25519(SK, 'agentconnect/v0/relay-auth' || nonce || relay_host); REST sig = Ed25519(SK, 'agentconnect/v0/relay-rest' || METHOD '\\n' || PATH '\\n' || ts '\\n' || SHA-256(body) || relay_host). instance is Instance.to_secret_bytes of a seeded test instance.",
+        &seed,
+    );
+    v["instance"] = String::from_utf8(secret.to_vec()).unwrap().into();
+    v["sig_key"] = b64(&instance.public_key()).into();
+    v["mailbox_id"] = instance.mailbox_id().into();
+    v["challenges"] = challenges.into();
+    v["requests"] = requests.into();
+    check_or_write("relay-auth.json", &v);
 }
 
 fn url_error(e: &Error) -> &'static str {

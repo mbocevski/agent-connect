@@ -19,6 +19,36 @@ use crate::rng::Rng;
 pub const IDENTITY_PREFIX: &str = "ac:v0:";
 
 const CERT_LABEL: &[u8] = b"agentconnect/v0/instance-cert";
+/// Domain-separation label of the relay WebSocket challenge (SPEC §8.2).
+pub const RELAY_AUTH_LABEL: &[u8] = b"agentconnect/v0/relay-auth";
+/// Domain-separation label of signed relay REST requests (SPEC §8.1.1).
+pub const RELAY_REST_LABEL: &[u8] = b"agentconnect/v0/relay-rest";
+
+/// The bytes signed to answer the relay's WebSocket challenge (SPEC §8.2):
+/// `"agentconnect/v0/relay-auth" || nonce || relay_host`. The relay verifies
+/// against the same function, so the layouts can't drift.
+#[must_use]
+pub fn relay_auth_message(nonce: &[u8], relay_host: &str) -> Vec<u8> {
+    [RELAY_AUTH_LABEL, nonce, relay_host.as_bytes()].concat()
+}
+
+/// The bytes signed for a relay REST request (SPEC §8.1.1):
+/// `"agentconnect/v0/relay-rest" || METHOD "\n" || PATH "\n" || ts "\n" ||
+/// SHA-256(body) || relay_host`, with `ts` in decimal unix seconds.
+#[must_use]
+pub fn relay_rest_message(
+    method: &str,
+    path: &str,
+    ts: u64,
+    body: &[u8],
+    relay_host: &str,
+) -> Vec<u8> {
+    let mut m = RELAY_REST_LABEL.to_vec();
+    m.extend_from_slice(format!("{method}\n{path}\n{ts}\n").as_bytes());
+    m.extend_from_slice(&Sha256::digest(body));
+    m.extend_from_slice(relay_host.as_bytes());
+    m
+}
 
 /// Parses an identity identifier `ac:v0:<b64url IK.pub>` into the public key.
 ///
@@ -327,6 +357,28 @@ impl Instance {
         self.key.sign(msg).to_bytes()
     }
 
+    /// Answers the relay's WebSocket challenge (SPEC §8.2):
+    /// `Ed25519(SK, "agentconnect/v0/relay-auth" || nonce || relay_host)`.
+    #[must_use]
+    pub fn sign_relay_challenge(&self, nonce: &[u8], relay_host: &str) -> [u8; 64] {
+        self.sign(&relay_auth_message(nonce, relay_host))
+    }
+
+    /// Signs a relay REST request (SPEC §8.1.1):
+    /// `Ed25519(SK, "agentconnect/v0/relay-rest" || METHOD "\n" PATH "\n" ts
+    /// "\n" || SHA-256(body) || relay_host)`. Use a fresh `ts` per request.
+    #[must_use]
+    pub fn sign_relay_request(
+        &self,
+        method: &str,
+        path: &str,
+        ts: u64,
+        body: &[u8],
+        relay_host: &str,
+    ) -> [u8; 64] {
+        self.sign(&relay_rest_message(method, path, ts, body, relay_host))
+    }
+
     /// Serialises the instance (secret key and certificate) so the daemon can
     /// store it. **Contains secret key material**: encrypt it at rest.
     ///
@@ -423,6 +475,52 @@ mod tests {
         }
         let restored = Identity::from_secret_bytes(&id.secret_bytes());
         assert_eq!(restored.id(), s);
+    }
+
+    #[test]
+    fn relay_signatures_cover_label_inputs_and_host() {
+        let (_, inst) = instance();
+        let key = VerifyingKey::from_bytes(&inst.public_key()).unwrap();
+        let rng = Rng::for_test("relay-nonce");
+        let nonce: [u8; 32] = rng.array().unwrap();
+        let ok = |msg: &[u8], sig: [u8; 64]| key.verify_strict(msg, &Signature::from_bytes(&sig));
+
+        let sig = inst.sign_relay_challenge(&nonce, "relay.test");
+        let expected = [
+            b"agentconnect/v0/relay-auth".as_slice(),
+            &nonce,
+            b"relay.test",
+        ]
+        .concat();
+        assert!(ok(&expected, sig).is_ok());
+        let other_host = [
+            b"agentconnect/v0/relay-auth".as_slice(),
+            &nonce,
+            b"relay.evil",
+        ]
+        .concat();
+        assert!(ok(&other_host, sig).is_err());
+
+        let body = b"{\"invite_id\":\"x\"}";
+        let sig = inst.sign_relay_request("POST", "/v0/invites", 42, body, "relay.test");
+        let mut expected = b"agentconnect/v0/relay-rest".to_vec();
+        expected.extend_from_slice(b"POST\n/v0/invites\n42\n");
+        expected.extend_from_slice(&Sha256::digest(body));
+        expected.extend_from_slice(b"relay.test");
+        assert!(ok(&expected, sig).is_ok());
+        for (m, p, ts, b) in [
+            ("DELETE", "/v0/invites", 42, body.as_slice()),
+            ("POST", "/v0/invites/x", 42, body.as_slice()),
+            ("POST", "/v0/invites", 43, body.as_slice()),
+            ("POST", "/v0/invites", 42, b"{}".as_slice()),
+        ] {
+            assert!(ok(&relay_rest_message(m, p, ts, b, "relay.test"), sig).is_err());
+        }
+        // The two labels never produce interchangeable signatures.
+        assert_ne!(
+            inst.sign_relay_challenge(b"", "h"),
+            inst.sign_relay_request("", "", 0, b"", "h")
+        );
     }
 
     #[test]
