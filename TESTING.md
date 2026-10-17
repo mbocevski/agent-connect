@@ -63,7 +63,10 @@ the slow test to a higher tier or make it faster. Do not raise the budget.
   (derandomized, no example database; selected automatically when `CI` is set)
   and `nightly` (2000 examples, no deadline). Override with
   `HYPOTHESIS_PROFILE`.
-- **Timeouts.** pytest: 10 s per test (`pytest-timeout`). nextest: slow after
+- **Timeouts.** pytest: 10 s per test (`pytest-timeout`), and 30 s for tests
+  under `harness/`, whose setup and teardown start and stop a real relay and
+  several daemons (set in the harness plugin; an explicit
+  `@pytest.mark.timeout` wins). nextest: slow after
   10 s, terminated after 30 s (`.config/nextest.toml`). A timeout is a failure.
 
 ## Contract tests
