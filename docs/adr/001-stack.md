@@ -185,6 +185,51 @@ only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
     with push protection, and Dependabot alerts and security updates.
   - Release tags `v*` are protected by a ruleset: no deletion, no moving.
 
+### 5. Platforms
+
+Tier 1 is Linux x86_64. Linux arm64 and macOS arm64 are supported too.
+Intel Macs and Windows are not (the daemon uses `fcntl` locks and Unix
+sockets).
+
+| Platform | CI | Release artifacts | Reproducibility check |
+|---|---|---|---|
+| Linux x86_64 | `ci.yml`, required | relay, core wheel, Python packages | yes |
+| Linux arm64 | `platforms`, `image`, not required | relay, core wheel | yes |
+| macOS arm64 | `platforms`, not required | core wheel | no |
+
+- **Native runners, no emulation.** arm64 builds use `ubuntu-24.04-arm`,
+  macOS builds `macos-15`. QEMU would turn the OpenSSL and libcrux builds
+  into a 30-minute job and add an emulator to the trust base.
+- **Wheels.** `agentconnect-core` is one abi3 wheel (`abi3-py312`) per
+  platform, built by maturin: manylinux 2.28 on Linux (in the maturin
+  container for the runner's own architecture), a plain `macosx_*_arm64`
+  wheel on macOS. The daemon and SDK are pure Python and ship once.
+- **Container.** `relay/Dockerfile` is architecture-neutral. CI builds it for
+  `linux/amd64` and `linux/arm64`, each on a native runner, and publishes
+  nothing; releases don't publish images yet.
+- **No system libraries.** SQLCipher, OpenSSL (vendored) and libcrux compile
+  from source and link statically. On macOS CI runs `otool -L` on the relay
+  and the extension module, prints the result, and fails if either links
+  anything outside `/usr/lib` and `/System`.
+- **Reproducibility.** The check runs on both Linux architectures. It does
+  not cover macOS: the Apple linker and the Xcode toolchain on the runner
+  image put host details into Mach-O files, and we can't pin them. macOS
+  wheels are signed and attested like the others, but not claimed to be
+  reproducible.
+- **Gating.** The new jobs are not in `ci-ok`: they have no track record
+  yet, and macOS runners queue unpredictably. They run on every pull request
+  and nightly. Promote a job into `ci-ok` after about 20 consecutive green
+  runs under 15 minutes.
+- **Paths and secrets on macOS.** The daemon keeps XDG paths on every
+  platform (`$XDG_DATA_HOME`, `$XDG_CONFIG_HOME`, overridable with
+  `AC_DATA_DIR`). Moving to `~/Library/Application Support` is a follow-up.
+  The keystore uses `keyring`, which talks to the login Keychain on macOS;
+  the unit tests use an in-memory keyring, so CI runs
+  `scripts/keychain_probe.py` to check a real Keychain round trip. The
+  `auto` keystore falls back to 0600 files when it fails. The local API
+  socket lives in the data directory; macOS limits Unix socket paths to 104
+  bytes, so a long `AC_DATA_DIR` breaks the daemon there.
+
 ## Consequences
 
 - Contributors need both toolchains. `just setup` installs everything through

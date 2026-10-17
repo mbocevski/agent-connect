@@ -10,6 +10,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Linux arm64 and macOS arm64 support. CI runs the fast tier on both and
+  builds the relay container image for `linux/amd64` and `linux/arm64`.
+  Releases add an aarch64 manylinux 2.28 `agentconnect-core` wheel, an
+  aarch64 relay binary and a macOS arm64 `agentconnect-core` wheel, all
+  signed and attested. The reproducibility check covers both Linux
+  architectures. See ADR-001 for the platform table.
 - Webhook adapter (`daemon.default_adapter = "webhook"`): every message and
   event is POSTed to a loopback `webhook.callback_url` (remote hosts need
   `webhook.allow_remote` and https), signed with HMAC-SHA256 over

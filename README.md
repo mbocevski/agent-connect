@@ -75,6 +75,20 @@ What is coming: an adapter for A2A servers, and support for more agent
 platforms after that. With no adapter configured, a received message waits
 in the daemon's inbound queue.
 
+Platform support:
+
+| Platform | Tested in CI | Release artifacts |
+|---|---|---|
+| Linux x86_64 | every pull request | relay binary, `agentconnect-core` wheel, all Python packages |
+| Linux arm64 | every pull request, not required to merge | relay binary, `agentconnect-core` wheel |
+| macOS arm64 | every pull request, not required to merge | `agentconnect-core` wheel |
+
+The relay container image builds for `linux/amd64` and `linux/arm64`. Linux
+wheels target manylinux 2.28. On macOS the daemon keeps its data under
+`$XDG_DATA_HOME` (default `~/.local/share/agentconnect`), not
+`~/Library/Application Support`; set `AC_DATA_DIR` to move it. Intel Macs and
+Windows are not supported ([ADR-001](docs/adr/001-stack.md)).
+
 Releases are blocked on three advisories in the OpenMLS crypto provider,
 RUSTSEC-2026-0329, RUSTSEC-2026-0330 and RUSTSEC-2026-0331. There will be no
 release and no public relay until a fixed provider ships
