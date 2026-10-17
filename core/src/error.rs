@@ -65,6 +65,15 @@ pub enum Error {
     /// There is no pending commit to confirm or discard.
     #[error("no pending commit")]
     NoPendingCommit,
+    /// The confirmation (`accepted` `msg_id`) is not for the pending commit
+    /// (SPEC §8.3). Nothing was merged.
+    #[error("confirmation does not match the pending commit")]
+    PendingCommitMismatch,
+    /// The relay accepted an own commit that this instance had already
+    /// discarded, so the group moved on without it (SPEC §8.3). The pending
+    /// commit (if any) was discarded; the instance must re-sync (rejoin).
+    #[error("an own commit discarded earlier was accepted; re-sync required")]
+    OwnCommitLost,
     /// The plaintext doesn't fit the largest padding bucket (SPEC §7.1).
     #[error("message too large")]
     TooLarge,

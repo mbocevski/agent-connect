@@ -17,7 +17,7 @@ use openmls_traits::OpenMlsProvider as _;
 use serde::Deserialize;
 
 use crate::clock::Clock;
-use crate::encoding::hex;
+use crate::encoding::{b64, hex};
 use crate::error::{Error, Result, mls, storage};
 use crate::identity::Instance;
 use crate::invite::{Invite, InviteMeta, InviteSecret};
@@ -30,6 +30,7 @@ use crate::mls::{
 use crate::padding::bucket_for;
 use crate::policy::{CommitFacts, Floor, GroupMeta, GroupPolicy, Removal, authorize};
 use crate::provider::{Provider, Store};
+use crate::records::{self, OwnCommits, PendingRecord, wire_hash};
 use crate::rng::Rng;
 use crate::sas::Sas;
 
@@ -89,13 +90,19 @@ pub struct Routing {
 }
 
 /// A commit created by this instance. It stays **pending** until the relay
-/// confirms it: call [`Group::confirm_pending_commit`] on `accepted`, or let
-/// [`Group::process`] confirm it when it is fanned back; call
-/// [`Group::discard_pending_commit`] on `epoch_conflict` (SPEC §8.3).
+/// confirms it (SPEC §8.3): call [`Group::confirm_pending_commit`] with the
+/// `msg_id` of the relay's `accepted` frame, or let [`Group::process`]
+/// confirm it when the fan-out delivers these exact bytes back. Call
+/// [`Group::discard_pending_commit`] only when the relay rejected the send
+/// (`epoch_conflict` or another error frame for this `msg_id`); after a
+/// timeout, resend the same bytes under the same `msg_id` instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitOut {
     /// The serialised MLS commit (`kind: commit`).
     pub commit: Vec<u8>,
+    /// The envelope `msg_id` to send the commit under (base64url of 16
+    /// random bytes). Only an `accepted` for this id confirms the commit.
+    pub msg_id: String,
     /// The epoch the commit was built in (`env.epoch`).
     pub epoch: u64,
     /// Routing hints for the envelope.
@@ -118,8 +125,9 @@ pub struct CommitSummary {
     pub removed: Vec<MemberInfo>,
     /// Whether `ac_group_policy` changed.
     pub policy_changed: bool,
-    /// Whether merging this commit dropped this instance's own pending
-    /// commit (it lost an epoch race and should be rebuilt if still needed).
+    /// Whether this commit (another member's, at the epoch of this
+    /// instance's own pending commit) won the epoch: the pending commit was
+    /// discarded and should be rebuilt if still needed (SPEC §8.3).
     pub discarded_own_pending: bool,
 }
 
@@ -165,7 +173,8 @@ pub enum Event {
     Application(ApplicationMessage),
     /// Another member's commit, checked against the policy and merged.
     Commit(CommitSummary),
-    /// This instance's pending commit came back from the relay and is merged.
+    /// This instance's pending commit came back from the relay byte for
+    /// byte and is merged.
     OwnCommitConfirmed(CommitSummary),
     /// A commit removed this instance. The group is now inactive; delete it.
     Removed(CommitSummary),
@@ -173,7 +182,8 @@ pub enum Event {
     /// some other member should commit it with
     /// [`Group::commit_pending_proposals`].
     LeaveProposed(MemberInfo),
-    /// One of this instance's own messages, fanned back, with nothing to do.
+    /// One of this instance's own messages from an earlier epoch (e.g. a
+    /// commit already confirmed by `accepted`), with nothing to do.
     OwnEcho,
 }
 
@@ -799,14 +809,35 @@ impl Group {
                 return Err(e);
             }
         };
-        let welcome = match (invite, bundle.to_welcome_msg()) {
-            (Some(invite), Some(w)) => {
-                Some(invite.secret().wrap_welcome(client.rng(), &wire(&w)?)?)
+        let built = (|| {
+            let welcome = match (invite, bundle.to_welcome_msg()) {
+                (Some(invite), Some(w)) => {
+                    Some(invite.secret().wrap_welcome(client.rng(), &wire(&w)?)?)
+                }
+                _ => None,
+            };
+            let commit = wire(bundle.commit())?;
+            let msg_id = b64(&client.rng().array::<16>()?);
+            let mut own = OwnCommits::load(client.provider.records(), self.group_id(), epoch)?;
+            own.pending = Some(PendingRecord {
+                msg_id: msg_id.clone(),
+                hash: wire_hash(&commit),
+            });
+            own.save(client.provider.records(), self.group_id())?;
+            Ok((welcome, commit, msg_id))
+        })();
+        let (welcome, commit, msg_id) = match built {
+            Ok(b) => b,
+            Err(e) => {
+                self.mls
+                    .clear_pending_commit(client.provider.storage())
+                    .map_err(storage)?;
+                return Err(e);
             }
-            _ => None,
         };
         Ok(CommitOut {
-            commit: wire(bundle.commit())?,
+            commit,
+            msg_id,
             epoch,
             routing: Routing {
                 add: inspection.added.iter().map(leaf_mailbox).collect(),
@@ -966,25 +997,57 @@ impl Group {
         wire(&msg)
     }
 
-    /// Merges the pending commit after the relay confirmed it (`accepted`).
+    /// Merges the pending commit after the relay confirmed it: `msg_id` is
+    /// the id in the relay's `accepted` frame and must be the pending
+    /// commit's [`CommitOut::msg_id`] (SPEC §8.3).
+    ///
+    /// A late `accepted` for a commit that the fan-out already confirmed
+    /// returns [`Error::NoPendingCommit`]; the daemon ignores it.
     ///
     /// # Errors
     ///
-    /// [`Error::NoPendingCommit`] or an MLS error.
+    /// [`Error::NoPendingCommit`], [`Error::PendingCommitMismatch`] (nothing
+    /// is merged), or an MLS error.
     pub fn confirm_pending_commit<S: Store>(
         &mut self,
         client: &Client<S>,
+        msg_id: &str,
     ) -> Result<CommitSummary> {
+        if !self.has_pending_commit() {
+            return Err(Error::NoPendingCommit);
+        }
+        let own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+        match own.pending {
+            Some(p) if p.msg_id == msg_id => self.merge_own(client),
+            _ => Err(Error::PendingCommitMismatch),
+        }
+    }
+
+    fn merge_own<S: Store>(&mut self, client: &Client<S>) -> Result<CommitSummary> {
         let staged = self.mls.pending_commit().ok_or(Error::NoPendingCommit)?;
         let inspection = self.inspect_commit(client, staged, self.mls.own_leaf_index())?;
+        let sent = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?
+            .pending
+            .map(|p| p.hash);
         self.mls
             .merge_pending_commit(&client.provider)
             .map_err(mls)?;
+        OwnCommits {
+            epoch: self.epoch(),
+            confirmed: sent,
+            ..OwnCommits::default()
+        }
+        .save(client.provider.records(), self.group_id())?;
         self.summary(inspection, false)
     }
 
-    /// Drops the pending commit after `epoch_conflict` (SPEC §8.3). Process
-    /// the winning commit next, then rebuild if still needed.
+    /// Drops the pending commit after the relay rejected it
+    /// (`epoch_conflict`, or another error for its `msg_id`; SPEC §8.3).
+    /// Process the winning commit next, then rebuild if still needed.
+    ///
+    /// Don't discard on a timeout: resend the same commit under the same
+    /// `msg_id` (the relay deduplicates it). If a discarded commit is later
+    /// delivered back, [`Group::process`] reports [`Error::OwnCommitLost`].
     ///
     /// # Errors
     ///
@@ -993,9 +1056,42 @@ impl Group {
         if !self.has_pending_commit() {
             return Err(Error::NoPendingCommit);
         }
+        let mut own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+        own.discard_pending();
+        own.save(client.provider.records(), self.group_id())?;
         self.mls
             .clear_pending_commit(client.provider.storage())
             .map_err(storage)
+    }
+
+    /// An MLS commit whose sender data names this instance's own leaf.
+    /// OpenMLS can't decrypt or authenticate it (the sender data is
+    /// encrypted under a key every member knows), so only an exact byte
+    /// match with what this instance sent confirms anything (SPEC §8.3).
+    fn own_commit<S: Store>(&mut self, client: &Client<S>, bytes: &[u8]) -> Result<Event> {
+        let mut own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+        let hash = wire_hash(bytes);
+        if self.has_pending_commit() && own.pending.as_ref().is_some_and(|p| p.hash == hash) {
+            return Ok(Event::OwnCommitConfirmed(self.merge_own(client)?));
+        }
+        if own.discarded.contains(&hash) {
+            // The relay accepted a commit we no longer hold: the group has
+            // moved to an epoch this instance can't enter.
+            if self.has_pending_commit() {
+                own.discard_pending();
+                own.save(client.provider.records(), self.group_id())?;
+                self.mls
+                    .clear_pending_commit(client.provider.storage())
+                    .map_err(storage)?;
+            }
+            return Err(Error::OwnCommitLost);
+        }
+        // Not something this instance sent: forged (any member can write
+        // sender data naming our leaf) or corrupted. Ignore it and keep the
+        // pending commit, which only authenticated evidence may settle.
+        Err(Error::Unauthorized(
+            "commit claims this instance as sender but was not sent by it",
+        ))
     }
 
     /// Encrypts an inner message (SPEC §7.2) as an application message,
@@ -1060,6 +1156,13 @@ impl Group {
         }
         let content_type = msg.content_type();
         let epoch = msg.epoch().as_u64();
+        if content_type == ContentType::Commit && epoch.checked_add(1) == Some(self.epoch()) {
+            // The fan-out copy of our own commit, already merged on `accepted`.
+            let own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+            if own.confirmed == Some(wire_hash(bytes)) {
+                return Ok(Event::OwnEcho);
+            }
+        }
         let processed = guard(|| {
             self.mls
                 .process_message(&client.provider, msg)
@@ -1114,17 +1217,10 @@ impl Group {
                     Event::Commit(summary)
                 })
             }
-            ProcessedMessageContent::OwnPendingCommit => Ok(Event::OwnCommitConfirmed(
-                self.confirm_pending_commit(client)?,
-            )),
-            ProcessedMessageContent::OwnPrivateMessage => {
-                if content_type == ContentType::Commit
-                    && epoch == self.epoch()
-                    && self.has_pending_commit()
-                {
-                    Ok(Event::OwnCommitConfirmed(
-                        self.confirm_pending_commit(client)?,
-                    ))
+            ProcessedMessageContent::OwnPendingCommit
+            | ProcessedMessageContent::OwnPrivateMessage => {
+                if content_type == ContentType::Commit && epoch == self.epoch() {
+                    self.own_commit(client, bytes)
                 } else {
                     Ok(Event::OwnEcho)
                 }
@@ -1142,6 +1238,7 @@ impl Group {
     ///
     /// [`Error::Storage`].
     pub fn delete<S: Store>(mut self, client: &Client<S>) -> Result<()> {
+        records::delete_group(client.provider.records(), self.group_id())?;
         self.mls.delete(client.provider.storage()).map_err(storage)
     }
 }

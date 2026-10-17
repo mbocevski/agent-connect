@@ -7,7 +7,7 @@
 mod common;
 
 use agentconnect_core::Group;
-use agentconnect_core::group::Event;
+use agentconnect_core::group::{CommitOut, Event};
 use common::*;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
@@ -58,9 +58,9 @@ struct World {
 impl World {
     /// Commit `out` was built by member `from`: confirm it there and
     /// process it everywhere else.
-    fn fan_out(&mut self, from: usize, commit: &[u8]) {
+    fn fan_out(&mut self, from: usize, out: &CommitOut) {
         self.groups[from]
-            .confirm_pending_commit(&self.peers[from].client)
+            .confirm_pending_commit(&self.peers[from].client, &out.msg_id)
             .unwrap();
         let mut removed = Vec::new();
         for i in 0..self.groups.len() {
@@ -68,7 +68,7 @@ impl World {
                 continue;
             }
             match self.groups[i]
-                .process(&self.peers[i].client, commit)
+                .process(&self.peers[i].client, &out.commit)
                 .unwrap()
             {
                 Event::Commit(_) => {}
@@ -101,12 +101,12 @@ impl World {
                 let victim = 1 + k % (n - 1);
                 let id = self.peers[victim].identity.id();
                 let out = self.groups[0].remove(&self.peers[0].client, &id).unwrap();
-                self.fan_out(0, &out.commit);
+                self.fan_out(0, &out);
             }
             Op::Update(k) => {
                 let who = k % n;
                 let out = self.groups[who].update(&self.peers[who].client).unwrap();
-                self.fan_out(who, &out.commit);
+                self.fan_out(who, &out);
             }
             Op::Message(k) => {
                 let who = k % n;

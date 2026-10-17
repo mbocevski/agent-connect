@@ -67,6 +67,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core: an own commit is confirmed only by the relay's `accepted` for its
+  `msg_id` (`CommitOut.msg_id`, now required by `confirm_pending_commit`) or
+  by the fan-out delivering the exact bytes sent. Previously any commit
+  claiming the instance's leaf at the current epoch merged whatever commit
+  was pending, so a stale own commit forked the instance and a malicious
+  member could trigger a premature merge. A discarded own commit that comes
+  back is reported as `OwnCommitLost` (re-sync needed).
 - Dependency policy allows MPL-2.0 for the three `hpke-rs` crates only.
   Advisories RUSTSEC-2026-0329/0330/0331 in the OpenMLS libcrux provider are
   temporarily ignored, and releases are blocked until a fixed provider ships.

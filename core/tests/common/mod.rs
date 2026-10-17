@@ -91,7 +91,9 @@ pub fn join(inviter: &Peer, group: &mut Group, joiner: &Peer) -> (Group, CommitO
     let out = group
         .add_member(&inviter.client, verified, &inv, true)
         .unwrap();
-    group.confirm_pending_commit(&inviter.client).unwrap();
+    group
+        .confirm_pending_commit(&inviter.client, &out.msg_id)
+        .unwrap();
     let joined = joiner
         .client
         .join_from_wrapped_welcome(

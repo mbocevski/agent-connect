@@ -28,6 +28,7 @@ mod mls;
 pub mod padding;
 pub mod policy;
 pub mod provider;
+mod records;
 pub mod rng;
 pub mod sas;
 #[cfg(test)]

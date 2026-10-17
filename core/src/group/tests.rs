@@ -39,7 +39,7 @@ fn join(inviter: &C, group: &mut Group, joiner: &C) -> (Group, CommitOut) {
     let req = joiner.create_join_request(inv.secret(), "j").unwrap();
     let v = inviter.verify_join_request(&req, &inv).unwrap();
     let out = group.add_member(inviter, v, &inv, true).unwrap();
-    group.confirm_pending_commit(inviter).unwrap();
+    group.confirm_pending_commit(inviter, &out.msg_id).unwrap();
     let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
     let g = joiner
         .join_from_wrapped_welcome(inv.secret(), &meta, out.welcome.as_ref().unwrap())
@@ -121,7 +121,7 @@ fn admin_removing_the_owner_is_rejected() {
     p.remove = RemovePermission::Admins;
     p.admins = vec![cs[1].instance().identity().to_owned()];
     let out = gs[0].set_policy(&cs[0], &p).unwrap();
-    gs[0].confirm_pending_commit(&cs[0]).unwrap();
+    gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
     for i in [1, 2] {
         gs[i].process(&cs[i], &out.commit).unwrap();
     }
@@ -334,7 +334,7 @@ fn local_checks_reject_own_bad_commits_and_clear_them() {
 fn processing_after_eviction_and_public_messages() {
     let (cs, mut gs) = trio();
     let out = gs[0].remove(&cs[0], cs[2].instance().identity()).unwrap();
-    gs[0].confirm_pending_commit(&cs[0]).unwrap();
+    gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
     assert!(matches!(
         gs[2].process(&cs[2], &out.commit),
         Ok(Event::Removed(_))
@@ -357,12 +357,44 @@ fn processing_after_eviction_and_public_messages() {
     assert!(format!("{:?}", cs[0]).contains("Client"));
 }
 
+/// Review F1, malicious member: any member can write sender data naming
+/// another member's leaf. A has `Remove(B)` pending; a commit that claims
+/// A's leaf but isn't the one A sent must neither merge A's pending commit
+/// (A would believe B is gone while nobody else does) nor discard it.
+#[test]
+fn forged_own_commit_echo_neither_confirms_nor_discards() {
+    let (cs, mut gs) = trio();
+    // Bytes framed as a commit from A's leaf at the current epoch that A
+    // never sent (built from A's state and thrown away, which is as good as
+    // a forgery from A's point of view).
+    let forged = raw_commit!(gs[0], cs[0], |b| b.force_self_update(true));
+    let out = gs[0].remove(&cs[0], cs[1].instance().identity()).unwrap();
+    let epoch = gs[0].epoch();
+    assert_eq!(
+        gs[0].process(&cs[0], &forged),
+        Err(Error::Unauthorized(
+            "commit claims this instance as sender but was not sent by it"
+        ))
+    );
+    assert_eq!(gs[0].epoch(), epoch);
+    assert!(gs[0].has_pending_commit());
+    assert_eq!(gs[0].members().unwrap().len(), 3);
+    // The relay's real confirmation still works.
+    let s = gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
+    assert_eq!(s.removed[0].identity, cs[1].instance().identity());
+    assert!(matches!(
+        gs[2].process(&cs[2], &out.commit),
+        Ok(Event::Commit(_))
+    ));
+    assert_eq!(gs[0].sas(), gs[2].sas());
+}
+
 #[test]
 fn wrong_epoch_is_reported() {
     let (cs, mut gs) = trio();
     // B moves to the next epoch; C hasn't seen the commit yet.
     let out = gs[0].update(&cs[0]).unwrap();
-    gs[0].confirm_pending_commit(&cs[0]).unwrap();
+    gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
     gs[1].process(&cs[1], &out.commit).unwrap();
     let ahead = gs[1].seal(&cs[1], &inner(&cs[1])).unwrap();
     assert_eq!(gs[2].process(&cs[2], &ahead), Err(Error::WrongEpoch));

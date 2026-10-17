@@ -93,7 +93,9 @@ fn removed_member_cannot_decrypt_next_epoch() {
         out.routing.remove,
         vec![peers[2].client.instance().mailbox_id()]
     );
-    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
     let s = expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
     assert_eq!(s.removed[0].identity, peers[2].identity.id());
     let Event::Removed(_) = groups[2].process(&peers[2].client, &out.commit).unwrap() else {
@@ -119,7 +121,9 @@ fn member_that_missed_its_removal_cannot_decrypt_either() {
     let out = groups[0]
         .remove(&peers[0].client, &peers[2].identity.id())
         .unwrap();
-    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
     let ct = groups[0]
         .seal(&peers[0].client, &inner(&peers[0], "secret"))
         .unwrap();
@@ -215,7 +219,7 @@ fn wrong_invite_secret_fails_mac_and_welcome() {
     assert_eq!(verified.mailbox_id(), b.client.instance().mailbox_id());
     assert_eq!(verified.instance_id(), b.client.instance().instance_id());
     let out = ga.add_member(&a.client, verified, &inv, true).unwrap();
-    ga.confirm_pending_commit(&a.client).unwrap();
+    ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let wrapped = out.welcome.unwrap();
     assert_eq!(
         b.client
@@ -402,7 +406,9 @@ fn owner_policy_change_round_trips() {
         groups[0].seal(&peers[0].client, &inner(&peers[0], "x")),
         Err(Error::CommitPending)
     );
-    let s = groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    let s = groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
     assert!(s.policy_changed);
     let s = expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
     assert!(s.policy_changed);
@@ -414,7 +420,9 @@ fn owner_policy_change_round_trips() {
     floor.floor = Floor::Moderated;
     floor.floor_moderator = Some(peers[1].identity.id());
     let out = groups[1].set_policy(&peers[1].client, &floor).unwrap();
-    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    groups[1]
+        .confirm_pending_commit(&peers[1].client, &out.msg_id)
+        .unwrap();
     expect_commit(groups[0].process(&peers[0].client, &out.commit).unwrap());
     assert_converged(&groups);
 
@@ -437,7 +445,9 @@ fn update_commits_converge_and_change_sas() {
     let (peers, mut groups) = group_of(3, &clock);
     let before = groups[0].sas();
     let out = groups[1].update(&peers[1].client).unwrap();
-    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    groups[1]
+        .confirm_pending_commit(&peers[1].client, &out.msg_id)
+        .unwrap();
     for i in [0, 2] {
         expect_commit(groups[i].process(&peers[i].client, &out.commit).unwrap());
     }
@@ -456,7 +466,9 @@ fn epoch_conflict_discard_process_rebuild() {
         Error::CommitPending
     );
     // The relay accepts A's commit; B gets epoch_conflict.
-    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &a.msg_id)
+        .unwrap();
     groups[1].discard_pending_commit(&peers[1].client).unwrap();
     assert_eq!(
         groups[1].discard_pending_commit(&peers[1].client),
@@ -466,7 +478,9 @@ fn epoch_conflict_discard_process_rebuild() {
     expect_commit(groups[2].process(&peers[2].client, &a.commit).unwrap());
     let b = groups[1].update(&peers[1].client).unwrap();
     assert_eq!(b.epoch, a.epoch + 1);
-    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    groups[1]
+        .confirm_pending_commit(&peers[1].client, &b.msg_id)
+        .unwrap();
     for i in [0, 2] {
         expect_commit(groups[i].process(&peers[i].client, &b.commit).unwrap());
     }
@@ -478,7 +492,9 @@ fn winner_commit_drops_pending_commit() {
     let clock = clock();
     let (peers, mut groups) = group_of(2, &clock);
     let a = groups[0].update(&peers[0].client).unwrap();
-    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &a.msg_id)
+        .unwrap();
     let _b = groups[1].update(&peers[1].client).unwrap();
     let s = expect_commit(groups[1].process(&peers[1].client, &a.commit).unwrap());
     assert!(s.discarded_own_pending);
@@ -499,14 +515,79 @@ fn own_commit_echo_confirms() {
     assert!(!groups[0].has_pending_commit());
     expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
     assert_converged(&groups);
-    // A second echo after confirmation is harmless.
-    assert!(matches!(
-        groups[0].process(&peers[0].client, &out.commit),
-        Ok(Event::OwnEcho) | Err(_)
-    ));
+    // A second echo after confirmation is an old-epoch echo, nothing more.
     assert_eq!(
-        groups[0].confirm_pending_commit(&peers[0].client),
+        groups[0].process(&peers[0].client, &out.commit),
+        Ok(Event::OwnEcho)
+    );
+    assert_eq!(groups[0].epoch(), 2);
+    // A late `accepted` for it finds nothing pending.
+    assert_eq!(
+        groups[0].confirm_pending_commit(&peers[0].client, &out.msg_id),
         Err(Error::NoPendingCommit)
+    );
+}
+
+#[test]
+fn accepted_confirms_only_its_own_msg_id_and_later_echo_is_harmless() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let first = groups[0].update(&peers[0].client).unwrap();
+    groups[0].discard_pending_commit(&peers[0].client).unwrap();
+    let out = groups[0].update(&peers[0].client).unwrap();
+    assert_ne!(first.msg_id, out.msg_id);
+    assert_eq!(out.msg_id.len(), 22, "base64url of 16 bytes");
+    // `accepted` for the discarded commit's msg_id confirms nothing.
+    assert_eq!(
+        groups[0].confirm_pending_commit(&peers[0].client, &first.msg_id),
+        Err(Error::PendingCommitMismatch)
+    );
+    assert!(groups[0].has_pending_commit());
+    assert_eq!(groups[0].epoch(), 1);
+    let s = groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
+    assert_eq!(s.epoch, 2);
+    // The fan-out copy arrives after `accepted`.
+    assert_eq!(
+        groups[0].process(&peers[0].client, &out.commit),
+        Ok(Event::OwnEcho)
+    );
+    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    assert_converged(&groups);
+}
+
+/// Review F1, honest relay: A's commit X was accepted but A timed out,
+/// discarded it and built Y at the same epoch. The fan-out then delivers X.
+/// Before the fix A merged Y on seeing "its own commit" while B merged X:
+/// same epoch, different state (a fork).
+#[test]
+fn stale_own_commit_is_not_taken_for_the_pending_one() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let x = groups[0].update(&peers[0].client).unwrap();
+    groups[0].discard_pending_commit(&peers[0].client).unwrap();
+    let _y = groups[0].update(&peers[0].client).unwrap();
+    let epoch = groups[0].epoch();
+
+    assert_eq!(
+        groups[0].process(&peers[0].client, &x.commit),
+        Err(Error::OwnCommitLost)
+    );
+    // Y was not merged: it is discarded, and A knows it has to re-sync.
+    assert_eq!(groups[0].epoch(), epoch);
+    assert!(!groups[0].has_pending_commit());
+    // B follows X; A did not silently fork to Y's state.
+    expect_commit(groups[1].process(&peers[1].client, &x.commit).unwrap());
+    assert_ne!(groups[0].epoch(), groups[1].epoch());
+
+    // Same when nothing was pending any more.
+    let (peers, mut groups) = group_of_seeded(2, 10, &clock);
+    let x = groups[0].update(&peers[0].client).unwrap();
+    groups[0].discard_pending_commit(&peers[0].client).unwrap();
+    assert_eq!(
+        groups[0].process(&peers[0].client, &x.commit),
+        Err(Error::OwnCommitLost)
     );
 }
 
@@ -517,9 +598,13 @@ fn forked_group_view_gives_different_sas() {
     // A and B commit concurrently. A malicious relay confirms both senders
     // and gives A's commit to C: A and C share a view, B is forked off.
     let a = groups[0].update(&peers[0].client).unwrap();
-    let _b = groups[1].update(&peers[1].client).unwrap();
-    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
-    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    let b = groups[1].update(&peers[1].client).unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &a.msg_id)
+        .unwrap();
+    groups[1]
+        .confirm_pending_commit(&peers[1].client, &b.msg_id)
+        .unwrap();
     expect_commit(groups[2].process(&peers[2].client, &a.commit).unwrap());
     assert!(groups.iter().all(|g| g.epoch() == groups[0].epoch()));
     assert_eq!(groups[0].sas(), groups[2].sas());
@@ -556,7 +641,9 @@ fn leave_via_remove_proposal() {
         out.routing.remove,
         vec![peers[2].client.instance().mailbox_id()]
     );
-    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    groups[1]
+        .confirm_pending_commit(&peers[1].client, &out.msg_id)
+        .unwrap();
     expect_commit(groups[0].process(&peers[0].client, &out.commit).unwrap());
     let Event::Removed(_) = groups[2].process(&peers[2].client, &out.commit).unwrap() else {
         panic!("expected removal");
@@ -593,7 +680,9 @@ fn multi_replica_identity_joins_and_is_removed_together() {
         .remove(&peers[0].client, &peers[1].identity.id())
         .unwrap();
     assert_eq!(out.routing.remove.len(), 2);
-    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
     assert_eq!(groups[0].members().unwrap().len(), 1);
 }
 
@@ -653,7 +742,7 @@ fn sqlite_store_persists_across_reopen() {
     let req = b.create_join_request(link.secret(), "b").unwrap();
     let v = a.client.verify_join_request(&req, &inv).unwrap();
     let out = ga.add_member(&a.client, v, &inv, true).unwrap();
-    ga.confirm_pending_commit(&a.client).unwrap();
+    ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let gid = b
         .join_from_wrapped_welcome(
             link.secret(),

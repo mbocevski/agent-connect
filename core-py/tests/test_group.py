@@ -63,7 +63,7 @@ def join(inviter: ac.Client, gid: bytes, joiner: ac.Client) -> dict[str, Any]:
     out = inviter.add_member(gid, verified, invite)
     with pytest.raises(ac.AgentConnectError, match="already used"):
         inviter.add_member(gid, verified, invite)
-    inviter.confirm_pending_commit(gid)
+    inviter.confirm_pending_commit(gid, out["msg_id"])
     welcome = out["welcome"]
     assert isinstance(welcome, bytes)
     assert joiner.join(link, invite_meta(invite), welcome) == gid
@@ -105,6 +105,8 @@ def test_group_commits_converge(rng: random.Random) -> None:
 
     upd = b.update(gid)
     assert b.has_pending_commit(gid)
+    with pytest.raises(ac.AgentConnectError, match="does not match the pending commit"):
+        b.confirm_pending_commit(gid, out["msg_id"])
     assert b.process(gid, upd["commit"])["type"] == "own_commit_confirmed"
     for client in (a, c):
         client.process(gid, upd["commit"])
@@ -114,7 +116,7 @@ def test_group_commits_converge(rng: random.Random) -> None:
     assert a.process(gid, leave)["type"] == "leave_proposed"
     b.process(gid, leave)
     out = a.commit_pending_proposals(gid)
-    a.confirm_pending_commit(gid)
+    a.confirm_pending_commit(gid, out["msg_id"])
     b.process(gid, out["commit"])
     assert c.process(gid, out["commit"])["type"] == "removed"
     assert len(a.members(gid)) == 2

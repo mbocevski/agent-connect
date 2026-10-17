@@ -426,6 +426,7 @@ fn summary<'py>(py: Python<'py>, s: &CommitSummary) -> PyResult<Bound<'py, PyDic
 fn commit_out<'py>(py: Python<'py>, c: &CommitOut) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("commit", PyBytes::new(py, &c.commit))?;
+    d.set_item("msg_id", &c.msg_id)?;
     d.set_item("epoch", c.epoch)?;
     d.set_item("routing", routing(py, &c.routing)?)?;
     d.set_item("welcome", c.welcome.as_ref().map(|w| PyBytes::new(py, w)))?;
@@ -815,15 +816,17 @@ impl Client {
         Ok(PyBytes::new(py, &p))
     }
 
+    /// Merges the pending commit on the relay's `accepted{msg_id}`.
     fn confirm_pending_commit<'py>(
         &self,
         py: Python<'py>,
         group_id: &[u8],
+        msg_id: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
         let s = py
             .detach(|| {
                 with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .confirm_pending_commit(c))
+                    .confirm_pending_commit(c, msg_id))
             })
             .map_err(err)?;
         summary(py, &s)
