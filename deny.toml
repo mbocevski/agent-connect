@@ -5,7 +5,18 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+# TEMPORARY, accepted 2026-10-17 (ADR-001 §2, docs/spikes/mls-xwing.md).
+# openmls_libcrux_crypto 0.4.0 pins these versions; upstream main already uses
+# the fixed releases, but no provider release ships them yet. Until one does,
+# `core` MUST length-check every HPKE public key before calling OpenMLS.
+# RELEASE BLOCKER: no release and no public relay while any of these entries
+# remain. Remove them as soon as a fixed provider is published.
+ignore = [
+    { id = "RUSTSEC-2026-0329", reason = "libcrux-hmac-drbg 0.0.1 via openmls_libcrux_crypto 0.4.0; fixed in 0.0.2" },
+    { id = "RUSTSEC-2026-0330", reason = "libcrux-kem 0.0.9 via hpke-rs-libcrux 0.7.0; fixed in 0.0.10" },
+    { id = "RUSTSEC-2026-0331", reason = "libcrux-kem 0.0.9 via hpke-rs-libcrux 0.7.0; reachable DoS, see spikes/mls-xwing t9; fixed in 0.0.10" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time only, via libcrux's hax-lib-macros" },
+]
 
 [licenses]
 confidence-threshold = 0.9
@@ -19,6 +30,23 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
+
+# Approved 2026-10-17 (ADR-001 §4). hpke-rs is the HPKE layer of both OpenMLS crypto providers (libcrux and
+# rust-crypto), so OpenMLS can't be used without it. MPL-2.0 is file-level
+# copyleft: using it unmodified is compatible with Apache-2.0 distribution;
+# modifying its files would oblige us to publish those files. Scoped to these
+# three crates only; MPL-2.0 is not allowed anywhere else.
+[[licenses.exceptions]]
+crate = "hpke-rs"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "hpke-rs-crypto"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+crate = "hpke-rs-libcrux"
+allow = ["MPL-2.0"]
 
 [licenses.private]
 ignore = true

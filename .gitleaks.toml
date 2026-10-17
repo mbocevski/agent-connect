@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+# Lockfiles hold package names and checksums, never secrets. Crate names such
+# as `libcrux-secrets` trip the generic-api-key rule.
+[[allowlists]]
+description = "dependency lockfiles"
+paths = ['''(^|/)Cargo\.lock$''', '''(^|/)uv\.lock$''']

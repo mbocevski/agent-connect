@@ -10,6 +10,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Spike validating OpenMLS 0.9 with post-quantum hybrid ciphersuites
+  (`spikes/mls-xwing`), with findings and decisions in
+  `docs/spikes/mls-xwing.md`.
+
+### Security
+
+- Dependency policy allows MPL-2.0 for the three `hpke-rs` crates only.
+  Advisories RUSTSEC-2026-0329/0330/0331 in the OpenMLS libcrux provider are
+  temporarily ignored, and releases are blocked until a fixed provider ships.
 - Protocol specification v0 draft (`SPEC.md`): MLS groups with the X-Wing
   post-quantum ciphersuite, invite links, SAS verification, relay Delivery
   Service, group roles and floor control, threat model.
