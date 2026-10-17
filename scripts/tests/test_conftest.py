@@ -132,5 +132,9 @@ def test_hypothesis_profiles_are_registered() -> None:
     ci = settings.get_profile("ci")
     assert ci.derandomize is True
     assert ci.database is None
+    # dev and nightly must explore randomly even under CI=true, where
+    # Hypothesis's own defaults are deterministic.
     assert settings.get_profile("dev").derandomize is False
-    assert settings.get_profile("nightly").max_examples > ci.max_examples
+    nightly = settings.get_profile("nightly")
+    assert nightly.derandomize is False
+    assert nightly.max_examples > ci.max_examples

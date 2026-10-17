@@ -40,7 +40,9 @@ def resolve_seed(environ: Mapping[str, str]) -> int:
 
 
 def _register_hypothesis_profiles() -> None:
-    settings.register_profile("dev", settings())
+    # Explicit derandomize=False: under CI=true Hypothesis's built-in defaults
+    # are deterministic, and profiles would otherwise inherit that.
+    settings.register_profile("dev", derandomize=False)
     # Deterministic: same examples every run, no example database.
     settings.register_profile(
         "ci",
@@ -52,6 +54,7 @@ def _register_hypothesis_profiles() -> None:
     )
     settings.register_profile(
         "nightly",
+        derandomize=False,
         database=None,
         max_examples=2000,
         deadline=None,
