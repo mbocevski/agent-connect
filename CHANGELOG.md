@@ -23,6 +23,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `just lint`, `just lint-py`, `just lint-rust`.
 - `scripts/hygiene.py`: rejects AI-tool attribution and internal tooling
   references in files, commit messages and PR text (hooks, CI, `just merge`).
+- Repository configuration as code: Dependabot (cargo, uv, Actions,
+  pre-commit hooks, Rust toolchain), a `v*` tag ruleset, CODEOWNERS, and PR
+  and issue templates.
 - Tooling: justfile, prek hooks (pre-commit, commit-msg, pre-push), CI,
   nightly audit/mutation runs, reproducibility check, signed release workflow,
   and local merge gating (`just merge`).
