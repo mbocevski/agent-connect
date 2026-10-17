@@ -563,18 +563,28 @@ def _json_line(value: Any) -> str:
 
 def _part_lines(part: Any) -> list[str]:
     """One A2A part as preview lines: text in full, data as JSON, a file by its
-    name, type and size (the bytes stay unshown)."""
+    name, type and size (the bytes stay unshown), and then every other member
+    of the part, so nothing rides along unseen."""
     if not isinstance(part, dict):
         return [f"[part] {_json_line(part)}"]
+    shown: set[str] = {"kind"}
     if isinstance(part.get("text"), str):
-        return [f"| {line}" for line in str(part["text"]).splitlines() or [""]]
-    if "data" in part:
-        return [f"[data] {_json_line(part['data'])}"]
-    file = part.get("file") if isinstance(part.get("file"), dict) else part
-    name = file.get("name") or file.get("filename") or "?"
-    media = file.get("mediaType") or file.get("mimeType") or "?"
-    content = file.get("bytes") or file.get("raw") or file.get("url") or file.get("uri") or ""
-    return [f"[file] {name}, {media}, {len(str(content))} characters of content (not shown)"]
+        lines = [f"| {line}" for line in str(part["text"]).splitlines() or [""]]
+        shown.add("text")
+    elif "data" in part:
+        lines = [f"[data] {_json_line(part['data'])}"]
+        shown.add("data")
+    else:
+        file = part.get("file") if isinstance(part.get("file"), dict) else part
+        name = file.get("name") or file.get("filename") or "?"
+        media = file.get("mediaType") or file.get("mimeType") or "?"
+        content = file.get("bytes") or file.get("raw") or file.get("url") or file.get("uri")
+        lines = [f"[file] {name}, {media}, {len(str(content or ''))} characters (not shown)"]
+        shown |= {"file", "raw", "url", "filename", "mediaType"}
+    rest = {k: v for k, v in part.items() if k not in shown}
+    if rest:
+        lines.append(f"[part fields] {_json_line(rest)}")
+    return lines
 
 
 def _preview_lines(m: dict[str, Any]) -> list[str]:

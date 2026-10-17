@@ -1,0 +1,25 @@
+{
+  "description": "A2A v1.0 part shapes the daemon and the SDK must agree on (SPEC sections 7.2 and 10.2). A valid part has exactly one content member (text, data, file, raw or url), an optional kind that names it (text, data or file; raw and url are file content), and otherwise only metadata, filename and mediaType. Anything else is malformed.",
+  "valid": [
+    {"part": {"text": "hello"}, "kind": "text"},
+    {"part": {"kind": "text", "text": "hello"}, "kind": "text"},
+    {"part": {"text": "hello", "metadata": {"lang": "en"}}, "kind": "text"},
+    {"part": {"data": {"k": 1}}, "kind": "data"},
+    {"part": {"kind": "data", "data": [1, 2]}, "kind": "data"},
+    {"part": {"raw": "QUJD", "filename": "a.txt", "mediaType": "text/plain"}, "kind": "file"},
+    {"part": {"url": "https://example.org/a.txt"}, "kind": "file"},
+    {"part": {"kind": "file", "file": {"name": "a.txt", "bytes": "QUJD"}}, "kind": "file"}
+  ],
+  "invalid": [
+    {"part": {"kind": "text", "text": "hello", "data": {"cmd": "x"}, "file": {"bytes": "QUJD"}}, "why": "more than one content member"},
+    {"part": {"text": "hello", "data": {}}, "why": "more than one content member"},
+    {"part": {"kind": "data", "text": "hello"}, "why": "kind and content member disagree"},
+    {"part": {"kind": "text", "raw": "QUJD"}, "why": "kind and content member disagree"},
+    {"part": {"kind": "text"}, "why": "no content member"},
+    {"part": {}, "why": "no content member"},
+    {"part": {"text": 5}, "why": "text that is not a string"},
+    {"part": {"text": "hello", "script": "x"}, "why": "an unknown member"},
+    {"part": {"kind": "shell", "text": "x"}, "why": "an unknown kind"},
+    {"part": "hello", "why": "not an object"}
+  ]
+}

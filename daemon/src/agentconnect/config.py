@@ -535,6 +535,8 @@ def _isolation(data: Mapping[str, Any]) -> dict[str, Any]:
         "isolation_agent_users": _users(table, "agent_users"),
         "isolation_human_users": _users(table, "human_users"),
     }
+
+
 MAX_AUDIT_RETENTION_DAYS = 365
 MIN_TRANSCRIPT_BYTES = 1024 * 1024
 

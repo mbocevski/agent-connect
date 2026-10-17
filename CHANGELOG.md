@@ -45,6 +45,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `hold_for_approval` or `drop` with a reason), and every message the agent
   sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
   the loop guard moved into it unchanged. See `docs/safety.md`.
+- Every A2A part must have exactly one content member that matches its
+  `kind`, and no other members but `metadata`, `filename` and
+  `mediaType`; any other part is `malformed`. The daemon, the A2A adapter
+  and the SDK apply the same rule (`testdata/a2a-parts.json`), and the
+  approval preview shows every member of a part.
 - The loop guard decides on the hop alone, so its pause no longer tells a
   peer whether the policy accepted a probe. The reconnect drain's rate
   exemption is bounded per identity (twice its per-sender rate). An

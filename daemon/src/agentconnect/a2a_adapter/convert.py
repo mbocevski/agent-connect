@@ -25,6 +25,8 @@ from a2a.types import (
 from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
 from google.protobuf.message import Message as ProtoMessage
 
+from agentconnect.limits import part_kind
+
 TERMINAL = frozenset(
     {
         TaskState.TASK_STATE_COMPLETED,
@@ -52,7 +54,13 @@ def _parse[T: ProtoMessage](body: Any, into: T) -> T | None:
 
 
 def parse_message(body: dict[str, Any]) -> Message:
-    """A peer's ``a2a.message`` body as an A2A ``Message`` (never raises)."""
+    """A peer's ``a2a.message`` body as an A2A ``Message`` (never raises).
+    Malformed parts are left out (agentconnect.limits.part_kind): the daemon
+    has dropped any message carrying one, and this keeps it so here too."""
+    parts = body.get("parts")
+    if isinstance(parts, list):
+        msg = _parse({**body, "parts": [p for p in parts if part_kind(p) != "invalid"]}, Message())
+        return Message() if msg is None else msg
     msg = _parse(body, Message())
     if msg is not None and len(msg.parts) > 0:
         return msg

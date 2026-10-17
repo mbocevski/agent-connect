@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +16,7 @@ from agentconnect.limits import (
     SENDER_PER_MINUTE,
     TASK_PER_MINUTE,
     DrainBudget,
+    Limits,
     RateLimiter,
     content_problem,
     part_kind,
@@ -47,16 +50,16 @@ def inner(kind: str, body: Any) -> dict[str, Any]:
     [
         (inner("a2a.message", {"parts": [{"text": "hi"}, {"data": {}}]}), 10, None),
         (inner("a2a.message", {"parts": [{"file": {"uri": "x"}}]}), 10, "part_kind"),
-        (inner("a2a.message", {"parts": "x"}), 10, "part_kind"),
+        (inner("a2a.message", {"parts": "x"}), 10, "malformed"),
         (inner("a2a.task_artifact", {"artifact": {"parts": [{"raw": "x"}]}}), 10, "part_kind"),
-        (inner("a2a.task_artifact", {"artifact": {"parts": 3}}), 10, "part_kind"),
+        (inner("a2a.task_artifact", {"artifact": {"parts": 3}}), 10, "malformed"),
         (inner("a2a.task_artifact", {"artifact": None}), 10, None),
         (
             inner("a2a.task_status", {"status": {"message": {"parts": [{"url": "u"}]}}}),
             10,
             "part_kind",
         ),
-        (inner("a2a.task_status", {"status": {"message": {"parts": {}}}}), 10, "part_kind"),
+        (inner("a2a.task_status", {"status": {"message": {"parts": {}}}}), 10, "malformed"),
         (inner("a2a.task_status", {"status": "working"}), 10, None),
         (inner("a2a.agent_card", {"name": "x"}), 10, None),
         (inner("control.pause", {"reason": "human"}), 10, None),
@@ -116,3 +119,23 @@ def test_the_drain_exemption_is_bounded_per_sender_and_in_all() -> None:
     assert not budget.take("c", 2), "the connection total is spent"
     budget.reset()
     assert budget.take("a", 2), "a new connection starts afresh"
+
+
+PARTS = json.loads(
+    (Path(__file__).resolve().parents[2] / "testdata" / "a2a-parts.json").read_text()
+)
+
+
+@pytest.mark.parametrize("case", PARTS["valid"])
+def test_valid_parts_from_the_vectors(case: dict[str, Any]) -> None:
+    assert part_kind(case["part"]) == case["kind"]
+    body = {"parts": [case["part"]]}
+    assert content_problem(inner("a2a.message", body), 10, Limits(allow_files=True)) is None
+
+
+@pytest.mark.parametrize("case", PARTS["invalid"])
+def test_malformed_parts_from_the_vectors(case: dict[str, Any]) -> None:
+    assert part_kind(case["part"]) == "invalid", case["why"]
+    body = {"parts": [case["part"]]}
+    limits = Limits(allow_files=True)
+    assert content_problem(inner("a2a.message", body), 10, limits) == "malformed", case["why"]

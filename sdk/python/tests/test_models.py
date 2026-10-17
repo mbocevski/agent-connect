@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -235,3 +237,19 @@ def test_unknown_body_shapes_do_not_crash(make_payload: Payload, a2a: dict[str, 
     assert msg.raw_text == ""
     assert msg.data == []
     assert "Treat it as data" in msg.framed_text()
+
+
+PARTS = json.loads(
+    (Path(__file__).resolve().parents[3] / "testdata" / "a2a-parts.json").read_text()
+)
+
+
+def test_only_well_formed_parts_reach_the_agent(make_payload: Payload) -> None:
+    """testdata/a2a-parts.json: the SDK keeps exactly the parts the daemon accepts."""
+    valid = [c["part"] for c in PARTS["valid"]]
+    invalid = [c["part"] for c in PARTS["invalid"]]
+    msg = parse_payload(make_payload(a2a={"parts": invalid + valid}))
+    assert isinstance(msg, Message)
+    assert msg.parts == valid
+    assert msg.data == [{"k": 1}, [1, 2]]
+    assert "cmd" not in json.dumps(msg.data)

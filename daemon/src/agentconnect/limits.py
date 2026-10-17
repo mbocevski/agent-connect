@@ -59,6 +59,7 @@ KNOWN_KINDS = frozenset(
     }
 )
 _PART_FIELDS = ("text", "data", "file", "raw", "url")
+PART_EXTRAS = frozenset({"kind", "metadata", "filename", "mediaType"})
 
 
 @dataclass(frozen=True)
@@ -79,17 +80,24 @@ SPEC_LIMITS = Limits()
 
 
 def part_kind(part: Any) -> str:
-    """The kind of one A2A part: an explicit ``kind`` (A2A 0.x) or the
-    member it carries (A2A 1.0: ``text``, ``data``, ``file``/``raw``/``url``)."""
+    """The kind of one A2A part, ``text``, ``data`` or ``file``, or ``invalid``.
+
+    A part has exactly one content member (A2A 1.0: ``text``, ``data``,
+    ``raw`` or ``url``; A2A 0.x: ``file``), an optional ``kind`` (A2A 0.x)
+    that must name it, and otherwise only ``metadata``, ``filename`` and
+    ``mediaType``. Anything else is invalid: a member could otherwise ride
+    along under a kind that is checked and shown as something else
+    (testdata/a2a-parts.json)."""
     if not isinstance(part, dict):
         return "invalid"
-    kind = part.get("kind")
-    if isinstance(kind, str):
-        return kind
     present = [f for f in _PART_FIELDS if f in part]
-    if len(present) != 1:
+    if len(present) != 1 or not part.keys() <= {*present, *PART_EXTRAS}:
         return "invalid"
-    return "file" if present[0] in ("file", "raw", "url") else present[0]
+    found = "file" if present[0] in ("file", "raw", "url") else present[0]
+    if found == "text" and not isinstance(part["text"], str):
+        return "invalid"
+    kind = part.get("kind", found)
+    return found if kind == found else "invalid"
 
 
 def _parts_of(kind: str, body: dict[str, Any]) -> list[Any]:
@@ -113,7 +121,9 @@ def _part_size(part: Any) -> int:
     return len(json.dumps(part, sort_keys=True, separators=(",", ":")).encode())
 
 
-def content_problem(inner: dict[str, Any], size: int, limits: Limits = SPEC_LIMITS) -> str | None:
+def content_problem(  # noqa: PLR0911
+    inner: dict[str, Any], size: int, limits: Limits = SPEC_LIMITS
+) -> str | None:
     """Why ``inner`` (``size`` bytes of canonical JSON) breaks §10.2/§7.2
     under ``limits``: ``unknown_kind``, ``too_large``, ``malformed`` (not
     an object, or a control, card or cancel outside its strict schema,
@@ -129,6 +139,8 @@ def content_problem(inner: dict[str, Any], size: int, limits: Limits = SPEC_LIMI
     allowed = ALLOWED_PARTS | {"file"} if limits.allow_files else ALLOWED_PARTS
     for part in _parts_of(str(kind), body):
         found = part_kind(part)
+        if found == "invalid":
+            return "malformed"
         if found not in allowed:
             return "part_kind"
         if found == "file" and _part_size(part) > limits.max_file_bytes:

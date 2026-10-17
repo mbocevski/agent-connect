@@ -39,8 +39,14 @@ through the daemon. Neither direction has a path around the policy.
 What the policy checks, in order:
 
 1. **Content.** The kind must be one the protocol defines. The message must
-   fit `max_message_bytes` (256 KiB by default). A2A parts must be `text` or
-   `data`; `file` parts pass only when the group sets `allow_files`, and
+   fit `max_message_bytes` (256 KiB by default). Each A2A part has exactly
+   one content member (`text`, `data`, or a file as `file`, `raw` or
+   `url`), an optional `kind` that names it, and otherwise only
+   `metadata`, `filename` and `mediaType`; any other part is
+   `malformed` and counts as a violation, so nothing rides along under a
+   kind that is checked and shown as something else
+   (`testdata/a2a-parts.json`, which the daemon and the SDK both test
+   against). Parts must be `text` or `data`; `file` parts pass only when the group sets `allow_files`, and
    then only up to `max_file_bytes`. Only A2A messages, task status and
    artifact updates carry parts. Every other kind (the `control.*`
    messages, Agent Cards, task cancellations) must fit a strict schema of

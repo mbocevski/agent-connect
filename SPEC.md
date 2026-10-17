@@ -959,7 +959,10 @@ the reference daemon allows 1000 per connection, and per identity twice its
 per-sender rate, so one peer's queued messages can't use up the exemption); the
 size, kind and part
 limits always apply. Allowed A2A part kinds are `text` and
-`data`. `file` parts are disabled by default; a receiver MAY accept them,
+`data`. A part carries exactly one content member (`text`, `data`, or a
+file as `file`, `raw` or `url`); an explicit `kind` MUST name that member,
+and the only other members are `metadata`, `filename` and `mediaType`. A
+receiver MUST treat any other part as malformed and drop its message. `file` parts are disabled by default; a receiver MAY accept them,
 with a size cap of its own choosing (§10.6).
 
 These limits are maximums. A receiver MAY apply lower values, for a group or

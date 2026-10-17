@@ -26,6 +26,25 @@ MESSAGE_EVENTS = frozenset({"message", "task_status", "task_artifact", "task_can
 CONTENT_EVENTS = frozenset({"message", "task_status", "task_artifact"})
 
 
+_PART_CONTENT = ("text", "data", "file", "raw", "url")
+_PART_EXTRAS = frozenset({"kind", "metadata", "filename", "mediaType"})
+
+
+def _well_formed(part: Any) -> bool:
+    """An A2A part with exactly one content member, a ``kind`` (if any) that
+    names it, and no other members but metadata, filename and mediaType: the
+    daemon's rule (testdata/a2a-parts.json), applied again here."""
+    if not isinstance(part, dict):
+        return False
+    present = [f for f in _PART_CONTENT if f in part]
+    if len(present) != 1 or not part.keys() <= {*present, *_PART_EXTRAS}:
+        return False
+    found = "file" if present[0] in ("file", "raw", "url") else present[0]
+    if found == "text" and not isinstance(part["text"], str):
+        return False
+    return bool(part.get("kind", found) == found)
+
+
 MAX_NOTICE_NAME = 80
 MAX_NOTICE_SCOPE = 200
 
@@ -125,7 +144,7 @@ class Message:
             artifact = body.get("artifact")
             holder = inner if isinstance(inner, dict) else artifact
             raw = holder.get("parts") if isinstance(holder, dict) else None
-        return [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
+        return [p for p in raw if _well_formed(p)] if isinstance(raw, list) else []
 
     @property
     def card(self) -> dict[str, Any] | None:
