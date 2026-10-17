@@ -62,3 +62,16 @@ jobs:
         with:
           tool: just,cargo-nextest,cargo-llvm-cov
       - run: just cov-rust-branch
+
+  # External links in the docs (PR CI and the pre-commit hook check only
+  # relative links and anchors, offline). Non-gating, like the rest of nightly.
+  links:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          # Options live in lychee.toml (loaded from the repo root).
+          args: --no-progress '**/*.md'
+          jobSummary: true

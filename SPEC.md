@@ -26,8 +26,10 @@ From then on the agents exchange messages in real time.
 > silently alter your agents' conversation. If members compare the short code,
 > nobody can sit in the middle, the relay operator included.
 
+<!-- vale AgentConnect.Claims = NO -->
 Never describe the protocol as "fully secure" or "MITM-proof". See §12 for
 what it does not protect against.
+<!-- vale AgentConnect.Claims = YES -->
 
 ## 2. Terminology
 
@@ -115,7 +117,7 @@ what it does not protect against.
   commit with a path) once 24 hours or 1000 application messages (sent and
   received, both use the epoch's keys) have passed since its last own
   commit, whichever comes first. The instance does this
-  just before its next send. This renews post-quantum forward secrecy and
+  immediately before its next send. This renews post-quantum forward secrecy and
   post-compromise security.
 
 ### 3.2 Extension codepoints
@@ -140,7 +142,7 @@ integer outside it.
 
 ### 3.3 Instance certificate
 
-```
+```text
 InstanceCert = {
   "v": 0,
   "identity": "ac:v0:<b64url IK.pub>",
@@ -167,7 +169,7 @@ receivers MUST NOT reject one because of its `created_at`.
 
 ### 3.4 Group metadata
 
-```
+```text
 GroupMeta = {
   "v": 0,
   "name": "<display name, ≤ 80 chars>",
@@ -195,7 +197,7 @@ ASCII strings and `‖` means concatenation.
 
 ### 4.1 URL format
 
-```
+```text
 https://<relay-host>/i/<invite_id>#v=0&s=<invite_secret>
 ```
 
@@ -217,7 +219,7 @@ https://<relay-host>/i/<invite_id>#v=0&s=<invite_secret>
 
 ### 4.2 Public invite metadata (stored by the relay)
 
-```
+```text
 InviteMeta = {
   "invite_id": "...",
   "group_name": "...",
@@ -291,7 +293,7 @@ Registration limits, enforced by the relay (`bad_request` otherwise):
 The joiner instance B parses the URL, fetches `InviteMeta` and shows the human
 the group name, purpose and member count. If the human confirms:
 
-```
+```text
 JoinRequest = {
   "v": 0,
   "invite_id": "...",
@@ -305,7 +307,7 @@ JoinRequest = {
 The MAC covers every field the inviter acts on, each length-prefixed so
 that field boundaries are unambiguous:
 
-```
+```text
 lp(x)     = u32be(len(x)) ‖ x
 mac_input = "agentconnect/v0/join-request"
             ‖ lp(invite_id)          # the raw 16 bytes, not base64url
@@ -415,7 +417,7 @@ JoinRequest.
 
 The inviter wraps every Welcome:
 
-```
+```text
 WrappedWelcome = nonce(12) ‖ ChaCha20-Poly1305(welcome_key, nonce, aad = "agentconnect/v0/welcome" ‖ invite_id, welcome_bytes)
 ```
 
@@ -441,7 +443,7 @@ addressed to the new member. Agent Cards are never published to the relay.
 All relay traffic uses JSON text frames. Binary fields are base64url without
 padding.
 
-```
+```text
 Envelope = {
   "v": 0,
   "kind": "commit" | "proposal" | "application" | "welcome_wrapped" | "join_request",
@@ -486,7 +488,7 @@ Envelope = {
 
 These are UTF-8 JSON objects:
 
-```
+```text
 Inner = {
   "v": 0,
   "seq": <u64, per-instance monotonic>,
@@ -557,7 +559,7 @@ status 400 (`bad_request`), 401 (`auth_failed`), 404 (`invite_not_open`), 413
 `POST` and `DELETE /v0/invites…` are authenticated with the instance key
 `SK`, the same key as the WebSocket (§8.2):
 
-```
+```text
 Authorization: AgentConnect-Ed25519 <b64url SK.pub>.<ts>.<b64url sig>
 sig = Ed25519(SK, "agentconnect/v0/relay-rest"
                   || METHOD || "\n" || PATH || "\n" || ts || "\n"
@@ -758,7 +760,7 @@ Mapping of the cases above:
 
 ### 9.1 Policy (`ac_group_policy`)
 
-```
+```text
 GroupPolicy = {
   "v": 0,
   "owner": "ac:v0:…",
@@ -804,7 +806,7 @@ and SHOULD leave the group if the honest members can't converge.
 |---|---|
 | Add (via invite) | A committer whose identity satisfies `invite` under the policy in force at the commit's epoch. |
 | Remove other member | A committer whose identity satisfies `remove`. Only the owner may remove the owner's instances. |
-| Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. The owner's last instance may not leave until it has transferred ownership. A sole remaining member just deletes its local state. |
+| Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. The owner's last instance may not leave until it has transferred ownership. A sole remaining member only deletes its local state. |
 | Policy change (GroupContextExtensions) | Owner. Admins may change `floor` and `floor_moderator` only. Any committer allowed to make the Add may apply the §9.1 floor switch. |
 | Owner transfer | Owner. The new owner must be a member after the commit. |
 | Update (own leaf) | The instance itself |
@@ -841,7 +843,7 @@ Notes on the table:
   member. One of several instances of the owner's identity may leave
   freely. An owner leaving after a SAS mismatch (§11) transfers ownership
   the same way before it deletes its state. A sole remaining member, owner
-  or not, just deletes its local state.
+  or not, only deletes its local state.
 - Each proposal of a commit is authorised against the policy in force at
   the commit's epoch, not the policy the commit introduces. The group after
   the commit MUST fit the `max_members` of the policy the commit ends with.
@@ -850,7 +852,6 @@ Notes on the table:
   Receivers MUST reject any other proposal type, external senders and
   `PublicMessage` handshakes, and at most one GroupContextExtensions
   proposal per commit.
-
 - **No SelfRemove in v0.** MLS SelfRemove proposals can only be sent as
   `PublicMessage` in current implementations, which the wire format policy
   (§3.1) forbids.
@@ -894,7 +895,7 @@ context (`addressed_to_me: false`), or batched (§10).
 
 Every delivery from a daemon to an adapter MUST carry:
 
-```
+```text
 {
   "untrusted": true,
   "scope": GroupMeta.purpose,
@@ -982,7 +983,7 @@ verified too.
     and then deletes its local state whatever the outcome, reporting in
     the alert whether the transfer was confirmed. If it was, the former
     owner is a plain member and its leaf is removed under the normal §9.2
-    rules (it SHOULD send a leave proposal first). A sole member just
+    rules (it SHOULD send a leave proposal first). A sole member only
     deletes its state.
   - A mismatch means the views may be forked. A transfer from a forked
     view only reaches that view: the real group then keeps the departed
@@ -1039,7 +1040,7 @@ stay visible.
 
 **Dropped messages and queue overflow.** A malicious relay can always drop,
 delay or withhold messages; `queue_overflow` does not prevent that and a
-malicious relay can simply omit it. What the marker adds is that an *honest*
+malicious relay can omit it. What the marker adds is that an *honest*
 relay's loss, caused by a full mailbox, is visible to the member that lost
 messages instead of silent. A member MUST treat a marker as "possibly out of
 sync", never as proof of relay honesty, and the absence of a marker proves
@@ -1067,7 +1068,7 @@ SAS checks above.
 
 ### 14.1 1:1: create, join, verify, talk, close
 
-```
+```text
 H_A      A (inviter daemon)          Relay                 B (joiner daemon)      H_B
  │ "start"  │                           │                          │                  │
  │─────────▶│ create group (epoch 0)    │                          │                  │
@@ -1096,7 +1097,7 @@ H_A      A (inviter daemon)          Relay                 B (joiner daemon)    
 
 ### 14.2 Third member joins (group mode)
 
-```
+```text
 C ── join(JoinRequest) ──▶ Relay ──▶ A (holds the invite)
 A: verify, approve, commit [Add(C), GroupContextExtensions(floor=mention)]; Welcome wrapped with welcome_key
 A ── commit (epoch n) ──▶ Relay ──▶ B, A          (B checks the commit against policy)
@@ -1106,7 +1107,7 @@ A, B, C: new SAS for epoch n+1. A and B stay verified for each other; C starts u
 
 ### 14.3 Epoch conflict
 
-```
+```text
 A ── commit(epoch 5) ──▶ Relay: accepted, epoch 5 → 6, fanned out
 B ── commit(epoch 5) ──▶ Relay: epoch_conflict{current_epoch: 6}
 B: discards its pending commit, processes A's commit, rebuilds at epoch 6, resends
@@ -1114,7 +1115,7 @@ B: discards its pending commit, processes A's commit, rebuilds at epoch 6, resen
 
 ### 14.4 Forked view detected by SAS
 
-```
+```text
 Attacker has the leaked link and the relay colludes:
   Attacker joins as "B" toward A    (group view 1)
   Attacker invites the real B into a second group posing as A    (group view 2)
@@ -1180,7 +1181,7 @@ Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 - RFC 9420, *The Messaging Layer Security (MLS) Protocol*
 - RFC 5869 (HKDF), RFC 8785 (JCS), RFC 7493 (I-JSON), RFC 2119 / RFC 8174
 - draft-ietf-mls-pq-ciphersuites (MLS post-quantum ciphersuites) and draft-ietf-hpke-pq (hybrid KEMs for HPKE)
-- A2A Protocol Specification v1.0, https://a2a-protocol.org/v1.0.0/specification/
+- A2A Protocol Specification v1.0, <https://a2a-protocol.org/v1.0.0/specification/>
 - draft-chapman-a2a-mls-03 (MLS carried inside A2A)
 - draft-mpsb-agntcy-slim-02 (AGNTCY SLIM)
 - Matrix SAS verification (the emoji table)

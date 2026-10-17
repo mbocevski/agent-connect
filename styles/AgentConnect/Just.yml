@@ -1,0 +1,8 @@
+# "just" as filler ("just run", "just works"). The task runner is written
+# as code (`just test`), which Vale never checks.
+extends: existence
+message: "'just' is filler here; cut it, or write the command runner as `just`."
+level: error
+ignorecase: true
+tokens:
+  - just

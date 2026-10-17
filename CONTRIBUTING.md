@@ -2,6 +2,13 @@
 
 ## Setup
 
+You need [rustup](https://rustup.rs), [uv](https://docs.astral.sh/uv/),
+[`just`](https://just.systems) and [prek](https://github.com/j178/prek)
+(`uv tool install prek`), plus the Rust test and lint tools:
+`cargo install --locked cargo-nextest cargo-llvm-cov cargo-deny cargo-shear
+taplo-cli`. The Markdown hooks (rumdl, lychee, Vale) install themselves on
+first run; Vale's hook needs Go.
+
 ```sh
 just setup
 ```
@@ -33,11 +40,13 @@ a GitHub ruleset on `main`:
 | No direct pushes to `main` | `pre-push` hook (`scripts/hooks/no-push-main.sh`) |
 | Fast test tier passes | `pre-push` hook (`just test`) |
 | CHANGELOG updated | `pre-push` hook and the CI `changelog` job (`scripts/check-changelog.sh`) |
+| Docs changed with mapped code | `pre-push` hook, `just docs-check` and the CI `docs` job (`scripts/check_docs.py`) |
+| Markdown lint, offline link check, prose rules | `pre-commit` hook and the CI `lint` job (rumdl, lychee, Vale) |
 | All required CI checks green, branch up to date, title OK | `just merge` (`scripts/merge.sh`) |
 | PR required, `ci-ok` green and up to date, squash-only, linear history, signed commits, no force-push or deletion | GitHub ruleset (`.github/rulesets/main.json`) |
 
 The required checks are listed in `.github/required-checks.txt`, currently
-just `ci-ok`, which aggregates every CI job. After changing that file or the
+only `ci-ok`, which aggregates every CI job. After changing that file or the
 ruleset JSON, run `just apply-ruleset` to sync it to GitHub.
 
 Never bypass hooks with `--no-verify`. If a hook fails, fix the cause.
@@ -55,6 +64,38 @@ legitimate product name.
 Commits whose types are all `docs`, `ci`, `chore`, `test`, `build` or `style`
 don't need a changelog entry. For anything else that genuinely isn't
 user-facing, add the `skip-changelog` label to the PR.
+
+### Docs that must change with code
+
+`docs/MAP.toml` lists the user-facing code whose behaviour is documented,
+and the docs that describe it:
+
+| Code | Docs (any one) |
+|---|---|
+| `daemon/src/agentconnect/cli.py` | `docs/cli.md` |
+| `daemon/src/agentconnect/api.py` (local API routes) | `docs/api.md` |
+| `daemon/src/agentconnect/config.py` | `docs/config.md` |
+| `relay/src/proto.rs`, `rest.rs`, `ws.rs` | `SPEC.md` or `relay/README.md` |
+| `testdata/*.json` (not `MANIFEST.json`) | `SPEC.md` |
+
+`scripts/check_docs.py` fails a branch when a commit changes mapped code and
+none of that rule's docs changed anywhere on the branch. Commits of type
+`docs`, `test`, `ci`, `chore`, `build` or `style` don't count, and merge
+commits are ignored. When a change leaves the docs correct, for
+example a refactor inside `cli.py`, add the `skip-docs` label to the PR (CI
+sets `SKIP_DOCS=true` from it; set it yourself to skip the pre-push hook for
+that push). Keep the map small: add a rule only for code whose behaviour
+users read about.
+
+### Writing docs
+
+Markdown is checked by rumdl (`.rumdl.toml`), lychee (`lychee.toml`, offline
+in the hooks and PR CI) and Vale (`.vale.ini`, rules in
+`styles/AgentConnect/`). Vale rejects filler and hype words, absolute
+security claims (use the canonical claim in SPEC.md §1) and emoji. Write for
+an engineer: plain words, short sentences, prose where prose reads better
+than a list, and only claims that are true of `main`. The README quickstart
+is tested (TESTING.md).
 
 ## Tests
 

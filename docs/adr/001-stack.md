@@ -103,6 +103,7 @@ covers everything v0 needs, so the classical fallback isn't needed.
 
 **Accepted risk: provider advisories.** `openmls_libcrux_crypto` 0.4.0, the
 only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
+
 - RUSTSEC-2026-0331 is reachable: a validly signed KeyPackage with a short
   hybrid key panics the inviter, so anyone holding an invite link can crash
   the inviter's daemon. RUSTSEC-2026-0329 and RUSTSEC-2026-0330 are also open.
@@ -121,7 +122,7 @@ only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
 | Python env & packaging | uv (workspace) | 0.13.1 |
 | Python build for bindings | maturin | 1.15.0 |
 | Git hooks | **prek** (drop-in for pre-commit; uses `.pre-commit-config.yaml`) | 0.5.5 |
-| Task runner | just | 1.59+ |
+| Task runner | `just` | 1.59+ |
 | Rust tests | cargo-nextest | 0.9.148 |
 | Property tests | proptest / hypothesis | 1.12.0 / 6.170.1 |
 | Snapshots | insta | 1.49.0 |

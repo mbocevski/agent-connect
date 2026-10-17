@@ -16,9 +16,10 @@ MCP / Claude Code Channels adapters are deferred.
 
 ## Status
 
-Skeleton. The protocol is in `SPEC.md` and the stack decisions in
-`docs/adr/001-stack.md`; those two files are the source of truth. Components
-are stubs until they're implemented.
+Pre-alpha. The protocol is in `SPEC.md` and the stack decisions in
+`docs/adr/001-stack.md`; those two files are the source of truth. The core,
+relay and daemon are implemented; the agent adapters and the SDK are still
+stubs.
 
 ## Layout
 
@@ -37,7 +38,7 @@ are stubs until they're implemented.
 
 Use the `justfile`. Run `just --list` first and don't invent your own commands.
 
-```
+```text
 just setup      # toolchains, deps, git hooks (pre-commit, commit-msg, pre-push)
 just fmt        # format everything
 just lint       # every static check: all prek hooks + cargo deny
@@ -50,6 +51,7 @@ just test-int   # docker compose integration + demos
 just test-nightly # mutants, long property runs, quarantined tests
 just cov        # coverage gates + ratchet against coverage-baseline.json
 just cov-baseline # refresh the baseline (in the PR that raises coverage)
+just docs-check # docs changed with the code they describe (docs/MAP.toml)
 just ci         # exactly what PR CI runs, including coverage gates
 just pr         # push branch, open/refresh PR
 just merge <n>  # the ONLY way to merge: refuses unless every required check is green
@@ -62,7 +64,8 @@ Python. Don't use `pip install` or global venvs.
 
 ## Rules
 
-**Security (non-negotiable)**
+### Security (non-negotiable)
+
 - The relay must never see plaintext or invite secrets. Don't add relay
   features that need either one.
 - The A2A/MCP bridging runs in the **daemon**, never in the relay.
@@ -72,8 +75,9 @@ Python. Don't use `pip install` or global venvs.
   side effects without going through the policy layer.
 - SAS verification is a **human** action. Don't expose it as an
   agent-callable tool.
-- Docs must not claim "fully secure" or "MITM-proof". Use the canonical claim
-  in `SPEC.md`.
+- Docs must not make absolute security claims. Use the canonical claim in
+  `SPEC.md` §1; Vale rejects the banned phrases
+  (`styles/AgentConnect/Claims.yml`).
 - Exactly one MLS ciphersuite per protocol version
   (`MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` in v0). Don't add
   ciphersuite negotiation or fallbacks; they create downgrade paths.
@@ -82,13 +86,15 @@ Python. Don't use `pip install` or global venvs.
 - Crypto changes need test vectors plus negative tests (wrong secret, tamper,
   replay, credential/key mismatch, forked group view → different SAS).
 
-**Dependencies**
+### Dependencies
+
 - Licences must be MIT, Apache-2.0 or BSD. **No AGPL/GPL** (so no
   libsignal). `cargo-deny` enforces this.
 - Check library APIs and versions against current upstream docs before
   adding or upgrading a dependency.
 
-**Code & tests**
+### Code and tests
+
 - Write tests first for `core/` and protocol code. Every bug fix comes with a
   regression test.
 - Tests must be deterministic: use the fake `Clock` (`agentconnect_core::clock`,
@@ -121,9 +127,18 @@ Python. Don't use `pip install` or global venvs.
   Merge only with `just merge <pr>` after CI is green. GitHub enforces the
   same rules server-side through the ruleset in `.github/rulesets/main.json`
   (`just apply-ruleset`).
-- Hooks run via `prek`: pre-commit (lint/format), commit-msg (Conventional
-  Commits), pre-push (`just test` + CHANGELOG check). If a hook fails, fix the
+- Hooks run via `prek`: pre-commit (lint/format, docs), commit-msg (Conventional
+  Commits), pre-push (`just test`, CHANGELOG and docs checks). If a hook fails, fix the
   cause and re-stage. **Never use `--no-verify`.**
+- Docs change with the code they describe. `docs/MAP.toml` maps user-facing
+  code (CLI, local API, daemon config, relay protocol, `testdata/` wire
+  formats) to its docs, and `scripts/check_docs.py` (pre-push, `just
+  docs-check`, CI `docs` job) fails a branch whose non-docs/test/ci/chore/
+  build/style commits change mapped code without touching one of its docs.
+  If the docs stay correct, label the PR `skip-docs`.
+- Markdown passes rumdl, lychee (offline) and Vale (`styles/AgentConnect/`:
+  no filler, hype, absolute security claims or emoji). The README
+  quickstart is a test (`harness/tests/test_readme.py`); keep it runnable.
 - PR descriptions say what changed and why. Don't include stats.
 
 ## No tool attribution or internal references

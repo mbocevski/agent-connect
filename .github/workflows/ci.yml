@@ -31,6 +31,11 @@ jobs:
         with:
           tool: cargo-shear
       - run: uv sync --all-packages
+      # Hook environments (lychee is built from source, Vale with Go).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/prek
+          key: prek-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
       - run: uv tool install prek==0.5.5
       - run: prek run --all-files --show-diff-on-failure
 
@@ -91,6 +96,19 @@ jobs:
           SKIP_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
         run: scripts/check-changelog.sh "origin/${{ github.base_ref }}"
 
+  # Docs must change with the user-facing code they describe (docs/MAP.toml).
+  docs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - env:
+          SKIP_DOCS: ${{ contains(github.event.pull_request.labels.*.name, 'skip-docs') }}
+        run: uv run --no-project python scripts/check_docs.py "origin/${{ github.base_ref }}"
+
   # Commit messages and PR text must not carry AI-tool attribution.
   hygiene:
     if: github.event_name == 'pull_request'
@@ -109,7 +127,7 @@ jobs:
   # Single required check for merge gating (.github/required-checks.txt).
   ci-ok:
     if: always()
-    needs: [lint, rust, python, contract, changelog, hygiene]
+    needs: [lint, rust, python, contract, changelog, docs, hygiene]
     runs-on: ubuntu-24.04
     steps:
       - name: All required jobs passed

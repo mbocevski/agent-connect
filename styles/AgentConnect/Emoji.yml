@@ -1,0 +1,8 @@
+# No emoji in docs. Pictographs, dingbats, symbols and flags; the SAS emoji
+# table lives in testdata/, not in prose.
+extends: existence
+message: "Remove the emoji '%s'."
+level: error
+nonword: true
+raw:
+  - '[\x{1F000}-\x{1FAFF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{FE0F}\x{200D}]'

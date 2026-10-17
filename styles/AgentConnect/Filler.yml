@@ -1,0 +1,42 @@
+# Marketing filler and stock phrases. Say what the thing does instead.
+extends: existence
+message: "Cut '%s' and say what the thing does."
+level: error
+ignorecase: true
+tokens:
+  - seamless(ly)?
+  - robust(ly|ness)?
+  - leverag(e|es|ed|ing)
+  - delv(e|es|ed|ing)
+  - cutting[- ]edge
+  - empower
+  - empowers
+  - empowered
+  - empowering
+  - empowerment
+  - unlock(s|ed|ing)?
+  - game[- ]changer(s)?
+  - game[- ]changing
+  - it'?s worth noting
+  - it is worth noting
+  - worth mentioning
+  - in today'?s
+  - simply
+  - utilize
+  - utilizes
+  - utilized
+  - utilizing
+  - harness(es|ed|ing)? the power
+  - at the end of the day
+  - needless to say
+  - in a nutshell
+  - look no further
+  - out of the box
+  - take it to the next level
+  - elevate(s|d)?
+  - supercharg(e|es|ed|ing)
+  - streamlin(e|es|ed|ing)
+  - unleash(es|ed|ing)?
+  - tapestry
+  - landscape
+  - realm

@@ -239,7 +239,7 @@ for one's own leaf that any other member commits. Use that for v0.
 
 Test: `t7_measure` (`#[ignore]`d). Run it with:
 
-```
+```text
 cargo test --release -p agentconnect-spike-mls-xwing --test t7_measure -- --ignored --nocapture
 ```
 
@@ -454,7 +454,7 @@ These aren't applied here; they need the maintainer's review.
 10. **§9.2 Remove self.** Replace with "a Remove proposal for its own leaf,
     sent as PrivateMessage and committed by any other member". Note that
     SelfRemove needs PublicMessage in OpenMLS 0.9 and isn't used in v0. A
-    sole remaining member just deletes its state.
+    sole remaining member only deletes its state.
 11. **§9.2 Policy change.** A GroupContextExtensions proposal replaces the
     whole set: it MUST carry `ac_group_meta` and `RequiredCapabilities` along
     with the new `ac_group_policy`. Receivers check that the immutable parts
