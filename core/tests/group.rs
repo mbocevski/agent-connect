@@ -114,6 +114,44 @@ fn removed_member_cannot_decrypt_next_epoch() {
     );
 }
 
+/// Review F3: an application message sent in epoch e by a member that the
+/// e -> e+1 commit removed arrives after that commit. It is inside the
+/// grace window and must be delivered, attributed to that member (it used
+/// to fail with `UnknownMember`, looked up in the new tree).
+#[test]
+fn grace_window_message_from_a_just_removed_member_is_delivered() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let msg = inner(&peers[2], "last words");
+    let ct = groups[2].seal(&peers[2].client, &msg).unwrap();
+    let out = groups[0]
+        .remove(&peers[0].client, &peers[2].identity.id())
+        .unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
+    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    for i in [0, 1] {
+        let m = groups[i].open(&peers[i].client, &ct).unwrap();
+        assert_eq!(m.sender.identity, peers[2].identity.id());
+        assert_eq!(m.sender.mailbox_id, peers[2].client.instance().mailbox_id());
+        assert_eq!(m.epoch, out.epoch);
+        assert_eq!(m.plaintext, msg);
+    }
+    // Messages of the current epoch still resolve against the current tree.
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "x"))
+        .unwrap();
+    assert_eq!(
+        groups[1]
+            .open(&peers[1].client, &ct)
+            .unwrap()
+            .sender
+            .identity,
+        peers[0].identity.id()
+    );
+}
+
 #[test]
 fn member_that_missed_its_removal_cannot_decrypt_either() {
     let clock = clock();

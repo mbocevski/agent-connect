@@ -436,6 +436,69 @@ fn forged_own_commit_echo_neither_confirms_nor_discards() {
     assert_eq!(gs[0].sas(), gs[2].sas());
 }
 
+/// Review F3: one commit removes C and adds D, who takes C's leaf. C's
+/// grace-window message must be attributed to C (the member in its epoch),
+/// not to D (the current occupant of the leaf).
+#[test]
+fn grace_window_sender_is_resolved_in_its_own_epoch() {
+    let (cs, mut gs) = trio();
+    let clock = Arc::new(FakeClock::default());
+    let d = client(96, &clock);
+    let inv = Invite::create(
+        cs[0].rng(),
+        cs[0].clock(),
+        "r.example",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = d.create_join_request(inv.secret(), "d").unwrap();
+    let kp = cs[0].verify_join_request(&req, &inv).unwrap().key_package;
+    let ct = gs[2].seal(&cs[2], &inner(&cs[2])).unwrap();
+    let bytes = raw_commit!(gs[0], cs[0], |b| b
+        .propose_removals([LeafNodeIndex::new(2)])
+        .propose_adds([kp]));
+    assert!(matches!(
+        gs[1].process(&cs[1], &bytes),
+        Ok(Event::Commit(_))
+    ));
+    let now = gs[1].members().unwrap();
+    assert_eq!(now[2].identity, d.instance().identity());
+    let m = gs[1].open(&cs[1], &ct).unwrap();
+    assert_eq!(m.sender.identity, cs[2].instance().identity());
+    assert_eq!(m.sender.leaf_index, 2);
+}
+
+/// A grace-window message from a leaf that was not a member in the
+/// message's epoch is rejected.
+#[test]
+fn grace_window_sender_must_have_been_a_member_then() {
+    let (cs, mut gs) = trio();
+    let ct1 = gs[2].seal(&cs[2], &inner(&cs[2])).unwrap();
+    let ct2 = gs[2].seal(&cs[2], &inner(&cs[2])).unwrap();
+    let out = gs[0].update(&cs[0]).unwrap();
+    gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
+    assert!(matches!(
+        gs[1].process(&cs[1], &out.commit),
+        Ok(Event::Commit(_))
+    ));
+    let records = cs[1].provider.records();
+    let mut prev = PreviousMembers::load(records, gs[1].group_id())
+        .unwrap()
+        .unwrap();
+    // A record naming someone else for C's leaf disagrees with the
+    // credential OpenMLS verified the message against.
+    prev.members[2].identity = cs[0].instance().identity().to_owned();
+    prev.save(records, gs[1].group_id()).unwrap();
+    assert_eq!(
+        gs[1].open(&cs[1], &ct1),
+        Err(Error::CredentialMismatch("sender != epoch member"))
+    );
+    // No member at C's leaf in that epoch.
+    prev.members.retain(|m| m.leaf_index != 2);
+    prev.save(records, gs[1].group_id()).unwrap();
+    assert_eq!(gs[1].open(&cs[1], &ct2), Err(Error::UnknownMember));
+}
+
 #[test]
 fn wrong_epoch_is_reported() {
     let (cs, mut gs) = trio();

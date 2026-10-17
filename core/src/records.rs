@@ -1,5 +1,7 @@
 //! `core`'s own records, kept next to the MLS state in the [`Store`]:
-//! what a pending commit looks like on the wire (SPEC §8.3).
+//! what a pending commit looks like on the wire (SPEC §8.3), which
+//! KeyPackages were already used in an Add (SPEC §6.2), and who was a
+//! member in the previous epoch (the §8.3 grace window).
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -7,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::encoding::hex;
 use crate::error::{Error, Result};
+use crate::group::MemberInfo;
 use crate::provider::Store;
 
 fn group_key(kind: &str, group_id: &[u8]) -> Vec<u8> {
@@ -84,6 +87,25 @@ impl OwnCommits {
     }
 }
 
+/// The members of the epoch before the current one: application messages
+/// from that epoch (the SPEC §8.3 grace window) are attributed against it,
+/// not against the current tree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PreviousMembers {
+    pub epoch: u64,
+    pub members: Vec<MemberInfo>,
+}
+
+impl PreviousMembers {
+    pub fn load<S: Store>(store: &S, group_id: &[u8]) -> Result<Option<Self>> {
+        load(store, &group_key("previous-members", group_id))
+    }
+
+    pub fn save<S: Store>(&self, store: &S, group_id: &[u8]) -> Result<()> {
+        save(store, &group_key("previous-members", group_id), self)
+    }
+}
+
 /// Whether a KeyPackage (by `KeyPackageRef`) was already used in an Add
 /// this client merged, in any group: a KeyPackage is single-use (SPEC §6.2,
 /// RFC 9420 §16.8), so a replayed JoinRequest must not re-add a member.
@@ -103,7 +125,8 @@ pub(crate) fn mark_key_packages_used<S: Store>(store: &S, kp_refs: &[Vec<u8>]) -
 
 /// Deletes a group's records (with the group).
 pub(crate) fn delete_group<S: Store>(store: &S, group_id: &[u8]) -> Result<()> {
-    store.put_record(&group_key("own-commits", group_id), None)
+    store.put_record(&group_key("own-commits", group_id), None)?;
+    store.put_record(&group_key("previous-members", group_id), None)
 }
 
 #[cfg(test)]
@@ -127,8 +150,15 @@ mod tests {
         assert!(OwnCommits::load(store, gid, 4).unwrap().pending.is_none());
         rec.discard_pending();
         assert_eq!(rec.discarded, vec![wire_hash(b"x")]);
+        let prev = PreviousMembers {
+            epoch: 2,
+            members: Vec::new(),
+        };
+        prev.save(store, gid).unwrap();
+        assert_eq!(PreviousMembers::load(store, gid).unwrap(), Some(prev));
         delete_group(store, gid).unwrap();
         assert!(OwnCommits::load(store, gid, 3).unwrap().pending.is_none());
+        assert_eq!(PreviousMembers::load(store, gid).unwrap(), None);
 
         assert!(!key_package_used(store, b"ref").unwrap());
         mark_key_packages_used(store, &[b"ref".to_vec()]).unwrap();

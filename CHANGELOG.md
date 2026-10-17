@@ -71,6 +71,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   Python `VerifiedJoinRequest` is no longer used up by a failed
   `add_member`, so an inviter can retry after `CommitPending` or an
   `epoch_conflict`.
+- Core: application messages in the one-epoch grace window are attributed
+  to the sender as it was in the message's epoch, so a message from a
+  member removed by the latest commit is delivered instead of dropped, and
+  a re-used leaf can't be mistaken for its previous occupant.
 
 ### Security
 

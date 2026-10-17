@@ -14,7 +14,7 @@ use openmls::prelude::{
     ProtocolMessage, Sender, ValidationError, WireFormat,
 };
 use openmls_traits::OpenMlsProvider as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::clock::Clock;
 use crate::encoding::{b64, hex};
@@ -30,7 +30,7 @@ use crate::mls::{
 use crate::padding::bucket_for;
 use crate::policy::{CommitFacts, Floor, GroupMeta, GroupPolicy, Removal, authorize};
 use crate::provider::{Provider, Store};
-use crate::records::{self, OwnCommits, PendingRecord, wire_hash};
+use crate::records::{self, OwnCommits, PendingRecord, PreviousMembers, wire_hash};
 use crate::rng::Rng;
 use crate::sas::Sas;
 
@@ -51,7 +51,7 @@ impl<S: Store> fmt::Debug for Client<S> {
 }
 
 /// A member instance, as seen in the group's ratchet tree.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemberInfo {
     /// MLS leaf index.
     pub leaf_index: u32,
@@ -1057,16 +1057,55 @@ impl Group {
         }
     }
 
+    /// The current epoch's members, taken just before a merge.
+    fn snapshot(&self) -> Result<PreviousMembers> {
+        Ok(PreviousMembers {
+            epoch: self.epoch(),
+            members: self.members()?,
+        })
+    }
+
+    /// Records kept after every merged commit: the members of the epoch
+    /// that just ended (for its grace window) and the KeyPackages it used.
+    fn after_merge<S: Store>(
+        &self,
+        client: &Client<S>,
+        previous: &PreviousMembers,
+        inspection: &Inspection,
+    ) -> Result<()> {
+        previous.save(client.provider.records(), self.group_id())?;
+        records::mark_key_packages_used(client.provider.records(), &inspection.added_refs)
+    }
+
+    /// The sender of an application message, resolved in the epoch the
+    /// message was sent in (SPEC §8.3 grace window): a member removed by the
+    /// commit that ended that epoch is still its sender.
+    fn sender_in_epoch<S: Store>(
+        &self,
+        client: &Client<S>,
+        index: LeafNodeIndex,
+        epoch: u64,
+    ) -> Result<MemberInfo> {
+        if epoch == self.epoch() {
+            return self.member_info(index);
+        }
+        PreviousMembers::load(client.provider.records(), self.group_id())?
+            .filter(|p| p.epoch == epoch)
+            .and_then(|p| p.members.into_iter().find(|m| m.leaf_index == index.u32()))
+            .ok_or(Error::UnknownMember)
+    }
+
     fn merge_own<S: Store>(&mut self, client: &Client<S>) -> Result<CommitSummary> {
         let staged = self.mls.pending_commit().ok_or(Error::NoPendingCommit)?;
         let inspection = self.inspect_commit(client, staged, self.mls.own_leaf_index())?;
         let sent = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?
             .pending
             .map(|p| p.hash);
+        let previous = self.snapshot()?;
         self.mls
             .merge_pending_commit(&client.provider)
             .map_err(mls)?;
-        records::mark_key_packages_used(client.provider.records(), &inspection.added_refs)?;
+        self.after_merge(client, &previous, &inspection)?;
         OwnCommits {
             epoch: self.epoch(),
             confirmed: sent,
@@ -1205,6 +1244,7 @@ impl Group {
         })?;
         let sender = processed.sender().clone();
         let msg_epoch = processed.epoch().as_u64();
+        let credential = processed.credential().clone();
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(m) => {
                 let Sender::Member(index) = sender else {
@@ -1212,7 +1252,14 @@ impl Group {
                         "application message from non-member",
                     ));
                 };
-                let sender = self.member_info(index)?;
+                let sender = self.sender_in_epoch(client, index, msg_epoch)?;
+                // OpenMLS verified the message against the leaf of its own
+                // epoch; the attribution must name the same credential.
+                let identity = BasicCredential::try_from(credential)
+                    .map_err(|_| Error::CredentialMismatch("not a basic credential"))?;
+                if identity.identity() != sender.identity.as_bytes() {
+                    return Err(Error::CredentialMismatch("sender != epoch member"));
+                }
                 let plaintext = m.into_bytes();
                 check_inner(&plaintext, &sender)?;
                 Ok(Event::Application(ApplicationMessage {
@@ -1242,10 +1289,11 @@ impl Group {
                 let had_pending = self.has_pending_commit();
                 let inspection = self.inspect_commit(client, &staged, committer)?;
                 let self_removed = staged.self_removed();
+                let previous = self.snapshot()?;
                 self.mls
                     .merge_staged_commit(&client.provider, *staged)
                     .map_err(mls)?;
-                records::mark_key_packages_used(client.provider.records(), &inspection.added_refs)?;
+                self.after_merge(client, &previous, &inspection)?;
                 let summary = self.summary(inspection, had_pending)?;
                 Ok(if self_removed {
                     Event::Removed(summary)
