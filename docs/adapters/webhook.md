@@ -149,9 +149,21 @@ agents that answer each other forever. Task updates use `a2a.task_status` and
 An agent that cannot accept inbound requests can pull the same payloads from
 `GET /v0/events` as a [Server-Sent Events stream](../api.md#event-stream)
 with `default_adapter = "sse"`. Messages that arrive while nothing is
-connected wait in the daemon's queue. Every message and event is also appended
-to a durable feed in the daemon's encrypted database, and the SSE `id` is its
-sequence number, so `Last-Event-ID` resume works across a daemon restart. The
-feed keeps the newest 10000 items (it holds message payloads for that long). A
-consumer that is away longer than that misses the oldest ones. Ordering is as
-for the webhook.
+connected wait in the daemon's queue. With the SSE adapter (and only
+then; the webhook adapter writes nothing of this kind) every message and event
+is also appended to a feed in the daemon's encrypted database, and the SSE `id`
+is its sequence number, so `Last-Event-ID` resume works across a daemon
+restart. The feed is a short window: items are deleted `sse.retention_secs`
+after they were written (default 3600, one hour, see
+[config.md](../config.md)), and in any case only the newest 10000 are kept.
+A consumer that resumes from an id older than the window first receives one
+`sse_gap` event:
+
+```json
+{"event": "sse_gap", "event_id": "sse_gap-<n>", "group": null,
+ "untrusted": true, "data": {"missed_through": 42, "resumed_from": 17}}
+```
+
+Items up to `missed_through` are gone. The frame's `id` is `missed_through`,
+so the consumer's resume point moves past the hole. Treat it as a signal to
+re-sync from your own source of truth. Ordering is as for the webhook.

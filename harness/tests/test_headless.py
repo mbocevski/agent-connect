@@ -392,3 +392,78 @@ async def test_the_text_shorthand_is_an_a2a_message(cluster: Cluster, sockdir: P
     assert received(alice)[1].body["role"] == "ROLE_USER"
     assert received(alice)[1].origin == "human"
     await bob.close()
+
+
+async def test_nothing_is_written_to_the_feed_without_the_sse_adapter(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    alice, bob, gid = await pair(cluster, sockdir)  # webhook
+    handled = asyncio.Event()
+
+    @bob.sdk.on_message
+    async def handle(_msg: Message, _group: Group) -> None:
+        handled.set()
+
+    say(alice, gid, "hello")
+    await asyncio.wait_for(handled.wait(), WAIT)
+    assert bob.node.daemon.store.feed_since(0) == []
+    assert bob.node.daemon.store.feed_last() == 0
+    assert alice.daemon.store.feed_last() == 0
+    await bob.close()
+
+
+async def test_sse_resume_past_the_retention_window_gets_a_gap_event(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    alice, bob, gid = await pair(cluster, sockdir, mode="sse", sse_retention=60)
+    handled: list[str] = []
+    changed = asyncio.Event()
+
+    @bob.sdk.on_message
+    async def handle(msg: Message, _group: Group) -> None:
+        handled.append(msg.text)
+        changed.set()
+
+    stream = asyncio.create_task(bob.sdk.stream())
+    await bob.hub.wait_listeners(1)
+    say(alice, gid, "m1")
+    while not handled:
+        changed.clear()
+        await asyncio.wait_for(changed.wait(), WAIT)
+    first_id = next(s for s, _g, p in bob.node.daemon.store.feed_since(0) if "msg_id" in p)
+    stream.cancel()
+    await asyncio.gather(stream, return_exceptions=True)
+    await bob.hub.wait_listeners(0)
+
+    # Inside the window the items survive a restart.
+    await bob.server.stop()
+    await bob.node.restart()
+    bob.server = await serve_api(bob.node, sockdir)
+    assert [s for s, _g, p in bob.node.daemon.store.feed_since(0) if "msg_id" in p] == [first_id]
+
+    # Past the window they are purged when the daemon comes back.
+    await bob.server.stop()
+    await bob.node.daemon.stop()
+    await cluster.advance(bob.node.config.sse_retention + 1)
+    await bob.node.start()
+    bob.server = await serve_api(bob.node, sockdir)
+    assert bob.node.daemon.store.feed_since(0) == []
+
+    resumed = AgentConnect(data_dir=bob.node.config.data_dir, socket=Path(str(bob.server.address)))
+    gaps: list[Event] = []
+    got = asyncio.Event()
+
+    @resumed.on_event
+    async def on_event(event: Event, _group: Group | None) -> None:
+        if event.type == "sse_gap":
+            gaps.append(event)
+            got.set()
+
+    task = asyncio.create_task(resumed.stream(last_event_id=str(first_id - 1)))
+    await asyncio.wait_for(got.wait(), WAIT)
+    assert gaps[0].data["missed_through"] >= first_id
+    assert gaps[0].group is None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await resumed.aclose()
+    await bob.close()

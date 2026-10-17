@@ -23,5 +23,5 @@ def build_adapters(config: Config, clock: Clock) -> list[Adapter]:
         secret = load_token(config.data_dir / SECRET_FILE)
         return [WebhookAdapter(config.webhook_url, secret, clock, timeout=config.webhook_timeout)]
     if config.default_adapter == "sse":
-        return [SseAdapter()]
+        return [SseAdapter(clock, config.sse_retention)]
     return []

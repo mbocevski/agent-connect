@@ -11,7 +11,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from agentconnect.adapter import Adapter
 from agentconnect.api import ApiServer
@@ -70,13 +70,14 @@ async def headless(  # noqa: PLR0913
     *,
     auto_approve: bool = True,
     started: bool = True,
+    **config: Any,
 ) -> Headless:
     """``started=False`` leaves the webhook unreachable until :meth:`Headless.up`."""
     secret = secrets.token_urlsafe(16)
 
     def adapters(config: Config, clock: Clock) -> list[Adapter]:
         if mode == "sse":
-            return [SseAdapter()]
+            return [SseAdapter(clock, config.sse_retention)]
         if config.webhook_url is None:
             msg = "the webhook adapter needs a callback_url"
             raise ValueError(msg)
@@ -88,6 +89,7 @@ async def headless(  # noqa: PLR0913
         default_adapter=mode,
         make_adapters=adapters,
         webhook_url=UNREACHABLE if mode == "webhook" else None,
+        **config,
     )
     server = await serve_api(node, sockdir)
     sdk = AgentConnect(

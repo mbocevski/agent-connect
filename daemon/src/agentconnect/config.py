@@ -27,6 +27,9 @@ Example file::
     socket = "~/.local/share/agentconnect/agentconnectd.sock"
     tcp_port = 0                    # > 0 serves on 127.0.0.1:<port> instead
 
+    [sse]
+    retention_secs = 3600           # how long the SSE feed keeps items for resume
+
     [webhook]
     callback_url = "http://127.0.0.1:8808/"   # where the webhook adapter POSTs
     allow_remote = false            # opt in to a callback that isn't loopback
@@ -87,6 +90,7 @@ class Config:
     webhook_url: str | None = None
     webhook_allow_remote: bool = False
     webhook_timeout: int = 120
+    sse_retention: int = 3600
 
     @property
     def relay_http(self) -> str:
@@ -208,6 +212,15 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "How long the daemon waits for each webhook response (1 to 3600). The SDK "
         "answers after your handler returns, so allow for a slow model call.",
     ),
+    ConfigKey(
+        "sse.retention_secs",
+        "sse_retention",
+        "`3600`",
+        "How long the SSE adapter keeps messages and events for `Last-Event-ID` "
+        "resume (60 to 604800). After that the payloads are deleted and a consumer "
+        "resuming from before the window gets an `sse_gap` event. Used only with "
+        '`default_adapter = "sse"`.',
+    ),
 )
 
 # Environment variables that don't override a single key.
@@ -296,6 +309,7 @@ def load_config(
     policy = _section(data, "policy")
     api = _section(data, "api")
     webhook = _section(data, "webhook")
+    sse = _section(data, "sse")
 
     relay_url = environ.get("AC_RELAY_URL") or _typed(relay, "url", str, DEFAULT_RELAY_URL)
     data_dir_raw = environ.get("AC_DATA_DIR") or _typed(daemon, "data_dir", str, "")
@@ -321,8 +335,12 @@ def load_config(
         "webhook_url": _typed(webhook, "callback_url", str, "") or None,
         "webhook_allow_remote": _typed(webhook, "allow_remote", bool, False),
         "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
+        "sse_retention": _typed(sse, "retention_secs", int, 3600),
     }
     values.update(overrides)
+    if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
+        msg = "sse retention_secs must be 60..604800"
+        raise ConfigError(msg)
     if not 1 <= values["webhook_timeout"] <= 3600:  # noqa: PLR2004
         msg = "webhook timeout_secs must be 1..3600"
         raise ConfigError(msg)

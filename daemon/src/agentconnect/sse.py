@@ -28,6 +28,7 @@ encrypted at rest (ADR-003).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -41,16 +42,26 @@ from agentconnect.adapter import (
     OutboundSend,
     Sender,
 )
+from agentconnect.clock import Clock, SystemClock, unix_seconds
 from agentconnect.payloads import event_payload, message_payload
 
 FEED_KEEP = 10_000
+RETENTION_SECS = 3600
+GAP_EVENT = "sse_gap"
+MAX_PURGE_INTERVAL = 60.0
 SUBSCRIBER_QUEUE = 1024
 
 
 class Feed(Protocol):
     """The durable feed (``Store`` implements it)."""
 
-    def feed_add(self, key: str, group_id: str | None, payload: dict[str, Any]) -> int | None: ...
+    def feed_add(
+        self, key: str, group_id: str | None, payload: dict[str, Any], now: int
+    ) -> int | None: ...
+
+    def feed_purge(self, before: int) -> int: ...
+
+    def feed_purged(self) -> int: ...
 
     def feed_since(
         self, after: int, group_id: str | None = None, limit: int = ...
@@ -92,8 +103,16 @@ class SseAdapter:
 
     name = "sse"
 
-    def __init__(self, feed: Feed | None = None) -> None:
+    def __init__(
+        self,
+        clock: Clock | None = None,
+        retention: int = RETENTION_SECS,
+        feed: Feed | None = None,
+    ) -> None:
+        self._clock: Clock = clock or SystemClock()
+        self._retention = retention
         self._feed = feed
+        self._purger: asyncio.Task[None] | None = None
         self._subs: set[Subscription] = set()
         self._changed = asyncio.Event()
 
@@ -112,10 +131,30 @@ class SseAdapter:
         return Capabilities(accepts=["text", "data"], originates=False)
 
     async def on_outbound(self, send: OutboundSend) -> None:
-        return None
+        self.purge()  # whatever expired while the daemon was down
+        if self._purger is None or self._purger.done():
+            self._purger = asyncio.get_running_loop().create_task(self._run_purger())
+
+    def purge(self) -> int:
+        """Delete feed items older than the retention window."""
+        return self.feed.feed_purge(unix_seconds(self._clock) - self._retention)
+
+    async def _run_purger(self) -> None:
+        interval = min(float(self._retention), MAX_PURGE_INTERVAL)
+        while True:
+            await self._clock.sleep(interval)
+            self.purge()
+
+    async def close(self) -> None:
+        if self._purger is not None:
+            self._purger.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._purger
+            self._purger = None
 
     def _publish(self, key: str, group_id: str | None, payload: dict[str, Any]) -> None:
-        seq = self.feed.feed_add(key, group_id, payload)
+        self.purge()
+        seq = self.feed.feed_add(key, group_id, payload, unix_seconds(self._clock))
         if seq is None:
             return  # handed over again after a crash: already in the feed
         item = Item(seq, group_id, payload)
@@ -149,14 +188,35 @@ class SseAdapter:
         Synchronous on purpose: no item can slip between the replay and the
         live feed.
         """
+        self.purge()
         after = self._resume_point(last_event_id)
         rows = self.feed.feed_since(after, group_id, FEED_KEEP)
-        sub = Subscription(group_id, asyncio.Queue(SUBSCRIBER_QUEUE + len(rows)))
+        gap = self._gap(last_event_id, after)
+        sub = Subscription(group_id, asyncio.Queue(SUBSCRIBER_QUEUE + len(rows) + 1))
+        if gap is not None:
+            sub.queue.put_nowait(gap)
         for seq, gid, payload in rows:
             sub.queue.put_nowait(Item(seq, gid, payload))
         self._subs.add(sub)
         self._changed.set()
         return sub
+
+    def _gap(self, last_event_id: str | None, after: int) -> Item | None:
+        """The ``sse_gap`` item for a consumer that resumed from before the
+        retention window: items up to ``missed_through`` are gone. Its ``id``
+        is ``missed_through``, so the consumer's resume point moves past the
+        hole and it should re-sync from the source of truth."""
+        purged = self.feed.feed_purged()
+        if last_event_id is None or after >= purged:
+            return None
+        payload = {
+            "event": GAP_EVENT,
+            "event_id": f"{GAP_EVENT}-{purged}",
+            "group": None,
+            "untrusted": True,
+            "data": {"missed_through": purged, "resumed_from": after},
+        }
+        return Item(purged, None, payload)
 
     def unsubscribe(self, sub: Subscription) -> None:
         self._subs.discard(sub)

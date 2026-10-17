@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
+from agentconnect.clock import FakeClock
 from agentconnect.sse import Item, SseAdapter
 from agentconnect.store import Store
 
@@ -24,8 +25,8 @@ def store(tmp_path: Path) -> Store:
 
 
 @pytest.fixture
-def hub(store: Store) -> SseAdapter:
-    return SseAdapter(store)
+def hub(store: Store, fake_clock: FakeClock) -> SseAdapter:
+    return SseAdapter(fake_clock, feed=store)
 
 
 def delivery(group: GroupView, msg_id: str) -> Delivery:
@@ -82,15 +83,17 @@ async def test_resume_replays_after_the_given_id(hub: SseAdapter) -> None:
     assert drain(resumed.queue) == ["m4"]
 
 
-async def test_resume_survives_a_new_hub_on_the_same_store(store: Store) -> None:
+async def test_resume_survives_a_new_hub_on_the_same_store(
+    store: Store, fake_clock: FakeClock
+) -> None:
     """A daemon restart builds a new hub over the same database."""
-    before = SseAdapter(store)
+    before = SseAdapter(fake_clock, feed=store)
     sub = before.subscribe(None, None)
     await put(before, G1, "m1")
     await put(before, G1, "m2")
     first = sub.queue.get_nowait()
 
-    after = SseAdapter(store)
+    after = SseAdapter(fake_clock, feed=store)
     assert drain(after.subscribe(None, first.id).queue) == ["m2"]
     assert after.subscribe(None, None).queue.empty()
 
@@ -156,12 +159,12 @@ async def test_a_slow_consumer_is_dropped_and_can_resume(
     assert await put(hub, G1, "m4") is DeliveryResult.RETRY
     last = sub.queue.get_nowait()
     resumed = hub.subscribe(None, last.id)
-    assert drain(resumed.queue) == ["m1", "m2"]  # the feed has what it accepted
+    assert drain(resumed.queue) == ["m1", "m2", "m3"]  # the feed has what it accepted
 
 
 async def test_the_feed_is_bounded(store: Store) -> None:
     for i in range(5):
-        store.feed_add(f"k{i}", "g1", {"event": "message", "msg_id": f"m{i}"}, keep=2)
+        store.feed_add(f"k{i}", "g1", {"event": "message", "msg_id": f"m{i}"}, 0, keep=2)
     assert [p["msg_id"] for _, _, p in store.feed_since(0)] == ["m3", "m4"]
     assert store.feed_last() == 5
 
@@ -185,3 +188,81 @@ async def test_wait_listeners(hub: SseAdapter) -> None:
 def test_an_unbound_hub_refuses_to_run() -> None:
     with pytest.raises(RuntimeError, match="no feed"):
         SseAdapter().subscribe(None, None)
+
+
+def files_bytes(directory: Path) -> bytes:
+    return b"".join(f.read_bytes() for f in directory.glob("daemon.sqlite3*"))
+
+
+async def test_items_are_purged_after_the_retention_window(
+    store: Store, fake_clock: FakeClock, tmp_path: Path
+) -> None:
+    hub = SseAdapter(fake_clock, 600, store)
+    sub = hub.subscribe(None, None)
+    await put(hub, G1, "old-" + "marker" * 3)
+    fake_clock.advance(599)
+    await put(hub, G1, "young")
+    assert hub.purge() == 0
+    fake_clock.advance(2)  # the first is now 601 seconds old
+    assert hub.purge() == 1
+    assert [p["msg_id"] for _, _, p in store.feed_since(0)] == ["young"]
+    assert store.feed_purged() == 1
+    # Gone from the file, WAL included (deleted rows are overwritten).
+    store.close()
+    assert b"marker" not in files_bytes(tmp_path)
+    assert sub.queue.qsize() == 2  # what was already queued for a live consumer stays
+
+
+async def test_the_purger_runs_on_the_clock(store: Store, fake_clock: FakeClock) -> None:
+    hub = SseAdapter(fake_clock, 600, store)
+    hub.subscribe(None, None)
+    await hub.on_outbound(_noop)
+    for _ in range(3):
+        await asyncio.sleep(0)  # the purger is now waiting on the clock
+    await put(hub, G1, "m1")
+    fake_clock.advance(700)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert store.feed_since(0) == []
+    await hub.close()
+    await hub.close()
+
+
+async def test_a_resume_from_before_the_window_gets_a_gap_event(
+    store: Store, fake_clock: FakeClock
+) -> None:
+    hub = SseAdapter(fake_clock, 600, store)
+    first = hub.subscribe(None, None)
+    await put(hub, G1, "m1")
+    await put(hub, G1, "m2")
+    old_id = first.queue.get_nowait().id
+    fake_clock.advance(601)
+    await put(hub, G1, "m3")  # purges m1 and m2
+
+    resumed = hub.subscribe(None, old_id)
+    gap, item = resumed.queue.get_nowait(), resumed.queue.get_nowait()
+    assert resumed.queue.empty()
+    assert gap.payload["event"] == "sse_gap"
+    assert gap.payload["data"] == {"missed_through": 2, "resumed_from": 1}
+    assert gap.id == "2"  # the consumer's resume point moves past the hole
+    assert gap.frame().decode().startswith("id: 2\nevent: sse_gap\n")
+    assert item.payload["msg_id"] == "m3"
+
+    # No gap when nothing it needs was purged, or when it starts live.
+    assert drain(hub.subscribe(None, "2").queue) == ["m3"]
+    assert hub.subscribe(None, None).queue.empty()
+    assert hub.subscribe(None, "junk").queue.empty()
+
+
+async def test_a_gap_is_signalled_when_the_count_limit_dropped_items(store: Store) -> None:
+    for i in range(5):
+        store.feed_add(f"k{i}", None, {"event": "message", "msg_id": f"m{i}"}, 0, keep=2)
+    assert store.feed_purged() == 3
+
+
+async def test_nothing_is_purged_from_an_empty_or_fresh_feed(store: Store) -> None:
+    assert store.feed_purge(10**12) == 0
+    store.feed_add("k", None, {"event": "message"}, 100)
+    assert store.feed_purge(100) == 0
+    assert store.feed_purge(101) == 1
+    assert store.feed_purged() == 1

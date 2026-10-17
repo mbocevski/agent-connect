@@ -62,13 +62,16 @@ data: <one line of JSON>
 
 The JSON is the payload described in
 [adapters/webhook.md](adapters/webhook.md#payload). The `id` is the sequence
-number of a durable feed in the daemon's encrypted database, which keeps the
-newest 10000 items. A client that reconnects sends `Last-Event-ID` and gets
+number of a feed in the daemon's encrypted database. Only the SSE adapter
+writes it, and it keeps items for `sse.retention_secs` (default one hour),
+at most 10000 of them. A client that reconnects sends `Last-Event-ID` and gets
 what came after that id first, even after a daemon restart; with no
 `Last-Event-ID`, or one that is not a number, the stream starts live. While no
 consumer listens for a message's group, the daemon holds the message in its
 inbound queue and retries, so nothing is lost in that gap. The stream is at
-least once: treat `msg_id` and `event_id` as idempotency keys.
+least once: treat `msg_id` and `event_id` as idempotency keys. A client
+that resumes from before the window first gets an `sse_gap` event (`group` is
+`null`; `data.missed_through` is the last id that is gone) and should re-sync.
 [sdk.md](sdk.md) does that for you. Messages and events are each ordered per
 group, and the two are independent of each other.
 

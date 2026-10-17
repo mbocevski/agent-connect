@@ -172,7 +172,8 @@ CREATE TABLE IF NOT EXISTS feed (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT NOT NULL UNIQUE,
     group_id TEXT,
-    payload TEXT NOT NULL
+    payload TEXT NOT NULL,
+    at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS hops (
     group_id TEXT NOT NULL,
@@ -269,6 +270,9 @@ class Store:
         for column, decl in (("event_id", "TEXT"), ("notified", "INTEGER NOT NULL DEFAULT 0")):
             if column not in columns:
                 self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {decl}")
+        feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
+        if "at" not in feed_columns:
+            self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
         )
@@ -721,20 +725,50 @@ class Store:
     # -- SSE feed -----------------------------------------------------------
 
     def feed_add(
-        self, key: str, group_id: str | None, payload: dict[str, Any], keep: int = 10_000
+        self,
+        key: str,
+        group_id: str | None,
+        payload: dict[str, Any],
+        now: int,
+        keep: int = 10_000,
     ) -> int | None:
         """Append to the SSE feed; its ``seq`` is the SSE event id. ``None``
         if ``key`` (a ``msg_id`` or ``event_id``) is already there. Only the
-        newest ``keep`` items are retained."""
+        newest ``keep`` items are retained; ``now`` stamps the row for
+        :meth:`feed_purge`."""
         cur = self._db.execute(
-            "INSERT OR IGNORE INTO feed (key, group_id, payload) VALUES (?, ?, ?)",
-            (key, group_id, json.dumps(payload, sort_keys=True)),
+            "INSERT OR IGNORE INTO feed (key, group_id, payload, at) VALUES (?, ?, ?, ?)",
+            (key, group_id, json.dumps(payload, sort_keys=True), now),
         )
         if cur.rowcount != 1:
             return None
         seq = int(cur.lastrowid or 0)
-        self._db.execute("DELETE FROM feed WHERE seq <= ?", (seq - keep,))
+        self._feed_drop_through(seq - keep)
         return seq
+
+    def _feed_drop_through(self, seq: int) -> None:
+        """Delete feed rows up to ``seq`` and remember it: a consumer resuming
+        from before that point has missed items (:meth:`feed_purged`)."""
+        row = self._one("SELECT MAX(seq) FROM feed WHERE seq <= ?", seq)
+        if row is None or row[0] is None:
+            return
+        gone = int(row[0])
+        self._db.execute("DELETE FROM feed WHERE seq <= ?", (gone,))
+        if gone > self.feed_purged():
+            self.kv_set("feed_purged", str(gone))
+
+    def feed_purge(self, before: int) -> int:
+        """Delete every feed item stamped before ``before`` (Unix seconds).
+        Returns how many went."""
+        row = self._one("SELECT MAX(seq), COUNT(*) FROM feed WHERE at < ?", before)
+        if row is None or row[0] is None:
+            return 0
+        self._feed_drop_through(int(row[0]))
+        return int(row[1])
+
+    def feed_purged(self) -> int:
+        """The highest ``seq`` ever removed from the feed (0: none)."""
+        return int(self.kv_get("feed_purged") or "0")
 
     def feed_since(
         self, after: int, group_id: str | None = None, limit: int = 10_000

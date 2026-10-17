@@ -18,7 +18,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   See `docs/adapters/webhook.md`.
 - SSE adapter (`default_adapter = "sse"`): `GET /v0/events` with
   `Accept: text/event-stream` streams the same payloads from a durable feed
-  and resumes with `Last-Event-ID`, also across a daemon restart;
+  and resumes with `Last-Event-ID`, also across a daemon restart. The feed
+  exists only with the SSE adapter and keeps items `sse.retention_secs`
+  (default one hour); a consumer resuming from before that gets an
+  `sse_gap` event;
   `GET /v0/events?group=` filters the JSON log by group.
 - Python SDK (`agentconnect-sdk`): `AgentConnect`, groups, invites, replies
   that carry `reply_to`, task status and artifact replies, webhook

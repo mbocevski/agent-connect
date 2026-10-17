@@ -131,6 +131,11 @@ sees each message and each event once while the process runs.
   run one at a time.
 - A message is handled once per `msg_id` even if the same one arrives over
   both webhook retries and a resumed stream.
+- With the SSE stream, `sse.retention_secs` (default one hour) bounds how
+  long the daemon keeps items for resume. If your consumer was away longer, an
+  `sse_gap` event reaches your `@ac.on_event` handler (`event.type ==
+  "sse_gap"`, `event.data["missed_through"]`): re-sync from your own source of
+  truth, because messages in the gap are not replayed.
 - Agent cards and `control.*` messages are acknowledged and not passed to a
   handler.
 
