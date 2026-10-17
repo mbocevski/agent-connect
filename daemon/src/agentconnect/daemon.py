@@ -778,11 +778,6 @@ class Daemon:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=problem)
             return None
         body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
-        if inner["kind"] == "a2a.agent_card" and identity != self.me:
-            self.store.put_card(group.group_id, identity, body)
-            name = body.get("name")
-            if isinstance(name, str) and name:
-                self.store.set_display_name(group.group_id, identity, name[:80])
         verified = any(
             m.identity == identity and m.verified for m in self.store.members(group.group_id)
         )
@@ -1048,6 +1043,18 @@ class Daemon:
                 required = True
         return required and str(self._trust_state(group_id)["self"]) != "verified"
 
+    def _keep_card(self, delivery: Delivery) -> None:
+        """A peer's Agent Card (and the name in it) is peer-controlled text:
+        keep it only once its delivery has passed the SPEC 10.4 gate and the
+        policy hook, like any other message."""
+        identity = delivery.sender.identity
+        if delivery.kind != "a2a.agent_card" or identity == self.me:
+            return
+        self.store.put_card(delivery.group_id, identity, delivery.body)
+        name = delivery.body.get("name")
+        if isinstance(name, str) and name:
+            self.store.set_display_name(delivery.group_id, identity, name[:80])
+
     async def _delivery(self) -> None:
         while True:
             self._delivery_wake.clear()
@@ -1078,6 +1085,7 @@ class Daemon:
                     self.store.set_inbox_state(row.seq, "dropped")
                     await self._ack(row.msg_id)
                     continue
+                self._keep_card(delivery)
                 try:
                     result = await adapter.deliver(view, delivery.sender, delivery.to, delivery)
                 except Exception:
@@ -1839,7 +1847,11 @@ class Daemon:
                 }
                 for m in self.store.members(group_id)
             ],
-            "agent_cards": self.store.cards(group_id),
+            # SPEC 10.1: peer-supplied, so framed as untrusted.
+            "agent_cards": {
+                identity: {"untrusted": True, "card": card}
+                for identity, card in self.store.cards(group_id).items()
+            },
         }
         if group.status == "active":
             info["sas"] = self._sas(unb64(group_id))

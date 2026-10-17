@@ -35,7 +35,7 @@ JSON over HTTP/1.1 on a Unix socket in the data directory, or on
 |---|---|
 | `GET /v0/status` | agent |
 | `GET /v0/groups`, `POST /v0/groups` `{name, purpose}` | agent |
-| `GET /v0/groups/{id}`: members, roles, verified flags, SAS, out_of_sync | agent |
+| `GET /v0/groups/{id}`: members, roles, verified flags, SAS, out_of_sync, peer Agent Cards (as `{untrusted, card}`) | agent |
 | `POST /v0/groups/{id}/invites` `{ttl_secs, max_uses, inviter_name}` → URL | agent |
 | `DELETE /v0/invites/{invite_id}` | agent |
 | `POST /v0/invites/inspect` `{url}`: parses locally, shows the public metadata | agent |

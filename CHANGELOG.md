@@ -137,6 +137,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: a peer's Agent Card, and the display name it sets, are kept only
+  once the card's delivery has passed the `require_verified` gate and the
+  policy hook, and `GET /v0/groups/{id}` returns each card as
+  `{"untrusted": true, "card": {...}}` (SPEC §10.1). Previously cards
+  were stored and served raw on receipt, ahead of the gate.
 - Daemon API hardening: a request must arrive within 10 s (408), at most 64
   connections are served at once (503), the Unix socket is bound under a
   0077 umask and an existing non-socket file at its path is never

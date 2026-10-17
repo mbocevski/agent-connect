@@ -102,7 +102,29 @@ async def test_agent_cards_are_exchanged(cluster: Cluster) -> None:
     await a.wait(lambda: a.me in b.daemon.store.cards(gid) and b.me in a.daemon.store.cards(gid))
     names = {m["identity"]: m["display_name"] for m in a.daemon.group_info(gid)["members"]}
     assert names[b.me] == "Bob agent"
-    assert b.daemon.group_info(gid)["agent_cards"][a.me]["name"] == "Alice agent"
+    card = b.daemon.group_info(gid)["agent_cards"][a.me]
+    assert card == {"untrusted": True, "card": {"name": "Alice agent", "skills": []}}
+
+
+async def test_cards_wait_for_the_verification_gate(cluster: Cluster) -> None:
+    a = await cluster.node("a")
+    gid = a.daemon.create_group("Gated", "")
+    await a.idle()
+    a.daemon.set_policy(gid, require_verified=True)
+    await a.idle()
+    b = await cluster.node("b")
+    b.adapter = RecordingAdapter(card={"name": "Mallory pretending"})
+    await b.restart()
+    await cluster.invite(a, b, gid)
+    # b's card has reached a, but a's human hasn't verified b: neither the
+    # card nor the self-chosen name is kept or shown yet.
+    await a.wait(lambda: a.daemon.status()["inbox_pending"] == 1)
+    assert a.daemon.store.cards(gid) == {}
+    names = {m["identity"]: m["display_name"] for m in a.daemon.group_info(gid)["members"]}
+    assert names[b.me] == "b"
+    a.daemon.mark_verified(gid, b.me)
+    await a.wait(lambda: b.me in a.daemon.store.cards(gid))
+    assert a.daemon.group_info(gid)["agent_cards"][b.me]["untrusted"] is True
 
 
 async def test_join_approval_rules(cluster: Cluster, advance: Advance) -> None:
