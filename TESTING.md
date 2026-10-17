@@ -68,6 +68,10 @@ the slow test to a higher tier or make it faster. Do not raise the budget.
   several daemons (set in the harness plugin; an explicit
   `@pytest.mark.timeout` wins). nextest: slow after
   10 s, terminated after 30 s (`.config/nextest.toml`). A timeout is a failure.
+  An intermittent one is usually a hang, not slowness: don't raise the limit.
+  Reproduce it with many parallel loops under coverage (CI runs `just cov-py`)
+  and `-o faulthandler_timeout=20`, which dumps the stacks. A busy loop shows up
+  as a different Python frame in each dump.
 
 ## Contract tests
 

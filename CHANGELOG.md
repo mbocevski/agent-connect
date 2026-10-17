@@ -223,6 +223,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- The daemon no longer freezes at 100% CPU when the relay connection closes
+  while the outbox has work queued (on a relay drop or on shutdown). A send
+  on the closed socket now takes the link down at once, so the outbox waits
+  for the reconnect instead of retrying in a loop that never yielded to the
+  event loop. Stopping the link also marks it down before closing the
+  socket.
 - A crash or an exception between the core processing a message and the
   daemon recording it no longer loses the message (ADR-004). The core's
   MLS state, its records and a new processing journal share one SQLCipher

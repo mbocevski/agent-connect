@@ -201,6 +201,13 @@ class RelayLink:
         try:
             await ws.send(json.dumps(frame, separators=(",", ":")))
         except websockets.WebSocketException as e:
+            # The socket is gone, but run() may not have noticed yet. Mark
+            # the link down now: a caller that retries after
+            # NotConnectedError then waits in wait_connected() instead of
+            # failing again without yielding, which would starve the loop
+            # (run() included) for good.
+            if self._ws is ws:
+                self._down()
             raise NotConnectedError(str(e)) from None
 
     async def request(self, frame: dict[str, Any], msg_id: str) -> dict[str, Any]:
@@ -234,8 +241,13 @@ class RelayLink:
             await ws.close()
 
     async def stop(self) -> None:
+        """Go down at once (pending requests fail, nothing new is sent),
+        then close the socket."""
         self._stop.set()
-        await self.kick()
+        ws = self._ws
+        if ws is not None:
+            self._down()
+            await ws.close()
 
 
 class RelayRest:
