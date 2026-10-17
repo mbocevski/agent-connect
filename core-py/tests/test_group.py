@@ -23,6 +23,7 @@ def make_client(rng: random.Random, path: Path | None = None) -> ac.Client:
         None if path is None else str(path),
         instance.to_secret_bytes(),
         rng.getrandbits(64),
+        None if path is None else rng.randbytes(ac.DB_KEY_LEN),
     )
 
 
@@ -169,12 +170,13 @@ def test_persistence_and_invite_parts(rng: random.Random, tmp_path: Path) -> Non
     instance = identity._create_instance_for_testing(seed=rng.getrandbits(64), now=1_800_000_000)
     assert json.loads(instance.cert_json)["created_at"] == 1_800_000_000
     saved = instance.to_secret_bytes()
+    db_key = rng.randbytes(ac.DB_KEY_LEN)
     a = make_client(rng)
-    b = ac.Client(str(db), saved)
+    b = ac.Client(str(db), saved, db_key)
     gid = a.create_group(NAME, PURPOSE)
     join(a, gid, b)
     del b
-    b = ac.Client(str(db), ac.Instance.from_secret_bytes(saved).to_secret_bytes())
+    b = ac.Client(str(db), ac.Instance.from_secret_bytes(saved).to_secret_bytes(), db_key)
     assert b.sas(gid) == a.sas(gid)
     assert b.open(gid, a.seal(gid, inner(a, "persisted")))["epoch"] == 1
 

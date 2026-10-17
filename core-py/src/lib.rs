@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agentconnect_core as core;
 use agentconnect_core::clock::Clock;
 use agentconnect_core::group::{CommitOut, CommitSummary, Event, MemberInfo};
-use agentconnect_core::{Group, MemoryStore, SqliteStore};
+use agentconnect_core::{DbKey, Group, MemoryStore, SqliteStore};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
@@ -432,7 +432,8 @@ struct State {
     groups: HashMap<Vec<u8>, Group>,
 }
 
-/// One instance's MLS state over a SQLite file (or memory, `path=None`).
+/// One instance's MLS state over an encrypted SQLite file (or memory,
+/// `path=None`).
 #[pyclass(frozen, module = "agentconnect_core._native")]
 struct Client {
     state: Mutex<State>,
@@ -576,19 +577,34 @@ impl Client {
         })
     }
 
-    fn with_rng(path: Option<String>, instance: &[u8], rng: core::Rng) -> PyResult<Self> {
+    fn with_rng(
+        path: Option<String>,
+        instance: &[u8],
+        db_key: Option<&[u8]>,
+        rng: core::Rng,
+    ) -> PyResult<Self> {
         let clock = Arc::new(SettableClock::default());
         let c = clock.clone();
         let inner = (|| -> CoreResult<Inner> {
             let inst = core::Instance::from_secret_bytes(instance)?;
-            Ok(match path {
-                Some(p) => Inner::Sqlite(core::Client::new(
-                    SqliteStore::open(std::path::Path::new(&p))?,
+            Ok(match (path, db_key) {
+                (Some(p), Some(k)) => Inner::Sqlite(core::Client::new(
+                    SqliteStore::open(std::path::Path::new(&p), &DbKey::from_bytes(k)?)?,
                     rng,
                     inst,
                     c,
                 )?),
-                None => Inner::Memory(core::Client::new(MemoryStore::new(), rng, inst, c)?),
+                (Some(_), None) => {
+                    return Err(core::Error::Malformed(
+                        "database key (required for an on-disk store)",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(core::Error::Malformed(
+                        "database key (an in-memory store takes none)",
+                    ));
+                }
+                (None, None) => Inner::Memory(core::Client::new(MemoryStore::new(), rng, inst, c)?),
             })
         })()
         .map_err(err)?;
@@ -604,26 +620,35 @@ impl Client {
 
 #[pymethods]
 impl Client {
-    /// `path=None` keeps state in memory (tests).
+    /// State in an encrypted SQLite file at `path` under the 32-byte
+    /// `db_key` (required), or in memory with `path=None` and no key (tests).
     #[new]
-    fn new(py: Python<'_>, path: Option<String>, instance: &[u8]) -> PyResult<Self> {
+    #[pyo3(signature = (path, instance, db_key=None))]
+    fn new(
+        py: Python<'_>,
+        path: Option<String>,
+        instance: &[u8],
+        db_key: Option<&[u8]>,
+    ) -> PyResult<Self> {
         py.detach(|| {
             guarded(|| {
                 let rng = core::Rng::os().map_err(err)?;
-                Self::with_rng(path, instance, rng)
+                Self::with_rng(path, instance, db_key, rng)
             })
         })
     }
 
     /// **Tests only**: a client whose randomness comes from a 64-bit seed.
     #[staticmethod]
+    #[pyo3(signature = (path, instance, seed, db_key=None))]
     fn _for_testing(
         py: Python<'_>,
         path: Option<String>,
         instance: &[u8],
         seed: u64,
+        db_key: Option<&[u8]>,
     ) -> PyResult<Self> {
-        py.detach(|| guarded(|| Self::with_rng(path, instance, core::Rng::from_u64(seed))))
+        py.detach(|| guarded(|| Self::with_rng(path, instance, db_key, core::Rng::from_u64(seed))))
     }
 
     /// **Tests only**: fix the client's clock at `now` (Unix seconds), or
@@ -989,6 +1014,19 @@ fn derive_sas(epoch_authenticator: &[u8], group_id: &[u8], epoch: u64) -> PyResu
     guarded(|| Ok(Sas(core::Sas::derive(epoch_authenticator, group_id, epoch))))
 }
 
+/// Re-encrypts the store at `path` from `old_key` to `new_key` (32 bytes
+/// each). No `Client` may have the store open while this runs.
+#[pyfunction]
+fn rekey_store(py: Python<'_>, path: &str, old_key: &[u8], new_key: &[u8]) -> PyResult<()> {
+    py.detach(|| {
+        guarded(|| {
+            let old = DbKey::from_bytes(old_key).map_err(err)?;
+            let new = DbKey::from_bytes(new_key).map_err(err)?;
+            SqliteStore::rekey(std::path::Path::new(path), &old, &new).map_err(err)
+        })
+    })
+}
+
 /// The padding bucket for an application plaintext length, or None.
 #[pyfunction]
 fn padding_bucket(plaintext_len: usize) -> PyResult<Option<usize>> {
@@ -1044,6 +1082,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PROTOCOL_VERSION", core::PROTOCOL_VERSION)?;
     m.add("CIPHERSUITE_V0", core::CIPHERSUITE_V0)?;
     m.add("PADDING_BUCKETS", core::padding::BUCKETS.to_vec())?;
+    m.add("DB_KEY_LEN", core::provider::DB_KEY_LEN)?;
     m.add("AgentConnectError", m.py().get_type::<AgentConnectError>())?;
     m.add("CoreError", m.py().get_type::<CoreError>())?;
     m.add_class::<Identity>()?;
@@ -1060,6 +1099,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(unwrap_welcome, m)?,
         wrap_pyfunction!(derive_sas, m)?,
         wrap_pyfunction!(padding_bucket, m)?,
+        wrap_pyfunction!(rekey_store, m)?,
         wrap_pyfunction!(verify_instance_cert, m)?,
         wrap_pyfunction!(identity_id, m)?,
         wrap_pyfunction!(fingerprint, m)?,

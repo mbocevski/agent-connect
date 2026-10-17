@@ -106,6 +106,10 @@ pub enum Error {
     /// An error reported by the storage backend.
     #[error("storage error: {0}")]
     Storage(String),
+    /// The database key doesn't decrypt the store: a wrong key, or a file
+    /// that isn't an encrypted AgentConnect store.
+    #[error("wrong database key, or not an encrypted store")]
+    StorageKey,
     /// The random number generator failed.
     #[error("randomness source failed")]
     Rng,
