@@ -116,8 +116,9 @@ undo ADR-003's separation of keys.
   row, members, policy, epoch, events, queued sends) in **one** daemon
   transaction. The inbox row `(sender, msg_id)` is the marker that the entry
   was applied, so a replay after that transaction only consumes the entry.
-  Events are recorded in the transaction; adapters are told after it
-  commits. Effects outside SQLite (deleting the core's group state, the
+  Events are recorded in the transaction, each with a stable `event_id`;
+  adapters are told after it commits, and an event is marked notified once
+  the adapter accepted it. Effects outside SQLite (deleting the core's group state, the
   join secret) run after it and are swept on start if a crash skipped them.
 - Who joined or left a group comes from the commit summary, not from a diff
   of the cache, so a replay emits the same events.
@@ -146,11 +147,23 @@ check (daemon) per point.
   the daemon's inbox until the adapter takes it (ADR-003 retention).
 - Journal tombstones (ids and hashes) are kept for the relay's message TTL
   (7 days) and purged after.
-- Delivery to the adapter is exactly-once except for a crash between the
-  adapter accepting a delivery and the daemon recording that: the delivery
-  is then repeated with the same `msg_id`, which adapters can deduplicate.
-- Adapter event notifications (`on_event`) are at most once: a crash after
-  the events are recorded and before the adapter hears of them leaves them
-  in the local API's event log only.
+- **The adapter contract is at-least-once, with stable ids** (the
+  maintainers' decision). `deliver` and `on_event` may repeat after a crash;
+  adapters deduplicate by `msg_id` and `event_id`. Nothing is lost:
+  - a delivery is acked to the relay only after `deliver` returned `ACK`;
+    a crash between that and the daemon recording it repeats the delivery
+    with the same `msg_id`;
+  - an event is recorded first (in the transaction that records its cause)
+    and marked notified only after `on_event` returned. Unnotified events
+    (a crash in between, or an adapter that raised) are sent again on start
+    and on every reconnect. The `event_id` comes from the event's cause (the
+    journal key of the message that caused it and the event's place among
+    the events it caused, or an explicit cause such as a request id or an
+    epoch), so an event regenerated after a crash has the same id and is
+    recorded once. Security alerts (`relay_misbehaviour`,
+    `unauthorized_commit`, `out_of_sync`, `sas_mismatch`) follow the same
+    rule, so a crash can't lose one.
+  - The local API's event log (`GET /v0/events`) carries the same
+    `event_id`.
 - The delegating storage provider has to follow `openmls_sqlite_storage`'s
   trait when OpenMLS is upgraded (the compiler enforces the signatures).

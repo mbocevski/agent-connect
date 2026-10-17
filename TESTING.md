@@ -236,7 +236,7 @@ daemon, so in-process daemons don't affect each other.
 | Layer | Arm | Points | Actions |
 |---|---|---|---|
 | core | `client.failpoints().arm(name, Action, times)` (Rust); `Client._arm_failpoint_for_testing(name, "error"\|"panic", times)` (Python) | `process.before_mls`, `process.after_mls`, `process.after_merge`, `process.before_commit`, `confirm.after_merge`, `confirm.before_commit`, `join.after_stage`, `join.before_commit`, `consume.before_commit` (`agentconnect_core::failpoint::POINTS`) | `error`: a storage error (the daemon retries it); `panic`: a panic. Both fire inside the operation's transaction, so the store rolls back as after a crash at that point. |
-| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register` (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
+| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register`; `event.after_record` and `event.after_notify` (around telling the adapter about a recorded event) (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
 
 `core/tests/journal.rs` runs every core point with both actions and checks
 that the state is unchanged, the retry succeeds and a second retry gets the
@@ -244,4 +244,5 @@ journalled result. `harness/tests/test_crash_consistency.py` runs the daemon
 and core points on the real relay, restarts or lets the daemon retry, and
 asserts that every message is delivered exactly once, every own commit is
 confirmed once, every Welcome joins once, and epochs and SAS converge with
-an empty journal.
+an empty journal, and that an event (a security alert included) reaches the
+adapter exactly once per `event_id` after a crash before or after notifying.

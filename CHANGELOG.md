@@ -108,6 +108,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Adapter contract: messages and events are delivered **at least once**,
+  each with a stable id; adapters deduplicate by `msg_id` and `event_id`.
+  Every event now has an `event_id` derived from its cause, so one
+  regenerated after a crash keeps its id, and it is recorded before the
+  adapter hears of it and sent again on start and reconnect until
+  `on_event` returns. A crash can no longer lose an event, security alerts
+  included. `GET /v0/events` carries `event_id` too.
 - README rewritten: what AgentConnect does, how it works, current status,
   quickstart, and the security model with what it does not protect against.
 - Daemon: on a SAS mismatch the owner's last instance first commits an
