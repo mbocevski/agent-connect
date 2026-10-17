@@ -1710,7 +1710,10 @@ class Daemon:
                     k: a[k]
                     for k in ("request_id", "group_id", "identity", "display_name", "received_at")
                 }
-                | {"display_name_verified": False}
+                | {
+                    "display_name_verified": False,
+                    "fingerprint": ac.fingerprint(ac_identity_key(a["identity"])),
+                }
             )
         return out
 

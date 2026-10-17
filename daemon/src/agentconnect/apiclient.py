@@ -13,7 +13,7 @@ from agentconnect.config import Config
 class ApiClientError(RuntimeError):
     def __init__(self, status: int, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
-        self.status, self.code = status, code
+        self.status, self.code, self.message = status, code, message
 
 
 class ApiClient:

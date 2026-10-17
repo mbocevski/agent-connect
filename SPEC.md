@@ -966,6 +966,10 @@ verified too.
     share the invite (for example a call, or in person).
   - Implementations MUST NOT let an agent mark verification on its own. There
     is no agent-callable verify operation.
+  - A verification applies to the epoch whose SAS the human was shown. If the
+    epoch (and so the SAS) changed between showing the code and the human's
+    answer, the implementation MUST refuse to record the answer and show the
+    new code instead.
   - If the human answers that the codes differ, the instance MUST leave the
     group and raise a `sas_mismatch` alert. A member that isn't the owner's
     last instance sends a leave proposal (§9.2) and deletes its local
