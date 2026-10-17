@@ -45,6 +45,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `hold_for_approval` or `drop` with a reason), and every message the agent
   sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
   the loop guard moved into it unchanged. See `docs/safety.md`.
+- Rate limits: received and sent messages have separate budgets, so a
+  member's own sends no longer make honest peers look like violators and
+  peer traffic can't stop the human's sends; the human's control messages
+  are never rate limited. Task updates also count against an identity cap
+  (3 times the task budget) and a group cap (`policy.group_task_per_minute`,
+  1200). The limiter and the violation counters are bounded and forget a
+  group once it ends.
 - Control messages, Agent Cards and task cancellations must fit strict
   per-kind schemas (no extra fields, no `parts` anywhere), so they can't
   carry text, data or files past `require_approval` or the file-part ban.

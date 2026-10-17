@@ -6,23 +6,24 @@ The SPEC defaults (:data:`SPEC_LIMITS`):
 * Each sender instance may send 30 messages per minute, all instances of one
   identity together 3 times that, and a group 120.
 * Updates for a task (``a2a.task_status``, ``a2a.task_artifact`` with a
-  ``taskId``) have their own budget: 300 per minute per task and sender.
-  The first update of a task in the window counts as an ordinary message, so
-  opening tasks is held to the message rates.
+  ``taskId``) have their own budget: 300 per minute per task and sender
+  instance, 3 times that for all of one identity's tasks, and 1200 for the
+  group's. The first update of a task in the window counts as an ordinary
+  message, so opening tasks is held to the message rates.
 * A2A parts may be ``text`` or ``data``; ``file`` parts are disabled.
 * Only the kinds of §7.2/§7.3 are delivered; unknown kinds are ignored.
 
 A group, or one sender in it, can have lower values (:class:`Limits`), never
 higher ones (SPEC 10.2); the safety policy (:mod:`agentconnect.policy`) picks
-them. Rates are counted on
-the daemon clock over a sliding 60-second window, when a message is
-received (inbound) or queued (outbound).
+them. Rates are counted on the daemon clock over a sliding 60-second
+window, separately for what is received (inbound) and what is queued
+(outbound).
 """
 
 from __future__ import annotations
 
 import json
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +35,9 @@ SENDER_PER_MINUTE = 30
 GROUP_PER_MINUTE = 120
 IDENTITY_RATE_MULTIPLE = 3  # all instances of an identity: 3 x SENDER_PER_MINUTE
 TASK_PER_MINUTE = 300
+GROUP_TASK_PER_MINUTE = 1200  # task updates from the whole group: 4 x TASK_PER_MINUTE
+MAX_KEYS = 50_000  # rate windows tracked at most (least recently used go first)
+SWEEP_FLOOR = 256  # sweep emptied windows once more than this many are tracked
 MAX_TASK_ID = 256  # longer taskIds get no task budget
 DEFAULT_MAX_FILE_BYTES = 64 * 1024
 TASK_UPDATE_KINDS = frozenset({"a2a.task_status", "a2a.task_artifact"})
@@ -66,6 +70,7 @@ class Limits:
     group_per_minute: int = GROUP_PER_MINUTE
     identity_rate_multiple: int = IDENTITY_RATE_MULTIPLE
     task_per_minute: int = TASK_PER_MINUTE
+    group_task_per_minute: int = GROUP_TASK_PER_MINUTE
     allow_files: bool = False
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
 
@@ -132,20 +137,72 @@ def content_problem(inner: dict[str, Any], size: int, limits: Limits = SPEC_LIMI
 
 
 class RateLimiter:
-    """Sliding-window counts per sender, per group and per task."""
+    """Sliding-window counts per sender instance, identity, group and task.
 
-    def __init__(self, clock: Clock) -> None:
+    Each direction has its own windows (``direction`` is ``in`` for what
+    peers send to this member, ``out`` for what it sends), so a member's own
+    sends never use up the budget it grants its peers, and peer traffic
+    never stops its own sends.
+
+    The state is bounded: windows that emptied are swept away once the map
+    grows, and past :data:`MAX_KEYS` the least recently used are evicted.
+    """
+
+    def __init__(self, clock: Clock, max_keys: int = MAX_KEYS) -> None:
         self._clock = clock
-        self._seen: dict[tuple[str, str], deque[float]] = {}
+        self._max_keys = max_keys
+        self._seen: OrderedDict[tuple[str, str], deque[float]] = OrderedDict()
+        self._sweep_at = SWEEP_FLOOR
 
     def _now(self) -> float:
         return self._clock.unix_millis() / 1000
 
+    def size(self) -> int:
+        """How many windows are tracked."""
+        return len(self._seen)
+
     def _count(self, key: tuple[str, str], now: float) -> deque[float]:
-        times = self._seen.setdefault(key, deque())
+        times = self._seen.get(key)
+        if times is None:
+            times = self._seen[key] = deque[float]()
+        self._seen.move_to_end(key)
         while times and times[0] <= now - WINDOW_SECS:
             times.popleft()
         return times
+
+    def _sweep(self, now: float) -> None:
+        if len(self._seen) <= self._sweep_at:
+            return
+        for key in [k for k, t in self._seen.items() if not t or t[-1] <= now - WINDOW_SECS]:
+            del self._seen[key]
+        while len(self._seen) > self._max_keys:
+            self._seen.popitem(last=False)
+        self._sweep_at = max(SWEEP_FLOOR, 2 * len(self._seen))
+
+    def forget_group(self, group_id: str) -> None:
+        for key in [k for k in self._seen if k[0] == group_id]:
+            del self._seen[key]
+
+    def _windows(
+        self, group_id: str, sender: str, identity: str | None, limits: Limits, direction: str
+    ) -> list[tuple[deque[float], int]]:
+        now = self._now()
+        windows = [
+            (self._count((group_id, f"{direction}\0{sender}"), now), limits.sender_per_minute),
+            (self._count((group_id, f"{direction}\0group"), now), limits.group_per_minute),
+        ]
+        if identity is not None:
+            cap = limits.sender_per_minute * limits.identity_rate_multiple
+            windows.append((self._count((group_id, f"{direction}\0id\0{identity}"), now), cap))
+        return windows
+
+    @staticmethod
+    def _take(windows: list[tuple[deque[float], int]], now: float) -> bool:
+        if any(len(times) >= limit for times, limit in windows):
+            return False
+        for times, _limit in windows:
+            times.append(now)
+        return True
 
     def allow(
         self,
@@ -154,24 +211,16 @@ class RateLimiter:
         limits: Limits = SPEC_LIMITS,
         *,
         identity: str | None = None,
+        direction: str = "in",
     ) -> bool:
         """Count one message from ``sender`` (an instance); False if it is
         over a limit (and then it doesn't count). With ``identity``, all
         instances of that identity together are also held to
         ``identity_rate_multiple`` times the per-sender rate."""
         now = self._now()
-        windows = [
-            (self._count((group_id, sender), now), limits.sender_per_minute),
-            (self._count((group_id, ""), now), limits.group_per_minute),
-        ]
-        if identity is not None:
-            cap = limits.sender_per_minute * limits.identity_rate_multiple
-            windows.append((self._count((group_id, f"identity\0{identity}"), now), cap))
-        if any(len(times) >= limit for times, limit in windows):
-            return False
-        for times, _limit in windows:
-            times.append(now)
-        return True
+        ok = self._take(self._windows(group_id, sender, identity, limits, direction), now)
+        self._sweep(now)
+        return ok
 
     def allow_inner(  # noqa: PLR0913
         self,
@@ -182,20 +231,31 @@ class RateLimiter:
         limits: Limits = SPEC_LIMITS,
         *,
         identity: str | None = None,
+        direction: str = "in",
     ) -> bool:
-        """Count one inner message against its budget (SPEC 10.2): a task
-        update against its task's (per sender instance), anything else
-        against the message rates."""
+        """Count one inner message against its budget (SPEC 10.2).
+
+        A task update counts against its task's budget (per sender instance),
+        against all of the identity's task updates (``identity_rate_multiple``
+        times the task budget) and against the group's
+        (``group_task_per_minute``). The first update of a task in the window
+        also counts as an ordinary message. Anything else counts against the
+        message rates."""
         task = body.get("taskId") if kind in TASK_UPDATE_KINDS and isinstance(body, dict) else None
         if not isinstance(task, str) or not 0 < len(task) <= MAX_TASK_ID:
-            return self.allow(group_id, sender, limits, identity=identity)
+            return self.allow(group_id, sender, limits, identity=identity, direction=direction)
         now = self._now()
-        times = self._count((group_id, f"{sender}\0task\0{task}"), now)
-        if not times:
+        prefix = f"{direction}\0task"
+        windows = [
+            (self._count((group_id, f"{prefix}\0{sender}\0{task}"), now), limits.task_per_minute),
+            (self._count((group_id, f"{prefix}\0group"), now), limits.group_task_per_minute),
+        ]
+        if identity is not None:
+            cap = limits.task_per_minute * limits.identity_rate_multiple
+            windows.append((self._count((group_id, f"{prefix}\0id\0{identity}"), now), cap))
+        if not windows[0][0]:
             # A task new in this window opens with an ordinary message.
-            if not self.allow(group_id, sender, limits, identity=identity):
-                return False
-        elif len(times) >= limits.task_per_minute:
-            return False
-        times.append(now)
-        return True
+            windows += self._windows(group_id, sender, identity, limits, direction)
+        ok = self._take(windows, now)
+        self._sweep(now)
+        return ok

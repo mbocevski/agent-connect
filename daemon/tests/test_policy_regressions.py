@@ -181,3 +181,87 @@ def test_the_card_and_cancel_schemas_follow_a2a() -> None:
 
     assert json_names(AgentCard) == CARD_FIELDS
     assert json_names(CancelTaskRequest) == CANCEL_FIELDS
+
+
+# -- H2: task updates respect the identity and the group caps -------------------------
+
+
+def test_task_updates_count_against_identity_and_group_caps(policy: SafetyPolicy) -> None:
+    delivered = 0
+    for inst in range(4):
+        for t in range(20):
+            for _ in range(300):
+                d = policy.inbound(inb(task(f"t{inst}-{t}"), inst=f"m/i{inst}"))
+                delivered += d.delivered
+    # 3 x 300 a minute for one identity's task updates, however many replicas.
+    assert delivered == 900
+    other = policy.inbound(inb(task("x"), sender="ac:v0:other", inst="o/i1"))
+    assert other.delivered, "another identity has its own task budget"
+
+
+def test_the_group_caps_task_updates(policy: SafetyPolicy) -> None:
+    policy.update(G, {"group_task_per_minute": 500})
+    delivered = 0
+    for ident in range(3):
+        for _ in range(300):
+            d = policy.inbound(inb(task(f"t{ident}"), sender=f"ac:v0:p{ident}", inst=f"p{ident}"))
+            delivered += d.delivered
+    assert delivered == 500
+
+
+# -- H3: inbound and outbound budgets are separate -------------------------------------
+
+
+def test_peer_traffic_does_not_starve_own_sends(policy: SafetyPolicy) -> None:
+    for ident in ("ac:v0:a", "ac:v0:b"):
+        for inst in ("i1", "i2"):
+            for _ in range(30):
+                policy.inbound(inb(msg(), ident, f"{ident}/{inst}"))
+    assert policy.outbound(out(msg())).delivered
+    # The human's controls are never rate limited, even past every budget.
+    for _ in range(40):
+        policy.outbound(out(msg()))
+    resume = {"kind": "control.resume", "origin": "human", "body": {}}
+    assert all(policy.outbound(out(resume)).delivered for _ in range(200))
+
+
+def test_own_sends_do_not_make_honest_peers_violators(policy: SafetyPolicy) -> None:
+    for _ in range(30):
+        assert policy.outbound(out(msg())).delivered
+    verdicts = [
+        policy.inbound(inb(msg(), ident, f"{ident}/i1"))
+        for ident in ("ac:v0:a", "ac:v0:b", "ac:v0:c", "ac:v0:d")
+        for _ in range(30)
+    ]
+    assert all(d.delivered for d in verdicts)
+
+
+def test_own_replicas_inbound_do_not_use_the_outbound_identity_window(
+    policy: SafetyPolicy,
+) -> None:
+    for replica in ("me/i2", "me/i3", "me/i4"):
+        for _ in range(30):
+            assert policy.inbound(inb(msg(), ME, replica)).delivered
+    assert policy.outbound(out(msg())).delivered
+
+
+# -- M4: bounded state ---------------------------------------------------------------
+
+
+def test_limiter_and_violation_state_stay_bounded(
+    policy: SafetyPolicy, fake_clock: FakeClock
+) -> None:
+    for minute in range(60):
+        for t in range(30):
+            policy.inbound(inb(task(f"{minute}-{t}-" + "x" * 200)))
+            policy.violation(G, f"ac:v0:s{minute}-{t}", "too_large")
+        fake_clock.advance(61)
+    assert policy.limiter.size() < 400
+    assert policy.tracked_senders() == 1800
+    fake_clock.advance(601)
+    policy.purge()
+    assert policy.tracked_senders() == 0, "counters outside the window are pruned"
+    policy.violation(G, MALLORY, "too_large")
+    policy.inbound(inb(msg()))
+    policy.forget_group(G)
+    assert (policy.tracked_senders(), policy.limiter.size()) == (0, 0)

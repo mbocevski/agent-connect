@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import enum
 import math
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any
@@ -45,6 +45,7 @@ from agentconnect.clock import Clock, unix_seconds
 from agentconnect.limits import (
     DEFAULT_MAX_FILE_BYTES,
     GROUP_PER_MINUTE,
+    GROUP_TASK_PER_MINUTE,
     IDENTITY_RATE_MULTIPLE,
     MAX_MESSAGE_BYTES,
     SENDER_PER_MINUTE,
@@ -83,6 +84,7 @@ APPROVAL_MODES = ("off", "inbound", "outbound", "both")
 DAY_SECS = 86_400
 PURGE_EVERY_SECS = 60
 MAX_AUDIT_ROWS = 100_000
+MAX_TRACKED = 10_000  # (group, sender) violation counters kept at most
 DEFAULT_VIOLATION_THRESHOLD = 10
 DEFAULT_VIOLATION_WINDOW_SECS = 600
 DEFAULT_AUDIT_RETENTION_DAYS = 30
@@ -200,10 +202,20 @@ KNOBS: tuple[Knob, ...] = (
         int,
         TASK_PER_MINUTE,
         "Updates a minute accepted for one task of one sender instance (1 to 300, the "
-        "SPEC 10.2 default; never more).",
+        "SPEC 10.2 default; never more). All of one identity's task updates together "
+        "may be `identity_rate_multiple` times this.",
         1,
         TASK_PER_MINUTE,
         per_sender=True,
+    ),
+    Knob(
+        "group_task_per_minute",
+        int,
+        GROUP_TASK_PER_MINUTE,
+        "Task updates a minute accepted from the whole group (1 to 1200, the SPEC 10.2 "
+        "default; never more).",
+        1,
+        GROUP_TASK_PER_MINUTE,
     ),
     Knob(
         "allow_files",
@@ -292,6 +304,7 @@ class Settings:
     group_per_minute: int = GROUP_PER_MINUTE
     identity_rate_multiple: int = IDENTITY_RATE_MULTIPLE
     task_per_minute: int = TASK_PER_MINUTE
+    group_task_per_minute: int = GROUP_TASK_PER_MINUTE
     allow_files: bool = False
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     frame_text: bool = True
@@ -438,7 +451,9 @@ class SafetyPolicy:
         self.clock = clock
         self.audit_retention_days = audit_retention_days
         self.limiter = RateLimiter(clock)
-        self._violations: dict[tuple[str, str], deque[int]] = {}
+        # Bounded: pruned by purge(), dropped with their group, and at most
+        # MAX_TRACKED senders (least recently seen go first).
+        self._violations: OrderedDict[tuple[str, str], deque[int]] = OrderedDict()
         self._alerted: dict[tuple[str, str], float] = {}
         self._purged_at = -math.inf
 
@@ -511,8 +526,17 @@ class SafetyPolicy:
             # Cards and controls come from the daemon or the human, never
             # from the agent: it can't use them to carry content.
             return drop("not_for_agents")
-        if not m.internal and not self.limiter.allow_inner(
-            m.group_id, m.instance, m.kind, m.inner.get("body"), limits, identity=m.sender
+        # The human's own controls (resume above all, to clear the loop
+        # guard) are never rate limited; nothing else shares this window.
+        exempt = m.internal or (human and m.kind.startswith("control."))
+        if not exempt and not self.limiter.allow_inner(
+            m.group_id,
+            m.instance,
+            m.kind,
+            m.inner.get("body"),
+            limits,
+            identity=m.sender,
+            direction="out",
         ):
             return drop("rate_limited")
         if not m.internal and not human and settings.approve_outbound and m.kind in HOLDABLE_KINDS:
@@ -532,6 +556,10 @@ class SafetyPolicy:
         window = settings.violation_window_secs
         key = (group_id, sender)
         times = self._violations.setdefault(key, deque())
+        self._violations.move_to_end(key)
+        while len(self._violations) > MAX_TRACKED:
+            old, _times = self._violations.popitem(last=False)
+            self._alerted.pop(old, None)
         while times and times[0] <= now - window:
             times.popleft()
         times.append(now)
@@ -547,6 +575,29 @@ class SafetyPolicy:
             "window_secs": window,
             "last_reason": reason,
         }
+
+    def tracked_senders(self) -> int:
+        """How many (group, sender) violation counters are kept."""
+        return len(self._violations)
+
+    def forget_group(self, group_id: str) -> None:
+        """Drop a group's rate windows and violation counters (it ended)."""
+        self.limiter.forget_group(group_id)
+        for key in [k for k in self._violations if k[0] == group_id]:
+            del self._violations[key]
+            self._alerted.pop(key, None)
+
+    def _prune_violations(self, now: int) -> None:
+        windows: dict[str, int] = {}
+        for key, times in list(self._violations.items()):
+            if key[0] not in windows:
+                windows[key[0]] = self.settings(key[0]).violation_window_secs
+            window = windows[key[0]]
+            while times and times[0] <= now - window:
+                times.popleft()
+            if not times and now - self._alerted.get(key, -math.inf) >= window:
+                del self._violations[key]
+                self._alerted.pop(key, None)
 
     def violations(self, group_id: str, sender: str) -> int:
         """Violations by ``sender`` in the current window."""
@@ -605,6 +656,7 @@ class SafetyPolicy:
         if now - self._purged_at < PURGE_EVERY_SECS:
             return
         self._purged_at = now
+        self._prune_violations(now)
         self.store.audit_purge(now - self.audit_retention_days * DAY_SECS, MAX_AUDIT_ROWS)
         for group_id in self.store.transcript_groups():
             days = self.settings(group_id).transcript_retention_days

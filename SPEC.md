@@ -962,12 +962,18 @@ with a size cap of its own choosing (§10.6).
 
 These limits are maximums. A receiver MAY apply lower values, for a group or
 for one sender, and MUST NOT apply higher ones; an implementation MUST
-reject a configuration that raises one.
+reject a configuration that raises one. They limit what a receiver accepts
+from its peers: its own sends MUST NOT count against them, and an
+implementation that limits its own sends keeps a separate budget for them,
+which MUST NOT apply to the controls its human sends (§7.3).
 
 Task updates have their own budget. An `a2a.task_status` or
 `a2a.task_artifact` whose `body.taskId` is a string of 1 to 256 characters
-counts against a budget of 300 per minute for that sender instance and task, instead
-of the per-sender and per-group rates. The first update of a task in the
+counts against a budget of 300 per minute for that sender instance and task,
+instead of the per-sender and per-group rates. Task updates have caps of their
+own too: all task updates of one identity's instances together 3 times that
+(900), and those of the whole group 1200 per minute, so replicas and many
+open tasks can't multiply the budget. The first update of a task in the
 window also counts as one ordinary message, so opening tasks is held to the
 message rates. The size, kind and part limits apply to task updates
 unchanged. Every other message, `a2a.task_cancel` included, counts against
@@ -1272,7 +1278,9 @@ Decided by the maintainer (2026-10-17), now normative:
 - The §10.2 limits are maximums: receivers may lower them, never raise
   them (§10.2).
 - Per-sender rates count per instance, with a per-identity cap of 3 times
-  the per-sender rate (§10.2).
+  the per-sender rate; task updates are capped per identity and per group
+  too, and a member's own sends never count against what it accepts
+  (§10.2).
 - Receivers never tell the sender that a message was dropped, held,
   rejected or expired (§10.2).
 - Local policy (approvals, framing, local limits) is described in an

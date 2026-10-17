@@ -809,6 +809,7 @@ class Daemon:
 
         def forget() -> None:
             self._leaving.discard(group_id)
+            self.safety.forget_group(group_id)
             with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
                 self.client.delete_group(gid)
 
