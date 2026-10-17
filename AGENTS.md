@@ -28,6 +28,7 @@ are stubs until they're implemented.
 | `core-py/` | PyO3 bindings for `core` (maturin) | Rust |
 | `relay/` | MLS Delivery Service: commit ordering, fan-out, invites; serves `web/` | Rust (axum) |
 | `daemon/` | `agentconnectd` + `agentconnect` CLI, adapters, policy, group mode | Python |
+| `harness/` | Multi-node test harness: relay process, daemons, malicious relay proxy | Python |
 | `sdk/python/` | Python SDK for headless agents | Python |
 | `web/` | Static invite landing page | HTML/CSS |
 | `docs/` | `adr/`, `spikes/`, guides | Markdown |
@@ -44,6 +45,7 @@ just lint-py    # ruff check, ruff format --check, ty check
 just lint-rust  # rustfmt, clippy, rustdoc, cargo shear, taplo, cargo deny
 just test       # fast tier, < 60 s: unit, property, contract, in-process multi-node
 just contract   # testdata/MANIFEST.json vs. the Rust and Python suites
+just build-relay-dev  # debug relay binary for the harness (test-py runs it)
 just test-int   # docker compose integration + demos
 just test-nightly # mutants, long property runs, quarantined tests
 just cov        # coverage gates + ratchet against coverage-baseline.json
