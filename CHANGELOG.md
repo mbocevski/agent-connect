@@ -45,6 +45,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `hold_for_approval` or `drop` with a reason), and every message the agent
   sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
   the loop guard moved into it unchanged. See `docs/safety.md`.
+- The transcript is capped per group (`policy.transcript_max_rows`, 10000)
+  and for the whole daemon (`policy.transcript_max_bytes`, 64 MiB), oldest
+  first, and the audit log's 100000-row cap holds on every row.
 - The approval preview shows every part (data as JSON, files by name, type
   and size), the body's other fields and the routing, and
   `approvals approve --yes` needs `--full` when the preview was cut. The

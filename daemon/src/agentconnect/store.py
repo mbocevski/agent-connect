@@ -234,7 +234,8 @@ CREATE TABLE IF NOT EXISTS transcript (
     sender TEXT NOT NULL,
     msg_id TEXT NOT NULL,
     kind TEXT NOT NULL,
-    inner TEXT NOT NULL
+    inner TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -643,12 +644,16 @@ class Store:
         size: int,
         decision: str,
         reason: str,
+        keep: int | None = None,
     ) -> None:
-        self._db.execute(
+        """One audit row; with ``keep``, only the newest ``keep`` rows stay."""
+        cur = self._db.execute(
             "INSERT INTO audit (group_id, at, direction, sender, msg_id, kind, size, decision, "
             "reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (group_id, at, direction, sender, msg_id, kind, size, decision, reason),
         )
+        if keep is not None:
+            self._db.execute("DELETE FROM audit WHERE seq <= ?", (int(cur.lastrowid) - keep,))
 
     _AUDIT_COLUMNS = (
         "seq",
@@ -693,11 +698,28 @@ class Store:
         msg_id: str,
         kind: str,
         inner: dict[str, Any],
+        max_rows: int,
+        max_bytes: int,
     ) -> None:
+        """One transcript entry. The group keeps its newest ``max_rows``, and
+        all groups together at most ``max_bytes``: the oldest entries go."""
+        text = json.dumps(inner, sort_keys=True)
         self._db.execute(
-            "INSERT INTO transcript (group_id, at, direction, sender, msg_id, kind, inner) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (group_id, at, direction, sender, msg_id, kind, json.dumps(inner, sort_keys=True)),
+            "INSERT INTO transcript (group_id, at, direction, sender, msg_id, kind, inner, size) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (group_id, at, direction, sender, msg_id, kind, text, len(text)),
+        )
+        self._db.execute(
+            "DELETE FROM transcript WHERE group_id = ? AND seq NOT IN (SELECT seq FROM "
+            "transcript WHERE group_id = ? ORDER BY seq DESC LIMIT ?)",
+            (group_id, group_id, max_rows),
+        )
+        # Over the byte cap, drop the oldest entries until it fits: every row
+        # whose running total from the newest one passes the cap.
+        self._db.execute(
+            "DELETE FROM transcript WHERE seq IN (SELECT seq FROM (SELECT seq, SUM(size) "
+            "OVER (ORDER BY seq DESC) AS total FROM transcript) WHERE total > ?)",
+            (max_bytes,),
         )
 
     def transcript(self, group_id: str, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:

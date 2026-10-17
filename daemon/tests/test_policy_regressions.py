@@ -5,6 +5,7 @@ limiter's memory (M4)."""
 
 from __future__ import annotations
 
+import json
 import random
 from collections.abc import Iterator
 from pathlib import Path
@@ -372,3 +373,27 @@ def test_the_notice_quotes_and_cleans_peer_text() -> None:
     )
     assert isinstance(sdk, Message)
     assert sdk.notice_text == text, "the SDK builds the same notice"
+
+
+# -- M3: the transcript and the audit log are bounded ------------------------------
+
+
+def test_the_transcript_is_capped_per_group_and_in_bytes(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    policy.update(G, {"transcript": True, "transcript_max_rows": 3})
+    for i in range(5):
+        policy.transcribe(G, "in", MALLORY, f"m{i}", msg())
+    assert [e["msg_id"] for e in store.transcript(G)] == ["m2", "m3", "m4"]
+    policy.transcript_max_bytes = 2 * len(json.dumps(msg(), sort_keys=True))
+    policy.update("g2", {"transcript": True})
+    policy.transcribe("g2", "in", MALLORY, "n1", msg())
+    assert len(store.transcript(G)) + len(store.transcript("g2")) == 2, "oldest go first"
+    assert [e["msg_id"] for e in store.transcript("g2")] == ["n1"]
+
+
+def test_the_audit_log_is_capped_on_every_row(store: Store) -> None:
+    meta: dict[str, Any] = {"sender": MALLORY, "kind": "k", "size": 1, "decision": "x"}
+    for i in range(5):
+        store.audit_add(G, at=0, direction="in", msg_id=f"m{i}", reason="", keep=2, **meta)
+    assert [r["msg_id"] for r in store.audit()] == ["m3", "m4"]

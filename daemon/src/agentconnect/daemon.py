@@ -381,7 +381,11 @@ class Daemon:
         self._delivery_backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         # Every message in and out goes through it (agentconnect.policy).
         self.safety = SafetyPolicy(
-            config.safety_defaults(), self.store, self.clock, config.policy_audit_retention_days
+            config.safety_defaults(),
+            self.store,
+            self.clock,
+            config.policy_audit_retention_days,
+            config.policy_transcript_max_bytes,
         )
         self._background: set[asyncio.Task[None]] = set()
         self._held_wake = asyncio.Event()

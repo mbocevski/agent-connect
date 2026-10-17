@@ -87,6 +87,8 @@ APPROVAL_MODES = ("off", "inbound", "outbound", "both")
 DAY_SECS = 86_400
 PURGE_EVERY_SECS = 60
 MAX_AUDIT_ROWS = 100_000
+DEFAULT_TRANSCRIPT_MAX_ROWS = 10_000
+DEFAULT_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_HELD_PER_GROUP = 100
 DEFAULT_MAX_HELD_PER_SENDER = 20
 DEFAULT_MAX_HELD_BYTES = 8 * 1024 * 1024
@@ -322,6 +324,14 @@ KNOBS: tuple[Knob, ...] = (
         1,
         365,
     ),
+    Knob(
+        "transcript_max_rows",
+        int,
+        DEFAULT_TRANSCRIPT_MAX_ROWS,
+        "Transcript entries a group keeps at most (1 to 10000); the oldest go first.",
+        1,
+        DEFAULT_TRANSCRIPT_MAX_ROWS,
+    ),
 )
 KNOB = {k.name: k for k in KNOBS}
 LIMIT_FIELDS = tuple(f.name for f in fields(Limits))
@@ -350,6 +360,7 @@ class Settings:
     violation_window_secs: int = DEFAULT_VIOLATION_WINDOW_SECS
     transcript: bool = False
     transcript_retention_days: int = 7
+    transcript_max_rows: int = DEFAULT_TRANSCRIPT_MAX_ROWS
     senders: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     @staticmethod
@@ -494,11 +505,13 @@ class SafetyPolicy:
         store: Store,
         clock: Clock,
         audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS,
+        transcript_max_bytes: int = DEFAULT_TRANSCRIPT_MAX_BYTES,
     ) -> None:
         self.defaults = defaults
         self.store = store
         self.clock = clock
         self.audit_retention_days = audit_retention_days
+        self.transcript_max_bytes = transcript_max_bytes
         self.limiter = RateLimiter(clock)
         # Bounded: pruned by purge(), dropped with their group, and at most
         # MAX_TRACKED senders (least recently seen go first).
@@ -741,13 +754,15 @@ class SafetyPolicy:
             size=size,
             decision=decision,
             reason=reason,
+            keep=MAX_AUDIT_ROWS,
         )
 
     def transcribe(
         self, group_id: str, direction: str, sender: str, msg_id: str, inner: dict[str, Any]
     ) -> None:
         """Keep the full message, if the group has ``transcript`` on."""
-        if self.settings(group_id).transcript:
+        settings = self.settings(group_id)
+        if settings.transcript:
             self.store.transcript_add(
                 group_id,
                 at=self._now(),
@@ -756,6 +771,8 @@ class SafetyPolicy:
                 msg_id=msg_id,
                 kind=str(inner.get("kind")),
                 inner=inner,
+                max_rows=settings.transcript_max_rows,
+                max_bytes=self.transcript_max_bytes,
             )
 
     def purge(self) -> None:

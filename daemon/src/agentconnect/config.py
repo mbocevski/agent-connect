@@ -68,6 +68,7 @@ from urllib.parse import urlsplit
 import agentconnect_core as ac
 from agentconnect.policy import (
     DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_TRANSCRIPT_MAX_BYTES,
     KNOB,
     KNOBS,
     PolicyError,
@@ -153,6 +154,8 @@ class Config:
     policy_violation_window_secs: int = KNOB["violation_window_secs"].default
     policy_transcript: bool = KNOB["transcript"].default
     policy_transcript_retention_days: int = KNOB["transcript_retention_days"].default
+    policy_transcript_max_rows: int = KNOB["transcript_max_rows"].default
+    policy_transcript_max_bytes: int = DEFAULT_TRANSCRIPT_MAX_BYTES
     policy_audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
 
     def safety_defaults(self) -> Settings:
@@ -221,6 +224,13 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         shown_default(DEFAULT_AUDIT_RETENTION_DAYS),
         "Days the metadata-only audit log keeps a row (1 to 365). It also keeps at most "
         "the newest 100000 rows.",
+    ),
+    ConfigKey(
+        "policy.transcript_max_bytes",
+        "policy_transcript_max_bytes",
+        shown_default(DEFAULT_TRANSCRIPT_MAX_BYTES),
+        "Bytes all transcripts together keep at most (1048576 to 67108864, 64 MiB); the "
+        "oldest entries go first.",
     ),
 )
 
@@ -526,6 +536,7 @@ def _isolation(data: Mapping[str, Any]) -> dict[str, Any]:
         "isolation_human_users": _users(table, "human_users"),
     }
 MAX_AUDIT_RETENTION_DAYS = 365
+MIN_TRANSCRIPT_BYTES = 1024 * 1024
 
 
 def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
@@ -543,6 +554,12 @@ def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
         msg = f"policy.audit_retention_days must be 1..{MAX_AUDIT_RETENTION_DAYS}"
         raise ConfigError(msg)
     out["policy_audit_retention_days"] = days
+    size = _typed(table, "transcript_max_bytes", int, DEFAULT_TRANSCRIPT_MAX_BYTES)
+    if not MIN_TRANSCRIPT_BYTES <= size <= DEFAULT_TRANSCRIPT_MAX_BYTES:
+        msg = f"policy.transcript_max_bytes must be {MIN_TRANSCRIPT_BYTES}.."
+        msg += str(DEFAULT_TRANSCRIPT_MAX_BYTES)
+        raise ConfigError(msg)
+    out["policy_transcript_max_bytes"] = size
     return out
 
 

@@ -343,7 +343,12 @@ def test_config_policy_keys(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "line",
-    ['require_approval = "maybe"', "sender_per_minute = 0", "audit_retention_days = 0"],
+    [
+        'require_approval = "maybe"',
+        "sender_per_minute = 0",
+        "audit_retention_days = 0",
+        "transcript_max_bytes = 10",
+    ],
 )
 def test_config_rejects_bad_policy_values(tmp_path: Path, line: str) -> None:
     cfg = tmp_path / "c.toml"
