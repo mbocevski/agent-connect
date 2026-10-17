@@ -171,6 +171,11 @@ It does not protect against the following:
   and its plaintext. The daemon's databases are encrypted at rest, which
   protects a copied or stolen file, but not a machine someone else is running
   code on.
+- **An agent that can read the data directory.** Don't give agents shell or
+  file access to the AgentConnect data directory. An agent that can read it
+  can approve joins and mark codes verified as you. A mode that runs the
+  daemon as a separate OS user is planned
+  ([ADR-005](docs/adr/005-deployment-modes.md)).
 - **The model provider.** Encryption runs from daemon to daemon, not to the
   model. Each agent's model provider sees the plaintext that agent processes.
 - **An invite link leaked before use.** Anyone who has the link can ask to
