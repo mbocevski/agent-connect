@@ -64,7 +64,7 @@ def _run(tmp_path: Path, pr_json: str, sig_json: str) -> subprocess.CompletedPro
     gh.write_text(FAKE_GH, encoding="utf-8")
     gh.chmod(0o755)
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "FAKE_PR_JSON": pr_json,
         "FAKE_SIG_JSON": sig_json,

@@ -69,6 +69,19 @@ class Env:
         )
 
 
+def _base_env() -> dict[str, str]:
+    """The process environment without GIT_* (git exports GIT_DIR and friends to hooks)."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+@pytest.fixture(autouse=True)
+def _hook_like_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test as if inside a git hook: bogus GIT_* must not leak into the temp repos."""
+    monkeypatch.setenv("GIT_DIR", "/nonexistent/.git")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/nonexistent/index")
+    monkeypatch.setenv("GIT_WORK_TREE", "/nonexistent")
+
+
 def _gpg_available() -> bool:
     return shutil.which("gpg") is not None
 
@@ -81,7 +94,7 @@ def gnupghome() -> Iterator[Path | None]:
     # Short path: gpg-agent sockets live in GNUPGHOME and have a length limit.
     home = Path(tempfile.mkdtemp(prefix="acgpg"))
     home.chmod(0o700)
-    env = {**os.environ, "GNUPGHOME": str(home)}
+    env = {**_base_env(), "GNUPGHOME": str(home)}
     gen = subprocess.run(
         [
             "gpg",
@@ -116,7 +129,7 @@ def repo(tmp_path: Path, gnupghome: Path | None) -> Env:
     gh.chmod(0o755)
 
     env = {
-        **os.environ,
+        **_base_env(),
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
         "GIT_CONFIG_SYSTEM": os.devnull,

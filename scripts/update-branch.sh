@@ -13,6 +13,9 @@
 # usage: scripts/update-branch.sh <pr-number>
 set -euo pipefail
 
+# Hooks and wrappers export these; they would point git at the wrong repo.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 pr="${1:?usage: just update-branch <pr-number>}"
 remote="${AC_REMOTE:-origin}"
 fail() { echo "update-branch: $*" >&2; exit 1; }
