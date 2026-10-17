@@ -124,6 +124,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core: `EncryptedDb` (Python: `agentconnect_core.Database`), a SQLCipher
+  database with a caller-defined schema for the daemon's own records, keyed
+  under `DbKey::derive` (HKDF-SHA256, label
+  `agentconnect/v0/daemon-db-key`) so one keystore entry keys both files
+  and no two share a key. `secure_delete` is on; a wrong key or a
+  cleartext file fails with `Error::StorageKey` (ADR-003).
 - Core and relay: the relay challenge nonce must be exactly 32 bytes
   (SPEC §8.2). `Instance.sign_relay_challenge` refuses any other length,
   and the relay never verifies one. The signed bytes don't delimit the

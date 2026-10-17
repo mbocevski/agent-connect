@@ -22,12 +22,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentconnect_core as core;
 use agentconnect_core::clock::Clock;
+use agentconnect_core::db::SqlValue;
 use agentconnect_core::group::{CommitOut, CommitSummary, Event, MemberInfo};
-use agentconnect_core::{DbKey, Group, MemoryStore, SqliteStore};
+use agentconnect_core::{DbKey, EncryptedDb, Group, MemoryStore, SqliteStore};
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyValueError};
+use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use zeroize::Zeroizing;
 
 create_exception!(
@@ -1044,6 +1045,110 @@ fn derive_sas(epoch_authenticator: &[u8], group_id: &[u8], epoch: u64) -> PyResu
     guarded(|| Ok(Sas(core::Sas::derive(epoch_authenticator, group_id, epoch))))
 }
 
+fn sql_value(v: &Bound<'_, PyAny>) -> PyResult<SqlValue> {
+    if v.is_none() {
+        return Ok(SqlValue::Null);
+    }
+    if let Ok(b) = v.cast::<PyBytes>() {
+        return Ok(SqlValue::Blob(b.as_bytes().to_vec()));
+    }
+    if let Ok(s) = v.cast::<PyString>() {
+        return Ok(SqlValue::Text(s.to_str()?.to_owned()));
+    }
+    if v.cast::<PyFloat>().is_ok() {
+        return Ok(SqlValue::Real(v.extract::<f64>()?));
+    }
+    if v.cast::<PyInt>().is_ok() {
+        return Ok(SqlValue::Integer(v.extract::<i64>()?));
+    }
+    Err(PyTypeError::new_err(
+        "SQL parameters must be None, int, float, str or bytes",
+    ))
+}
+
+fn py_value<'py>(py: Python<'py>, v: &SqlValue) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match v {
+        SqlValue::Null => py.None().into_bound(py),
+        SqlValue::Integer(i) => i.into_pyobject(py)?.into_any(),
+        SqlValue::Real(f) => f.into_pyobject(py)?.into_any(),
+        SqlValue::Text(s) => PyString::new(py, s).into_any(),
+        SqlValue::Blob(b) => PyBytes::new(py, b).into_any(),
+    })
+}
+
+fn sql_params(params: &[Bound<'_, PyAny>]) -> PyResult<Vec<SqlValue>> {
+    params.iter().map(sql_value).collect()
+}
+
+/// The daemon's own database (ADR-003): SQLCipher, keyed with a key the core
+/// derives from the 32-byte `db_key` (the MLS store's key) under
+/// `"agentconnect/v0/daemon-db-key"`, so the derived key never reaches
+/// Python. There is no unencrypted mode: a wrong key, or a cleartext file,
+/// raises `AgentConnectError`.
+#[pyclass(frozen, module = "agentconnect_core._native")]
+struct Database(EncryptedDb);
+
+#[pymethods]
+impl Database {
+    #[new]
+    fn new(py: Python<'_>, path: &str, db_key: &[u8]) -> PyResult<Self> {
+        py.detach(|| {
+            guarded(|| {
+                let root = DbKey::from_bytes(db_key).map_err(err)?;
+                let key = root.derive(core::db::DAEMON_DB_INFO);
+                Ok(Self(
+                    EncryptedDb::open(std::path::Path::new(path), &key).map_err(err)?,
+                ))
+            })
+        })
+    }
+
+    /// Runs one statement and returns its rows as tuples.
+    #[pyo3(signature = (sql, params=Vec::new()))]
+    fn query<'py>(
+        &self,
+        py: Python<'py>,
+        sql: &str,
+        params: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        guarded(|| {
+            let rows = self.0.query(sql, &sql_params(&params)?).map_err(err)?;
+            let out = PyList::empty(py);
+            for row in &rows {
+                let values = row
+                    .iter()
+                    .map(|v| py_value(py, v))
+                    .collect::<PyResult<Vec<_>>>()?;
+                out.append(PyTuple::new(py, values)?)?;
+            }
+            Ok(out)
+        })
+    }
+
+    /// Runs one statement for its effect: `(changes, last_insert_rowid)`.
+    #[pyo3(signature = (sql, params=Vec::new()))]
+    fn execute(&self, sql: &str, params: Vec<Bound<'_, PyAny>>) -> PyResult<(u64, i64)> {
+        guarded(|| {
+            let done = self.0.execute(sql, &sql_params(&params)?).map_err(err)?;
+            Ok((done.changes, done.last_insert_rowid))
+        })
+    }
+
+    /// Runs `;`-separated statements without parameters.
+    fn execute_script(&self, sql: &str) -> PyResult<()> {
+        guarded(|| self.0.execute_batch(sql).map_err(err))
+    }
+
+    /// Closes the database; later calls raise `AgentConnectError`.
+    fn close(&self) -> PyResult<()> {
+        guarded(|| self.0.close().map_err(err))
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "Database(...)"
+    }
+}
+
 /// Re-encrypts the store at `path` from `old_key` to `new_key` (32 bytes
 /// each). No `Client` may have the store open while this runs.
 #[pyfunction]
@@ -1122,6 +1227,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Sas>()?;
     m.add_class::<VerifiedJoinRequest>()?;
     m.add_class::<Client>()?;
+    m.add_class::<Database>()?;
     for f in [
         wrap_pyfunction!(supports_protocol, m)?,
         wrap_pyfunction!(parse_invite_url, m)?,
