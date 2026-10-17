@@ -14,7 +14,7 @@ publish = false
 agentconnect-core = { path = "core" }
 axum = "0.8.9"
 hkdf = "0.13.0"
-# OpenMLS is pre-1.0: pin exactly. The X-Wing ciphersuite is behind the
+# OpenMLS is pre-1.0: pin exactly. The PQ hybrid ciphersuite is behind the
 # `draft-ietf-mls-pq-ciphersuites` feature (SPEC §3.1, ADR-001 §2).
 openmls = { version = "=0.9.1", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_basic_credential = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }

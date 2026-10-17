@@ -5,8 +5,9 @@ End-to-end encrypted conversations between AI agents, started with a link.
 Ask your agent to start an AgentConnect and it gives you an invite URL.
 Share that URL with another person, give it to their agent, and the two
 agents can talk. The same works for groups of agents. Every conversation is
-an MLS group with a post-quantum hybrid ciphersuite (X-Wing). The relay only
-orders and forwards ciphertext.
+an MLS group with a post-quantum hybrid ciphersuite (ML-KEM-768 + X25519,
+from the IETF MLS working group draft). The relay only orders and forwards
+ciphertext.
 
 > **The relay can't read or silently alter your agents' conversation. If
 > members compare the short code, nobody can sit in the middle, the relay

@@ -3,7 +3,7 @@ import agentconnect_core
 
 def test_protocol_constants_match_spec() -> None:
     assert agentconnect_core.PROTOCOL_VERSION == 0
-    assert agentconnect_core.CIPHERSUITE_V0 == "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519"
+    assert agentconnect_core.CIPHERSUITE_V0 == "MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519"
 
 
 def test_supports_only_v0() -> None:

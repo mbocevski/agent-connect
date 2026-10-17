@@ -48,10 +48,25 @@ what it does not protect against.
 ### 3.1 MLS
 
 - **Version:** MLS 1.0 (RFC 9420).
-- **Ciphersuite (the only one):** `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`.
-  X-Wing is a hybrid KEM combining X25519 and ML-KEM-768. Implementations MUST
-  reject KeyPackages, Welcomes and groups that use any other ciphersuite.
-  v0 has **no ciphersuite negotiation**.
+- **Ciphersuite (the only one):**
+  `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`.
+  - This is suite TBD1 of `draft-ietf-mls-pq-ciphersuites-06` (MLS WG, in
+    Working Group Last Call). Its KEM is the hybrid `MLKEM768-X25519` from
+    `draft-ietf-hpke-pq`, combining ML-KEM-768 with X25519 (NIST level 3,
+    hence `MLS_128`).
+  - **Codepoint (provisional):** `0x004F`, the value OpenMLS uses until IANA
+    assigns one. A different final codepoint or KEM derivation is a protocol
+    version change (§13).
+  - Implementations MUST reject KeyPackages, Welcomes and groups that use any
+    other ciphersuite. v0 has **no ciphersuite negotiation**.
+  - In OpenMLS the suite is behind the `draft-ietf-mls-pq-ciphersuites`
+    feature and needs the libcrux crypto provider.
+- **HPKE key lengths:** every HPKE public key received in a KeyPackage or
+  LeafNode MUST be exactly the suite's public key length (1216 bytes:
+  1184 for ML-KEM-768 plus 32 for X25519). Implementations MUST check this
+  *before* passing the object to their MLS library, and reject it otherwise.
+  This is defence in depth against malformed hybrid keys (see
+  `docs/spikes/mls-xwing.md`).
 - **Credential:** `BasicCredential` with `identity` = the UTF-8 bytes of the
   identity identifier (`ac:v0:…`).
 - **Leaf signature key:** the instance key `SK.pub`. RFC 9420 requires leaf
@@ -63,6 +78,9 @@ what it does not protect against.
   any Add or Welcome that contains such a leaf.
 - **Required extensions** (listed in `RequiredCapabilities`):
   `ac_group_policy`, `ac_group_meta`, `ac_instance_cert`, `ratchet_tree`.
+  `RequiredCapabilities` only ensures every member *supports* these
+  extensions; it doesn't ensure they're *present*. Presence is enforced by
+  the MUSTs in this section (e.g. on `ac_instance_cert`) and in §9.2.
 - **Wire format policy:** handshake messages and application messages MUST be
   sent as `PrivateMessage`. KeyPackages, Welcomes and GroupInfo use their
   standard formats.
@@ -125,8 +143,7 @@ ASCII strings and `‖` means concatenation.
 | Value | Derivation |
 |---|---|
 | `join_key` | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/join", L = 32) |
-| `invite_psk` | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/psk", L = 32) |
-| `welcome_key` (fallback, §6.4) | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/welcome", L = 32) |
+| `welcome_key` (§6.4) | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/welcome", L = 32) |
 | `sas_bytes` | HKDF(ikm = epoch_authenticator, salt = group_id, info = "agentconnect/v0/sas" ‖ u64be(epoch), L = 6) |
 
 ## 4. Invites
@@ -219,8 +236,8 @@ JoinRequest = {
 }
 ```
 
-B stores `invite_psk` under PSK id `"ac:v0:invite:" ‖ invite_id` **before**
-sending.
+B keeps the invite secret (and so can derive `welcome_key`) until it has
+joined or the invite expires.
 
 ### 6.2 Validation and approval (inviter)
 
@@ -229,42 +246,51 @@ The inviter instance A MUST:
 1. Check that the invite is open, has uses left and hasn't expired.
 2. Verify `mac`. If verification fails, drop the request and count it toward
    rate limiting. A failed MAC MUST NOT consume a use.
-3. Validate the KeyPackage: v0 ciphersuite, signature, instance certificate,
-   and required capabilities.
+3. Validate the KeyPackage: v0 ciphersuite, HPKE key lengths (§3.1),
+   signature, instance certificate, and required capabilities. All of this
+   MUST happen before the KeyPackage is handed to the MLS library.
 4. Approve the join, either automatically (when policy allows) or through its
    human. Approval MUST time out after 1 hour by default, and a timeout
    rejects the join.
-5. Commit, in a single commit:
-   - an `Add(B.key_package)` proposal
-   - a `PreSharedKey` proposal for the external PSK
-     `"ac:v0:invite:" ‖ invite_id`
-6. Send the commit to the group and the Welcome to B's mailbox (§8). The
-   Welcome MUST include the `ratchet_tree` extension.
+5. Commit `Add(B.key_package)`. When the §9.1 floor switch applies, the same
+   commit also carries the GroupContextExtensions proposal (§9.2). The commit
+   carries **no** PSK proposal: an external PSK would have to be held by
+   every existing member to process the commit, but only the inviting
+   instance holds the invite secret (§4.3).
+6. Wrap the Welcome (§6.4) and send it to B's mailbox as envelope kind
+   `welcome_wrapped`. Send the commit to the group (§8). The Welcome MUST
+   include the `ratchet_tree` extension.
 7. Send `invite.consume{invite_id}` to the relay.
 
 ### 6.3 Processing the Welcome (joiner)
 
-B processes the Welcome with the stored PSK. B MUST:
+B unwraps the Welcome with `welcome_key` (§6.4). B MUST:
 
-- Abort if the Welcome can't be processed. The PSK ties the Welcome to
-  someone who knows the invite secret.
+- Abort if the AEAD check fails. The wrapping ties the Welcome to someone who
+  knows the invite secret.
+- Abort if the Welcome can't be processed.
 - Verify that `ac_group_meta.name` and `.purpose` match the `InviteMeta` it
   showed its human.
 - Verify the instance certificates of every leaf.
-- Delete the PSK and the invite secret after a successful join.
+- Delete `welcome_key` and the invite secret after a successful join.
 
-### 6.4 Fallback: AEAD-wrapped Welcome
+Any failure while processing a Welcome consumes B's KeyPackage (its private
+key material is used up). A retry needs a fresh KeyPackage and a new
+JoinRequest.
 
-If the implementation's MLS library can't use an external PSK in a
-Welcome-bearing commit, the inviter MUST instead wrap the Welcome:
+### 6.4 AEAD-wrapped Welcome
+
+The inviter wraps every Welcome:
 
 ```
 WrappedWelcome = nonce(12) ‖ ChaCha20-Poly1305(welcome_key, nonce, aad = "agentconnect/v0/welcome" ‖ invite_id, welcome_bytes)
 ```
 
-Which mode is in use is signalled by the outer envelope `kind`: `welcome` or
-`welcome_wrapped`. Implementations of a given release MUST support exactly
-one mode. Which one is decided in `docs/spikes/mls-xwing.md`.
+- `nonce` is 12 random bytes, fresh for each Welcome.
+- This is the only Welcome format in v0. The envelope kind is always
+  `welcome_wrapped`; an unwrapped `welcome` MUST be rejected.
+- The AEAD is independent of the MLS ciphersuite: it binds the Welcome to the
+  invite; MLS protects the group secrets inside it.
 
 ### 6.5 After joining
 
@@ -282,12 +308,12 @@ padding.
 ```
 Envelope = {
   "v": 0,
-  "kind": "commit" | "application" | "welcome" | "welcome_wrapped" | "join_request",
+  "kind": "commit" | "proposal" | "application" | "welcome_wrapped" | "join_request",
   "group_id": "...",           // absent for join_request
-  "epoch": <u64>,              // for commit and application; equals the MLS PrivateMessage epoch
+  "epoch": <u64>,              // commit, proposal, application; equals the MLS PrivateMessage epoch
   "msg_id": "<16 random bytes>",
   "sender": "<mailbox_id>",
-  "to": ["<mailbox_id>"],      // welcome and join_request only
+  "to": ["<mailbox_id>"],      // welcome_wrapped and join_request only
   "routing": {                 // commit only; hints for the relay's fan-out table
     "add": ["<mailbox_id>"],
     "remove": ["<mailbox_id>"]
@@ -385,14 +411,22 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   `current_epoch`, applies the `routing` hints, and fans the commit out to all
   members (including the sender, as confirmation). Otherwise it replies with
   `epoch_conflict{current_epoch}`.
+- **Merging own commits:** a sender MUST NOT merge its own commit until the
+  relay confirms it: an `accepted` frame for the commit's `msg_id`, or its own
+  commit delivered back in the fan-out. Until then the commit stays pending.
 - **On `epoch_conflict`,** the sender MUST discard its pending commit, process
   the winning commit from its queue, and then rebuild and resend its own
   commit if it is still needed.
 - **Application messages:** accepted when `env.epoch == current_epoch` or
   `current_epoch - 1` (a grace window), and the sender is a member. They are
   fanned out to every member except the sender.
-- **Welcome:** delivered to the `to` mailbox. If that mailbox doesn't exist
-  yet, the relay creates it.
+- **Proposals** (standalone, e.g. a Remove for the sender's own leaf, §9.2):
+  accepted only when `env.epoch == current_epoch` and the sender is a member,
+  and fanned out to every member except the sender. A proposal from an older
+  epoch is stale and gets `epoch_conflict`; the sender resends it after
+  catching up.
+- **Welcome** (`welcome_wrapped`): delivered to the `to` mailbox. If that
+  mailbox doesn't exist yet, the relay creates it.
 - **`join`:** forwarded to the invite's `inviter_mailbox` if the invite is
   open. It is rate-limited per invite: 10 per minute by default.
 - **`invite.consume`:** accepted only from the inviter mailbox. It decrements
@@ -451,13 +485,22 @@ and SHOULD leave the group if the honest members can't converge.
 |---|---|
 | Add (via invite) | The instance that created the invite. Its identity must satisfy `invite` at the time the invite was created. |
 | Remove other member | Per `remove` |
-| Remove self | Any member (SelfRemove proposal if supported, or a Remove committed by any other member on request) |
+| Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. A sole remaining member just deletes its local state. |
 | Policy change (GroupContextExtensions) | Owner. Admins may change `floor` and `floor_moderator` only. |
 | Owner transfer | Owner. The new owner must be a current member. |
 | Update (own leaf) | The instance itself |
 | Add another instance of an existing identity | Any instance of that identity (multi-replica) |
 
 Removing a member's identity removes all of that member's instances.
+
+- **No SelfRemove in v0.** MLS SelfRemove proposals can only be sent as
+  `PublicMessage` in current implementations, which the wire format policy
+  (§3.1) forbids.
+- **GroupContextExtensions replace the whole set.** A policy-change proposal
+  MUST carry the complete extension list: `ac_group_meta`,
+  `RequiredCapabilities` and the new `ac_group_policy`. Receivers MUST reject
+  it if `ac_group_meta` or `RequiredCapabilities` differ from the current
+  values (they're immutable in v0) or if any required extension is missing.
 
 ### 9.3 Floor control and triggering
 
@@ -561,12 +604,12 @@ until its human has verified the current epoch (§11).
 | Attacker | Capability | Mitigation | Residual risk |
 |---|---|---|---|
 | Honest-but-curious relay | Sees all envelopes | MLS E2E; padding | **Metadata:** membership size and churn, timing, message sizes (bucketed), mailbox ids |
-| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and PSK; MLS signatures and epochs; replay protection via generation counters and `msg_id`; routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
+| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; MLS signatures and epochs; replay protection via generation counters and `msg_id`; routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
 | **Link leaked before use** (chat/email provider, inbox access, LLM logs, tampered landing page) | Joins as a member | Use limits and the "already used" warning; inviter approval; **SAS** | **Becomes a member if approved. Full MITM if the relay colludes and the SAS isn't compared.** |
 | Link leaked after exhaustion or expiry | — | The secret only authenticates joins | None |
 | Malicious member | Reads everything while a member; injects content | Roles and policy; removal (new epoch); endpoint policy (§10) | Everything it saw while it was a member |
 | Removed member | Holds old keys | MLS forward secrecy across epochs | Past epochs it was part of |
-| Quantum adversary recording traffic | Future decryption | X-Wing in every path secret; Update cadence | Rests on X-Wing's security |
+| Quantum adversary recording traffic | Future decryption | Hybrid ML-KEM-768 + X25519 KEM in every path secret; Update cadence | Rests on ML-KEM-768 (and X25519 until a quantum computer exists) |
 | **Model provider of any member's agent** | Sees what that agent processes | — (inherent) | **Sees plaintext. E2E runs daemon to daemon, not to the model.** |
 | Compromised host | Has keys and state | Encrypted-at-rest storage; Updates heal after removal or re-key | That member fully, until removed |
 | Malicious or prompt-injected peer agent | Social-engineers the local agent | Untrusted framing, scope, limits, approval hooks (§10) | Behavioural; can't be solved with cryptography |
@@ -609,9 +652,9 @@ H_A      A (inviter daemon)          Relay                 B (joiner daemon)    
  │          │◀── deliver(join_request) ─│                          │                  │
  │          │ verify MAC, KeyPackage    │                          │                  │
  │◀ approve?│                           │                          │                  │
- │── yes ──▶│ commit Add + PSK (epoch 0)│                          │                  │
+ │── yes ──▶│ commit Add (epoch 0)      │                          │                  │
  │          │── send(commit) ──────────▶│ epoch 0 → 1              │                  │
- │          │── send(welcome → B) ─────▶│── deliver(welcome) ─────▶│ join with PSK    │
+ │          │── send(wrapped Welcome) ─▶│── deliver(wrapped) ─────▶│ unwrap, join     │
  │          │── invite.consume ────────▶│                          │ check meta       │
  │          │                           │                          │                  │
  │◀─ SAS ───│                           │                          │─── SAS ─────────▶│
@@ -625,7 +668,7 @@ H_A      A (inviter daemon)          Relay                 B (joiner daemon)    
 
 ```
 C ── join(JoinRequest) ──▶ Relay ──▶ A (holds the invite)
-A: verify, approve, commit [Add(C), PSK, GroupContextExtensions(floor=mention)]
+A: verify, approve, commit [Add(C), GroupContextExtensions(floor=mention)]; Welcome wrapped with welcome_key
 A ── commit (epoch n) ──▶ Relay ──▶ B, A          (B checks the commit against policy)
 A ── welcome ──────────▶ Relay ──▶ C
 A, B, C: new SAS for epoch n+1. A and B stay verified for each other; C starts unverified.
@@ -650,21 +693,28 @@ A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice
 
 ## 15. Open questions
 
-1. Whether OpenMLS supports an external PSK in an Add commit with a Welcome
-   (§6.2), or the AEAD fallback (§6.4) is needed. The spike decides.
-2. Whether OpenMLS supports SelfRemove (§9.2).
-3. The X-Wing ciphersuite codepoint is still in an IETF draft. Track it and
-   pin it per release.
-4. Whether to require Updates on every membership change, in addition to the
+1. The ciphersuite codepoint (§3.1) is provisional (`0x004F`) until IANA
+   assigns TBD1 of `draft-ietf-mls-pq-ciphersuites`. Track it, and the KEM
+   derivation in `draft-ietf-hpke-pq`.
+2. Whether to require Updates on every membership change, in addition to the
    cadence in §3.1.
-5. Multi-relay federation. Out of scope for v0.
-6. Interop with AGNTCY SLIM (also MLS-based), and an A2A extension (§13).
+3. Multi-relay federation. Out of scope for v0.
+4. Interop with AGNTCY SLIM (also MLS-based), and an A2A extension (§13).
+
+Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
+
+- Invite binding: the AEAD-wrapped Welcome (§6.4) is the only mode. An
+  external PSK works for 1:1 but would require every existing member to hold
+  the invite secret.
+- SelfRemove: not used in v0, because it needs `PublicMessage` (§9.2).
+- Ciphersuite: the MLS WG suite TBD1 replaces the expired individual-draft
+  X-Wing suite (`0x004D`).
 
 ## 16. References
 
 - RFC 9420, *The Messaging Layer Security (MLS) Protocol*
 - RFC 5869 (HKDF), RFC 8785 (JCS), RFC 2119 / RFC 8174
-- X-Wing hybrid KEM and the MLS PQ ciphersuite Internet-Drafts
+- draft-ietf-mls-pq-ciphersuites (MLS post-quantum ciphersuites) and draft-ietf-hpke-pq (hybrid KEMs for HPKE)
 - A2A Protocol Specification v1.0, https://a2a-protocol.org/v1.0.0/specification/
 - draft-chapman-a2a-mls-03 (MLS carried inside A2A)
 - draft-mpsb-agntcy-slim-02 (AGNTCY SLIM)
