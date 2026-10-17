@@ -113,7 +113,7 @@ Example (wrapped for reading; the real thing is one canonical line):
         "v": 0
       },
       "required": true,
-      "uri": "https://agentconnect.dev/ext/e2e/v0"
+      "uri": "https://yggdrasill.network/ext/agentconnect/e2e/v0"
     }]
   },
   "defaultInputModes": ["text/plain"],
@@ -137,7 +137,7 @@ Example (wrapped for reading; the real thing is one canonical line):
 }
 ```
 
-### Extension params (`https://agentconnect.dev/ext/e2e/v0`)
+### Extension params (`https://yggdrasill.network/ext/agentconnect/e2e/v0`)
 
 | Field | Rule |
 |---|---|
@@ -249,7 +249,7 @@ our verifier and a2a-sdk's verifier compute the same bytes:
   Replicas share IK (ADR-005, Decision 5), and IK is what peers see in
   MLS credentials.
 - *`alg: "Ed25519"` (RFC 9864).* It is the cleaner name, but PyJWT 2.15.1
-  and so a2a-sdk 1.2.2 can't verify it. See open question 9.
+  and so a2a-sdk 1.2.2 can't verify it. See open question 4.
 
 ### Fingerprint shown to humans
 
@@ -378,7 +378,7 @@ timeout send nothing.
 On naming: the site's status line says "door invites". A door is **not**
 an invite. It has no secret, isn't bound to a group, and is never consumed.
 This ADR uses "door" and "knock" throughout, and SPEC §4 is unchanged. See
-open question 1.
+"Decided in review", item 1.
 
 ### Why not reuse §4
 
@@ -641,7 +641,7 @@ Heimdall indexes signed listings and serves them.
 
 | Field | Why it is safe |
 |---|---|
-| `identity`, fingerprint | Public by the owner's choice. It does link the listed identity to any group where it is a member, so open question 5 recommends a dedicated identity for listing. |
+| `identity`, fingerprint | Public by the owner's choice. It does link the listed identity to any group where it is a member, so a dedicated identity for listing is recommended ("Decided in review", item 4). |
 | `door.id` | It authenticates nothing. All it allows is sending knocks, which are rate-limited and approved by a human. Only the relay can map it to a mailbox, and the relay knows every mailbox already. |
 | `door.key` | A public key. Rotated with every door. |
 | `relay` | A public host. |
@@ -703,7 +703,7 @@ ListingToken = {
     only IK can sign the listing.
   - It is embedded in `params.token`, so mirrors and knockers check
     curation themselves.
-- **Lifetime.** At most 90 days (open question 7). Re-issuing is an
+- **Lifetime.** At most 90 days (open question 2). Re-issuing is an
   operator action. A listing whose token has expired is hidden as if it
   were withdrawn, and the daemon warns its human 14 days ahead.
 - **Revocation.** The operator signs
@@ -868,8 +868,9 @@ The edits use the existing section numbers; nothing is renumbered.
 11. **§12 Threat model.** Add the rows of Decision 5 and the asset.
     Extend the "Non-goals" list with "directory availability and
     censorship resistance".
-12. **§13 Versioning and extensibility.** Replace the future-work bullet
-    with:
+12. **§13 Versioning and extensibility.** Replace the future-work bullet,
+    which names `https://agentconnect.dev/ext/e2e/v0`, with the extension
+    URI `https://yggdrasill.network/ext/agentconnect/e2e/v0`, and add:
     - **§13.1 "The `e2e` extension and signed listings":** Decision 1 in
       full, meaning the params, the card rules, the canonical form profile,
       the JWS, and the fingerprint.
@@ -1012,7 +1013,7 @@ conversation itself, and nothing stronger.
 
 - **A listed identity is public.** Anyone can tell that a member with that
   identity in any group is the listed agent. This is the price of being
-  findable, and open question 5 recommends a separate identity.
+  findable, and a separate identity is recommended ("Decided in review", item 4).
 - **The relay grows a small door registry and one frame.** It still parses
   no `ct` and holds no secret. Its new metadata (who knocks on which door,
   and when) is of the same kind as `join` today, with the knock contents
@@ -1033,47 +1034,49 @@ conversation itself, and nothing stronger.
   listings when it is given a `key_provider` that reads `kid`. Python tests
   check this against the shared vectors.
 
+## Decided in review
+
+1. **Site wording.** The status line becomes "SPEC draft: signed listings
+   and doors". A door is not an invite (Decision 3).
+2. **Extension URI.** `https://yggdrasill.network/ext/agentconnect/e2e/v0`,
+   replacing the `agentconnect.dev` URI in §13, which the project doesn't
+   hold. A page describing the extension is served at that URI before v0 is
+   tagged. Changing the URI later would be a new extension version, which
+   is why it's settled now.
+3. **Well-known name.** `/.well-known/agentconnect.json` on the owner's
+   domain. It's registered with IANA (RFC 8615) before v0 is tagged.
+4. **A dedicated identity for listing.** SHOULD, not MUST. `listing
+   publish` warns when the identity already has groups, and the docs
+   explain the linkage. Enforcing it would mean a second daemon per listed
+   agent (ADR-005, one daemon per identity).
+5. **Who may knock.** The agent token, like `accept`. The decision that
+   matters is on the owner's side and is human, and knocking only reveals
+   the knocker's identity to the owner it chose. A local policy switch to
+   require human confirmation of outgoing knocks comes with §10.6.
+
 ## Open questions
 
-1. **"Door invites" on the site's status line.** A door is not an invite
-   (Decision 3). *Recommendation:* change it to "SPEC draft: signed
-   listings and doors".
-2. **"RENEWS IN N DAYS".** Heimdall knows only the signed expiry, not
+The recommendations below stand unless review says otherwise.
+
+1. **"RENEWS IN N DAYS".** Heimdall knows only the signed expiry, not
    whether the daemon will renew. *Recommendation:* keep the label and
    define N as the days until `door.expires_at`, as in the table above. A
    door that isn't renewed shows "DOOR CLOSED" after expiry.
-3. **Extension URI host.** §13 names `https://agentconnect.dev/ext/e2e/v0`,
-   but the deployment lives on `yggdrasill.network`. *Recommendation:*
-   keep `agentconnect.dev`, because the protocol shouldn't be tied to one
-   operator. Confirm the project controls the domain before tagging v0,
-   and serve a page describing the extension at that URI.
-4. **Well-known name.** *Recommendation:* use
-   `/.well-known/agentconnect.json` now. Register it with IANA (RFC 8615)
-   before v0 is tagged.
-5. **A dedicated identity for listing.** *Recommendation:* SHOULD, not
-   MUST. `listing publish` warns when the identity already has groups, and
-   the docs explain the linkage. Enforcing it would mean a second daemon
-   per listed agent (ADR-005, one daemon per identity).
-6. **Who may knock.** *Recommendation:* agent token, like `accept`. The
-   decision that matters is on the owner's side and is human. Knocking only
-   reveals the knocker's identity to the owner it chose. A local policy
-   switch to require human confirmation of outgoing knocks can come with
-   §10.6.
-7. **Token lifetime.** *Recommendation:* 90 days while the service is
+2. **Token lifetime.** *Recommendation:* 90 days while the service is
    pre-alpha, with operator re-issue. Revisit when curation moves beyond
    invitation.
-8. **Doors held by replicas.** v0 has one door per listing on one
+3. **Doors held by replicas.** v0 has one door per listing on one
    instance. *Recommendation:* defer. Several replicas behind one door need
    a shared door key and a rule for who approves, which deserves its own
    design.
-9. **`EdDSA` or `Ed25519` as the JWS `alg`.** *Recommendation:* `EdDSA`
+4. **`EdDSA` or `Ed25519` as the JWS `alg`.** *Recommendation:* `EdDSA`
    for v0, because a2a-sdk 1.2.2 can verify it. Move to `Ed25519` in a
    later version once PyJWT supports it, never by accepting both.
-10. **Silent drop on per-door overflow.** The other option is an honest
-    `rate_limited`. That would tell a knocker the door is busy, and it
-    would let a prober measure an owner's traffic. *Recommendation:* keep
-    the silent drop. A flood is a denial of service either way.
-11. **Name transfer on key rotation.** *Recommendation:* a new token from
-    the operator plus the 30-day "key changed" banner, rather than letting
-    the old key sign a handover. A compromised key must not be able to
-    hand its name to the attacker.
+5. **Silent drop on per-door overflow.** The other option is an honest
+   `rate_limited`. That would tell a knocker the door is busy, and it
+   would let a prober measure an owner's traffic. *Recommendation:* keep
+   the silent drop. A flood is a denial of service either way.
+6. **Name transfer on key rotation.** *Recommendation:* a new token from
+   the operator plus the 30-day "key changed" banner, rather than letting
+   the old key sign a handover. A compromised key must not be able to
+   hand its name to the attacker.
