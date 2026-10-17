@@ -131,7 +131,8 @@ class Cluster:
         **overrides: Any,
     ) -> Node:
         """A started daemon. ``identity_of`` makes it a replica (another
-        instance of that node's identity)."""
+        instance of that node's identity). ``adapter`` builds the node's
+        adapter from its data directory, instead of a recording adapter."""
         name = name or f"n{len(self.nodes)}"
         proxy = RelayProxy(self.relay.ws_url)
         await proxy.start()

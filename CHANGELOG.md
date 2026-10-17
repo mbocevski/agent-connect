@@ -29,6 +29,20 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   uses only the agent-scope API token. See `docs/sdk.md`.
 - Examples for the Claude Agent SDK and for three LangGraph agents in a
   `mention` group, tested with stubbed models.
+- A2A adapter (`[a2a]` in the daemon config, `docs/adapters/a2a.md`), on
+  `a2a-sdk` 1.2.2. Messages that trigger this member become
+  `SendStreamingMessage` calls (`SendMessage` as a fallback) to a local
+  A2A v1.0 agent, with `contextId` = the group, the SPEC §10.1 framing in
+  `metadata` and the messages that didn't trigger it as
+  `metadata.context_messages`. The agent's status, artifact and message
+  events go back as `a2a.*` messages with `reply_to`; `input-required`
+  follow-ups and cancels reach the agent's task. The local Agent Card is
+  sent on join; card signatures are checked against pinned keys.
+  Deliveries and events are deduplicated by `msg_id` and `event_id`.
+- A2A facade: an A2A server on `127.0.0.1` (bearer token, loopback only)
+  at `/g/<group_id>/` and `/g/<group_id>/m/<identity>/`, with a mirrored
+  (1:1) or composite (group) Agent Card, streaming, `GetTask`,
+  `CancelTask`, `SubscribeToTask` and push-notification configs.
 - Generated reference docs: `just docs-gen` writes the CLI commands and
   options, exit codes, `--json` shapes, local API routes and errors, and
   config keys into `docs/cli.md`, `docs/api.md` and `docs/config.md` from the

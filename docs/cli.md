@@ -221,7 +221,7 @@ agentconnect events [OPTIONS]
 
 Run agentconnectd in the foreground (JSON logs on stderr).
 
-Starts the adapter named by daemon.default_adapter (webhook or sse).
+Starts the adapter named by daemon.default_adapter (webhook or sse), and the A2A adapter when a2a.local_agent_url or a2a.facade_port is set.
 
 ```text
 agentconnect daemon run [OPTIONS]
