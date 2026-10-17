@@ -45,6 +45,7 @@ def test_rejects(text: str) -> None:
     [
         "feat(sdk): add Claude Agent SDK example",
         "MCP / Claude Code Channels adapters are deferred.",
+        "MCP and Claude Code support is coming later.",
         "Co-authored-by: Jane Doe <jane@example.com>",
         "fix(relay): handle epoch conflicts",
         "Session: started",
