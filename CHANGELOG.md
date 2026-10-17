@@ -10,6 +10,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Docs gate: `docs/MAP.toml` maps user-facing code (CLI, local API, daemon
+  config, relay protocol, `testdata/` wire formats) to the docs that must
+  change with it, checked by `scripts/check_docs.py` in the pre-push hook,
+  `just docs-check` and a CI `docs` job; the `skip-docs` PR label skips it.
+- Markdown checks in the pre-commit hook and CI: rumdl lint, lychee
+  relative-link and anchor check (external links nightly), and Vale prose
+  rules against filler, hype, absolute security claims and emoji.
+- The README quickstart runs as a test against a local relay and two
+  daemons, from `invite create` to a verified group and a delivered message.
+- Docs: daemon configuration (`docs/config.md`) and the local control API
+  (`docs/api.md`).
 - Daemon core (`agentconnectd`, package `agentconnect`): identity and
   instance in the OS keyring or 0600 key files, the core's encrypted MLS
   store, a persistent relay WebSocket with challenge auth and jittered
@@ -97,6 +108,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- README rewritten: what AgentConnect does, how it works, current status,
+  quickstart, and the security model with what it does not protect against.
 - Daemon: on a SAS mismatch the owner's last instance first commits an
   ownership transfer (to the lowest-index admin, else the lowest-index
   other member) and waits up to 10 s for the relay, then deletes its local
@@ -182,7 +195,7 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `NotPermitted`, and receivers reject that leave proposal and any commit
   that removes the owner's last instance (`unauthorized_commit`), so a
   group can no longer end up ownerless. One of several owner instances may
-  still leave, and a sole member still just deletes its state.
+  still leave, and a sole member still only deletes its state.
 - Core: application messages in the one-epoch grace window are attributed
   to the sender as it was in the message's epoch, so a message from a
   member removed by the latest commit is delivered instead of dropped, and
