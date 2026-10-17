@@ -71,6 +71,7 @@ STATUS_TEXT = {
 }
 ERROR_STATUS = {
     "bad_request": 400,
+    "wrong_relay": 400,
     "forbidden": 403,
     "not_found": 404,
     "expired": 409,
@@ -282,7 +283,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "_inspect",
         "Parse an invite URL locally and return its public metadata. Nothing is "
         "sent to the relay. The metadata is claimed by the link, so it is "
-        "marked `untrusted`.",
+        "marked `untrusted`. An invite whose relay host is not this daemon's "
+        "relay is refused with `400 wrong_relay` before anything is fetched "
+        "(SPEC 4.4).",
         request={"url": "str"},
         response={"meta": "object", "warning": Opt("str"), "untrusted": "bool"},
     ),
@@ -290,7 +293,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/invites/accept",
         "_accept",
-        "Send the join request for an invite URL. The inviter's human must approve it.",
+        "Send the join request for an invite URL. The inviter's human must approve it. "
+        "An invite for another relay is refused with `400 wrong_relay`, as by "
+        "`/v0/invites/inspect`.",
         request={"url": "str", "display_name?": Opt("str")},
         response={"invite_id": "str", "status": "str", "meta": "object"},
     ),
@@ -423,6 +428,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "bad_request",
         "Malformed request: the body is not a JSON object, or a field is missing "
         "or has the wrong type.",
+    ),
+    (
+        400,
+        "wrong_relay",
+        "The invite is for a different relay than this daemon's (SPEC 4.4). Nothing "
+        "was fetched or sent.",
     ),
     (401, "auth_failed", "The bearer token is missing or wrong."),
     (403, "human_only", "The operation needs the human token."),

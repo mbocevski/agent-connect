@@ -76,6 +76,7 @@ from agentconnect.relay import (
     unb64,
 )
 from agentconnect.store import GroupRow, OutboxRow, Store
+from agentconnect.tasks import cancel_and_wait
 
 LOG = log.get("agentconnect.daemon")
 
@@ -228,6 +229,16 @@ def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911
             _str_list(routing.get(k, [])) for k in ("add", "remove")
         ):
             return "routing"
+    return None
+
+
+def _header_mismatch(env: dict[str, Any], group_id: bytes, head: dict[str, Any]) -> str | None:
+    """How a group envelope disagrees with its MLS header (SPEC 7.1), or
+    None. ``head`` is ``agentconnect_core.peek_header`` of its ``ct``."""
+    if head["group_id"] != group_id:
+        return "group_mismatch"
+    if head["epoch"] != env["epoch"]:
+        return "epoch_mismatch"
     return None
 
 
@@ -407,23 +418,23 @@ class Daemon:
         crash in tests: nothing is flushed that isn't already durable)."""
         self.running = False
         await self.link.stop()
-        for task in self._tasks:
-            task.cancel()
-        for task in self._tasks:
-            with contextlib.suppress(asyncio.CancelledError, Exception, SimulatedCrash):
-                await task
-        self._tasks.clear()
-        for adapter in self.adapters.values():
-            # Optional hook: adapters with workers or connections release them.
-            close = getattr(adapter, "close", None)
-            if close is not None:
-                with contextlib.suppress(Exception):
-                    await close()
-        self.store.close()
-        # Drop the core client so its SQLite connections close.
-        del self.client
-        self._lock.release()
-        LOG.info("daemon_stopped")
+        try:
+            # If whoever stops us is cancelled meanwhile, that cancellation
+            # propagates, after the cleanup below.
+            await cancel_and_wait(*self._tasks, ignore=(Exception, SimulatedCrash))
+        finally:
+            self._tasks.clear()
+            for adapter in self.adapters.values():
+                # Optional hook: adapters with workers or connections release them.
+                close = getattr(adapter, "close", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        await close()
+            self.store.close()
+            # Drop the core client so its SQLite connections close.
+            del self.client
+            self._lock.release()
+            LOG.info("daemon_stopped")
 
     def _recover(self) -> None:
         """After a restart: a commit built but never persisted for sending
@@ -1011,6 +1022,25 @@ class Daemon:
         except ValueError:
             await self._malformed(env, "ct")
             return
+        try:
+            # SPEC 7.1: compare the envelope with the unprotected MLS header
+            # first. Peeking uses no key, so a dropped message consumes none.
+            head = ac.peek_header(ct)
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            await self._rejected(group_id, env, e)
+            return
+        mismatch = _header_mismatch(env, gid, head)
+        if mismatch is not None and head["content_type"] != "commit":
+            # An application message or a proposal is dropped unprocessed. A
+            # commit is still processed (dropping an authenticated commit
+            # would fork us); its epoch mismatch is flagged in _after_commit.
+            self.store.record_inbox(sender, msg_id, group_id, "dropped", self.now())
+            await self._ack(msg_id)
+            await self.emit(group_id, "relay_misbehaviour", reason=mismatch)
+            return
+        if mismatch == "group_mismatch":
+            # A commit of another group: flagged here, rejected by the core.
+            await self.emit(group_id, "relay_misbehaviour", reason=mismatch)
         if env["kind"] == "proposal" and int(env["epoch"]) != self._core_epoch(gid):
             # SPEC 7.1: a proposal is only valid in the current epoch, so an
             # envelope epoch that differs is dropped (commits are merged and
@@ -1930,11 +1960,11 @@ class Daemon:
             return
         waiter = asyncio.ensure_future(self.wait_until(moved, within=REBUILD_WAIT_SECS * 10))
         timer = asyncio.ensure_future(self._sleep(REBUILD_WAIT_SECS))
-        await asyncio.wait({waiter, timer}, return_when=asyncio.FIRST_COMPLETED)
-        for t in (waiter, timer):
-            t.cancel()
-            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
-                await t
+        try:
+            await asyncio.wait({waiter, timer}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Our own cancellation, here or in the wait, still propagates.
+            await cancel_and_wait(waiter, timer, ignore=(TimeoutError,))
 
     def _fail_intent(self, intent: dict[str, Any]) -> None:
         if intent["type"] == "add":
@@ -2109,7 +2139,7 @@ class Daemon:
         except ac.AgentConnectError as e:
             raise DaemonError("bad_request", str(e)) from None
         if not _same_relay(link.relay_host, self.config.relay_host):
-            raise DaemonError("bad_request", "the invite is for a different relay")
+            raise DaemonError("wrong_relay", "the invite is for a different relay")
         return link
 
     async def inspect_invite(self, url: str) -> dict[str, Any]:
@@ -2440,21 +2470,23 @@ class Daemon:
         }
         send = asyncio.ensure_future(self._request({"t": "send", "env": env}, out["msg_id"]))
         timer = asyncio.ensure_future(self._sleep(TRANSFER_TIMEOUT_SECS))
-        await asyncio.wait({send, timer}, return_when=asyncio.FIRST_COMPLETED)
+        try:
+            await asyncio.wait({send, timer}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            await cancel_and_wait(send, timer, ignore=(Exception,))
+            raise
         timer.cancel()
-        if send.done() and send.exception() is None:
+        if send.done() and not send.cancelled() and send.exception() is None:
             # Accepted; the fan-out echo may already have merged it.
             with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
                 self.client.confirm_pending_commit(gid, str(out["msg_id"]))
-        else:
-            send.cancel()
         try:
             confirmed = json.loads(self.client.policy(gid)).get("owner") == new_owner
         except (ac.AgentConnectError, ac.CoreError, ValueError):
             confirmed = False
-        for t in (send, timer):
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await t
+        # Stops the send if it is still waiting; a cancellation of this task
+        # meanwhile propagates (a restart discards the unsent commit, §8.3).
+        await cancel_and_wait(send, timer, ignore=(Exception,))
         if not confirmed:
             with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
                 self.client.discard_pending_commit(gid)

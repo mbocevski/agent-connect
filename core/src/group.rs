@@ -745,6 +745,72 @@ fn parse_protocol(bytes: &[u8]) -> Result<ProtocolMessage> {
         .map_err(|_| Error::UnexpectedMessage("not a protocol message"))
 }
 
+/// The content type in a `PrivateMessage` header, named like the envelope
+/// `kind` that must match it (SPEC §7.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageKind {
+    /// An application message.
+    Application,
+    /// A proposal.
+    Proposal,
+    /// A commit.
+    Commit,
+}
+
+impl MessageKind {
+    /// `"application"`, `"proposal"` or `"commit"`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Application => "application",
+            Self::Proposal => "proposal",
+            Self::Commit => "commit",
+        }
+    }
+}
+
+/// The unprotected header of a `PrivateMessage` (RFC 9420 §6.3).
+///
+/// Nothing in it is authenticated by itself: it is what the sender (or
+/// whoever altered the bytes) put there. Processing then authenticates it,
+/// because the AEAD binds the header as associated data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageHeader {
+    /// The `group_id` field.
+    pub group_id: Vec<u8>,
+    /// The `epoch` field.
+    pub epoch: u64,
+    /// The `content_type` field.
+    pub content_type: MessageKind,
+}
+
+/// Parses only the unprotected header of an MLS message, so a receiver can
+/// compare the relay's envelope with it before processing (SPEC §7.1).
+///
+/// The input is validated exactly as [`Group::process`] does before it
+/// touches any state: one TLS-encoded `MLSMessage` with nothing after it,
+/// whose wire format is `PrivateMessage`. No key material is used and no
+/// storage is read or written, so peeking consumes nothing: the same bytes
+/// still process afterwards.
+///
+/// # Errors
+///
+/// [`Error::Malformed`] for bytes that are not one MLS message, and
+/// [`Error::UnexpectedMessage`] for any other wire format.
+pub fn peek_header(bytes: &[u8]) -> Result<MessageHeader> {
+    let msg = parse_protocol(bytes)?;
+    let content_type = match msg.content_type() {
+        ContentType::Application => MessageKind::Application,
+        ContentType::Proposal => MessageKind::Proposal,
+        ContentType::Commit => MessageKind::Commit,
+    };
+    Ok(MessageHeader {
+        group_id: msg.group_id().as_slice().to_vec(),
+        epoch: msg.epoch().as_u64(),
+        content_type,
+    })
+}
+
 /// Builds, stages and checks a commit; `$build` maps the commit builder.
 macro_rules! commit {
     ($self:ident, $client:ident, $invite:expr, |$b:ident| $build:expr) => {{
