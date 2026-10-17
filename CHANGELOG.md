@@ -86,6 +86,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Daemon: core errors are classified. Storage, RNG and internal errors and
+  core panics are transient: the frame is neither recorded nor acked and is
+  retried in order with backoff (`processing_failed` after 8 attempts,
+  redelivered on the next reconnect). A commit for the current or a later
+  epoch that can't be merged marks the group `out_of_sync`
+  (`commit_rejected`) instead of leaving the member silently forked.
 - Protocol: `SPEC.md` now states as normative text what the core does
   where it was silent: when HPKE key lengths are checked and that parent
   nodes are included (§3.1), canonical JCS with no unknown fields for

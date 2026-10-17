@@ -93,8 +93,30 @@ def new_msg_id() -> str:
     return b64(secrets.token_bytes(16))
 
 
+class TransientError(Exception):
+    """Processing failed for a reason that may pass (storage, a core panic):
+    the frame is neither recorded nor acked, and is retried."""
+
+    def __init__(self, group_id: str | None, reason: str) -> None:
+        super().__init__(reason)
+        self.group_id, self.reason = group_id, reason
+
+
+# Core errors that say nothing about the message itself (SQLCipher I/O or a
+# lock, the RNG, an internal error); a CoreError (a panic) is transient too.
+TRANSIENT_PREFIXES = (
+    "storage error",
+    "wrong database key",
+    "randomness source failed",
+    "internal error",
+)
+MAX_TRANSIENT_RETRIES = 8
+
+
 def _core_error(e: Exception) -> str:
     text = str(e)
+    if isinstance(e, ac.CoreError) or text.startswith(TRANSIENT_PREFIXES):
+        return "transient"
     if "re-sync required" in text:
         return "own_commit_lost"
     if text.startswith("unauthorized commit"):
@@ -420,6 +442,12 @@ class Daemon:
         self.store.update_group(group_id, policy=policy, epoch=self.client.epoch(gid))
         return joined, gone
 
+    def _core_epoch(self, gid: bytes) -> int:
+        try:
+            return int(self.client.epoch(gid))
+        except (ac.AgentConnectError, ac.CoreError):
+            return 0
+
     def _trust_state(self, group_id: str) -> dict[str, Any]:
         members = self.store.members(group_id)
         others = [m for m in members if m.identity != self.me]
@@ -499,12 +527,28 @@ class Daemon:
     # -- inbound --------------------------------------------------------------
 
     async def _inbound(self) -> None:
+        backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         while True:
             frame = await self._frames.get()
-            try:
-                await self._handle_frame(frame)
-            except Exception:
-                LOG.exception("inbound_failed", t=frame.get("t"))
+            for attempt in range(1, MAX_TRANSIENT_RETRIES + 1):
+                try:
+                    await self._handle_frame(frame)
+                except TransientError as e:
+                    # Nothing was recorded or acked: retry the same frame, in
+                    # order. The core's replay protection and the inbox's
+                    # (sender, msg_id) dedup mean a retry can't process a
+                    # message twice.
+                    LOG.warning("inbound_transient", reason=e.reason, attempt=attempt)
+                    if attempt < MAX_TRANSIENT_RETRIES:
+                        await self._sleep(backoff.next())
+                        continue
+                    # Give up for now; unacked, the relay redelivers it after
+                    # the next reconnect.
+                    await self.emit(e.group_id, "processing_failed", reason=e.reason)
+                except Exception:
+                    LOG.exception("inbound_failed", t=frame.get("t"))
+                backoff.reset()
+                break
             self._pulse()
 
     async def _ack(self, msg_id: str) -> None:
@@ -580,28 +624,46 @@ class Daemon:
             self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
         await self._ack(msg_id)
 
+    async def _rejected(self, group_id: str, env: dict[str, Any], e: Exception) -> None:
+        """The core refused a group message (or failed transiently)."""
+        reason = _core_error(e)
+        if reason == "transient":
+            raise TransientError(group_id, type(e).__name__) from None
+        sender, msg_id = str(env["sender"]), str(env["msg_id"])
+        self.store.record_inbox(sender, msg_id, group_id, "failed", self.now())
+        await self._ack(msg_id)
+        LOG.info(
+            "message_rejected",
+            group=log.hid(group_id),
+            kind=env.get("kind"),
+            reason=reason,
+            # Core errors never carry key material or plaintext.
+            detail=str(e)[:100],
+        )
+        if reason == "own_commit_lost":
+            await self.mark_out_of_sync(group_id, "own_commit_lost")
+            return
+        if reason == "unauthorized_commit":
+            await self.emit(group_id, "unauthorized_commit", detail=str(e))
+        if env["kind"] == "commit" and int(env["epoch"]) >= self._core_epoch(unb64(group_id)):
+            # A commit for the current (or a later) epoch that we can't
+            # merge: the group moves on without us. (Replays of older
+            # commits are harmless and don't count.)
+            await self.mark_out_of_sync(group_id, "commit_rejected", error=reason)
+
     async def _on_group_message(self, group: GroupRow, env: dict[str, Any]) -> None:
         group_id, sender, msg_id = group.group_id, str(env["sender"]), str(env["msg_id"])
         gid = unb64(group_id)
         now = self.now()
         try:
-            event = self.client.process(gid, unb64(str(env.get("ct", ""))))
+            ct = unb64(str(env["ct"]))
+        except ValueError:
+            await self._malformed(env, "ct")
+            return
+        try:
+            event = self.client.process(gid, ct)
         except (ac.AgentConnectError, ac.CoreError) as e:
-            reason = _core_error(e)
-            self.store.record_inbox(sender, msg_id, group_id, "failed", now)
-            await self._ack(msg_id)
-            LOG.info(
-                "message_rejected",
-                group=log.hid(group_id),
-                kind=env.get("kind"),
-                reason=reason,
-                # Core errors never carry key material or plaintext.
-                detail=str(e)[:100],
-            )
-            if reason == "own_commit_lost":
-                await self.mark_out_of_sync(group_id, "own_commit_lost")
-            elif reason == "unauthorized_commit":
-                await self.emit(group_id, "unauthorized_commit", detail=str(e))
+            await self._rejected(group_id, env, e)
             return
         etype = event["type"]
         if etype == "application":
