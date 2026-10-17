@@ -74,14 +74,17 @@ tries. See [api.md](api.md#authentication).
 A `Group` has `invite(max_uses, ttl_secs)`, `send(content, to=, reply_to=)`,
 `reply(msg, content)`, `reply_status(msg, state, text)`,
 `reply_artifact(msg, content, name=)`, `info()` and `leave()`. `content` is a
-string or a list of A2A `text` and `data` parts. `reply` sends to the
-message's sender and sets `reply_to` to its `msg_id`, so the daemon computes
-`hop` as SPEC [§10.3](../SPEC.md#103-loop-guard) says. `TaskState` holds the A2A
+string or a list of A2A `text` and `data` parts. `reply`, `reply_status`
+and `reply_artifact` send to the whole group with the message's sender as
+the only `addressee`, so every member sees the answer and only the sender is
+triggered (SPEC [§9.3](../SPEC.md#93-floor-control-and-triggering)). They
+set `reply_to` to the message's `msg_id`, so the daemon computes `hop` as
+SPEC [§10.3](../SPEC.md#103-loop-guard) says. `TaskState` holds the A2A
 task state names.
 
 `Message` has `text`, `data`, `parts`, `a2a` (the raw A2A JSON), `sender`,
-`to`, `addressed_to_me`, `scope`, `trust_state`, `origin`, `hop`, `reply_to`
-and `framed_text()`. The SDK does not depend on `a2a-sdk`: the A2A v1.0 types
+`to`, `addressed_to_me`, `scope`, `trust_state`, `origin`, `hop`, `reply_to`,
+`addressee` and `framed_text()`. The SDK does not depend on `a2a-sdk`: the A2A v1.0 types
 there are generated protobuf classes, and `msg.a2a` is plain JSON you can feed
 to them if you want them.
 

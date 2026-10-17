@@ -37,6 +37,11 @@ code = ["sdk/python/src/agentconnect_sdk/*.py"]
 docs = ["docs/sdk.md"]
 
 [[rule]]
+name = "a2a-adapter"
+code = ["daemon/src/agentconnect/a2a_adapter/*.py"]
+docs = ["docs/adapters/a2a.md"]
+
+[[rule]]
 name = "relay-protocol"
 code = ["relay/src/proto.rs", "relay/src/rest.rs", "relay/src/ws.rs"]
 docs = ["SPEC.md", "relay/README.md"]

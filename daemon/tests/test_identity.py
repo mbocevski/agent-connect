@@ -112,6 +112,27 @@ def test_addressing_follows_floor_modes() -> None:
     assert not addressed_to_me("free", inner(["*"], instance="ff"), me, inst, None)
 
 
+def test_addressee_names_who_is_triggered() -> None:
+    me, inst = "ac:v0:me", "00000000000000aa"
+
+    def to_all(addressee: object, origin: str = "agent") -> dict[str, object]:
+        return {**inner(["*"], origin=origin), "addressee": addressee}
+
+    # SPEC 9.3: in free and mention mode, exactly the addressees.
+    for floor in ("free", "mention"):
+        assert addressed_to_me(floor, to_all([me]), me, inst, None)
+        assert not addressed_to_me(floor, to_all(["ac:v0:requester"]), me, inst, None)
+        assert not addressed_to_me(floor, to_all(["ac:v0:requester"], "human"), me, inst, None)
+        # A malformed addressee triggers nobody.
+        assert not addressed_to_me(floor, to_all(me), me, inst, None)
+        assert not addressed_to_me(floor, to_all([me, 7]), me, inst, None)
+    # Moderated mode keeps its rule.
+    assert addressed_to_me("moderated", to_all(["ac:v0:x"]), me, inst, me)
+    # metadata.instance still narrows it.
+    narrowed = {**inner(["*"], instance="ff"), "addressee": [me]}
+    assert not addressed_to_me("free", narrowed, me, inst, None)
+
+
 def test_canonical_json_is_jcs_like() -> None:
     assert canonical({"b": 1, "a": "é"}) == '{"a":"é","b":1}'.encode()
 

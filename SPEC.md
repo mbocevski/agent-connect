@@ -435,6 +435,7 @@ WrappedWelcome = nonce(12) ‖ ChaCha20-Poly1305(welcome_key, nonce, aad = "agen
 Each new member instance SHOULD send its A2A Agent Card (`kind:
 a2a.agent_card`, §7.2) to the group. Existing members SHOULD resend theirs,
 addressed to the new member. Agent Cards are never published to the relay.
+A received card is as trustworthy as the member that sent it (§10.5).
 
 ## 7. Messages
 
@@ -497,8 +498,9 @@ Inner = {
   "to": ["*"] | ["ac:v0:…", ...],
   "hop": <u32, see §10.3>,
   "reply_to": ["<msg_id>", ...],   // optional, at most 16, see §10.3
+  "addressee": ["ac:v0:…", ...],   // optional, 1 to 50, see §9.3
   "origin": "agent" | "human",
-  "kind": "a2a.message" | "a2a.task_status" | "a2a.task_artifact" | "a2a.agent_card" | "control.<name>",
+  "kind": "a2a.message" | "a2a.task_status" | "a2a.task_artifact" | "a2a.task_cancel" | "a2a.agent_card" | "control.<name>",
   "body": { ... }
 }
 ```
@@ -506,8 +508,19 @@ Inner = {
 - `sender` and `instance_id` MUST match the MLS sender leaf's credential and
   instance certificate. Receivers MUST drop the message if they don't.
 - `body` for the `a2a.*` kinds is the corresponding **A2A v1.0** object:
-  `Message`, `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent` or
-  `AgentCard`. The A2A `contextId` SHOULD equal the base64url `group_id`.
+  `Message`, `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`,
+  `CancelTaskRequest` (`a2a.task_cancel`) or `AgentCard`. The A2A
+  `contextId` SHOULD equal the base64url `group_id`.
+- A **task** is the A2A task an agent runs for the message that started it.
+  The task's **requester** is the identity that sent that message. The
+  member running the task sends its `a2a.task_status`,
+  `a2a.task_artifact` and `a2a.message` replies with `reply_to` naming that
+  message, `to: ["*"]` and `addressee: [<requester>]` (§9.3).
+- `a2a.task_cancel` asks the member running the task `body.id` to cancel
+  it (A2A `CancelTask`). Only the task's requester may send it: the member
+  running the task MUST ignore an `a2a.task_cancel` from any other
+  identity. An `a2a.task_status` with a `canceled` state reports a state; a
+  receiver MUST NOT treat it as a request to cancel.
 - **Addressing is not secrecy.** Every member can decrypt every application
   message. `to` controls who is *triggered* (§9.3). Conversations that need
   privacy from some members belong in a separate group.
@@ -874,6 +887,17 @@ triggering.
 | `mention` | Only members listed in `to`. With `to: ["*"]`, all members, but only for `origin: "human"` messages; agent-originated broadcasts are context only. |
 | `moderated` | Only the current `control.floor` holder, plus the moderator. The moderator (or owner) grants the floor. Until an implementation supports floor control, only the moderator is triggered and everyone else receives messages as context only. |
 
+In `mention` mode, an agent-originated message with `to: ["*"]` and no
+`addressee` triggers nobody: every member gets it as context.
+
+**`addressee`.** An inner message MAY carry `addressee`, a list of 1 to 50
+identities. In `free` and `mention` mode, a message with `addressee`
+triggers exactly the members it lists, whatever `to` and `origin` say
+(§9.4 then applies to their instances). An `addressee` that isn't a list
+of identity strings triggers nobody. In `moderated` mode the table above
+applies and `addressee` is ignored. Task replies (§7.2) use it: every
+member sees the task's progress, and only the requester is triggered.
+
 Messages that don't trigger a member are still delivered to its adapter as
 context (`addressed_to_me: false`), or batched (§10).
 
@@ -926,6 +950,15 @@ the reference daemon allows 1000 per connection); the size, kind and part
 limits always apply. Allowed A2A part kinds are `text` and
 `data`. `file` parts are disabled by default.
 
+Task updates have their own budget. An `a2a.task_status` or
+`a2a.task_artifact` whose `body.taskId` is a string of 1 to 256 characters
+counts against a budget of 300 per minute for that sender and task, instead
+of the per-sender and per-group rates. The first update of a task in the
+window also counts as one ordinary message, so opening tasks is held to the
+message rates. The size, kind and part limits apply to task updates
+unchanged. Every other message, `a2a.task_cancel` included, counts against
+the ordinary rates.
+
 ### 10.3 Loop guard
 
 - `hop` is 0 on human-originated messages.
@@ -950,6 +983,20 @@ until its human has verified the current epoch (§11), that is until
 `trust_state.self` is `verified`: every other current member is
 verified. A member that joins later re-gates deliveries until it is
 verified too.
+
+### 10.5 Agent Cards
+
+An Agent Card (`a2a.agent_card`) states what its sender says about itself.
+It is as trustworthy as the MLS-authenticated member that sent it (§7.2),
+and no more: its name, description and skills are untrusted content
+(§10.1).
+
+- An implementation MUST check an A2A card signature (`AgentCard.signatures`)
+  only against keys its user pinned. It MUST NOT fetch a key from a URL a
+  card names (`jku`), or from any other location a peer supplies.
+- A card with a signature that fails against a pinned key MUST NOT be used.
+- A signature with no pinned key proves nothing beyond the sender's MLS
+  authentication.
 
 ## 11. Short authentication string (SAS)
 
@@ -1166,6 +1213,14 @@ Decided by the maintainer (2026-10-17), now normative:
 - Every KEM ciphertext received is length-checked (§3.1).
 - Removing only some of an identity's instances is allowed (§9.2).
 - KeyPackages have no lifetime cap beyond reuse tracking (§6.2).
+- Cancelling a task is its own kind, `a2a.task_cancel` (A2A
+  `CancelTask`), which only the task's requester may send (§7.2).
+- An Agent Card is as trustworthy as the member that sent it; card
+  signatures are checked against pinned keys only (§6.5, §10.5).
+- Task updates have a per-task budget of 300 a minute (§10.2).
+- Task replies go to `["*"]` with the requester as `addressee` (§7.2,
+  §9.3).
+- In `mention` mode an agent's `["*"]` triggers nobody (§9.3).
 
 Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 

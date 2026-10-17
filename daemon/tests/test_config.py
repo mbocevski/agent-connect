@@ -1,7 +1,9 @@
+import secrets
 from pathlib import Path
 
 import pytest
 
+from agentconnect.a2a_adapter import A2AOptions
 from agentconnect.config import (
     DEFAULT_RELAY_URL,
     ConfigError,
@@ -93,6 +95,13 @@ callback_url = "http://127.0.0.1:8808/"
         ("[relay", "config.toml"),
         ('[relay]\nhost = "me@relay.test"', "not a valid host"),
         ('[relay]\nhost = "relay.test:0"', "not a valid host"),
+        ('[a2a]\nlocal_agent_url = "ftp://agent"', "http:// or https://"),
+        ("[a2a]\nfacade_port = 70000", "facade_port"),
+        ("[a2a]\ncontext_messages = 101", "context_messages"),
+        ("[a2a]\nreply_timeout = 0", "reply_timeout"),
+        ("[a2a]\nreply_timeout = true", "reply_timeout"),
+        ("[a2a]\nreply_timeout = 1.5", "reply_timeout"),
+        ('a2a = "x"', r"\[a2a\] must be a table"),
     ],
 )
 def test_invalid_values_are_rejected(tmp_path: Path, text: str, match: str) -> None:
@@ -108,3 +117,39 @@ def test_the_relay_host_is_canonical(tmp_path: Path) -> None:
     assert cfg.relay_host == "localhost:8080"
     cfg = load_config(write(tmp_path, '[relay]\nhost = "Relay.TEST:8443"'), environ=env)
     assert cfg.relay_host == "relay.test:8443"
+
+
+def test_the_a2a_section(tmp_path: Path) -> None:
+    env = {"HOME": str(tmp_path)}
+    assert not load_config(environ=env).a2a_enabled
+    token = tmp_path / "agent-token"
+    secret = secrets.token_urlsafe(16)
+    token.write_text(secret + "\n", encoding="utf-8")
+    keys = tmp_path / "keys.json"
+    keys.write_text('{"keys": [{"kty": "oct", "kid": "sym", "k": "AA"}, "junk"]}')
+    text = (
+        "[a2a]\n"
+        'local_agent_url = "http://127.0.0.1:9999/"\n'
+        f'local_agent_token_file = "{token}"\n'
+        f'card_keys_file = "{keys}"\n'
+        "facade_port = 8765\n"
+        "context_messages = 5\n"
+        "frame_text = false\n"
+        "reply_timeout = 30\n"
+    )
+    cfg = load_config(write(tmp_path, text), environ=env)
+    assert cfg.a2a_enabled
+    assert cfg.a2a_local_agent_url == "http://127.0.0.1:9999/"
+    assert cfg.a2a_facade_port == 8765
+    assert cfg.a2a_reply_timeout == 30
+    options = A2AOptions.from_config(cfg)
+    assert options.local_agent_token == secret
+    assert options.card_keys == {}  # symmetric keys are refused
+    assert options.facade_port == 8765
+    assert (options.context_messages, options.frame_text) == (5, False)
+    assert secret not in repr(options)
+    off = load_config(write(tmp_path, "[a2a]\n"), environ=env)
+    assert not off.a2a_enabled
+    assert A2AOptions.from_config(off).facade_port is None
+    assert A2AOptions.from_config(off).local_agent_url is None
+    assert A2AOptions.from_config(load_config(environ=env)).local_agent_url is None
