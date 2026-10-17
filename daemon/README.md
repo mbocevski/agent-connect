@@ -37,24 +37,8 @@ it 0600. Configuration is `~/.config/agentconnect/config.toml`; see
 
 JSON over HTTP/1.1 on a Unix socket in the data directory, or on
 `127.0.0.1:<port>`. Every request needs `Authorization: Bearer <token>`.
-[docs/api.md](../docs/api.md) describes the transport, tokens and errors.
-
-| Method and path | Scope |
-|---|---|
-| `GET /v0/status` | agent |
-| `GET /v0/groups`, `POST /v0/groups` `{name, purpose}` | agent |
-| `GET /v0/groups/{id}`: members, roles, verified flags, SAS, out_of_sync, peer Agent Cards (as `{untrusted, card}`) | agent |
-| `POST /v0/groups/{id}/policy` `{require_verified}`: `true` is allowed to the agent token, `false` needs the human token | agent / **human** |
-| `POST /v0/groups/{id}/invites` `{ttl_secs, max_uses, inviter_name}` → URL | agent |
-| `DELETE /v0/invites/{invite_id}` | agent |
-| `POST /v0/invites/inspect` `{url}`: parses locally, shows the public metadata | agent |
-| `POST /v0/invites/accept` `{url, display_name}`: sends the JoinRequest | agent |
-| `POST /v0/groups/{id}/messages` `{text \| body, to, kind, reply_to}` (`reply_to`: the msg_ids answered, which set `hop`, SPEC §10.3): sent as `origin: "agent"` with the agent token, `"human"` with the human token; `control.resume` needs the human token | agent |
-| `POST /v0/groups/{id}/leave` | agent |
-| `GET /v0/approvals` (with the joiner's `fingerprint`), `GET /v0/events?after=N` | agent |
-| `POST /v0/approvals/{id}/approve`, `.../reject` | **human** |
-| `POST /v0/groups/{id}/members/{identity}/verify` `{verified}` | **human** |
-| `POST /v0/groups/{id}/sas/mismatch` `{epoch}`: the codes differ; raises `sas_mismatch` and leaves (SPEC §11) | **human** |
+[docs/api.md](../docs/api.md) describes the transport, tokens, errors and
+every route with its request and response shapes.
 
 Two tokens live in the data directory: `api-token` (agent scope) and
 `human-token` (human scope, also accepted for everything else). Approving a

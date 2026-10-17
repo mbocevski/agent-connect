@@ -31,6 +31,7 @@ import re
 import secrets
 import stat
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from agentconnect import log
 from agentconnect.daemon import HUMAN_ONLY_KINDS, Daemon, DaemonError
 from agentconnect.keystore import write_private
 from agentconnect.relay import RelayError
+from agentconnect.shapes import Opt
 
 LOG = log.get("agentconnect.api")
 
@@ -110,6 +112,278 @@ class Route:
         self.human = human
 
 
+@dataclass(frozen=True)
+class RouteSpec:
+    """One route: where it is served, who may call it and what it takes and
+    returns. The table below is the only place routes are declared; the server
+    is built from it and ``docs/api.md`` is generated from it
+    (``scripts/gen_reference.py``)."""
+
+    method: str
+    path: str  # `{name}` segments become handler parameters
+    handler: str  # name of the ApiServer method that serves it
+    summary: str
+    request: Any = None  # shape of the JSON body (None: no body); see shapes.py
+    response: Any = None  # shape of the JSON answer
+    query: str = ""  # query parameters, described in words
+    human: bool = False  # True: the human token only
+
+
+_GROUP_INFO: dict[str, Any] = {
+    "group_id": "str",
+    "name": "str",
+    "purpose": "str",
+    "status": "str",
+    "epoch": "int",
+    "policy": "object",
+    "out_of_sync": "bool",
+    "out_of_sync_reason": Opt("str"),
+    "adapter": "str",
+    "trust_state": {"self": "str", "verified_members": "int", "members": "int"},
+    "members": [
+        {
+            "identity": "str",
+            "fingerprint": "str",
+            "display_name": Opt("str"),
+            "display_name_verified": "bool",
+            "role": "str",
+            "verified": "bool",
+            "instances": ["object"],
+            "self": "bool",
+        }
+    ],
+    "agent_cards": "object",
+    "sas?": {"decimal": "str", "emoji_indices": ["int"]},
+}
+
+ROUTE_SPECS: tuple[RouteSpec, ...] = (
+    RouteSpec(
+        "GET",
+        "/v0/status",
+        "_status",
+        "Daemon status: identity, relay connection, queue sizes.",
+        response={
+            "identity": "str",
+            "fingerprint": "str",
+            "instance_id": "str",
+            "mailbox_id": "str",
+            "relay": {"url": "str", "connected": "bool"},
+            "keystore": "str",
+            "groups": "int",
+            "out_of_sync": ["str"],
+            "outbox_queued": "int",
+            "inbox_pending": "int",
+            "pending_approvals": "int",
+        },
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/groups",
+        "_list_groups",
+        "List groups.",
+        response={
+            "groups": [
+                {
+                    "group_id": "str",
+                    "name": "str",
+                    "status": "str",
+                    "epoch": "int",
+                    "members": "int",
+                    "out_of_sync": "bool",
+                }
+            ]
+        },
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups",
+        "_create_group",
+        "Create a group you own.",
+        request={"name": "str", "purpose?": "str"},
+        response={"group_id": "str"},
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/groups/{gid}",
+        "_group_info",
+        "One group: members, roles, verified flags, short code, `out_of_sync` and "
+        "the peers' Agent Cards (each wrapped as `untrusted`).",
+        response=_GROUP_INFO,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/invites",
+        "_create_invite",
+        "Create an invite. `ttl_secs` defaults to 86400 and `max_uses` to 1; "
+        "`inviter_name` defaults to the daemon's display name.",
+        request={"ttl_secs?": "int", "max_uses?": "int", "inviter_name?": "str"},
+        response={"url": "str", "invite_id": "str", "expires_at": "int"},
+    ),
+    RouteSpec(
+        "DELETE",
+        "/v0/invites/{invite_id}",
+        "_revoke",
+        "Revoke an invite you created.",
+        response={"revoked": "str"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/invites/inspect",
+        "_inspect",
+        "Parse an invite URL locally and return its public metadata. Nothing is "
+        "sent to the relay. The metadata is claimed by the link, so it is "
+        "marked `untrusted`.",
+        request={"url": "str"},
+        response={"meta": "object", "warning": Opt("str"), "untrusted": "bool"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/invites/accept",
+        "_accept",
+        "Send the join request for an invite URL. The inviter's human must approve it.",
+        request={"url": "str", "display_name?": Opt("str")},
+        response={"invite_id": "str", "status": "str", "meta": "object"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/policy",
+        "_policy",
+        "Set the group policy. Turning `require_verified` on is allowed with "
+        "either token; turning it off needs the human token (SPEC 10.4).",
+        request={"require_verified": "bool"},
+        response={"require_verified": "bool"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/messages",
+        "_send",
+        "Send a message. Give `text`, or a full `body` object. `to` defaults to "
+        '`["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the '
+        "`msg_id`s answered (SPEC 10.3). The agent token sends as the agent and "
+        "the human token as the human; kinds reserved to humans (such as "
+        "`control.resume`) need the human token (SPEC 7.3).",
+        request={
+            "text?": "str",
+            "body?": "object",
+            "to?": ["str"],
+            "kind?": "str",
+            "reply_to?": ["str"],
+        },
+        response={"msg_id": "str"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/leave",
+        "_leave",
+        "Leave a group. The owner's last instance must hand over ownership first.",
+        response={"status": "str"},
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/approvals",
+        "_list_approvals",
+        "Pending join requests, with the joiner's fingerprint.",
+        response={
+            "approvals": [
+                {
+                    "request_id": "str",
+                    "group_id": "str",
+                    "identity": "str",
+                    "display_name": "str",
+                    "received_at": "int",
+                    "display_name_verified": "bool",
+                    "fingerprint": "str",
+                }
+            ]
+        },
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/approvals/{rid}/approve",
+        "_approve",
+        "Approve a join request.",
+        response={"status": "str"},
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/approvals/{rid}/reject",
+        "_reject",
+        "Reject a join request.",
+        response={"status": "str"},
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/members/{identity}/verify",
+        "_verify",
+        "Mark a member verified (the human compared the short code). `verified` "
+        "defaults to `true`.",
+        request={"verified?": "bool"},
+        response={"verified": "bool"},
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/sas/mismatch",
+        "_sas_mismatch",
+        "Report that the short codes differ. The daemon leaves the group "
+        "(SPEC 11). `epoch` is the epoch the human compared.",
+        request={"epoch?": Opt("int")},
+        response={"status": "str"},
+        human=True,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/events",
+        "_events",
+        "Daemon events in order, at most 200 per call.",
+        query="`after`: only events with a greater `seq` (default 0).",
+        response={
+            "events": [
+                {
+                    "seq": "int",
+                    "group_id": Opt("str"),
+                    "type": "str",
+                    "data": "object",
+                    "at": "int",
+                    "event_id": "str",
+                }
+            ]
+        },
+    ),
+)
+
+# Every error the server can answer with: status, code, meaning.
+API_ERRORS: tuple[tuple[int, str, str], ...] = (
+    (
+        400,
+        "bad_request",
+        "Malformed request: the body is not a JSON object, or a field is missing "
+        "or has the wrong type.",
+    ),
+    (401, "auth_failed", "The bearer token is missing or wrong."),
+    (403, "human_only", "The operation needs the human token."),
+    (
+        403,
+        "forbidden",
+        "The daemon refused: the owner must hand over first, or a browser request "
+        "reached the TCP listener.",
+    ),
+    (404, "not_found", "No such endpoint, group, invite or request."),
+    (405, "method_not_allowed", "The path exists but not for this method."),
+    (408, "timeout", "The request was not received within 10 seconds."),
+    (409, "stale_epoch", "The group changed since the epoch you passed."),
+    (409, "expired", "The invite or request has expired."),
+    (409, "invite_not_open", "The invite was used up, revoked or never open."),
+    (413, "too_large", "The headers or the body (over 1 MiB) are too large."),
+    (429, "rate_limited", "Too many requests."),
+    (500, "internal", "An unexpected failure; the daemon logs it."),
+    (502, "relay", "The relay reported an error."),
+    (503, "busy", "Too many open connections."),
+)
+
+
 def _str(body: dict[str, Any], key: str, default: str | None = None) -> str:
     value = body.get(key, default)
     if not isinstance(value, str):
@@ -138,32 +412,24 @@ class ApiServer:
         self._connections = 0
         self._port: int | None = None
         self.address: str | Path | None = None
-        d = daemon
         self.routes = [
-            Route("GET", "/v0/status", lambda _p, _b: self._ok(d.status())),
-            Route("GET", "/v0/groups", lambda _p, _b: self._ok({"groups": d.list_groups()})),
-            Route("POST", "/v0/groups", self._create_group),
-            Route("GET", "/v0/groups/{gid}", lambda p, _b: self._ok(d.group_info(p["gid"]))),
-            Route("POST", "/v0/groups/{gid}/invites", self._create_invite),
-            Route("DELETE", "/v0/invites/{invite_id}", self._revoke),
-            Route("POST", "/v0/invites/inspect", self._inspect),
-            Route("POST", "/v0/invites/accept", self._accept),
-            Route("POST", "/v0/groups/{gid}/policy", self._policy),
-            Route("POST", "/v0/groups/{gid}/messages", self._send),
-            Route("POST", "/v0/groups/{gid}/leave", self._leave),
-            Route("GET", "/v0/approvals", lambda _p, _b: self._ok({"approvals": d.approvals()})),
-            Route("POST", "/v0/approvals/{rid}/approve", self._approve, human=True),
-            Route("POST", "/v0/approvals/{rid}/reject", self._reject, human=True),
-            Route("POST", "/v0/groups/{gid}/members/{identity}/verify", self._verify, human=True),
-            Route("POST", "/v0/groups/{gid}/sas/mismatch", self._sas_mismatch, human=True),
-            Route("GET", "/v0/events", self._events),
+            Route(spec.method, spec.path, getattr(self, spec.handler), human=spec.human)
+            for spec in ROUTE_SPECS
         ]
 
-    @staticmethod
-    async def _ok(value: Any) -> Any:
-        return value
-
     # -- handlers ----------------------------------------------------------
+
+    async def _status(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.status()
+
+    async def _list_groups(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return {"groups": self.daemon.list_groups()}
+
+    async def _group_info(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.group_info(p["gid"])
+
+    async def _list_approvals(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return {"approvals": self.daemon.approvals()}
 
     async def _create_group(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
         return {"group_id": self.daemon.create_group(_str(b, "name"), _str(b, "purpose", ""))}

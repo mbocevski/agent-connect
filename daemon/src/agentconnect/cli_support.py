@@ -29,6 +29,34 @@ EXIT_INTERCEPTED = 4  # invite already used or revoked: possible interception
 EXIT_UNREACHABLE = 5  # the daemon is not running
 EXIT_MISMATCH = 6  # the human reported different short codes; the group was left
 
+# The same codes with their meaning, for the docs (scripts/gen_reference.py).
+EXIT_CODES: tuple[tuple[int, str, str], ...] = (
+    (EXIT_OK, "EXIT_OK", "Success."),
+    (
+        EXIT_FAILED,
+        "EXIT_FAILED",
+        "Failed: the daemon or relay reported an error (not found, relay down, ...).",
+    ),
+    (EXIT_USAGE, "EXIT_USAGE", "Usage: bad arguments, malformed invite URL, bad configuration."),
+    (
+        EXIT_REFUSED,
+        "EXIT_REFUSED",
+        "Refused: declined at a prompt, human-only operation, the group changed while "
+        "comparing, invite for a different relay (nothing is sent).",
+    ),
+    (
+        EXIT_INTERCEPTED,
+        "EXIT_INTERCEPTED",
+        "Interception warning: the invite was already used or revoked.",
+    ),
+    (EXIT_UNREACHABLE, "EXIT_UNREACHABLE", "The daemon is not running or unreachable."),
+    (
+        EXIT_MISMATCH,
+        "EXIT_MISMATCH",
+        "`verify` mismatch: you reported different codes and left the group.",
+    ),
+)
+
 EXIT_CODES_HELP = (
     "Exit codes: 0 ok, 1 failed, 2 usage or bad invite, 3 refused (declined, "
     "wrong token, other relay), 4 invite already used or revoked (possible "

@@ -97,12 +97,36 @@ an engineer: plain words, short sentences, prose where prose reads better
 than a list, and only claims that are true of `main`. The README quickstart
 is tested (TESTING.md).
 
+### Generated reference
+
+The command, route, error, exit-code, config-key and `--json` tables in
+`docs/cli.md`, `docs/api.md` and `docs/config.md` are generated from the
+code, between `<!-- generated:NAME:start -->` and `<!-- generated:NAME:end -->`
+markers. Don't edit them by hand and don't move the markers; the prose around
+them is yours.
+
+After you change a CLI command or option, a local API route
+(`ROUTE_SPECS` in `daemon/src/agentconnect/api.py`), a config key
+(`CONFIG_KEYS` in `config.py`), an exit code (`EXIT_CODES` in
+`cli_support.py`) or a `--json` shape (`cli_json.py`), run:
+
+```sh
+just docs-gen
+```
+
+and commit the result. A drift test in `just test` fails with the same
+instruction when the committed docs are stale. New commands and options
+appear on their own; a new route, config key or `--json` shape needs its entry
+in the table named above, and tests fail until it has one. The generator is
+`scripts/gen_reference.py`.
+
 ## Tests
 
 | Command | Tier |
 |---|---|
 | `just test` | Fast (< 60 s): unit, property and contract tests. Runs on pre-push. |
 | `just contract` | `testdata/` manifest check (part of `just test`) |
+| `just docs-gen` | Regenerate the reference sections of `docs/cli.md`, `docs/api.md`, `docs/config.md` |
 | `just cov` | Coverage with gates (core ≥ 90%, relay ≥ 80%, Python ≥ 85%) and the ratchet against `coverage-baseline.json` |
 | `just test-int` | Integration (docker compose, < 10 min) |
 | `just test-nightly` | Mutation testing, long property runs, quarantined tests (fuzzing and benchmarks to come) |

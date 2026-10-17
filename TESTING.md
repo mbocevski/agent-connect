@@ -136,6 +136,31 @@ Vale reports errors in `README.md` and `docs/` and warnings elsewhere. The
 nightly workflow runs lychee with network access to check external links.
 `just docs-check` is the docs gate (CONTRIBUTING.md).
 
+## Generated reference
+
+`scripts/gen_reference.py` writes the reference sections of `docs/cli.md`,
+`docs/api.md` and `docs/config.md` from the code (`just docs-gen`):
+
+| Docs section | Source |
+|---|---|
+| CLI commands, options, defaults, help | the typer app (`agentconnect.cli.app`), introspected |
+| Exit codes | `agentconnect.cli_support.EXIT_CODES` |
+| `--json` shapes | `agentconnect.cli_json.SCHEMAS` |
+| Local API routes and errors | `ROUTE_SPECS` and `API_ERRORS` in `agentconnect.api`; the server is built from the same table |
+| Config keys and environment overrides | `CONFIG_KEYS` in `agentconnect.config` and the `Config` dataclass |
+
+Tests keep the sources honest:
+
+- `scripts/tests/test_gen_reference.py` regenerates in memory and fails when
+  the committed docs differ, telling you to run `just docs-gen`. It runs in
+  `just test`.
+- `daemon/tests/test_cli_commands.py` checks real `--json` output against the
+  same shapes the docs show (`agentconnect.shapes.conforms`).
+- `harness/tests/test_api_shapes.py` checks real API requests and responses
+  against `ROUTE_SPECS`.
+- `daemon/tests/test_reference_sources.py` checks that every exit code,
+  config field and route handler is covered by its table.
+
 ## Coverage
 
 | Component | Gate (`just cov`) | Metric |
