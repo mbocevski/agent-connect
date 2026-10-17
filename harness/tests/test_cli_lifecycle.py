@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -45,15 +44,10 @@ class Cli:
         input: str | None = None,
         stdout_only: bool = False,
     ) -> tuple[int, str]:
-        # Group ids are base64url and may start with "-": put such an id after "--".
-        dashed = [i for i, a in enumerate(args) if re.match(r"-[^-]", a)]
-        if dashed:
-            pre, post = args[: dashed[0]], args[dashed[0] :]
-            flags = [a for a in post if a == "--json"]
-            rest = [a for a in post if a != "--json"]
-            argv = [*pre, "--config", self.config, *flags, "--", *rest]
-        else:
-            argv = [*args, "--config", self.config]
+        # Ids are base64url and may start with "-"; the commands read them
+        # as ids wherever they are (cli_support.IdArgsCommand), like a user
+        # typing them would.
+        argv = [*args, "--config", self.config]
         result = runner.invoke(app, argv, input=input)
         if result.exception and not isinstance(result.exception, SystemExit):
             raise result.exception
