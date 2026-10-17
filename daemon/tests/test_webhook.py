@@ -11,10 +11,12 @@ from typing import Any
 import httpx
 import pytest
 
+from agentconnect.a2a_adapter import A2AAdapter
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
 from agentconnect.adapters import build_adapters
 from agentconnect.clock import FakeClock, unix_seconds
 from agentconnect.config import Config
+from agentconnect.payloads import message_payload
 from agentconnect.sse import SseAdapter
 from agentconnect.webhook import SIGNATURE_HEADER, TIMESTAMP_HEADER, WebhookAdapter, sign
 
@@ -249,3 +251,31 @@ def test_build_adapters_follows_the_config(tmp_path: Path, fake_clock: FakeClock
     (again,) = build_adapters(cfg, fake_clock)
     assert isinstance(again, WebhookAdapter)
     assert again._secret == hook._secret == secret_file.read_text().strip()
+
+
+def test_build_adapters_runs_a2a_next_to_webhook_or_sse(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    base = Config(relay_url="ws://127.0.0.1:1", relay_host="127.0.0.1:1", data_dir=tmp_path)
+    a2a = base.with_overrides(a2a_local_agent_url="http://127.0.0.1:9/")
+    # Groups bound to `none` deliver to the first adapter: the A2A one.
+    (only,) = build_adapters(a2a, fake_clock)
+    assert isinstance(only, A2AAdapter)
+    hook, bridge = build_adapters(
+        a2a.with_overrides(default_adapter="webhook", webhook_url="http://127.0.0.1:9/"),
+        fake_clock,
+    )
+    assert (type(hook), type(bridge)) == (WebhookAdapter, A2AAdapter)
+    (named,) = build_adapters(a2a.with_overrides(default_adapter="a2a"), fake_clock)
+    assert isinstance(named, A2AAdapter)
+    sse_cfg = base.with_overrides(default_adapter="sse", a2a_facade_port=1)
+    stream, facade = build_adapters(sse_cfg, fake_clock)
+    assert (type(stream), type(facade)) == (SseAdapter, A2AAdapter)
+
+
+def test_payloads_carry_addressee_and_name_task_cancel() -> None:
+    d = delivery(kind="a2a.task_cancel", addressee=["ac:v0:me"], reply_to=["m0"])
+    out = message_payload(GROUP, d)
+    assert out["event"] == "task_cancel"
+    assert out["addressee"] == ["ac:v0:me"]
+    assert "addressee" not in message_payload(GROUP, delivery())

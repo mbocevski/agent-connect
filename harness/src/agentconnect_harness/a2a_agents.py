@@ -11,6 +11,7 @@ loopback (``127.0.0.1``, a free port).
   - ``ask``: a task that stops in ``input-required``; the follow-up on that
     task completes it with ``thanks, <text>``;
   - ``wait``: a task that stays ``working`` until it is canceled;
+  - ``many <n>``: a task that streams ``n`` artifact chunks;
   - anything else: one message, ``echo: <text>``.
 
 Both record every request they get (``received``), so tests can check what
@@ -130,7 +131,7 @@ class ScriptedExecutor(AgentExecutor, _Recorder):
         if context.current_task is not None:
             await updater.complete(_reply(f"thanks, {text}", context_id, task_id))
             return
-        if word not in ("stream", "ask", "wait"):
+        if word not in ("stream", "ask", "wait", "many"):
             await event_queue.enqueue_event(_reply(f"echo: {text}", context_id))
             return
         history = [] if context.message is None else [context.message]
@@ -143,6 +144,13 @@ class ScriptedExecutor(AgentExecutor, _Recorder):
             await updater.add_artifact(
                 [Part(text="part two")], artifact_id="a1", append=True, last_chunk=True
             )
+            await updater.complete()
+        elif word == "many":
+            n = int(text.split(" ")[1])
+            for i in range(n):
+                await updater.add_artifact(
+                    [Part(text=f"chunk {i}")], artifact_id="a1", append=i > 0, last_chunk=i == n - 1
+                )
             await updater.complete()
         elif word == "ask":
             await updater.requires_input(_reply("which one?", context_id, task_id))

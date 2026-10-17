@@ -253,10 +253,10 @@ class BridgeExecutor(AgentExecutor):
         task_id = context.task_id or ""
         bound = self._facade.bound.get(task_id)
         if bound is not None:
-            body = convert.cancel_body(bound.remote_task_id, self._group_id)
+            body = convert.cancel_body(bound.remote_task_id)
             try:
                 await self._facade.adapter.send_to_group(
-                    self._group_id, body, [bound.responder], kind="a2a.task_status"
+                    self._group_id, body, [bound.responder], kind="a2a.task_cancel"
                 )
             except Exception as e:
                 LOG.info("a2a_cancel_not_sent", error=type(e).__name__)

@@ -79,7 +79,42 @@ async def test_a_message_triggers_the_handler_and_the_reply_carries_hop(
     assert answer.body["parts"] == [{"text": "echo ping"}]
     assert answer.inner["reply_to"] == [sent]
     assert answer.hop == 2  # SPEC 10.3: one more than the message replied to
-    assert answer.to == [alice.me]
+    # SPEC 9.3: to the whole group, addressed to the requester.
+    assert (answer.to, answer.inner["addressee"], answer.addressed_to_me) == (
+        ["*"],
+        [alice.me],
+        True,
+    )
+    await bob.close()
+
+
+async def test_addressee_reaches_the_sdk_and_triggers_only_who_it_names(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    alice, bob, gid = await pair(cluster, sockdir)
+    carol = await cluster.node("carol")
+    await cluster.invite(alice, carol, gid)
+    seen: list[Message] = []
+
+    @bob.sdk.on_message
+    async def handle(msg: Message, group: Group) -> None:
+        seen.append(msg)
+        if msg.addressed_to_me:
+            await group.reply(msg, "for alice")
+
+    # Alice's agent names Bob as the addressee of a message to everyone.
+    sent = alice.daemon.send_message(gid, {"text": "bob, you"}, addressee=[bob.node.me])
+    await carol.adapter.wait_for(lambda: bool(received(carol)), WAIT)
+    assert not received(carol)[0].addressed_to_me
+    await alice.adapter.wait_for(lambda: bool(received(alice)), WAIT)
+    (msg,) = [m for m in seen if m.msg_id == sent]
+    assert msg.addressee == (bob.node.me,)
+    assert msg.addressed_to_me
+    # Bob's answer reaches Carol as context only.
+    await carol.adapter.wait_for(lambda: len(received(carol)) == 2, WAIT)
+    answer = received(carol)[1]
+    assert answer.sender.identity == bob.node.me
+    assert not answer.addressed_to_me
     await bob.close()
 
 

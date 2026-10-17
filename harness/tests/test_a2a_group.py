@@ -14,6 +14,7 @@ from agentconnect_harness.a2a_agents import (
     HelloWorldExecutor,
     ScriptedExecutor,
     a2a_node,
+    a2a_of,
 )
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 
@@ -66,7 +67,7 @@ async def test_mention_mode_triggers_only_the_addressed_agent(cluster: Cluster) 
         assert "everyone, as context" in context
         assert all(m["sender"] in (a.me, c.me) for m in meta["context_messages"])
         assert "context_messages" not in convert.to_json(seen_b[0].message)["metadata"]
-        # Replies to an addressed message go to the requester only.
+        # Replies go to the whole group, addressed to the requester (SPEC 9.3).
         await a.adapter.wait_for(
             lambda: any(
                 d.sender.identity == c.me and d.kind == "a2a.message" for d in a.adapter.deliveries
@@ -76,8 +77,13 @@ async def test_mention_mode_triggers_only_the_addressed_agent(cluster: Cluster) 
         reply = next(
             d for d in a.adapter.deliveries if d.sender.identity == c.me and d.kind == "a2a.message"
         )
-        assert reply.to == [a.me]
+        assert reply.to == ["*"]
+        assert reply.inner["addressee"] == [a.me]
         assert reply.addressed_to_me
+        # b saw c's reply too, and wasn't triggered by it.
+        b_adapter = a2a_of(b)
+        await b.wait(lambda: b_adapter._seen.has("m", reply.msg_id))
+        assert len(eb.received) == 2
     finally:
         await agent_b.stop()
         await agent_c.stop()

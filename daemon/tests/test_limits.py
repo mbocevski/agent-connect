@@ -10,7 +10,9 @@ from agentconnect.clock import FakeClock
 from agentconnect.limits import (
     GROUP_PER_MINUTE,
     MAX_MESSAGE_BYTES,
+    MAX_TASK_ID,
     SENDER_PER_MINUTE,
+    TASK_PER_MINUTE,
     RateLimiter,
     content_problem,
     part_kind,
@@ -80,3 +82,26 @@ def test_rates_per_sender_and_group(fake_clock: FakeClock) -> None:
     for s in senders:
         assert all(limiter.allow("g", s) for _ in range(SENDER_PER_MINUTE))
     assert not limiter.allow("g", "fresh")
+
+
+def test_task_updates_have_their_own_budget(fake_clock: FakeClock) -> None:
+    rl = RateLimiter(fake_clock)
+    update = {"taskId": "t1", "status": {"state": "TASK_STATE_WORKING"}}
+    # A long stream for one task is not cut off at the message rate...
+    for _ in range(TASK_PER_MINUTE):
+        assert rl.allow_inner("g", "a", "a2a.task_status", update)
+    # ...but has its own cap.
+    assert not rl.allow_inner("g", "a", "a2a.task_artifact", update)
+    # The task's first update counted as one ordinary message.
+    for _ in range(SENDER_PER_MINUTE - 1):
+        assert rl.allow_inner("g", "a", "a2a.message", {"parts": []})
+    assert not rl.allow_inner("g", "a", "a2a.message", {"parts": []})
+    # A new task opens with an ordinary message, so it is held to the rate.
+    assert not rl.allow_inner("g", "a", "a2a.task_status", {"taskId": "t2"})
+    # No taskId, a non-string one, or an oversized one: ordinary messages.
+    for body in ({}, {"taskId": 7}, {"taskId": "x" * (MAX_TASK_ID + 1)}, "not a dict"):
+        assert not rl.allow_inner("g", "a", "a2a.task_status", body)
+    # Other senders and groups are unaffected; the window slides.
+    assert rl.allow_inner("g", "b", "a2a.task_status", update)
+    fake_clock.advance(61)
+    assert rl.allow_inner("g", "a", "a2a.task_status", update)

@@ -13,13 +13,13 @@ from typing import Any
 
 from a2a.types import (
     AgentCard,
+    CancelTaskRequest,
     Message,
     Part,
     Role,
     StreamResponse,
     TaskArtifactUpdateEvent,
     TaskState,
-    TaskStatus,
     TaskStatusUpdateEvent,
 )
 from google.protobuf.json_format import MessageToDict, ParseDict, ParseError
@@ -134,14 +134,15 @@ def is_final(resp: StreamResponse) -> bool:
     return False
 
 
-def cancel_body(task_id: str, group_id: str) -> dict[str, Any]:
-    """The ``a2a.task_status`` a requester sends to cancel a bridged task."""
-    event = TaskStatusUpdateEvent(
-        task_id=task_id,
-        context_id=group_id,
-        status=TaskStatus(state=TaskState.TASK_STATE_CANCELED),
-    )
-    return to_json(event)
+def cancel_body(task_id: str) -> dict[str, Any]:
+    """The ``a2a.task_cancel`` body (an A2A ``CancelTaskRequest``, SPEC 7.2)
+    a requester sends to cancel a bridged task."""
+    return to_json(CancelTaskRequest(id=task_id))
+
+
+def parse_cancel(body: dict[str, Any]) -> CancelTaskRequest | None:
+    request = _parse(body, CancelTaskRequest())
+    return request if request is not None and request.id else None
 
 
 def agent_text(text: str, group_id: str) -> Message:

@@ -253,13 +253,14 @@ async def test_context_is_batched_and_bounded(hello: AgentServer, tmp_path: Path
     await adapter.deliver(view(), d2.sender, d2.to, d2)
     await sent.wait_for(2)
     assert "context_messages" not in convert.to_json(received(hello)[1].message)["metadata"]
-    # A reply goes to the requester only when the trigger was addressed.
+    # SPEC 9.3: replies go to the group, addressed to the requester.
     assert sent.calls[0]["to"] == ["*"]
+    assert sent.calls[0]["addressee"] == [PEER]
     assert sent.calls[0]["reply_to"] == ["t1"]
     d3 = delivery("t3", text("just me"), to=[PEER])
     await adapter.deliver(view(), d3.sender, d3.to, d3)
     calls = await sent.wait_for(3)
-    assert calls[2]["to"] == [PEER]
+    assert (calls[2]["to"], calls[2]["addressee"]) == (["*"], [PEER])
     await adapter.aclose()
 
 
@@ -437,18 +438,16 @@ async def test_task_memory_is_bounded_and_strangers_cannot_cancel(
         assert len(tasks) == 2
         assert len(adapter._tasks) == 1
         first = calls[0]["body"]["taskId"]
-        # Unknown task, another member, or a state other than canceled: ignored.
-        for i, (task_id, who, state) in enumerate(
+        # Forgotten (bounded memory), another member's, or malformed: ignored.
+        for i, (body, who) in enumerate(
             [
-                (first, PEER, TaskState.TASK_STATE_CANCELED),
-                (calls[-1]["body"]["taskId"], "ac:v0:x", TaskState.TASK_STATE_CANCELED),
-                ("t", PEER, TaskState.TASK_STATE_COMPLETED),
+                (convert.cancel_body(first), PEER),
+                (convert.cancel_body(calls[-1]["body"]["taskId"]), "ac:v0:x"),
+                ({"id": {"not": "a string"}}, PEER),
+                ({}, PEER),
             ]
         ):
-            body = convert.to_json(
-                TaskStatusUpdateEvent(task_id=task_id, status=TaskStatus(state=state))
-            )
-            c = delivery(f"c{i}", body, kind="a2a.task_status", sender=who)
+            c = delivery(f"c{i}", body, kind="a2a.task_cancel", sender=who)
             assert await adapter.deliver(view(), c.sender, c.to, c) is DeliveryResult.ACK
         assert executor.canceled == []
         await adapter.aclose()

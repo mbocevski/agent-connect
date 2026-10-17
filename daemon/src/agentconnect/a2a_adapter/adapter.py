@@ -8,10 +8,10 @@ group and the SPEC §10.1 framing in ``metadata``. Messages that don't
 trigger it are kept, bounded, and handed over with the next call as
 ``metadata.context_messages``. What the agent streams back goes to the group
 as ``a2a.task_status`` / ``a2a.task_artifact`` / ``a2a.message`` with
-``reply_to`` = the triggering ``msg_id`` (SPEC §10.3), to the requester only
-when the trigger was addressed. A follow-up that names one of the agent's
-tasks (``input-required``) continues it; a requester's ``a2a.task_status``
-with state ``canceled`` cancels it.
+``reply_to`` = the triggering ``msg_id`` (SPEC §10.3), to the whole group
+(``to: ["*"]``) with the requester as the only ``addressee`` (SPEC §9.3).
+A follow-up that names one of the agent's tasks (``input-required``)
+continues it; an ``a2a.task_cancel`` from the task's requester cancels it.
 
 **Direction 2, the facade** (:mod:`.facade`): a local A2A client talks to
 the group through a server on ``127.0.0.1``.
@@ -52,7 +52,6 @@ from a2a.types import (
     Role,
     SendMessageRequest,
     StreamResponse,
-    TaskState,
 )
 from a2a.utils.errors import A2AError, UnsupportedOperationError
 from jwt import PyJWK
@@ -269,7 +268,7 @@ class A2AAdapter:
             return DeliveryResult.ACK
         if self.facade is not None and self.facade.route_reply(d):
             return DeliveryResult.ACK
-        if d.kind == "a2a.task_status":
+        if d.kind == "a2a.task_cancel":
             await self._maybe_cancel(d)
             return DeliveryResult.ACK
         if d.kind != "a2a.message" or self.options.local_agent_url is None:
@@ -380,19 +379,20 @@ class A2AAdapter:
         self, d: Delivery, first: StreamResponse, rest: AsyncIterator[StreamResponse]
     ) -> None:
         """Send what the local agent streams to the group."""
-        to = ["*"] if d.to == ["*"] else [d.sender.identity]
-        await self._emit(d, to, first)
+        # SPEC 9.3: everyone sees the progress; only the requester is triggered.
+        addressee = [d.sender.identity]
+        await self._emit(d, addressee, first)
         if convert.is_final(first):
             return
         try:
             async for resp in rest:
-                await self._emit(d, to, resp)
+                await self._emit(d, addressee, resp)
                 if convert.is_final(resp):
                     break
         except (A2AError, httpx.HTTPError) as e:
             LOG.warning("a2a_stream_failed", group=log.hid(d.group_id), error=type(e).__name__)
 
-    async def _emit(self, d: Delivery, to: list[str], resp: StreamResponse) -> None:
+    async def _emit(self, d: Delivery, addressee: list[str], resp: StreamResponse) -> None:
         task_id = convert.task_id_of(resp)
         if task_id:
             self._tasks[task_id] = TaskRef(d.group_id, d.sender.identity, d.msg_id)
@@ -403,28 +403,35 @@ class A2AAdapter:
             return
         for kind, body in convert.stream_to_inner(resp, d.group_id):
             try:
-                await self._send(d.group_id, body, to=to, kind=kind, reply_to=[d.msg_id])
+                await self._send(
+                    d.group_id,
+                    body,
+                    to=["*"],
+                    kind=kind,
+                    reply_to=[d.msg_id],
+                    addressee=addressee,
+                )
             except Exception as e:
                 code = getattr(e, "code", type(e).__name__)
                 LOG.warning("a2a_reply_not_sent", group=log.hid(d.group_id), code=code)
 
     async def _maybe_cancel(self, d: Delivery) -> None:
-        """A requester's ``canceled`` status for one of the agent's tasks
-        cancels it there."""
-        event = convert.parse_status(d.body)
-        if event is None or event.status.state != TaskState.TASK_STATE_CANCELED:
-            return
-        ref = self._tasks.get(event.task_id)
+        """SPEC 7.2: ``a2a.task_cancel`` (an A2A ``CancelTaskRequest``) from
+        the task's requester cancels the agent's task; from anyone else it is
+        ignored."""
+        request = convert.parse_cancel(d.body)
+        ref = None if request is None else self._tasks.get(request.id)
         if (
-            ref is None
+            request is None
+            or ref is None
             or ref.group_id != d.group_id
             or ref.requester != d.sender.identity
-            or not d.addressed_to_me
             or self._client is None
         ):
+            LOG.info("a2a_cancel_ignored", group=log.hid(d.group_id))
             return
         with contextlib.suppress(A2AError, httpx.HTTPError):
-            await self._client.cancel_task(CancelTaskRequest(id=event.task_id))
+            await self._client.cancel_task(CancelTaskRequest(id=request.id))
             LOG.info("a2a_task_canceled", group=log.hid(d.group_id))
 
     # -- the local agent's card ----------------------------------------------

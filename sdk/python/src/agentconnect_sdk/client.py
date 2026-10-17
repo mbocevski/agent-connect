@@ -110,11 +110,13 @@ class Group:
         return await self._post("a2a.message", body, to, reply_to)
 
     async def reply(self, msg: Message, content: str | Sequence[Mapping[str, Any]]) -> str:
-        """Answer ``msg`` to its sender. ``reply_to`` carries ``msg.msg_id``,
-        so the daemon sets ``hop`` (SPEC section 10.3) and the loop guard can
-        stop a runaway exchange."""
+        """Answer ``msg``: to the whole group, with its sender as the only
+        ``addressee`` (SPEC section 9.3), so everyone sees the answer and only
+        the sender is triggered. ``reply_to`` carries ``msg.msg_id``, so the
+        daemon sets ``hop`` (SPEC section 10.3) and the loop guard can stop a
+        runaway exchange."""
         body = _agent_message(self.id, content)
-        return await self._post("a2a.message", body, [msg.sender.identity], [msg.msg_id])
+        return await self._answer(msg, "a2a.message", body)
 
     async def reply_status(
         self,
@@ -135,7 +137,7 @@ class Group:
             "contextId": self.id,
             "status": status,
         }
-        return await self._post("a2a.task_status", body, [msg.sender.identity], [msg.msg_id])
+        return await self._answer(msg, "a2a.task_status", body)
 
     async def reply_artifact(  # noqa: PLR0913
         self,
@@ -162,18 +164,29 @@ class Group:
             "append": append,
             "lastChunk": last_chunk,
         }
-        return await self._post("a2a.task_artifact", body, [msg.sender.identity], [msg.msg_id])
+        return await self._answer(msg, "a2a.task_artifact", body)
 
     async def leave(self) -> str:
         reply = await self._client._request("POST", f"/v0/groups/{self.id}/leave")
         return str(reply["status"])
 
+    async def _answer(self, msg: Message, kind: str, body: dict[str, Any]) -> str:
+        return await self._post(kind, body, ["*"], [msg.msg_id], addressee=[msg.sender.identity])
+
     async def _post(
-        self, kind: str, body: dict[str, Any], to: Sequence[str], reply_to: Sequence[str]
+        self,
+        kind: str,
+        body: dict[str, Any],
+        to: Sequence[str],
+        reply_to: Sequence[str],
+        *,
+        addressee: Sequence[str] | None = None,
     ) -> str:
         payload: dict[str, Any] = {"kind": kind, "body": body, "to": list(to)}
         if reply_to:
             payload["reply_to"] = list(reply_to)
+        if addressee is not None:
+            payload["addressee"] = list(addressee)
         reply = await self._client._request("POST", f"/v0/groups/{self.id}/messages", payload)
         return str(reply["msg_id"])
 

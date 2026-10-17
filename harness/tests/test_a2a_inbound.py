@@ -8,15 +8,18 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from a2a.types import Message, Part, Role
+from a2a.types import Message, Part, Role, TaskState, TaskStatus, TaskStatusUpdateEvent
 
 from agentconnect.a2a_adapter import convert
 from agentconnect.adapter import Delivery
+from agentconnect.daemon import DaemonError
+from agentconnect.limits import SENDER_PER_MINUTE
 from agentconnect_harness.a2a_agents import (
     AgentServer,
     HelloWorldExecutor,
     ScriptedExecutor,
     a2a_node,
+    a2a_of,
 )
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 
@@ -132,6 +135,39 @@ async def test_streaming_task_round_trip(cluster: Cluster, scripted: AgentServer
     assert chunks == ["part one", "part two"]
 
 
+async def test_a_long_stream_is_not_cut_off_but_a_flood_is(
+    cluster: Cluster, scripted: AgentServer
+) -> None:
+    # SPEC 10.2: task updates have a per-task budget (300 a minute), ordinary
+    # messages keep 30 a minute. Daemon time stands still: one window.
+    a, b, gid = await one_to_one(cluster, scripted)
+    send = a.adapter.send
+    assert send is not None
+    # More than the message rate, and under the relay's per-second send rate
+    # (SPEC 8.3), whose back-off would wait on the fake clock.
+    chunks = SENDER_PER_MINUTE + 10
+    await send(gid, body(f"many {chunks}", gid))
+    await a.adapter.wait_for(
+        lambda: any(
+            d.kind == "a2a.task_status" and d.body["status"]["state"] == "TASK_STATE_COMPLETED"
+            for d in from_peer(a, b)
+        ),
+        WAIT,
+    )
+    assert len(from_peer(a, b, "a2a.task_artifact")) == chunks
+    # An ordinary flood from the same member is still cut off.
+    sent, code = 0, ""
+    try:
+        for i in range(SENDER_PER_MINUTE + 1):
+            await send(gid, body(f"flood {i}", gid))
+            sent += 1
+    except DaemonError as e:
+        code = e.code
+    assert code == "rate_limited"
+    # a's own messages so far this minute: the request, then the flood.
+    assert sent == SENDER_PER_MINUTE - 1
+
+
 @pytest.mark.parametrize("streaming", [True, False])
 async def test_input_required_round_trip(cluster: Cluster, streaming: bool) -> None:
     executor = ScriptedExecutor()
@@ -176,23 +212,54 @@ async def test_input_required_round_trip(cluster: Cluster, streaming: bool) -> N
         await agent.stop()
 
 
-async def test_requester_cancels_the_task(cluster: Cluster) -> None:
+async def test_only_the_requester_cancels_the_task(cluster: Cluster) -> None:
     executor = ScriptedExecutor()
     agent = AgentServer(executor, "waiter")
     await agent.start()
     try:
         a, b, gid = await one_to_one(cluster, agent)
-        send = a.adapter.send
+        c = await cluster.node("c")
+        await cluster.invite(a, c, gid)
+        send, send_c = a.adapter.send, c.adapter.send
         assert send is not None
-        await send(gid, body("wait for it", gid))
+        assert send_c is not None
+        await send(gid, body("wait for it", gid), to=[b.me])
 
-        def state(s: str) -> list[Delivery]:
-            return [d for d in from_peer(a, b, "a2a.task_status") if d.body["status"]["state"] == s]
+        def state(node: Node, s: str) -> list[Delivery]:
+            return [
+                d for d in from_peer(node, b, "a2a.task_status") if d.body["status"]["state"] == s
+            ]
 
-        await a.adapter.wait_for(lambda: bool(state("TASK_STATE_WORKING")), WAIT)
-        task_id = state("TASK_STATE_WORKING")[0].body["taskId"]
-        await send(gid, convert.cancel_body(task_id, gid), to=[b.me], kind="a2a.task_status")
-        await a.adapter.wait_for(lambda: bool(state("TASK_STATE_CANCELED")), WAIT)
+        await a.adapter.wait_for(lambda: bool(state(a, "TASK_STATE_WORKING")), WAIT)
+        working = state(a, "TASK_STATE_WORKING")[0]
+        task_id = working.body["taskId"]
+        # The progress reaches the whole group; only the requester is addressed.
+        assert (working.to, working.inner["addressee"], working.addressed_to_me) == (
+            ["*"],
+            [a.me],
+            True,
+        )
+        await c.adapter.wait_for(lambda: bool(state(c, "TASK_STATE_WORKING")), WAIT)
+        assert not state(c, "TASK_STATE_WORKING")[0].addressed_to_me
+
+        adapter = a2a_of(b)
+        # Another member's a2a.task_cancel is ignored, and a canceled status
+        # is not a cancel command.
+        stranger = await send_c(
+            gid, convert.cancel_body(task_id), to=[b.me], kind="a2a.task_cancel"
+        )
+        status = convert.to_json(
+            TaskStatusUpdateEvent(
+                task_id=task_id, status=TaskStatus(state=TaskState.TASK_STATE_CANCELED)
+            )
+        )
+        not_a_command = await send(gid, status, to=[b.me], kind="a2a.task_status")
+        await b.wait(
+            lambda: adapter._seen.has("m", stranger) and adapter._seen.has("m", not_a_command)
+        )
+        assert executor.canceled == []
+        await send(gid, convert.cancel_body(task_id), to=[b.me], kind="a2a.task_cancel")
+        await a.adapter.wait_for(lambda: bool(state(a, "TASK_STATE_CANCELED")), WAIT)
         assert executor.canceled == [task_id]
     finally:
         await agent.stop()

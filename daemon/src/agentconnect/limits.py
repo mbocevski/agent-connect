@@ -2,6 +2,10 @@
 
 * Messages are at most 256 KiB (the canonical JSON of the inner message).
 * Each sender may send 30 messages per minute, and a group 120.
+* Updates for a task (``a2a.task_status``, ``a2a.task_artifact`` with a
+  ``taskId``) have their own budget: 300 per minute per task and sender.
+  The first update of a task in the window counts as an ordinary message, so
+  opening tasks is held to the message rates.
 * A2A parts may be ``text`` or ``data``; ``file`` parts are disabled.
 * Only the kinds of §7.2/§7.3 are delivered; unknown kinds are ignored.
 
@@ -19,6 +23,9 @@ from agentconnect.clock import Clock
 MAX_MESSAGE_BYTES = 256 * 1024
 SENDER_PER_MINUTE = 30
 GROUP_PER_MINUTE = 120
+TASK_PER_MINUTE = 300
+MAX_TASK_ID = 256  # longer taskIds get no task budget
+TASK_UPDATE_KINDS = frozenset({"a2a.task_status", "a2a.task_artifact"})
 WINDOW_SECS = 60.0
 ALLOWED_PARTS = frozenset({"text", "data"})
 KNOWN_KINDS = frozenset(
@@ -27,6 +34,7 @@ KNOWN_KINDS = frozenset(
         "a2a.task_status",
         "a2a.task_artifact",
         "a2a.agent_card",
+        "a2a.task_cancel",
         "control.leave",
         "control.close",
         "control.floor",
@@ -110,4 +118,21 @@ class RateLimiter:
             return False
         per_sender.append(now)
         per_group.append(now)
+        return True
+
+    def allow_inner(self, group_id: str, sender: str, kind: Any, body: Any) -> bool:
+        """Count one inner message against its budget (SPEC 10.2): a task
+        update against its task's, anything else against the message rates."""
+        task = body.get("taskId") if kind in TASK_UPDATE_KINDS and isinstance(body, dict) else None
+        if not isinstance(task, str) or not 0 < len(task) <= MAX_TASK_ID:
+            return self.allow(group_id, sender)
+        now = self._now()
+        times = self._count((group_id, f"{sender}\0task\0{task}"), now)
+        if not times:
+            # A task new in this window opens with an ordinary message.
+            if not self.allow(group_id, sender):
+                return False
+        elif len(times) >= TASK_PER_MINUTE:
+            return False
+        times.append(now)
         return True

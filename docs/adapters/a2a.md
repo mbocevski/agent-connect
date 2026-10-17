@@ -34,6 +34,12 @@ facade_port = 8765
 agentconnect daemon run
 ```
 
+The A2A adapter runs next to the webhook or SSE adapter when both are
+configured. Each group delivers to one adapter: the one `daemon.default_adapter`
+named when the group was created (`a2a` here; with `none`, the A2A
+adapter). The facade gets replies only in groups that deliver to the A2A
+adapter.
+
 When the daemon starts, the adapter reads the agent's card from
 `<local_agent_url>/.well-known/agent-card.json`. The daemon sends that card
 to every group it joins, and to members who join later, as an
@@ -129,18 +135,21 @@ Each event the agent streams becomes one message to the group:
 
 `contextId` is set to the group, `taskId` is the agent's, and `reply_to`
 names the triggering `msg_id`, so receivers compute `hop` from it (SPEC
-§10.3). A reply goes to `["*"]` when the trigger did, and to the requester
-alone when the trigger named its recipients.
+§10.3). Every reply goes to `to: ["*"]` with `addressee: [<requester>]`
+(SPEC §9.3): the whole group sees the task's progress as context, and only
+the requester is triggered.
 
 **`input-required`.** When the agent asks for input, the requester answers
 with an `a2a.message` that carries the same `taskId` and `contextId`. The
 adapter continues the agent's task. A `taskId` from another member, or from
 another group, starts a new task instead.
 
-**Cancel.** The requester cancels a task with an `a2a.task_status` for its
-`taskId` with state `TASK_STATE_CANCELED`, sent to this member. The adapter
-calls `CancelTask` on the agent, and the agent's own `canceled` status goes
-back to the group.
+**Cancel.** The requester cancels a task with an `a2a.task_cancel` whose
+body is an A2A `CancelTaskRequest` (`{"id": "<taskId>"}`), sent to this
+member (SPEC §7.2). The adapter calls `CancelTask` on the agent, and the
+agent's own `canceled` status goes back to the group. An `a2a.task_cancel`
+from any other member is ignored, and an `a2a.task_status` with a canceled
+state is never treated as a cancel.
 
 ### Agent Cards and signatures
 
@@ -157,7 +166,8 @@ peer's control.
 | `invalid` | a pinned key matches, and no signature checks out | card ignored |
 
 An invalid local card is not sent. Symmetric (`oct`) keys in the JWKS are
-ignored, and only asymmetric algorithms are accepted.
+ignored, and only asymmetric algorithms are accepted. Whatever the result,
+a card is as trustworthy as the member that sent it (SPEC §10.5).
 
 ## Facade: local client to group
 
@@ -219,7 +229,8 @@ and rate limits apply to them.
   `contextId` other than the group id (or empty) is refused.
 - `GetTask`, `CancelTask`, `SubscribeToTask` and the
   push-notification config methods work on the facade's tasks.
-  `CancelTask` also sends a cancel to the member running the peer task.
+  `CancelTask` also sends an `a2a.task_cancel` to the member running the
+  peer task.
 - Facade tasks are kept in memory and are lost on restart.
 
 ## Delivery guarantees
@@ -247,9 +258,10 @@ SPEC §10.2 applies to everything the adapter and the facade send:
 
 - A message is at most 256 KiB. A larger reply isn't sent; the adapter logs
   `a2a_reply_not_sent`.
-- Each member may send 30 messages a minute, and a group 120. Each streamed
-  event is one message, so a long stream can hit the rate; events over it
-  are not sent.
+- Each member may send 30 messages a minute, and a group 120.
+- Streamed task updates (`a2a.task_status`, `a2a.task_artifact`) have their
+  own budget: 300 a minute per task. A task's first update counts as one
+  ordinary message. Updates over the budget are not sent.
 - Parts may be `text` or `data`. A reply with a `file` part (`raw` or
   `url`) is not sent. Inbound messages with one never reach the adapter.
 

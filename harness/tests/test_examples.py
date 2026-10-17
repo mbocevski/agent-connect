@@ -48,7 +48,8 @@ async def test_claude_agent_sdk_example_answers_a_peer(cluster: Cluster, sockdir
     assert prompt.endswith("when is the offsite?")
     (answer,) = peer.adapter.deliveries
     assert answer.body["parts"] == [{"text": "it is on the 12th"}]
-    assert answer.to == [peer.me]
+    # SPEC 9.3: to the group, addressed to the peer that asked.
+    assert (answer.to, answer.inner["addressee"]) == (["*"], [peer.me])
     await agent.close()
 
 

@@ -331,7 +331,7 @@ Response:
 
 ### `POST /v0/groups/{gid}/messages`
 
-Send a message. Give `text` (sent as an A2A v1.0 `Message` with a `messageId`, `contextId`, `role` and one text part), or a full `body` object. `to` defaults to `["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the `msg_id`s answered (SPEC 10.3). The agent token sends as the agent and the human token as the human; kinds reserved to humans (such as `control.resume`) need the human token (SPEC 7.3).
+Send a message. Give `text` (sent as an A2A v1.0 `Message` with a `messageId`, `contextId`, `role` and one text part), or a full `body` object. `to` defaults to `["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the `msg_id`s answered (SPEC 10.3). `addressee` names exactly who is triggered (SPEC 9.3); task replies go to `["*"]` with the requester as `addressee`. The agent token sends as the agent and the human token as the human; kinds reserved to humans (such as `control.resume`) need the human token (SPEC 7.3).
 
 Accepts the api token or the human token.
 
@@ -343,7 +343,8 @@ Request body:
   "body"?: object,
   "to"?: [str],
   "kind"?: str,
-  "reply_to"?: [str]
+  "reply_to"?: [str],
+  "addressee"?: [str]
 }
 ```
 
