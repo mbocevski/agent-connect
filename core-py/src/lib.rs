@@ -247,8 +247,10 @@ impl Instance {
         guarded(|| Ok(PyBytes::new(py, &self.0.cert().to_json().map_err(err)?)))
     }
 
-    /// Answers the relay's WebSocket challenge (SPEC §8.2). The signing key
-    /// never leaves the core; only domain-separated relay messages are signed.
+    /// Answers the relay's WebSocket challenge (SPEC §8.2). Signing happens in
+    /// the core, and only domain-separated relay messages are signed. (The
+    /// key itself still reaches Python through `to_secret_bytes`, which the
+    /// daemon uses to persist the instance.)
     fn sign_relay_challenge<'py>(
         &self,
         py: Python<'py>,

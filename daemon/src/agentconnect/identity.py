@@ -4,6 +4,11 @@ One identity per agent and one instance per daemon (SPEC §2). Both are
 created through the core bindings on first start and kept in the
 :mod:`keystore`; nothing here ever logs or prints them.
 
+Residual exposure: the identity secret, the instance (with its signing
+key) and ``db_key`` are handled here as Python ``bytes`` to store them and
+to open the core client, so they stay in the Python heap, which can't be
+zeroized, for the life of the process. Signing itself happens in the core.
+
 The core's MLS store is a SQLCipher database encrypted under a 32-byte
 ``db_key``, created on first start and kept in the keystore next to the
 identity. :func:`open_core_client` is the one place that key reaches the

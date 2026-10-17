@@ -133,9 +133,11 @@ async def test_join_request_rejections(cluster: Cluster, rng: random.Random) -> 
     await c.daemon.accept_invite(invite2["url"])
     await b.idle()
     await c.idle()
-    rows = [r for r in a.daemon.store.events() if r["type"] == "pending_approval"]
     await a.wait(lambda: a.daemon.store.inbox_state(c.daemon.mailbox, _join_msg_id(c)) is not None)
     await a.wait(lambda: a.daemon.store.inbox_state(b.daemon.mailbox, _join_msg_id(b)) is not None)
+    # Read only once both JoinRequests were processed (earlier, this check
+    # was vacuous).
+    rows = [r for r in a.daemon.store.events() if r["type"] == "pending_approval"]
     assert rows == []
     assert a.daemon.approvals() == []
 

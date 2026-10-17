@@ -52,7 +52,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Relay authentication signing in the core: `Instance.sign_relay_challenge`
   (SPEC §8.2) and `Instance.sign_relay_request` (§8.1.1), with the signed
   message layout shared by core and relay and a contract vector
-  (`testdata/relay-auth.json`). The instance key never leaves the core.
+  (`testdata/relay-auth.json`). Signing happens in the core and no generic
+  signer is exposed; the instance key itself still passes through Python
+  as bytes when the daemon stores it.
 - Shared test vectors in `testdata/` for key derivation, SAS, padding,
   instance certificates and invite URLs (`just vectors` regenerates them).
 - Spike validating OpenMLS 0.9 with post-quantum hybrid ciphersuites
