@@ -147,6 +147,10 @@ build:
 pr:
     scripts/pr.sh
 
+# Rebase a PR branch onto main, re-sign every commit and push (run from its checkout)
+update-branch pr:
+    scripts/update-branch.sh {{ pr }}
+
 # Gated merge: refuses unless every required check is green
 merge pr:
     scripts/merge.sh {{ pr }}
