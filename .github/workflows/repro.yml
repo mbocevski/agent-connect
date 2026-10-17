@@ -1,5 +1,6 @@
 # Reproducibility check: build release artifacts twice in clean runners and
-# compare their hashes.
+# compare their hashes, on x86_64 and aarch64 Linux. macOS is not covered:
+# Mach-O linking embeds build-host details we don't control (see ADR-001).
 name: repro
 
 on:
@@ -9,6 +10,7 @@ on:
     paths:
       - ".github/workflows/repro.yml"
       - ".github/workflows/release.yml"
+      - ".github/actions/**"
       - "Cargo.lock"
       - "uv.lock"
       - "rust-toolchain.toml"
@@ -25,31 +27,58 @@ env:
 
 jobs:
   build:
+    name: build (${{ matrix.arch }}-${{ matrix.attempt }})
     strategy:
+      fail-fast: false
       matrix:
+        arch: [x86_64, aarch64]
         attempt: [a, b]
-    runs-on: ubuntu-24.04
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+            pure: true
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            pure: false
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - run: rustup show active-toolchain || rustup toolchain install
-      - name: Build
+      - name: Reproducible build environment
         run: |
-          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
-          export SOURCE_DATE_EPOCH
-          export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home" >> "$GITHUB_ENV"
+      - name: Relay binary
+        run: |
           cargo build --release --locked -p agentconnect-relay
-          uv build --all-packages --sdist --wheel --out-dir dist
+          mkdir -p dist
           cp target/release/agentconnect-relay dist/
-          (cd dist && sha256sum -- * | sort -k2 > ../SHA256SUMS)
+      - name: Core wheel
+        uses: ./.github/actions/core-wheel
+      - name: Python packages and sdists
+        if: matrix.pure
+        run: |
+          uv build --all-packages --sdist --out-dir dist
+          uv build --package agentconnect --wheel --out-dir dist
+          uv build --package agentconnect-sdk --wheel --out-dir dist
+      - name: Checksums
+        run: (cd dist && sha256sum -- * | sort -k2 > ../SHA256SUMS)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: sums-${{ matrix.attempt }}
+          name: sums-${{ matrix.arch }}-${{ matrix.attempt }}
           path: SHA256SUMS
 
   compare:
+    name: compare (${{ matrix.arch }})
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-      - run: diff -u sums-a/SHA256SUMS sums-b/SHA256SUMS
+        with:
+          pattern: sums-${{ matrix.arch }}-*
+      - run: diff -u sums-${{ matrix.arch }}-a/SHA256SUMS sums-${{ matrix.arch }}-b/SHA256SUMS
