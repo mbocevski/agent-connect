@@ -1,0 +1,32 @@
+# Python dependency licence policy (ADR-001 §4). The Python counterpart of the
+# `[licenses]` section in deny.toml, enforced by scripts/check_licences.py
+# (`just licences`). AGPL/GPL/LGPL are banned by omission from `allow`.
+
+# SPDX identifiers. MIT-0 is MIT without the attribution clause, so it is at
+# least as permissive as MIT (pulled in by cffi).
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+    # The PSF licence covers stdlib-adjacent packages (typing_extensions).
+    "PSF-2.0",
+    "Python-2.0",
+]
+
+# Scoped, per-package exceptions. Each is listed in ADR-001 §4. MPL-2.0 is
+# file-level copyleft: using a package unmodified is compatible with
+# Apache-2.0 distribution; modifying its files would oblige us to publish them.
+[[exceptions]]
+package = "certifi"
+allow = ["MPL-2.0"]
+# Runtime dependency via httpx (CA bundle). Used unmodified.
+
+[[exceptions]]
+package = "hypothesis"
+allow = ["MPL-2.0"]
+# Test-time only (property tests). Never shipped or imported by released code.
