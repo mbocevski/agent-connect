@@ -1,0 +1,32 @@
+name: Bug report
+description: Something doesn't work as specified
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `agentconnect version --json`, or the commit SHA.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [core, relay, daemon / CLI, SDK, protocol (SPEC.md), CI / tooling, docs]
+    validations:
+      required: true

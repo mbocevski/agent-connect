@@ -123,7 +123,7 @@ fallback needs the maintainer's sign-off.
 - *mypy.* Initially chosen because ty is pre-1.0. Revised on 2026-10-17 in
   favour of ty, to stay on the Astral toolchain (uv, ruff, ty) with a single
   fast checker. Mitigations: ty is pinned exactly, every rule is set to error,
-  and upgrades go through Renovate PRs with CI.
+  and upgrades go through Dependabot PRs with CI.
 - *pre-commit.* prek is faster, needs no Python environment, and reads the
   same config file.
 
@@ -150,7 +150,12 @@ fallback needs the maintainer's sign-off.
   - Sigstore/cosign signing plus SLSA provenance via
     `actions/attest-build-provenance`.
   - GitHub Actions pinned by commit SHA.
-  - Renovate for dependency updates.
+  - Dependabot for dependency updates (cargo, uv, Actions, pre-commit
+    hooks, Rust toolchain). It's built into GitHub, unlike Renovate, which
+    needs an app installed.
+  - CodeQL code scanning (default setup, extended suite), secret scanning
+    with push protection, and Dependabot alerts and security updates.
+  - Release tags `v*` are protected by a ruleset: no deletion, no moving.
 
 ## Consequences
 
