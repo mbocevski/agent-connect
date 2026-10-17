@@ -46,6 +46,32 @@ has the same id, and is recorded once. Adapters see the same events through
 `on_event`, at least once; deduplicate by `event_id` there, as by `msg_id`
 for messages (ADR-004).
 
+`?group=<group_id>` limits the list to one group.
+
+### Event stream
+
+With `Accept: text/event-stream`, `GET /v0/events` streams messages and
+events instead of returning a list (see the route in the table below). Each
+frame is
+
+```text
+id: <n>
+event: message | task_status | task_artifact | agent_card | control.<name> | <event type>
+data: <one line of JSON>
+```
+
+The JSON is the payload described in
+[adapters/webhook.md](adapters/webhook.md#payload). The `id` is the sequence
+number of a durable feed in the daemon's encrypted database, which keeps the
+newest 10000 items. A client that reconnects sends `Last-Event-ID` and gets
+what came after that id first, even after a daemon restart; with no
+`Last-Event-ID`, or one that is not a number, the stream starts live. While no
+consumer listens for a message's group, the daemon holds the message in its
+inbound queue and retries, so nothing is lost in that gap. The stream is at
+least once: treat `msg_id` and `event_id` as idempotency keys.
+[sdk.md](sdk.md) does that for you. Messages and events are each ordered per
+group, and the two are independent of each other.
+
 ## Routes
 
 Version 0 of the API. Path segments in braces are parameters.
@@ -302,7 +328,7 @@ Response:
 
 ### `POST /v0/groups/{gid}/messages`
 
-Send a message. Give `text`, or a full `body` object. `to` defaults to `["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the `msg_id`s answered (SPEC 10.3). The agent token sends as the agent and the human token as the human; kinds reserved to humans (such as `control.resume`) need the human token (SPEC 7.3).
+Send a message. Give `text` (sent as an A2A v1.0 `Message` with a `messageId`, `contextId`, `role` and one text part), or a full `body` object. `to` defaults to `["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the `msg_id`s answered (SPEC 10.3). The agent token sends as the agent and the human token as the human; kinds reserved to humans (such as `control.resume`) need the human token (SPEC 7.3).
 
 Accepts the api token or the human token.
 
@@ -436,11 +462,11 @@ Response:
 
 ### `GET /v0/events`
 
-Daemon events in order, at most 200 per call.
+Daemon events in order, at most 200 per call. With `Accept: text/event-stream` it is instead a Server-Sent Events stream of messages and events from a durable feed (needs `daemon.default_adapter = "sse"`, else `409 no_sse_adapter`): each frame has `id` (the feed sequence number), `event` and one line of JSON `data`, in the payload shape of the webhook adapter. Send `Last-Event-ID` to resume after that id, also after a daemon restart; without it the stream starts live.
 
 Accepts the api token or the human token.
 
-Query: `after`: only events with a greater `seq` (default 0).
+Query: `after`: only events with a greater `seq` (default 0). `group`: only that group (`404 not_found` on a stream for an unknown group).
 
 Response:
 

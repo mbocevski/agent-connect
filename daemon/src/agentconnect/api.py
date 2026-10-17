@@ -36,10 +36,11 @@ from pathlib import Path
 from typing import Any
 
 from agentconnect import log
-from agentconnect.daemon import HUMAN_ONLY_KINDS, Daemon, DaemonError
+from agentconnect.daemon import HUMAN_ONLY_KINDS, Daemon, DaemonError, new_msg_id
 from agentconnect.keystore import write_private
 from agentconnect.relay import RelayError
 from agentconnect.shapes import Opt
+from agentconnect.sse import SseAdapter, Subscription
 
 LOG = log.get("agentconnect.api")
 
@@ -50,6 +51,8 @@ MAX_CONNECTIONS = 64
 API_TOKEN_FILE = "api-token"  # noqa: S105 - a file name
 HUMAN_TOKEN_FILE = "human-token"  # noqa: S105 - a file name
 SCOPE = "_scope"  # handler parameter carrying the request's token scope
+ACCEPT = "_accept"  # ... the Accept header
+LAST_EVENT_ID = "_last_event_id"  # ... the Last-Event-ID header
 
 STATUS_TEXT = {
     200: "OK",
@@ -77,6 +80,53 @@ ERROR_STATUS = {
     "rate_limited": 429,
     "relay": 502,
 }
+
+
+async def _close(writer: asyncio.StreamWriter) -> None:
+    """Close and wait, so no transport outlives the server that made it."""
+    writer.close()
+    with contextlib.suppress(ConnectionError, OSError):
+        await writer.wait_closed()
+
+
+class SseStream:
+    """A handler result that keeps the connection open and writes SSE frames
+    until the client goes away (``text/event-stream``, see :mod:`sse`)."""
+
+    def __init__(self, hub: SseAdapter, sub: Subscription) -> None:
+        self.hub, self.sub = hub, sub
+        self._stop = asyncio.Event()
+
+    def stop(self) -> None:
+        """End the stream (the daemon is shutting down)."""
+        self._stop.set()
+
+    async def run(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n"
+            b"cache-control: no-cache\r\nconnection: close\r\n\r\n: connected\n\n"
+        )
+        gone = asyncio.ensure_future(reader.read(1))  # EOF: the client left
+        stopped = asyncio.ensure_future(self._stop.wait())
+        try:
+            await writer.drain()
+            while not gone.done() and not stopped.done():
+                if self.sub.overflowed and self.sub.queue.empty():
+                    break  # too slow: the client resumes with Last-Event-ID
+                get = asyncio.ensure_future(self.sub.queue.get())
+                await asyncio.wait({get, gone, stopped}, return_when=asyncio.FIRST_COMPLETED)
+                if not get.done():
+                    get.cancel()
+                    break
+                writer.write(get.result().frame())
+                await writer.drain()
+        except ConnectionError:
+            pass
+        finally:
+            self.hub.unsubscribe(self.sub)
+            gone.cancel()
+            stopped.cancel()
+            await _close(writer)
 
 
 class ApiError(Exception):
@@ -257,7 +307,8 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/groups/{gid}/messages",
         "_send",
-        "Send a message. Give `text`, or a full `body` object. `to` defaults to "
+        "Send a message. Give `text` (sent as an A2A v1.0 `Message` with a `messageId`, "
+        "`contextId`, `role` and one text part), or a full `body` object. `to` defaults to "
         '`["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the '
         "`msg_id`s answered (SPEC 10.3). The agent token sends as the agent and "
         "the human token as the human; kinds reserved to humans (such as "
@@ -337,8 +388,16 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "GET",
         "/v0/events",
         "_events",
-        "Daemon events in order, at most 200 per call.",
-        query="`after`: only events with a greater `seq` (default 0).",
+        "Daemon events in order, at most 200 per call. With "
+        "`Accept: text/event-stream` it is instead a Server-Sent Events stream "
+        "of messages and events from a durable feed (needs "
+        '`daemon.default_adapter = "sse"`, else `409 no_sse_adapter`): each '
+        "frame has `id` (the feed sequence number), `event` and one line of "
+        "JSON `data`, in the payload shape of the webhook adapter. Send "
+        "`Last-Event-ID` to resume after that id, also after a daemon restart; "
+        "without it the stream starts live.",
+        query="`after`: only events with a greater `seq` (default 0). `group`: only "
+        "that group (`404 not_found` on a stream for an unknown group).",
         response={
             "events": [
                 {
@@ -384,6 +443,16 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
 )
 
 
+def a2a_text(group_id: str, text: str, human: bool) -> dict[str, Any]:
+    """The ``text`` shorthand as an A2A v1.0 ``Message`` (SPEC 7.2)."""
+    return {
+        "messageId": new_msg_id(),
+        "contextId": group_id,
+        "role": "ROLE_USER" if human else "ROLE_AGENT",
+        "parts": [{"text": text}],
+    }
+
+
 def _str(body: dict[str, Any], key: str, default: str | None = None) -> str:
     value = body.get(key, default)
     if not isinstance(value, str):
@@ -410,6 +479,9 @@ class ApiServer:
         }
         self._server: asyncio.Server | None = None
         self._connections = 0
+        self._streams: set[SseStream] = set()
+        self._idle = asyncio.Event()
+        self._idle.set()
         self._port: int | None = None
         self.address: str | Path | None = None
         self.routes = [
@@ -468,8 +540,9 @@ class ApiServer:
 
     async def _send(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         body = b.get("body")
+        human = p.get(SCOPE) == "human"
         if body is None:
-            body = {"text": _str(b, "text")}
+            body = a2a_text(p["gid"], _str(b, "text"), human)
         if not isinstance(body, dict):
             raise ApiError(400, "bad_request", "body must be an object")
         to = b.get("to", ["*"])
@@ -484,7 +557,6 @@ class ApiServer:
         # SPEC 7.2/10.3: only the human's own requests are human-originated.
         # The agent token always sends as the agent, and can't send the
         # controls SPEC 7.3 reserves to humans.
-        human = p.get(SCOPE) == "human"
         if kind in HUMAN_ONLY_KINDS and not human:
             raise ApiError(403, "human_only", f"{kind} needs the human token")
         msg_id = self.daemon.send_message(
@@ -522,7 +594,18 @@ class ApiServer:
         return {"status": await self.daemon.sas_mismatch(p["gid"], epoch)}
 
     async def _events(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return {"events": self.daemon.store.events(int(p.get("after", "0") or 0))}
+        """Events as JSON (``after``), or, with ``Accept: text/event-stream``,
+        the SSE feed of messages and events (``Last-Event-ID`` resumes)."""
+        group = p.get("group") or None
+        if "text/event-stream" not in p.get(ACCEPT, ""):
+            after = int(p.get("after", "0") or 0)
+            return {"events": self.daemon.store.events(after, group_id=group)}
+        hub = self.daemon.adapters.get("sse")
+        if not isinstance(hub, SseAdapter):
+            raise ApiError(409, "no_sse_adapter", 'set daemon.default_adapter = "sse"')
+        if group is not None and self.daemon.store.group(group) is None:
+            raise ApiError(404, "not_found", "no such group")
+        return SseStream(hub, hub.subscribe(group, p.get(LAST_EVENT_ID)))
 
     # -- HTTP --------------------------------------------------------------
 
@@ -562,21 +645,42 @@ class ApiServer:
                 raise ApiError(400, "bad_request", "body is not JSON") from None
             if not isinstance(data, dict):
                 raise ApiError(400, "bad_request", "body must be a JSON object")
-            return 200, await route.handler({**params, **m.groupdict(), SCOPE: scope}, data)
+            extra = {
+                SCOPE: scope,
+                ACCEPT: headers.get("accept", ""),
+                LAST_EVENT_ID: headers.get("last-event-id", ""),
+            }
+            return 200, await route.handler({**params, **m.groupdict(), **extra}, data)
         if allowed:
             raise ApiError(405, "method_not_allowed", "method not allowed")
         raise ApiError(404, "not_found", "no such endpoint")
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await self._serve_one(reader, writer)
+        finally:
+            writer.close()  # also when the handler is cancelled mid-request
+
+    async def _serve_one(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if self._connections >= MAX_CONNECTIONS:
             await self._reply(writer, 503, {"code": "busy", "message": "too many connections"})
             return
         self._connections += 1
+        self._idle.clear()
         try:
             status, payload = await self._request(reader)
+            if isinstance(payload, SseStream):
+                self._streams.add(payload)
+                try:
+                    await payload.run(reader, writer)
+                finally:
+                    self._streams.discard(payload)
+                return
+            await self._reply(writer, status, payload)
         finally:
             self._connections -= 1
-        await self._reply(writer, status, payload)
+            if self._connections == 0:
+                self._idle.set()
 
     def _check_origin(self, headers: dict[str, str]) -> None:
         """Loopback TCP: no browser requests (no ``Origin``), and a ``Host``
@@ -671,8 +775,14 @@ class ApiServer:
         LOG.info("api_listening", transport="tcp" if cfg.api_tcp_port else "unix")
 
     async def stop(self) -> None:
+        for stream in list(self._streams):
+            stream.stop()
         if self._server is not None:
             self._server.close()
+            close_clients = getattr(self._server, "close_clients", None)  # Python 3.13+
+            if close_clients is not None:
+                close_clients()  # connections accepted but not yet served
+            await self._idle.wait()  # every connection handler has closed its transport
             await self._server.wait_closed()
             self._server = None
         if isinstance(self.address, Path):

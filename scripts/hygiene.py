@@ -25,6 +25,9 @@ ALLOWED_PHRASES: tuple[str, ...] = (
     "Claude Agent SDK",
     "Claude Code Channels",
     "Claude Code support",
+    # The Claude Agent SDK's package and the example directory named after it.
+    "claude-agent-sdk",
+    "claude_agent_sdk",
 )
 
 # Character classes like `cl[a]ude` keep this file from matching itself.

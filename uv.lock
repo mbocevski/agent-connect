@@ -59,6 +59,7 @@ version = "0.0.0"
 source = { editable = "harness" }
 dependencies = [
     { name = "agentconnect" },
+    { name = "agentconnect-sdk" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "websockets" },
@@ -67,6 +68,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "agentconnect", editable = "daemon" },
+    { name = "agentconnect-sdk", editable = "sdk/python" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "websockets", specifier = ">=17.2" },
@@ -76,6 +78,12 @@ requires-dist = [
 name = "agentconnect-sdk"
 version = "0.0.0"
 source = { editable = "sdk/python" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.28.1" }]
 
 [[package]]
 name = "annotated-doc"

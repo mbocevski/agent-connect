@@ -1,0 +1,27 @@
+"""Builds the adapters ``agentconnectd`` runs from its configuration."""
+
+from __future__ import annotations
+
+from agentconnect.adapter import Adapter
+from agentconnect.api import load_token
+from agentconnect.clock import Clock
+from agentconnect.config import Config
+from agentconnect.sse import SseAdapter
+from agentconnect.webhook import SECRET_FILE, WebhookAdapter
+
+
+def build_adapters(config: Config, clock: Clock) -> list[Adapter]:
+    """The adapter named by ``daemon.default_adapter``: ``webhook`` (needs
+    ``webhook.callback_url``) or ``sse``. ``none`` runs without one, so
+    received messages wait in the inbound queue.
+
+    The webhook secret lives in ``<data_dir>/webhook-secret`` (0600, created
+    on first use) next to ``api-token``; the SDK reads both. It signs
+    deliveries. It grants no access to the daemon."""
+    if config.default_adapter == "webhook" and config.webhook_url is not None:
+        config.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        secret = load_token(config.data_dir / SECRET_FILE)
+        return [WebhookAdapter(config.webhook_url, secret, clock, timeout=config.webhook_timeout)]
+    if config.default_adapter == "sse":
+        return [SseAdapter()]
+    return []

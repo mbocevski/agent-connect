@@ -54,6 +54,9 @@ auto_approve = true
 [api]
 socket = "/tmp/x.sock"
 tcp_port = 7787
+
+[webhook]
+callback_url = "http://127.0.0.1:8808/"
 """,
     )
     env = {"HOME": str(tmp_path)}

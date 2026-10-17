@@ -22,6 +22,21 @@ code = ["daemon/src/agentconnect/config.py"]
 docs = ["docs/config.md"]
 
 [[rule]]
+name = "webhook-adapter"
+code = [
+    "daemon/src/agentconnect/webhook.py",
+    "daemon/src/agentconnect/sse.py",
+    "daemon/src/agentconnect/payloads.py",
+    "daemon/src/agentconnect/adapters.py",
+]
+docs = ["docs/adapters/webhook.md"]
+
+[[rule]]
+name = "python-sdk"
+code = ["sdk/python/src/agentconnect_sdk/*.py"]
+docs = ["docs/sdk.md"]
+
+[[rule]]
 name = "relay-protocol"
 code = ["relay/src/proto.rs", "relay/src/rest.rs", "relay/src/ws.rs"]
 docs = ["SPEC.md", "relay/README.md"]

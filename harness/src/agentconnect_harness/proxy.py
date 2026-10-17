@@ -41,6 +41,7 @@ class RelayProxy:
         self.delivered: list[Frame] = []  # every deliver frame passed to the daemon
         self._forged: list[Frame] = []  # replies forged to the daemon
         self._sessions: set[_Session] = set()
+        self._gone = asyncio.Event()
         self._server: Server | None = None
         self.port = 0
 
@@ -51,6 +52,12 @@ class RelayProxy:
     async def start(self) -> None:
         self._server = await serve(self._handle, "127.0.0.1", 0, max_size=4 << 20, compression=None)
         self.port = int(next(iter(self._server.sockets)).getsockname()[1])
+
+    async def wait_no_sessions(self) -> None:
+        """Wait until every session has finished unwinding (for tests)."""
+        while self._sessions:
+            self._gone.clear()
+            await self._gone.wait()
 
     async def stop(self) -> None:
         await self.cut()
@@ -249,3 +256,4 @@ class RelayProxy:
         finally:
             self._sessions.discard(session)
             await client.close()
+            self._gone.set()

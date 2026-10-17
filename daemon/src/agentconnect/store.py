@@ -168,6 +168,12 @@ CREATE TABLE IF NOT EXISTS events (
     event_id TEXT,
     notified INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS feed (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    group_id TEXT,
+    payload TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS hops (
     group_id TEXT NOT NULL,
     msg_id TEXT NOT NULL,
@@ -712,6 +718,41 @@ class Store:
         )
         return cur.rowcount == 1
 
+    # -- SSE feed -----------------------------------------------------------
+
+    def feed_add(
+        self, key: str, group_id: str | None, payload: dict[str, Any], keep: int = 10_000
+    ) -> int | None:
+        """Append to the SSE feed; its ``seq`` is the SSE event id. ``None``
+        if ``key`` (a ``msg_id`` or ``event_id``) is already there. Only the
+        newest ``keep`` items are retained."""
+        cur = self._db.execute(
+            "INSERT OR IGNORE INTO feed (key, group_id, payload) VALUES (?, ?, ?)",
+            (key, group_id, json.dumps(payload, sort_keys=True)),
+        )
+        if cur.rowcount != 1:
+            return None
+        seq = int(cur.lastrowid or 0)
+        self._db.execute("DELETE FROM feed WHERE seq <= ?", (seq - keep,))
+        return seq
+
+    def feed_since(
+        self, after: int, group_id: str | None = None, limit: int = 10_000
+    ) -> list[tuple[int, str | None, dict[str, Any]]]:
+        rows = self._all(
+            "SELECT seq, group_id, payload FROM feed WHERE seq > ? "
+            "AND (? IS NULL OR group_id = ?) ORDER BY seq LIMIT ?",
+            after,
+            group_id,
+            group_id,
+            limit,
+        )
+        return [(int(r[0]), r[1], json.loads(r[2])) for r in rows]
+
+    def feed_last(self) -> int:
+        row = self._one("SELECT seq FROM sqlite_sequence WHERE name = 'feed'")
+        return 0 if row is None else int(row[0])
+
     def unnotified_events(self) -> list[dict[str, Any]]:
         """Recorded events the adapter has not accepted yet, oldest first."""
         rows = self._all(
@@ -738,11 +779,15 @@ class Store:
             "event_id": r[5],
         }
 
-    def events(self, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+    def events(
+        self, after: int = 0, limit: int = 200, group_id: str | None = None
+    ) -> list[dict[str, Any]]:
         rows = self._all(
             "SELECT seq, group_id, type, data, at, event_id FROM events WHERE seq > ? "
-            "ORDER BY seq LIMIT ?",
+            "AND (? IS NULL OR group_id = ?) ORDER BY seq LIMIT ?",
             after,
+            group_id,
+            group_id,
             limit,
         )
         return [self._event(r) for r in rows]

@@ -26,10 +26,16 @@ Example file::
     [api]
     socket = "~/.local/share/agentconnect/agentconnectd.sock"
     tcp_port = 0                    # > 0 serves on 127.0.0.1:<port> instead
+
+    [webhook]
+    callback_url = "http://127.0.0.1:8808/"   # where the webhook adapter POSTs
+    allow_remote = false            # opt in to a callback that isn't loopback
+    timeout_secs = 120              # per request; an agent turn may be slow
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import tomllib
 from collections.abc import Mapping
@@ -78,6 +84,9 @@ class Config:
     api_socket: Path | None = None
     api_tcp_port: int = 0
     relay_rest_url: str | None = None
+    webhook_url: str | None = None
+    webhook_allow_remote: bool = False
+    webhook_timeout: int = 120
 
     @property
     def relay_http(self) -> str:
@@ -146,7 +155,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "daemon.default_adapter",
         "default_adapter",
         "`none`",
-        "The adapter that new groups deliver to.",
+        "The adapter that new groups deliver to: `webhook` "
+        "([adapters/webhook.md](adapters/webhook.md)), `sse` (the event stream of "
+        "`GET /v0/events`, see [api.md](api.md#event-stream)) or `none`. With "
+        "`none`, received messages wait in the inbound queue. The A2A adapter is "
+        "not written yet.",
     ),
     ConfigKey(
         "daemon.keystore",
@@ -175,6 +188,26 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "When greater than 0, serve the local API on `127.0.0.1:<port>` instead of "
         "the socket (0 to 65535).",
     ),
+    ConfigKey(
+        "webhook.callback_url",
+        "webhook_url",
+        "none",
+        "Where the webhook adapter POSTs. Required when `default_adapter = "
+        '"webhook"`. Loopback unless `webhook.allow_remote` is set.',
+    ),
+    ConfigKey(
+        "webhook.allow_remote",
+        "webhook_allow_remote",
+        "`false`",
+        "Allow a `callback_url` that is not loopback. It must then use `https`.",
+    ),
+    ConfigKey(
+        "webhook.timeout_secs",
+        "webhook_timeout",
+        "`120`",
+        "How long the daemon waits for each webhook response (1 to 3600). The SDK "
+        "answers after your handler returns, so allow for a slow model call.",
+    ),
 )
 
 # Environment variables that don't override a single key.
@@ -192,6 +225,37 @@ def _check_relay_url(url: str) -> str:
     if parts.scheme == "ws" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
         msg = "plain ws:// is only allowed for loopback relays"
         raise ConfigError(msg)
+    return url
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def check_callback_url(url: str, allow_remote: bool) -> str:
+    """A webhook callback must be loopback unless ``allow_remote`` is set,
+    and a remote one must use ``https`` (message text travels in the body)."""
+    parts = urlsplit(url)
+    host = parts.hostname
+    if parts.scheme not in ("http", "https") or host is None or host == "":
+        msg = f"webhook callback_url must be http:// or https://, got {url!r}"
+        raise ConfigError(msg)
+    if "@" in parts.netloc:
+        msg = "webhook callback_url must not carry credentials"
+        raise ConfigError(msg)
+    loopback = _is_loopback(host)
+    if not loopback:
+        if not allow_remote:
+            msg = "webhook callback_url is not loopback; set webhook.allow_remote to allow it"
+            raise ConfigError(msg)
+        if parts.scheme != "https":
+            msg = "a remote webhook callback_url must use https"
+            raise ConfigError(msg)
     return url
 
 
@@ -231,6 +295,7 @@ def load_config(
     daemon = _section(data, "daemon")
     policy = _section(data, "policy")
     api = _section(data, "api")
+    webhook = _section(data, "webhook")
 
     relay_url = environ.get("AC_RELAY_URL") or _typed(relay, "url", str, DEFAULT_RELAY_URL)
     data_dir_raw = environ.get("AC_DATA_DIR") or _typed(daemon, "data_dir", str, "")
@@ -253,8 +318,19 @@ def load_config(
         "auto_approve": _typed(policy, "auto_approve", bool, False),
         "api_socket": Path(socket_raw).expanduser() if socket_raw else None,
         "api_tcp_port": port,
+        "webhook_url": _typed(webhook, "callback_url", str, "") or None,
+        "webhook_allow_remote": _typed(webhook, "allow_remote", bool, False),
+        "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
     }
     values.update(overrides)
+    if not 1 <= values["webhook_timeout"] <= 3600:  # noqa: PLR2004
+        msg = "webhook timeout_secs must be 1..3600"
+        raise ConfigError(msg)
+    if values["webhook_url"] is not None:
+        check_callback_url(values["webhook_url"], values["webhook_allow_remote"])
+    elif values["default_adapter"] == "webhook":
+        msg = 'default_adapter "webhook" needs webhook.callback_url'
+        raise ConfigError(msg)
     values["relay_url"] = _check_relay_url(values["relay_url"])
     if not values["relay_host"]:
         # The URL's authority without any userinfo (SPEC 8.1.1).

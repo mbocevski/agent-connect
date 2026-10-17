@@ -185,6 +185,19 @@ class PassThroughPolicy:
         return PolicyDecision.ALLOW
 
 
+def _text_of(body: dict[str, Any]) -> str:
+    """The text of an A2A message body (its text parts, joined), or of a
+    plain ``{"text": ...}`` body."""
+    parts = body.get("parts")
+    if isinstance(parts, list):
+        texts = [
+            str(p["text"]) for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)
+        ]
+        if texts:
+            return "\n".join(texts)
+    return str(body.get("text"))
+
+
 class RecordingAdapter:
     """Records deliveries and events in memory; for tests.
 
@@ -239,7 +252,7 @@ class RecordingAdapter:
 
     def texts(self, group_id: str | None = None) -> list[str]:
         return [
-            str(d.body.get("text"))
+            _text_of(d.body)
             for d in self.deliveries
             if d.kind == "a2a.message" and (group_id is None or d.group_id == group_id)
         ]
