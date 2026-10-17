@@ -23,6 +23,18 @@ from agentconnect_harness.cluster import Cluster, Node
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import RelayProcess, run_relay
 
+# Harness tests start and stop a real relay process and several daemons, so
+# setup and teardown alone can take seconds on a loaded CI runner. They get a
+# larger per-test ceiling than the 10 s unit-test default (TESTING.md); an
+# explicit @pytest.mark.timeout on a test still wins.
+HARNESS_TIMEOUT_SECS = 30
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if "harness" in item.path.parts and item.get_closest_marker("timeout") is None:
+            item.add_marker(pytest.mark.timeout(HARNESS_TIMEOUT_SECS))
+
 
 @pytest.fixture(scope="session")
 def relay(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RelayProcess]:
