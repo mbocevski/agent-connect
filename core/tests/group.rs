@@ -218,7 +218,7 @@ fn wrong_invite_secret_fails_mac_and_welcome() {
     assert_eq!(verified.display_name(), "b");
     assert_eq!(verified.mailbox_id(), b.client.instance().mailbox_id());
     assert_eq!(verified.instance_id(), b.client.instance().instance_id());
-    let out = ga.add_member(&a.client, verified, &inv, true).unwrap();
+    let out = ga.add_member(&a.client, &verified, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let wrapped = out.welcome.unwrap();
     assert_eq!(
@@ -272,6 +272,85 @@ fn join_request_for_another_invite_or_expired_is_rejected() {
     );
 }
 
+/// Review F7: a JoinRequest replayed after its joiner left must not re-add
+/// the joiner's certified identity as a leaf nobody controls.
+#[test]
+fn replayed_join_request_cannot_re_add_a_departed_member() {
+    let clock = clock();
+    let a = peer(1, &clock);
+    let b = peer(2, &clock);
+    let mut ga = a.client.create_group(NAME, PURPOSE).unwrap();
+    let inv = invite(&a);
+    let link = InviteLink::parse(&inv.url()).unwrap();
+    let req = b.client.create_join_request(link.secret(), "b").unwrap();
+    let v = a.client.verify_join_request(&req, &inv).unwrap();
+    let out = ga.add_member(&a.client, &v, &inv, true).unwrap();
+    ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
+    let mut gb = b
+        .client
+        .join_from_wrapped_welcome(
+            link.secret(),
+            &meta_for(&inv),
+            out.welcome.as_ref().unwrap(),
+        )
+        .unwrap();
+    let leave = gb.propose_leave(&b.client).unwrap();
+    ga.process(&a.client, &leave).unwrap();
+    let out = ga.commit_pending_proposals(&a.client).unwrap();
+    ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
+    assert_eq!(ga.members().unwrap().len(), 1);
+
+    // The relay replays B's JoinRequest while the invite still has uses.
+    assert_eq!(
+        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        Error::KeyPackageReused
+    );
+    // A copy verified before the first Add is refused as well.
+    assert_eq!(
+        ga.add_member(&a.client, &v, &inv, true).unwrap_err(),
+        Error::KeyPackageReused
+    );
+    assert_eq!(ga.members().unwrap().len(), 1);
+    assert!(!ga.has_pending_commit());
+}
+
+/// Review F8: a failed `add_member` must not use up the verified request.
+#[test]
+fn verified_join_request_survives_a_failed_add() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let c = peer(60, &clock);
+    let inv = invite(&peers[0]);
+    let req = c.client.create_join_request(inv.secret(), "c").unwrap();
+    let v = peers[0].client.verify_join_request(&req, &inv).unwrap();
+    groups[0].update(&peers[0].client).unwrap();
+    assert_eq!(
+        groups[0]
+            .add_member(&peers[0].client, &v, &inv, true)
+            .unwrap_err(),
+        Error::CommitPending
+    );
+    groups[0].discard_pending_commit(&peers[0].client).unwrap();
+    // The Add itself loses an epoch race and is rebuilt from the same request.
+    groups[0]
+        .add_member(&peers[0].client, &v, &inv, true)
+        .unwrap();
+    groups[0].discard_pending_commit(&peers[0].client).unwrap();
+    let out = groups[0]
+        .add_member(&peers[0].client, &v, &inv, true)
+        .unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
+    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    let gc = c
+        .client
+        .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), out.welcome.as_ref().unwrap())
+        .unwrap();
+    groups.push(gc);
+    assert_converged(&groups);
+}
+
 #[test]
 fn mailbox_must_match_key_package() {
     let clock = clock();
@@ -301,7 +380,7 @@ fn welcome_meta_must_match_invite_meta() {
     let inv = invite(&a);
     let req = b.client.create_join_request(inv.secret(), "b").unwrap();
     let verified = a.client.verify_join_request(&req, &inv).unwrap();
-    let out = ga.add_member(&a.client, verified, &inv, true).unwrap();
+    let out = ga.add_member(&a.client, &verified, &inv, true).unwrap();
     let wrong_meta = InviteMeta::expected(inv.secret().id(), NAME, "something else");
     assert_eq!(
         b.client
@@ -388,7 +467,7 @@ fn members_may_not_remove_or_change_policy_locally() {
     let v = peers[1].client.verify_join_request(&req, &inv).unwrap();
     assert_eq!(
         groups[1]
-            .add_member(&peers[1].client, v, &inv, true)
+            .add_member(&peers[1].client, &v, &inv, true)
             .unwrap_err(),
         Error::NotPermitted("this identity may not invite")
     );
@@ -741,7 +820,7 @@ fn sqlite_store_persists_across_reopen() {
     let link = InviteLink::parse(&inv.url()).unwrap();
     let req = b.create_join_request(link.secret(), "b").unwrap();
     let v = a.client.verify_join_request(&req, &inv).unwrap();
-    let out = ga.add_member(&a.client, v, &inv, true).unwrap();
+    let out = ga.add_member(&a.client, &v, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let gid = b
         .join_from_wrapped_welcome(

@@ -84,6 +84,23 @@ impl OwnCommits {
     }
 }
 
+/// Whether a KeyPackage (by `KeyPackageRef`) was already used in an Add
+/// this client merged, in any group: a KeyPackage is single-use (SPEC §6.2,
+/// RFC 9420 §16.8), so a replayed JoinRequest must not re-add a member.
+pub(crate) fn key_package_used<S: Store>(store: &S, kp_ref: &[u8]) -> Result<bool> {
+    Ok(store
+        .get_record(&group_key("key-package-used", kp_ref))?
+        .is_some())
+}
+
+/// Records KeyPackages used by a merged Add.
+pub(crate) fn mark_key_packages_used<S: Store>(store: &S, kp_refs: &[Vec<u8>]) -> Result<()> {
+    for r in kp_refs {
+        store.put_record(&group_key("key-package-used", r), Some(b"1"))?;
+    }
+    Ok(())
+}
+
 /// Deletes a group's records (with the group).
 pub(crate) fn delete_group<S: Store>(store: &S, group_id: &[u8]) -> Result<()> {
     store.put_record(&group_key("own-commits", group_id), None)
@@ -112,6 +129,10 @@ mod tests {
         assert_eq!(rec.discarded, vec![wire_hash(b"x")]);
         delete_group(store, gid).unwrap();
         assert!(OwnCommits::load(store, gid, 3).unwrap().pending.is_none());
+
+        assert!(!key_package_used(store, b"ref").unwrap());
+        mark_key_packages_used(store, &[b"ref".to_vec()]).unwrap();
+        assert!(key_package_used(store, b"ref").unwrap());
 
         store.put_record(b"junk", Some(b"not json")).unwrap();
         assert_eq!(

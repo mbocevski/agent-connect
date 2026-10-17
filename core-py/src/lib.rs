@@ -303,10 +303,11 @@ impl Sas {
     }
 }
 
-/// A JoinRequest that passed verification; consumed by `Client.add_member`.
+/// A JoinRequest that passed verification, for `Client.add_member` (which
+/// may be retried with it, e.g. after an `epoch_conflict`).
 #[pyclass(frozen, module = "agentconnect_core._native")]
 struct VerifiedJoinRequest {
-    inner: Mutex<Option<core::VerifiedJoinRequest>>,
+    inner: core::VerifiedJoinRequest,
     identity: String,
     instance_id: u64,
     display_name: String,
@@ -604,7 +605,7 @@ impl Client {
             instance_id: v.instance_id(),
             display_name: v.display_name().to_owned(),
             mailbox_id: v.mailbox_id().to_owned(),
-            inner: Mutex::new(Some(v)),
+            inner: v,
         })
     }
 
@@ -620,15 +621,9 @@ impl Client {
     ) -> PyResult<Bound<'py, PyDict>> {
         let out = py
             .detach(|| {
-                let req = request
-                    .inner
-                    .lock()
-                    .map_err(|_| core::Error::Internal("lock poisoned"))?
-                    .take()
-                    .ok_or(core::Error::NotPermitted("join request already used"))?;
                 with_client!(self, |c, groups| group(c, groups, group_id)?.add_member(
                     c,
-                    req,
+                    &request.inner,
                     &invite.0,
                     switch_floor
                 ))

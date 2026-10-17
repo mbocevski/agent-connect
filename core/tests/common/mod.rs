@@ -89,7 +89,7 @@ pub fn join(inviter: &Peer, group: &mut Group, joiner: &Peer) -> (Group, CommitO
     let req = agentconnect_core::JoinRequest::from_json(&req.to_json().unwrap()).unwrap();
     let verified = inviter.client.verify_join_request(&req, &inv).unwrap();
     let out = group
-        .add_member(&inviter.client, verified, &inv, true)
+        .add_member(&inviter.client, &verified, &inv, true)
         .unwrap();
     group
         .confirm_pending_commit(&inviter.client, &out.msg_id)

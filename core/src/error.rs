@@ -40,6 +40,10 @@ pub enum Error {
     /// A KeyPackage that fails validation (SPEC §6.2 step 3).
     #[error("invalid key package: {0}")]
     InvalidKeyPackage(&'static str),
+    /// The KeyPackage was already used in an Add (a replayed JoinRequest,
+    /// SPEC §6.2).
+    #[error("key package already used")]
+    KeyPackageReused,
     /// A missing or invalid `ac_instance_cert` (SPEC §3.3).
     #[error("invalid instance certificate: {0}")]
     InvalidCert(&'static str),

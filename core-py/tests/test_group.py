@@ -61,9 +61,16 @@ def join(inviter: ac.Client, gid: bytes, joiner: ac.Client) -> dict[str, Any]:
     verified = inviter.verify_join_request(request, invite)
     assert verified.mailbox_id == joiner.mailbox_id
     out = inviter.add_member(gid, verified, invite)
-    with pytest.raises(ac.AgentConnectError, match="already used"):
+    with pytest.raises(ac.AgentConnectError, match="already pending"):
         inviter.add_member(gid, verified, invite)
+    # A failed add leaves the verified request usable: rebuild after a discard.
+    inviter.discard_pending_commit(gid)
+    out = inviter.add_member(gid, verified, invite)
     inviter.confirm_pending_commit(gid, out["msg_id"])
+    with pytest.raises(ac.AgentConnectError, match="key package already used"):
+        inviter.add_member(gid, verified, invite)
+    with pytest.raises(ac.AgentConnectError, match="key package already used"):
+        inviter.verify_join_request(request, invite)
     welcome = out["welcome"]
     assert isinstance(welcome, bytes)
     assert joiner.join(link, invite_meta(invite), welcome) == gid

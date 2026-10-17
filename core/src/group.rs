@@ -379,6 +379,12 @@ impl<S: Store> Client<S> {
                 "mailbox_id != key package signature key",
             ));
         }
+        if records::key_package_used(
+            self.provider.records(),
+            &key_package_ref(self, &key_package)?,
+        )? {
+            return Err(Error::KeyPackageReused);
+        }
         Ok(VerifiedJoinRequest {
             invite_id: request.invite_id,
             display_name: request.display_name.clone(),
@@ -481,6 +487,8 @@ impl fmt::Debug for Group {
 struct Inspection {
     committer: MemberInfo,
     added: Vec<LeafInfo>,
+    /// `KeyPackageRef`s of the added KeyPackages.
+    added_refs: Vec<Vec<u8>>,
     removed: Vec<MemberInfo>,
     policy_changed: bool,
 }
@@ -516,6 +524,14 @@ fn process_error<E: fmt::Display>(e: ProcessMessageError<E>) -> Error {
         }
         e => mls(e),
     }
+}
+
+fn key_package_ref<S: Store>(client: &Client<S>, kp: &KeyPackage) -> Result<Vec<u8>> {
+    Ok(kp
+        .hash_ref(client.provider.crypto())
+        .map_err(mls)?
+        .as_slice()
+        .to_vec())
 }
 
 fn wire(msg: &MlsMessageOut) -> Result<Vec<u8>> {
@@ -681,6 +697,7 @@ impl Group {
         let current = check_group_context(self.mls.extensions())?;
         let committer = self.member_info(committer)?;
         let mut added = Vec::new();
+        let mut added_refs = Vec::new();
         let mut removals = Vec::new();
         let mut removed = Vec::new();
         let mut new_ctx = None;
@@ -692,6 +709,11 @@ impl Group {
                         return Err(Error::HpkeKeyLength);
                     }
                     added.push(validate_leaf(kp.leaf_node())?);
+                    let kp_ref = key_package_ref(client, kp)?;
+                    if records::key_package_used(client.provider.records(), &kp_ref)? {
+                        return Err(Error::Unauthorized("key package already used"));
+                    }
+                    added_refs.push(kp_ref);
                 }
                 Proposal::Remove(remove) => {
                     let index = remove.removed();
@@ -757,6 +779,7 @@ impl Group {
         Ok(Inspection {
             committer,
             added,
+            added_refs,
             removed,
             policy_changed,
         })
@@ -856,14 +879,19 @@ impl Group {
     /// members also moves from `free` to `mention` in the same commit
     /// (SPEC §9.1); pass `false` if the owner set the floor explicitly.
     ///
+    /// The request is only borrowed: after a failure (e.g. another commit
+    /// pending, or an `epoch_conflict` that discarded this one) the inviter
+    /// can retry with the same verified request.
+    ///
     /// # Errors
     ///
     /// [`Error::InviteMismatch`], [`Error::InviteExpired`],
-    /// [`Error::NotPermitted`], [`Error::CommitPending`], or an MLS error.
+    /// [`Error::KeyPackageReused`], [`Error::NotPermitted`],
+    /// [`Error::CommitPending`], or an MLS error.
     pub fn add_member<S: Store>(
         &mut self,
         client: &Client<S>,
-        request: VerifiedJoinRequest,
+        request: &VerifiedJoinRequest,
         invite: &Invite,
         switch_floor: bool,
     ) -> Result<CommitOut> {
@@ -872,6 +900,12 @@ impl Group {
         }
         if invite.is_expired(client.clock()) {
             return Err(Error::InviteExpired);
+        }
+        if records::key_package_used(
+            client.provider.records(),
+            &key_package_ref(client, &request.key_package)?,
+        )? {
+            return Err(Error::KeyPackageReused);
         }
         let ctx = check_group_context(self.mls.extensions())?;
         let me = client.instance.identity();
@@ -891,7 +925,7 @@ impl Group {
         } else {
             None
         };
-        let key_package = request.key_package;
+        let key_package = request.key_package.clone();
         guard(|| {
             commit!(self, client, Some(invite), |b| {
                 let b = b.propose_adds([key_package]);
@@ -1032,6 +1066,7 @@ impl Group {
         self.mls
             .merge_pending_commit(&client.provider)
             .map_err(mls)?;
+        records::mark_key_packages_used(client.provider.records(), &inspection.added_refs)?;
         OwnCommits {
             epoch: self.epoch(),
             confirmed: sent,
@@ -1210,6 +1245,7 @@ impl Group {
                 self.mls
                     .merge_staged_commit(&client.provider, *staged)
                     .map_err(mls)?;
+                records::mark_key_packages_used(client.provider.records(), &inspection.added_refs)?;
                 let summary = self.summary(inspection, had_pending)?;
                 Ok(if self_removed {
                     Event::Removed(summary)

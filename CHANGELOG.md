@@ -65,6 +65,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   contract data in `testdata/` (with the Matrix SAS emoji table) checked by
   `just contract`, and a coverage ratchet (`coverage-baseline.json`).
 
+### Changed
+
+- Core: `Group::add_member` borrows the `VerifiedJoinRequest`, and the
+  Python `VerifiedJoinRequest` is no longer used up by a failed
+  `add_member`, so an inviter can retry after `CommitPending` or an
+  `epoch_conflict`.
+
 ### Security
 
 - Core: an own commit is confirmed only by the relay's `accepted` for its
@@ -74,6 +81,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   was pending, so a stale own commit forked the instance and a malicious
   member could trigger a premature merge. A discarded own commit that comes
   back is reported as `OwnCommitLost` (re-sync needed).
+- Core: KeyPackages are single-use. Every client records the KeyPackage
+  refs of the Adds it merges and rejects a JoinRequest, a local Add or a
+  received Add that reuses one, so a replayed JoinRequest can no longer
+  re-add a departed member as a leaf nobody controls.
 - Dependency policy allows MPL-2.0 for the three `hpke-rs` crates only.
   Advisories RUSTSEC-2026-0329/0330/0331 in the OpenMLS libcrux provider are
   temporarily ignored, and releases are blocked until a fixed provider ships.

@@ -38,7 +38,7 @@ fn join(inviter: &C, group: &mut Group, joiner: &C) -> (Group, CommitOut) {
     .unwrap();
     let req = joiner.create_join_request(inv.secret(), "j").unwrap();
     let v = inviter.verify_join_request(&req, &inv).unwrap();
-    let out = group.add_member(inviter, v, &inv, true).unwrap();
+    let out = group.add_member(inviter, &v, &inv, true).unwrap();
     group.confirm_pending_commit(inviter, &out.msg_id).unwrap();
     let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
     let g = joiner
@@ -156,6 +156,53 @@ fn member_adding_without_invite_permission_is_rejected() {
         1,
         &bytes,
         &Error::Unauthorized("committer may not invite"),
+    );
+}
+
+/// Review F7, receiver side: a member that bypasses its own checks and
+/// re-adds a KeyPackage already used in an earlier Add is rejected by the
+/// others, who remember every KeyPackage they merged.
+#[test]
+fn re_add_of_a_used_key_package_is_rejected_by_receivers() {
+    let (cs, mut gs) = trio();
+    let clock = Arc::new(FakeClock::default());
+    let d = client(97, &clock);
+    let inv = Invite::create(
+        cs[0].rng(),
+        cs[0].clock(),
+        "r.example",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = d.create_join_request(inv.secret(), "d").unwrap();
+    let v = cs[0].verify_join_request(&req, &inv).unwrap();
+    let kp = v.key_package.clone();
+    let out = gs[0].add_member(&cs[0], &v, &inv, true).unwrap();
+    gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
+    for i in [1, 2] {
+        assert!(matches!(
+            gs[i].process(&cs[i], &out.commit),
+            Ok(Event::Commit(_))
+        ));
+    }
+    // D is removed; A then commits a raw Add of D's old KeyPackage.
+    let removal = gs[0].remove(&cs[0], d.instance().identity()).unwrap();
+    gs[0]
+        .confirm_pending_commit(&cs[0], &removal.msg_id)
+        .unwrap();
+    for i in [1, 2] {
+        assert!(matches!(
+            gs[i].process(&cs[i], &removal.commit),
+            Ok(Event::Commit(_))
+        ));
+    }
+    let bytes = raw_commit!(gs[0], cs[0], |b| b.propose_adds([kp]));
+    all_reject(
+        &cs,
+        &mut gs,
+        0,
+        &bytes,
+        &Error::Unauthorized("key package already used"),
     );
 }
 
