@@ -42,6 +42,12 @@ Example file::
     context_messages = 20
     frame_text = true
     reply_timeout = 600
+    [isolation]                     # optional: separate-OS-user mode (docs/isolation.md)
+    enabled = false
+    agent_dir = "/run/agentconnect"
+    group = "agentconnect"
+    agent_users = ["bot"]           # names or UIDs allowed on the socket
+    human_users = []                # also allowed to use the human token
 """
 
 from __future__ import annotations
@@ -106,6 +112,11 @@ class Config:
     a2a_context_messages: int = 20
     a2a_frame_text: bool = True
     a2a_reply_timeout: int = 600
+    isolation: bool = False
+    isolation_agent_dir: Path = Path("/run/agentconnect")
+    isolation_group: str = "agentconnect"
+    isolation_agent_users: tuple[str, ...] = ()
+    isolation_human_users: tuple[str, ...] = ()
 
     @property
     def a2a_enabled(self) -> bool:
@@ -129,7 +140,10 @@ class Config:
 
     @property
     def socket_path(self) -> Path:
-        return self.api_socket or self.data_dir / "agentconnectd.sock"
+        # Separate-OS-user mode: agents can't enter the data directory, so the
+        # socket lives in the agent directory (docs/isolation.md).
+        home = self.isolation_agent_dir if self.isolation else self.data_dir
+        return self.api_socket or home / "agentconnectd.sock"
 
     def with_overrides(self, **kw: Any) -> Config:
         return replace(self, **kw)
@@ -284,6 +298,46 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "`600`",
         "Seconds a facade request waits for the first reply from the group.",
     ),
+    ConfigKey(
+        "isolation.enabled",
+        "isolation",
+        "`false`",
+        "Separate-OS-user mode ([isolation.md](isolation.md)): the daemon runs as its "
+        "own user, checks the peer's UID on every connection, and serves the socket "
+        "and a copy of `api-token` from `isolation.agent_dir`. Needs the Unix socket "
+        "(no `api.tcp_port`) and refuses to start as root or with a data directory, "
+        "token or agent directory that others can read.",
+    ),
+    ConfigKey(
+        "isolation.agent_dir",
+        "isolation_agent_dir",
+        "`/run/agentconnect`",
+        "The directory agents use as their data directory (`AC_DATA_DIR`): the socket, "
+        "`api-token` and `webhook-secret`, group-readable by `isolation.group`. It must "
+        "be owned by the daemon's user, belong to that group and give others no access.",
+    ),
+    ConfigKey(
+        "isolation.group",
+        "isolation_group",
+        "`agentconnect`",
+        "The group (name or GID) that owns the socket and the agent directory. Agent "
+        "users join it.",
+    ),
+    ConfigKey(
+        "isolation.agent_users",
+        "isolation_agent_users",
+        "`[]`",
+        "Users (names or UIDs) allowed to connect with the agent token, besides the "
+        "daemon's own user. Any other UID is logged and refused.",
+    ),
+    ConfigKey(
+        "isolation.human_users",
+        "isolation_human_users",
+        "`[]`",
+        "Users (names or UIDs), besides the daemon's own user, from whom the human "
+        "token is accepted, such as `0` for `sudo agentconnect ...`. The human token "
+        "is still required. A user can't be in both lists.",
+    ),
 )
 
 # Environment variables that don't override a single key.
@@ -390,6 +444,29 @@ def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _users(table: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    raw = _typed(table, key, list, [])
+    if not all(isinstance(u, str | int) and not isinstance(u, bool) for u in raw):
+        msg = f"isolation.{key} must be a list of user names or UIDs"
+        raise ConfigError(msg)
+    return tuple(str(u) for u in raw)
+
+
+def _isolation(data: Mapping[str, Any]) -> dict[str, Any]:
+    table = _section(data, "isolation")
+    group = table.get("group", "agentconnect")
+    if not isinstance(group, str | int) or isinstance(group, bool) or group == "":
+        msg = "isolation.group must be a group name or GID"
+        raise ConfigError(msg)
+    return {
+        "isolation": _typed(table, "enabled", bool, False),
+        "isolation_agent_dir": _path(table, "agent_dir") or Path("/run/agentconnect"),
+        "isolation_group": str(group),
+        "isolation_agent_users": _users(table, "agent_users"),
+        "isolation_human_users": _users(table, "human_users"),
+    }
+
+
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
@@ -439,7 +516,7 @@ def load_config(
         "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
         "sse_retention": _typed(sse, "retention_secs", int, 3600),
     }
-    values.update(_a2a(data))
+    values.update(_a2a(data) | _isolation(data))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"

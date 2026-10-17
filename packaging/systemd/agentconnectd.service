@@ -1,0 +1,46 @@
+# agentconnectd as its own OS user (separate-OS-user mode, docs/isolation.md).
+# Install to /etc/systemd/system/ after the sysusers.d and tmpfiles.d snippets.
+
+[Unit]
+Description=AgentConnect daemon (own OS user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentconnect
+Group=agentconnect
+Environment=AC_CONFIG=/etc/agentconnect/config.toml
+ExecStart=/usr/bin/agentconnect daemon run
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+
+# /var/lib/agentconnect: keys, databases and both tokens, private to the user.
+StateDirectory=agentconnect
+StateDirectoryMode=0700
+# /run/agentconnect: the socket and the agent-scope files, for the group.
+RuntimeDirectory=agentconnect
+RuntimeDirectoryMode=0750
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

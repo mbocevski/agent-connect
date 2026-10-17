@@ -10,6 +10,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon
+  runs as its own user, so agents with a shell under another user can't read
+  the human token, the keys or the data directory. The socket and copies of
+  `api-token` and `webhook-secret` live in a group-readable agent directory;
+  each connection's peer UID is checked (`SO_PEERCRED` on Linux,
+  `getpeereid` on macOS) against `isolation.agent_users`, and the human
+  token is accepted only from the daemon's own UID or
+  `isolation.human_users` (`403 peer_refused`). The daemon refuses to start
+  as root, on TCP, or with a data directory, token or agent directory that
+  is too open. The human runs the human-only commands with
+  `sudo -u agentconnect agentconnect ...`. `packaging/` has a systemd unit,
+  sysusers.d and tmpfiles.d snippets, a sudoers drop-in and a launchd plist.
+  See `docs/isolation.md`.
 - Linux arm64 and macOS arm64 support. CI runs the fast tier on both and
   builds the relay container image for `linux/amd64` and `linux/arm64`.
   Releases add an aarch64 manylinux 2.28 `agentconnect-core` wheel, an

@@ -56,6 +56,11 @@ relay.
 
 - Never give an agent the human token, and never let an agent run those
   commands for the human.
+- When the daemon runs as its own OS user ([isolation.md](isolation.md)),
+  run the human commands as that user:
+  `sudo -u agentconnect agentconnect approvals approve <request_id> --config
+  /etc/agentconnect/config.toml`. `daemon run` refuses to start (exit 2) when
+  that mode's permission checks fail.
 - `verify` is interactive on purpose. It has no `--yes`, and EOF on stdin
   counts as "no answer" (exit 3, nothing changed).
 - Everything else uses the api token and is fine for agents. When an LLM agent

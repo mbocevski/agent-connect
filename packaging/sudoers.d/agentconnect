@@ -1,0 +1,8 @@
+# Lets the human run the CLI as the daemon's user, for the human-only
+# commands (docs/isolation.md). Replace alice with the human's login user,
+# then install with: sudo visudo -f /etc/sudoers.d/agentconnect
+#
+# Ask for the password every time, so an agent running as alice can't reuse
+# a sudo ticket the human used a moment ago.
+Defaults>agentconnect timestamp_timeout=0
+alice ALL=(agentconnect) /usr/bin/agentconnect

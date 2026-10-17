@@ -18,6 +18,11 @@ checks, so those endpoints refuse the agent token. Hand only ``api-token``
 to agent tooling. (Both files are readable by the same OS user; the split
 keeps agent integrations from holding the human capability by default, it is
 not a sandbox.)
+
+Separate-OS-user mode (:mod:`agentconnect.isolation`): the socket is opened
+to an agent group, every connection's peer UID is checked against an
+allowlist, and the human token is accepted only from the daemon's own UID or
+a configured human UID.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from typing import Any
 
 from agentconnect import log
 from agentconnect.daemon import HUMAN_ONLY_KINDS, Daemon, DaemonError, new_msg_id
+from agentconnect.isolation import PeerGate
 from agentconnect.keystore import write_private
 from agentconnect.relay import RelayError
 from agentconnect.shapes import Opt
@@ -439,6 +445,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (403, "human_only", "The operation needs the human token."),
     (
         403,
+        "peer_refused",
+        "Separate-OS-user mode: the caller's OS user may not use the socket, or may "
+        "not use the human token (docs/isolation.md).",
+    ),
+    (
+        403,
         "forbidden",
         "The daemon refused: the owner must hand over first, or a browser request "
         "reached the TCP listener.",
@@ -484,8 +496,10 @@ def _int(body: dict[str, Any], key: str, default: int) -> int:
 class ApiServer:
     """Serves the control API for one :class:`Daemon`."""
 
-    def __init__(self, daemon: Daemon) -> None:
+    def __init__(self, daemon: Daemon, gate: PeerGate | None = None) -> None:
         self.daemon = daemon
+        # Peer-credential checks; a no-op unless isolation.enabled.
+        self.gate = gate if gate is not None else PeerGate.from_config(daemon.config)
         data_dir = daemon.config.data_dir
         self.tokens = {
             "agent": load_token(data_dir / API_TOKEN_FILE),
@@ -639,6 +653,8 @@ class ApiServer:
         is_agent = hmac.compare_digest(token.encode(), self.tokens["agent"].encode())
         if not (is_human or is_agent):
             raise ApiError(401, "auth_failed", "invalid token")
+        if is_human and not self.gate.human_allowed():
+            raise ApiError(403, "peer_refused", "the human token is not accepted from this user")
         if human and not is_human:
             raise ApiError(403, "human_only", "this operation needs the human token")
         return "human" if is_human else "agent"
@@ -682,6 +698,9 @@ class ApiServer:
             writer.close()  # also when the handler is cancelled mid-request
 
     async def _serve_one(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if not self.gate.admit(writer):
+            await self._reply(writer, 403, {"code": "peer_refused", "message": "user refused"})
+            return
         if self._connections >= MAX_CONNECTIONS:
             await self._reply(writer, 503, {"code": "busy", "message": "too many connections"})
             return
@@ -791,6 +810,7 @@ class ApiServer:
             finally:
                 os.umask(old)
             path.chmod(0o600)
+            self.gate.publish(path)  # isolation: 0660 for the agent group
             self.address = path
         LOG.info("api_listening", transport="tcp" if cfg.api_tcp_port else "unix")
 

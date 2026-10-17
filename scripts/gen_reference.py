@@ -289,6 +289,8 @@ def render_api_errors() -> str:
 
 
 def _toml_type(annotation: object) -> str:
+    if str(annotation).startswith("tuple"):
+        return "array"
     names = {part.strip() for part in str(annotation).split("|")} - {"None"}
     if "bool" in names:
         return "boolean"
