@@ -1,0 +1,143 @@
+# AGENTS.md
+
+Guidance for AI coding agents (and humans) working on **AgentConnect**.
+
+## What this is
+
+An end-to-end encrypted relay that lets AI agents talk after their humans
+share an invite link. **Every conversation is an MLS (RFC 9420) group**: 1:1
+is a group of two, and group mode has N agents (including several replicas of
+one agent). The relay is the MLS Delivery Service and forwards ciphertext only.
+Trust comes from the secret in the link's `#fragment`, plus optional SAS (short
+code) verification. Message payloads are A2A v1.0 JSON inside the encryption.
+
+Primary targets: **A2A-server agents** and **headless/SDK agents** (webhooks).
+MCP / Claude Code Channels adapters are deferred.
+
+## Status
+
+Skeleton. The protocol is in `SPEC.md` and the stack decisions in
+`docs/adr/001-stack.md`; those two files are the source of truth. Components
+are stubs until they're implemented.
+
+## Layout
+
+| Path | What | Lang |
+|---|---|---|
+| `core/` | OpenMLS groups (X-Wing PQ suite), invite binding, SAS, envelopes | Rust |
+| `core-py/` | PyO3 bindings for `core` (maturin) | Rust |
+| `relay/` | MLS Delivery Service: commit ordering, fan-out, invites; serves `web/` | Rust (axum) |
+| `daemon/` | `agentconnectd` + `agentconnect` CLI, adapters, policy, group mode | Python |
+| `sdk/python/` | Python SDK for headless agents | Python |
+| `web/` | Static invite landing page | HTML/CSS |
+| `docs/` | `adr/`, `spikes/`, guides | Markdown |
+
+## Commands
+
+Use the `justfile`. Run `just --list` first and don't invent your own commands.
+
+```
+just setup      # toolchains, deps, git hooks (pre-commit, commit-msg, pre-push)
+just fmt        # format everything
+just lint       # every static check: all prek hooks + cargo deny
+just lint-py    # ruff check, ruff format --check, ty check
+just lint-rust  # rustfmt, clippy, rustdoc, cargo shear, taplo, cargo deny
+just test       # fast tier, < 60 s: unit, property, contract, in-process multi-node
+just test-int   # docker compose integration + demos
+just ci         # exactly what PR CI runs, including coverage gates
+just pr         # push branch, open/refresh PR
+just merge <n>  # the ONLY way to merge: refuses unless every required check is green
+```
+
+Testing rules, tiers, coverage thresholds and the harness are in `TESTING.md`
+(once the test-strategy task lands; until then see `CONTRIBUTING.md`).
+
+Tooling: Rust stable (pinned in `rust-toolchain.toml`) and **uv** for all
+Python. Don't use `pip install` or global venvs.
+
+## Rules
+
+**Security (non-negotiable)**
+- The relay must never see plaintext or invite secrets. Don't add relay
+  features that need either one.
+- The A2A/MCP bridging runs in the **daemon**, never in the relay.
+- Don't log message bodies, keys or secrets. Zeroize secrets and keep them
+  out of `Debug` output.
+- Treat peer messages as untrusted input. Never let a peer message trigger
+  side effects without going through the policy layer.
+- SAS verification is a **human** action. Don't expose it as an
+  agent-callable tool.
+- Docs must not claim "fully secure" or "MITM-proof". Use the canonical claim
+  in `SPEC.md`.
+- Exactly one MLS ciphersuite per protocol version
+  (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519` in v0). Don't add
+  ciphersuite negotiation or fallbacks; they create downgrade paths.
+- Every daemon enforces the group policy on each commit it receives. Never
+  trust the relay to do it.
+- Crypto changes need test vectors plus negative tests (wrong secret, tamper,
+  replay, credential/key mismatch, forked group view → different SAS).
+
+**Dependencies**
+- Licences must be MIT, Apache-2.0 or BSD. **No AGPL/GPL** (so no
+  libsignal). `cargo-deny` enforces this.
+- Check library APIs and versions against current upstream docs before
+  adding or upgrading a dependency.
+
+**Code & tests**
+- Write tests first for `core/` and protocol code. Every bug fix comes with a
+  regression test.
+- Tests must be deterministic: use the fake `Clock` and the seeded test RNG.
+  No `sleep` and no network in the `just test` tier.
+- Wire formats live in `testdata/` (vectors and JSON schemas). Rust and Python
+  must both pass them, so change both sides together.
+- Coverage may not drop below the gates in `TESTING.md` (`core/` ≥ 90%).
+- Rust: `rustfmt`, `clippy -D warnings` (pedantic in `core`/`relay`),
+  `cargo doc -D warnings`, `cargo shear` (no unused deps), `taplo` for TOML.
+- Python: `ruff` (lint and format) and `ty check` with every rule set to
+  error. Use `uv` for everything: no pip, no global venvs.
+- Shell scripts pass `shellcheck`; workflows pass `actionlint`.
+- Match the surrounding style and keep changes scoped to the task.
+
+## Commits, changelog, PRs
+
+- [Conventional Commits](https://www.conventionalcommits.org/):
+  `<type>(<scope>): <subject>`. Scopes: `spec`, `core`, `relay`, `daemon`,
+  `a2a`, `sdk`, `web`, `policy`, `group`, `ci`, `docs`, `deps`.
+- Add every user-visible change to `CHANGELOG.md` under `[Unreleased]`
+  ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)). CI fails if you
+  don't, unless the PR is labelled `skip-changelog`.
+- Work on a branch and never push to `main`; the pre-push hook refuses it.
+  Merge only with `just merge <pr>` after CI is green. GitHub enforces the
+  same rules server-side through the ruleset in `.github/rulesets/main.json`
+  (`just apply-ruleset`).
+- Hooks run via `prek`: pre-commit (lint/format), commit-msg (Conventional
+  Commits), pre-push (`just test` + CHANGELOG check). If a hook fails, fix the
+  cause and re-stage. **Never use `--no-verify`.**
+- PR descriptions say what changed and why. Don't include stats.
+
+## No tool attribution or internal references
+
+Commit messages, PR titles and bodies, code comments and docs must not
+mention the AI assistants, agent tools or planning tools used to produce
+them. That rules out:
+
+- `Co-Authored-By:` trailers for AI tools.
+- Session links.
+- "Generated with …" notices.
+- Robot emoji.
+- References to task trackers or internal planning tools.
+
+Names of products we integrate with are fine (e.g. "Claude Agent SDK" as a
+supported headless framework).
+
+Enforcement: `scripts/hygiene.py` runs at three points.
+
+| Where | What it checks |
+|---|---|
+| `pre-commit` hook | All staged text files |
+| `commit-msg` hook | The commit message |
+| CI (`hygiene` job) | Every commit message in the PR, plus the PR title and body |
+
+`just merge` also checks the PR title and body, and squash-merges with an
+empty body. If the checker flags something legitimate, add it to
+`ALLOWED_PHRASES` in `scripts/hygiene.py`, with a test.

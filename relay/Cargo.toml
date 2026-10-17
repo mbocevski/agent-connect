@@ -1,0 +1,23 @@
+[package]
+name = "agentconnect-relay"
+description = "AgentConnect relay: MLS Delivery Service, mailboxes and invite registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+agentconnect-core.workspace = true
+axum.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[lints]
+workspace = true

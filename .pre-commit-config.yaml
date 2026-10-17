@@ -1,0 +1,140 @@
+# Run with prek (`just setup` installs all hook types). Compatible with pre-commit.
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+default_stages: [pre-commit]
+
+repos:
+  - repo: builtin
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-added-large-files
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/ComPWA/taplo-pre-commit
+    rev: v0.9.3
+    hooks:
+      - id: taplo-format
+      # Default schema catalogs fail to parse with taplo 0.10 (SchemaStore format
+      # change), so lint syntax/structure only.
+      - id: taplo-lint
+        args: []
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: v1.7.12.25
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.51.1
+    hooks:
+      - id: typos
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args:
+          - --strict
+          - --scopes=spec,core,relay,daemon,a2a,sdk,web,policy,group,ci,docs,deps
+          - feat
+          - fix
+          - docs
+          - test
+          - refactor
+          - perf
+          - build
+          - ci
+          - chore
+          - revert
+          - style
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: cargo fmt --all --check
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        entry: cargo clippy --workspace --all-targets --locked -- -D warnings
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-doc
+        name: cargo doc (deny warnings)
+        language: system
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --no-deps --locked --quiet
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-shear
+        name: cargo shear (unused dependencies)
+        language: system
+        entry: cargo shear
+        files: (Cargo\.toml|\.rs)$
+        pass_filenames: false
+      - id: ty
+        name: ty check
+        language: system
+        entry: uv run --all-packages --frozen ty check
+        types: [python]
+        pass_filenames: false
+
+      - id: no-tool-refs
+        name: no AI-tool attribution / tooling references
+        language: system
+        entry: uv run --frozen python scripts/hygiene.py files
+        types: [text]
+      - id: no-tool-refs-msg
+        name: commit message has no AI-tool attribution
+        language: system
+        entry: uv run --frozen python scripts/hygiene.py msg
+        stages: [commit-msg]
+
+      # pre-push gates (see CONTRIBUTING.md)
+      - id: no-push-main
+        name: refuse direct push to main
+        language: script
+        entry: scripts/hooks/no-push-main.sh
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+      - id: changelog
+        name: CHANGELOG [Unreleased] updated
+        language: script
+        entry: scripts/check-changelog.sh
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+      - id: fast-tests
+        name: just test (fast tier)
+        language: system
+        entry: just test
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false

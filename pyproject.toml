@@ -1,0 +1,64 @@
+# uv workspace root (virtual: not a package itself).
+
+[tool.uv.workspace]
+members = ["core-py", "daemon", "sdk/python"]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.17.1",
+    # ty is pre-1.0: pin exactly and bump deliberately (Renovate).
+    "ty==0.0.89",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "ASYNC", "PT", "N", "PL"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agentconnect", "agentconnect_core", "agentconnect_sdk"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "PLR2004"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = [
+    "core-py/python",
+    "core-py/tests",
+    "daemon/src",
+    "daemon/tests",
+    "sdk/python/src",
+    "sdk/python/tests",
+    "scripts",
+]
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.pytest.ini_options]
+testpaths = ["core-py/tests", "daemon/tests", "sdk/python/tests", "scripts/tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
+asyncio_mode = "auto"
+timeout = 10
+markers = ["quarantine: known-flaky test; excluded from gating runs (see TESTING.md)"]
+
+[tool.coverage.run]
+branch = true
+source = ["agentconnect", "agentconnect_sdk"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

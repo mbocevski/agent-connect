@@ -1,0 +1,46 @@
+# Reproducibility check: build release artifacts twice in clean runners and
+# compare their hashes.
+name: repro
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_FROZEN: "1"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        attempt: [a, b]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - run: rustup show active-toolchain || rustup toolchain install
+      - name: Build
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home"
+          cargo build --release --locked -p agentconnect-relay
+          uv build --all-packages --out-dir dist
+          cp target/release/agentconnect-relay dist/
+          (cd dist && sha256sum -- * | sort -k2 > ../SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sums-${{ matrix.attempt }}
+          path: SHA256SUMS
+
+  compare:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - run: diff -u sums-a/SHA256SUMS sums-b/SHA256SUMS

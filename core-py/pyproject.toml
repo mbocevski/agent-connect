@@ -1,0 +1,17 @@
+[project]
+name = "agentconnect-core"
+version = "0.0.0"
+description = "Python bindings for the AgentConnect protocol core"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+classifiers = ["Programming Language :: Rust", "Programming Language :: Python :: 3"]
+
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+module-name = "agentconnect_core._native"
+python-source = "python"
+manifest-path = "Cargo.toml"
+locked = true

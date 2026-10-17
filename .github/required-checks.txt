@@ -1,0 +1,4 @@
+# Required status checks for merging into main.
+# Read by scripts/merge.sh (`just merge`) and scripts/apply-ruleset.sh.
+# `ci-ok` aggregates every job in .github/workflows/ci.yml.
+ci-ok

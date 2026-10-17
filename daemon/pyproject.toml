@@ -1,0 +1,18 @@
+[project]
+name = "agentconnect"
+version = "0.0.0"
+description = "AgentConnect daemon (agentconnectd) and CLI"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = ["agentconnect-core", "typer>=0.27.3"]
+
+[project.scripts]
+agentconnect = "agentconnect.cli:app"
+
+[tool.uv.sources]
+agentconnect-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14"]
+build-backend = "uv_build"
