@@ -10,7 +10,9 @@ fi
 
 git push -u origin "$branch"
 
-if gh pr view "$branch" --json url --jq .url 2>/dev/null; then
+open_url="$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // empty')"
+if [[ -n "$open_url" ]]; then
+    echo "$open_url"
     exit 0
 fi
 gh pr create --fill --base main --head "$branch"
