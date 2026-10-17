@@ -38,7 +38,6 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Spike validating OpenMLS 0.9 with post-quantum hybrid ciphersuites
   (`spikes/mls-xwing`), with findings and decisions in
   `docs/spikes/mls-xwing.md`.
-
 - Protocol specification v0 draft (`SPEC.md`): MLS groups with a
   post-quantum hybrid ciphersuite (ML-KEM-768 + X25519, MLS WG draft),
   invite links with AEAD-wrapped Welcomes, SAS verification, relay Delivery
@@ -67,6 +66,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Protocol: `SPEC.md` now states as normative text what the core does
+  where it was silent: when HPKE key lengths are checked and that parent
+  nodes are included (§3.1), canonical JCS with no unknown fields for
+  policy, meta and certificates (§3.2, §3.3), invite URL parsing rules
+  (§4.1), the fingerprint format (§2), single-use KeyPackages (§6.2),
+  own-commit confirmation, pending-commit handling and the grace window
+  (§8.3), the envelope epoch check (§7.1), policy defaults and the floor
+  switch (§9.1), and Add/Remove authorisation (§9.2). Open questions that
+  need a decision are listed in §15.
 - Relay: the frame limit is now 2 MiB (SPEC §8.3), so an application
   message padded to the 1 MiB bucket fits once base64url-encoded in an
   envelope. Before, anything above about 786 KiB was refused as

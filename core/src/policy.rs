@@ -153,9 +153,7 @@ pub enum Role {
 }
 
 impl GroupPolicy {
-    /// The SPEC §9.1 defaults for a new group owned by `owner`. SPEC doesn't
-    /// give defaults for `invite` and `remove`; both default to `owner`, the
-    /// most restrictive choice.
+    /// The SPEC §9.1 defaults for a new group owned by `owner`.
     #[must_use]
     pub fn default_for(owner: &str) -> Self {
         Self {
@@ -279,14 +277,13 @@ pub(crate) struct CommitFacts {
 
 /// Checks a commit against the policy in force at its epoch (SPEC §9.2).
 ///
-/// Interpretations where SPEC is silent (all conservative):
-/// - Receivers can't tell which instance created an invite, so an Add is
-///   allowed if the committer's identity satisfies `invite` now, or if the
-///   added identity is the committer's own (another replica).
+/// The rules of SPEC §9.1–§9.2:
+/// - An Add is allowed if the committer's identity satisfies `invite`, or
+///   if the added identity is the committer's own (another replica).
 /// - Removing the owner's instances needs the owner, unless it's a leave.
-/// - The SPEC §9.1 floor switch (`free` → `mention` in the commit that grows
-///   the group past two members) is accepted from any committer allowed to
-///   make that Add, since SPEC asks the inviter's daemon to do it.
+/// - The floor switch (`free` → `mention` in the commit that grows the
+///   group past two instances) is accepted from any committer allowed to
+///   make that Add.
 pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()> {
     let committer = facts.committer.as_str();
     for added in &facts.adds {
