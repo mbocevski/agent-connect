@@ -10,15 +10,17 @@ use axum::response::Response;
 use crate::auth::{random_bytes, verify_ws_auth};
 use crate::proto::{ClientFrame, ErrorCode, ServerFrame, b64_encode, log_tag, parse_client_frame};
 use crate::relay::{Relay, RelayError};
-use crate::store::Store;
+use crate::store::{DEFAULT_FRAME_MAX, Store};
 
 /// How long a client has to answer the challenge.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Messages sent to a connection per storage round trip.
 const BATCH: u32 = 256;
-/// Transport-level cap. The protocol limit (`Limits::frame_max`) is enforced
-/// per frame with a `too_large` error; this only stops absurd allocations.
-const HARD_MAX_MESSAGE: usize = 4 << 20;
+/// Transport-level cap (WebSocket message and frame size). The protocol limit
+/// (`Limits::frame_max`, 2 MiB by default) is enforced per frame with a
+/// `too_large` error; this only stops absurd allocations, so it must stay
+/// above the protocol limit.
+const HARD_MAX_MESSAGE: usize = 2 * DEFAULT_FRAME_MAX;
 
 /// Upgrade handler.
 pub async fn ws_handler<S: Store>(

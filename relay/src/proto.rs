@@ -546,7 +546,10 @@ mod tests {
             ),
         ];
         for f in &frames {
-            assert!(parse_client_frame(f, 1 << 20).is_ok(), "{f}");
+            assert!(
+                parse_client_frame(f, crate::store::DEFAULT_FRAME_MAX).is_ok(),
+                "{f}"
+            );
         }
         let mut join = env(Kind::JoinRequest);
         join.group_id = None;
@@ -556,7 +559,7 @@ mod tests {
             serde_json::to_string(&join).unwrap()
         );
         assert!(matches!(
-            parse_client_frame(&j, 1 << 20),
+            parse_client_frame(&j, crate::store::DEFAULT_FRAME_MAX),
             Ok(ClientFrame::Join { .. })
         ));
     }
@@ -587,7 +590,10 @@ mod tests {
             r#"{{"t":"send","env":{}}}"#,
             serde_json::to_string(&e).unwrap()
         );
-        assert_eq!(code(&f, 1 << 20), ErrorCode::BadRequest);
+        assert_eq!(
+            code(&f, crate::store::DEFAULT_FRAME_MAX),
+            ErrorCode::BadRequest
+        );
     }
 
     #[test]

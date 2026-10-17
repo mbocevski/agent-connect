@@ -1,0 +1,1397 @@
+//! MLS groups: creation, joining, membership changes, policy enforcement and
+//! application messages (SPEC §5–§9, §11).
+
+use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Arc;
+
+use openmls::group::{MlsGroup, ProcessedWelcome, StagedCommit};
+use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
+use openmls::prelude::{
+    BasicCredential, ContentType, CredentialWithKey, GroupId, KeyPackage, LeafNodeIndex,
+    MlsGroupStateError, MlsMessageBodyIn, MlsMessageIn, MlsMessageOut,
+    PURE_CIPHERTEXT_WIRE_FORMAT_POLICY, ProcessMessageError, ProcessedMessageContent, Proposal,
+    ProtocolMessage, Sender, ValidationError, WireFormat,
+};
+use openmls_traits::OpenMlsProvider as _;
+use serde::{Deserialize, Serialize};
+
+use crate::clock::Clock;
+use crate::encoding::{b64, hex};
+use crate::error::{Error, Result, mls, storage};
+use crate::identity::Instance;
+use crate::invite::{Invite, InviteMeta, InviteSecret};
+use crate::join::{JoinRequest, check_display_name, join_request_mac};
+use crate::mls::{
+    CS, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities, check_group_context,
+    check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
+    group_context_extensions, guard, join_config, join_config_with_padding, leaf_extensions,
+    leaf_mailbox, validate_key_package, validate_leaf,
+};
+use crate::padding::bucket_for;
+use crate::policy::{
+    CommitFacts, Floor, GroupMeta, GroupPolicy, OWNER_MUST_TRANSFER, Removal, authorize,
+};
+use crate::provider::{Provider, Store};
+use crate::records::{self, OwnCommits, PendingRecord, PreviousMembers, wire_hash};
+use crate::rng::Rng;
+use crate::sas::Sas;
+
+/// One instance's MLS state: storage, randomness, its signing key and a
+/// clock. Groups are loaded from and written through to its store.
+pub struct Client<S: Store> {
+    provider: Provider<S>,
+    instance: Instance,
+    clock: Arc<dyn Clock>,
+}
+
+impl<S: Store> fmt::Debug for Client<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("instance", &self.instance)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A member instance, as seen in the group's ratchet tree.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MemberInfo {
+    /// MLS leaf index.
+    pub leaf_index: u32,
+    /// `ac:v0:…` identity.
+    pub identity: String,
+    /// Instance id from the instance certificate.
+    pub instance_id: u64,
+    /// Relay mailbox id derived from the leaf signature key.
+    pub mailbox_id: String,
+}
+
+impl MemberInfo {
+    fn from_leaf(leaf_index: u32, info: &LeafInfo) -> Self {
+        Self {
+            leaf_index,
+            identity: info.identity.clone(),
+            instance_id: info.instance_id,
+            mailbox_id: leaf_mailbox(info),
+        }
+    }
+
+    /// The instance id as 16 lowercase hex characters, as in inner messages.
+    #[must_use]
+    pub fn instance_id_hex(&self) -> String {
+        hex(&self.instance_id.to_be_bytes())
+    }
+}
+
+/// Relay fan-out hints for a commit (SPEC §7.1 `routing`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Routing {
+    /// Mailboxes added by the commit.
+    pub add: Vec<String>,
+    /// Mailboxes removed by the commit.
+    pub remove: Vec<String>,
+}
+
+/// A commit created by this instance. It stays **pending** until the relay
+/// confirms it (SPEC §8.3): call [`Group::confirm_pending_commit`] with the
+/// `msg_id` of the relay's `accepted` frame, or let [`Group::process`]
+/// confirm it when the fan-out delivers these exact bytes back. Call
+/// [`Group::discard_pending_commit`] only when the relay rejected the send
+/// (`epoch_conflict` or another error frame for this `msg_id`); after a
+/// timeout, resend the same bytes under the same `msg_id` instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitOut {
+    /// The serialised MLS commit (`kind: commit`).
+    pub commit: Vec<u8>,
+    /// The envelope `msg_id` to send the commit under (base64url of 16
+    /// random bytes). Only an `accepted` for this id confirms the commit.
+    pub msg_id: String,
+    /// The epoch the commit was built in (`env.epoch`).
+    pub epoch: u64,
+    /// Routing hints for the envelope.
+    pub routing: Routing,
+    /// The `WrappedWelcome` for an added member. Send it only after the
+    /// commit is confirmed: a Welcome for a rejected commit is useless.
+    pub welcome: Option<Vec<u8>>,
+}
+
+/// What a merged commit changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitSummary {
+    /// The new epoch.
+    pub epoch: u64,
+    /// Who committed.
+    pub committer: MemberInfo,
+    /// Added instances.
+    pub added: Vec<MemberInfo>,
+    /// Removed instances.
+    pub removed: Vec<MemberInfo>,
+    /// Whether `ac_group_policy` changed.
+    pub policy_changed: bool,
+    /// Whether this commit (another member's, at the epoch of this
+    /// instance's own pending commit) won the epoch: the pending commit was
+    /// discarded and should be rebuilt if still needed (SPEC §8.3).
+    pub discarded_own_pending: bool,
+}
+
+impl CommitSummary {
+    /// The routing hints this commit should have carried, to compare with
+    /// the envelope's `routing` (SPEC §7.1, `relay_misbehaviour`).
+    #[must_use]
+    pub fn routing(&self) -> Routing {
+        Routing {
+            add: self.added.iter().map(|m| m.mailbox_id.clone()).collect(),
+            remove: self.removed.iter().map(|m| m.mailbox_id.clone()).collect(),
+        }
+    }
+}
+
+/// A decrypted application message.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApplicationMessage {
+    /// The sending instance, authenticated by MLS.
+    pub sender: MemberInfo,
+    /// The epoch it was sent in.
+    pub epoch: u64,
+    /// The inner message (SPEC §7.2), UTF-8 JSON.
+    pub plaintext: Vec<u8>,
+}
+
+impl fmt::Debug for ApplicationMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never print message bodies (AGENTS.md).
+        f.debug_struct("ApplicationMessage")
+            .field("sender", &self.sender)
+            .field("epoch", &self.epoch)
+            .field("len", &self.plaintext.len())
+            .finish()
+    }
+}
+
+/// The outcome of processing one message from the relay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Event {
+    /// An application message.
+    Application(ApplicationMessage),
+    /// Another member's commit, checked against the policy and merged.
+    Commit(CommitSummary),
+    /// This instance's pending commit came back from the relay byte for
+    /// byte and is merged.
+    OwnCommitConfirmed(CommitSummary),
+    /// A commit removed this instance. The group is now inactive; delete it.
+    Removed(CommitSummary),
+    /// A member proposed its own removal (a leave). The proposal is stored;
+    /// some other member should commit it with
+    /// [`Group::commit_pending_proposals`].
+    LeaveProposed(MemberInfo),
+    /// One of this instance's own messages from an earlier epoch (e.g. a
+    /// commit already confirmed by `accepted`), with nothing to do.
+    OwnEcho,
+}
+
+impl Event {
+    /// The variant name, for logs and error messages. Unlike `Debug`, it
+    /// carries no message content at all.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Event::Application(_) => "application",
+            Event::Commit(_) => "commit",
+            Event::OwnCommitConfirmed(_) => "own_commit_confirmed",
+            Event::Removed(_) => "removed",
+            Event::LeaveProposed(_) => "leave_proposed",
+            Event::OwnEcho => "own_echo",
+        }
+    }
+}
+
+/// A JoinRequest that passed every check of SPEC §6.2 steps 1–3.
+#[derive(Debug)]
+pub struct VerifiedJoinRequest {
+    invite_id: [u8; 16],
+    display_name: String,
+    mailbox_id: String,
+    key_package: KeyPackage,
+    info: LeafInfo,
+}
+
+impl VerifiedJoinRequest {
+    /// The joiner's identity.
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        &self.info.identity
+    }
+
+    /// The joiner's instance id.
+    #[must_use]
+    pub fn instance_id(&self) -> u64 {
+        self.info.instance_id
+    }
+
+    /// The (unauthenticated) display name.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    /// The joiner's mailbox, where the wrapped Welcome goes.
+    #[must_use]
+    pub fn mailbox_id(&self) -> &str {
+        &self.mailbox_id
+    }
+}
+
+impl<S: Store> Client<S> {
+    /// A client for `instance` over `store`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rng`] if the crypto provider can't be seeded.
+    pub fn new(store: S, rng: Rng, instance: Instance, clock: Arc<dyn Clock>) -> Result<Self> {
+        Ok(Self {
+            provider: Provider::new(store, rng)?,
+            instance,
+            clock,
+        })
+    }
+
+    /// This client's instance.
+    #[must_use]
+    pub fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    /// This client's randomness source.
+    #[must_use]
+    pub fn rng(&self) -> &Rng {
+        self.provider.rng()
+    }
+
+    /// This client's clock.
+    #[must_use]
+    pub fn clock(&self) -> &dyn Clock {
+        &*self.clock
+    }
+
+    fn signer(&self) -> InstanceSigner<'_> {
+        InstanceSigner(&self.instance)
+    }
+
+    fn credential(&self) -> CredentialWithKey {
+        CredentialWithKey {
+            credential: BasicCredential::new(self.instance.identity().as_bytes().to_vec()).into(),
+            signature_key: self.instance.public_key().to_vec().into(),
+        }
+    }
+
+    fn now(&self) -> u64 {
+        self.clock.unix_millis() / 1000
+    }
+
+    /// Creates a group with this instance as owner (SPEC §5).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidGroupContext`] for an over-long name or purpose, or
+    /// an MLS/storage error.
+    pub fn create_group(&self, name: &str, purpose: &str) -> Result<Group> {
+        let meta = GroupMeta {
+            v: 0,
+            name: name.to_owned(),
+            purpose: purpose.to_owned(),
+            created_at: self.now(),
+            created_by: self.instance.identity().to_owned(),
+        };
+        meta.validate()?;
+        let policy = GroupPolicy::default_for(self.instance.identity());
+        let extensions = group_context_extensions(&meta.to_json()?, &policy.to_json()?)?;
+        let group_id: [u8; 16] = self.rng().array()?;
+        let mls = MlsGroup::builder()
+            .with_group_id(GroupId::from_slice(&group_id))
+            .ciphersuite(CS)
+            .with_wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+            .use_ratchet_tree_extension(true)
+            .max_past_epochs(MAX_PAST_EPOCHS)
+            .with_capabilities(capabilities())
+            .with_leaf_node_extensions(leaf_extensions(self.instance.cert())?)
+            .map_err(mls)?
+            .with_group_context_extensions(extensions)
+            .build(&self.provider, &self.signer(), self.credential())
+            .map_err(mls)?;
+        Ok(Group { mls })
+    }
+
+    /// Loads a group from storage.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`].
+    pub fn load_group(&self, group_id: &[u8]) -> Result<Option<Group>> {
+        Ok(
+            MlsGroup::load(self.provider.storage(), &GroupId::from_slice(group_id))
+                .map_err(storage)?
+                .map(|mls| Group { mls }),
+        )
+    }
+
+    /// Creates a JoinRequest for an invite (SPEC §6.1). The KeyPackage's
+    /// private keys go to this client's store.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] for a display name that is too long or has control
+    /// characters, or an MLS error.
+    pub fn create_join_request(
+        &self,
+        invite: &InviteSecret,
+        display_name: &str,
+    ) -> Result<JoinRequest> {
+        check_display_name(display_name)?;
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities())
+            .leaf_node_extensions(leaf_extensions(self.instance.cert())?)
+            .build(CS, &self.provider, &self.signer(), self.credential())
+            .map_err(mls)?;
+        let key_package = bundle.key_package().tls_serialize_detached().map_err(mls)?;
+        let mailbox_id = self.instance.mailbox_id();
+        let mut request = JoinRequest {
+            invite_id: *invite.id(),
+            display_name: display_name.to_owned(),
+            key_package,
+            mailbox_id,
+            mac: [0; 32],
+        };
+        request.mac = join_request_mac(&invite.join_key(), &request.mac_input());
+        Ok(request)
+    }
+
+    /// Inviter side, SPEC §6.2 steps 1–3: the invite is ours and not
+    /// expired, the MAC verifies, and the KeyPackage passes every check
+    /// (ciphersuite, HPKE key lengths, signature, instance certificate,
+    /// capabilities, mailbox id) before it reaches the MLS group.
+    ///
+    /// Use limits are the daemon's: a failed MAC must not consume a use.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InviteMismatch`], [`Error::InviteExpired`], [`Error::BadMac`],
+    /// or a KeyPackage validation error.
+    pub fn verify_join_request(
+        &self,
+        request: &JoinRequest,
+        invite: &Invite,
+    ) -> Result<VerifiedJoinRequest> {
+        if request.invite_id != *invite.secret().id() {
+            return Err(Error::InviteMismatch);
+        }
+        if invite.is_expired(self.clock()) {
+            return Err(Error::InviteExpired);
+        }
+        if !request.mac_ok(&invite.secret().join_key()) {
+            return Err(Error::BadMac);
+        }
+        let (key_package, info) =
+            validate_key_package(self.provider.crypto(), &request.key_package)?;
+        if leaf_mailbox(&info) != request.mailbox_id {
+            return Err(Error::CredentialMismatch(
+                "mailbox_id != key package signature key",
+            ));
+        }
+        if records::key_package_used(
+            self.provider.records(),
+            &key_package_ref(self, &key_package)?,
+        )? {
+            return Err(Error::KeyPackageReused);
+        }
+        Ok(VerifiedJoinRequest {
+            invite_id: request.invite_id,
+            display_name: request.display_name.clone(),
+            mailbox_id: request.mailbox_id.clone(),
+            key_package,
+            info,
+        })
+    }
+
+    /// Joiner side, SPEC §6.3: unwrap with `welcome_key`, check the
+    /// ciphersuite and the KEM ciphertext lengths before OpenMLS touches the
+    /// Welcome, allow no `GroupInfo` extension but `ratchet_tree`, check
+    /// every HPKE key before MLS processes the tree, check that the policy
+    /// is well-formed and in range, check
+    /// that `ac_group_meta` matches the `InviteMeta` shown to the human, and
+    /// verify every leaf's instance certificate. On any failure after MLS
+    /// has started, the KeyPackage is spent and no group is kept.
+    ///
+    /// The caller deletes the invite secret after success (dropping the
+    /// [`InviteSecret`] zeroizes it).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::WelcomeAuth`], [`Error::WrongCiphersuite`],
+    /// [`Error::KemOutputLength`], [`Error::HpkeKeyLength`],
+    /// [`Error::InvalidGroupContext`], [`Error::MetaMismatch`], certificate
+    /// errors, or an MLS error.
+    pub fn join_from_wrapped_welcome(
+        &self,
+        invite: &InviteSecret,
+        expected: &InviteMeta,
+        wrapped: &[u8],
+    ) -> Result<Group> {
+        if expected.invite_id != invite.id_b64() {
+            return Err(Error::InviteMismatch);
+        }
+        let welcome_bytes = invite.unwrap_welcome(wrapped)?;
+        let msg = MlsMessageIn::tls_deserialize_exact(welcome_bytes.as_slice())
+            .map_err(|_| Error::Malformed("welcome"))?;
+        let MlsMessageBodyIn::Welcome(welcome) = msg.extract() else {
+            return Err(Error::UnexpectedMessage("not a Welcome"));
+        };
+        if welcome.ciphersuite() != CS {
+            return Err(Error::WrongCiphersuite);
+        }
+        // The only KEM ciphertexts outside the encryption: check them before
+        // OpenMLS decapsulates ours (SPEC §3.1).
+        check_welcome_kem_outputs(
+            welcome
+                .secrets()
+                .iter()
+                .filter_map(|s| s.tls_serialize_detached().ok()),
+        )?;
+        guard(|| {
+            let processed =
+                ProcessedWelcome::new_from_welcome(&self.provider, &join_config(), welcome)
+                    .map_err(mls)?;
+            if !processed.psks().is_empty() {
+                return Err(Error::InvalidGroupContext("PSKs are not used in v0"));
+            }
+            let group_info_exts = processed.unverified_group_info().extensions();
+            check_group_info_extensions(group_info_exts)?;
+            let tree = group_info_exts
+                .ratchet_tree()
+                .ok_or(Error::InvalidGroupContext("missing ratchet tree"))?
+                .ratchet_tree()
+                .clone();
+            check_tree_keys(
+                tree.leaves()
+                    .filter_map(|l| l.tls_serialize_detached().ok()),
+                tree.parents()
+                    .filter_map(|p| p.tls_serialize_detached().ok()),
+            )?;
+            let staged = processed
+                .into_staged_welcome(&self.provider, None)
+                .map_err(mls)?;
+            if staged.group_context().ciphersuite() != CS {
+                return Err(Error::WrongCiphersuite);
+            }
+            let ctx = check_group_context(staged.group_context().extensions())?;
+            if ctx.meta.name != expected.group_name || ctx.meta.purpose != expected.purpose {
+                return Err(Error::MetaMismatch);
+            }
+            let mut group = Group {
+                mls: staged.into_group(&self.provider).map_err(mls)?,
+            };
+            let checked = group.check_all_leaves(&ctx.policy);
+            if let Err(e) = checked {
+                group.mls.delete(self.provider.storage()).map_err(storage)?;
+                return Err(e);
+            }
+            Ok(group)
+        })
+    }
+}
+
+/// An MLS group (one conversation).
+pub struct Group {
+    mls: MlsGroup,
+}
+
+impl fmt::Debug for Group {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Group")
+            .field("group_id", &hex(self.group_id()))
+            .field("epoch", &self.epoch())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Per-commit facts gathered before merging.
+struct Inspection {
+    committer: MemberInfo,
+    added: Vec<LeafInfo>,
+    /// `KeyPackageRef`s of the added KeyPackages.
+    added_refs: Vec<Vec<u8>>,
+    removed: Vec<MemberInfo>,
+    policy_changed: bool,
+}
+
+#[derive(Deserialize)]
+struct InnerHead {
+    v: u32,
+    sender: String,
+    instance_id: String,
+}
+
+/// SPEC §7.2: `sender` and `instance_id` must match the MLS sender.
+fn check_inner(bytes: &[u8], sender: &MemberInfo) -> Result<()> {
+    let head: InnerHead =
+        serde_json::from_slice(bytes).map_err(|_| Error::Malformed("inner message"))?;
+    if head.v != 0 {
+        return Err(Error::UnsupportedVersion);
+    }
+    if head.sender != sender.identity {
+        return Err(Error::CredentialMismatch("inner sender != MLS sender"));
+    }
+    if head.instance_id != sender.instance_id_hex() {
+        return Err(Error::CredentialMismatch("inner instance_id != MLS sender"));
+    }
+    Ok(())
+}
+
+fn process_error<E: fmt::Display>(e: ProcessMessageError<E>) -> Error {
+    match e {
+        ProcessMessageError::ValidationError(ValidationError::WrongEpoch) => Error::WrongEpoch,
+        ProcessMessageError::GroupStateError(MlsGroupStateError::UseAfterEviction) => {
+            Error::NotMember
+        }
+        e => mls(e),
+    }
+}
+
+fn key_package_ref<S: Store>(client: &Client<S>, kp: &KeyPackage) -> Result<Vec<u8>> {
+    Ok(kp
+        .hash_ref(client.provider.crypto())
+        .map_err(mls)?
+        .as_slice()
+        .to_vec())
+}
+
+fn wire(msg: &MlsMessageOut) -> Result<Vec<u8>> {
+    msg.tls_serialize_detached().map_err(mls)
+}
+
+fn parse_protocol(bytes: &[u8]) -> Result<ProtocolMessage> {
+    let msg =
+        MlsMessageIn::tls_deserialize_exact(bytes).map_err(|_| Error::Malformed("MLS message"))?;
+    if msg.wire_format() != WireFormat::PrivateMessage {
+        return Err(Error::UnexpectedMessage("only PrivateMessage is accepted"));
+    }
+    msg.try_into_protocol_message()
+        .map_err(|_| Error::UnexpectedMessage("not a protocol message"))
+}
+
+/// Builds, stages and checks a commit; `$build` maps the commit builder.
+macro_rules! commit {
+    ($self:ident, $client:ident, $invite:expr, |$b:ident| $build:expr) => {{
+        $self.ready()?;
+        $self.handshake_padding($client)?;
+        let signer = $client.signer();
+        let $b = $self.mls.commit_builder();
+        let bundle = $build
+            .load_psks($client.provider.storage())
+            .map_err(mls)?
+            .build(
+                $client.provider.rand(),
+                $client.provider.crypto(),
+                &signer,
+                |_| true,
+            )
+            .map_err(mls)?
+            .stage_commit(&$client.provider)
+            .map_err(mls)?;
+        $self.finish_commit($client, &bundle, $invite)
+    }};
+}
+
+impl Group {
+    /// The 16-byte group id.
+    #[must_use]
+    pub fn group_id(&self) -> &[u8] {
+        self.mls.group_id().as_slice()
+    }
+
+    /// The current epoch.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.mls.epoch().as_u64()
+    }
+
+    /// Whether this instance is still a member.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.mls.is_active()
+    }
+
+    /// Whether a commit is waiting for relay confirmation.
+    #[must_use]
+    pub fn has_pending_commit(&self) -> bool {
+        self.mls.pending_commit().is_some()
+    }
+
+    /// This instance's leaf index.
+    #[must_use]
+    pub fn own_leaf_index(&self) -> u32 {
+        self.mls.own_leaf_index().u32()
+    }
+
+    /// The current `ac_group_policy`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidGroupContext`] if the stored context is broken.
+    pub fn policy(&self) -> Result<GroupPolicy> {
+        Ok(check_group_context(self.mls.extensions())?.policy)
+    }
+
+    /// The `ac_group_meta`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidGroupContext`] if the stored context is broken.
+    pub fn meta(&self) -> Result<GroupMeta> {
+        Ok(check_group_context(self.mls.extensions())?.meta)
+    }
+
+    /// Every member instance.
+    ///
+    /// # Errors
+    ///
+    /// A validation error if a stored leaf is broken.
+    pub fn members(&self) -> Result<Vec<MemberInfo>> {
+        self.mls
+            .members()
+            .map(|m| self.member_info(m.index))
+            .collect()
+    }
+
+    /// The SAS for the current epoch (SPEC §11).
+    #[must_use]
+    pub fn sas(&self) -> Sas {
+        Sas::derive(
+            self.mls.epoch_authenticator().as_slice(),
+            self.group_id(),
+            self.epoch(),
+        )
+    }
+
+    fn member_info(&self, index: LeafNodeIndex) -> Result<MemberInfo> {
+        let leaf = self
+            .mls
+            .public_group()
+            .leaf(index)
+            .ok_or(Error::UnknownMember)?;
+        Ok(MemberInfo::from_leaf(index.u32(), &validate_leaf(leaf)?))
+    }
+
+    /// Whether the leave of `leaving`, together with the leaves already
+    /// pending in this epoch, would remove the owner's last instance
+    /// (SPEC §9.2). Pending proposals don't outlive their epoch, so these
+    /// are all the removals the next commit can carry.
+    fn owner_left_without(&self, leaving: LeafNodeIndex) -> Result<bool> {
+        let owner = self.policy()?.owner;
+        if self.member_info(leaving)?.identity != owner {
+            return Ok(false);
+        }
+        let mut gone: BTreeSet<u32> = self
+            .mls
+            .pending_proposals()
+            .filter_map(|q| match (q.proposal(), q.sender()) {
+                (Proposal::Remove(r), Sender::Member(s)) if r.removed() == *s => Some(s.u32()),
+                _ => None,
+            })
+            .collect();
+        gone.insert(leaving.u32());
+        Ok(!self
+            .members()?
+            .iter()
+            .any(|m| m.identity == owner && !gone.contains(&m.leaf_index)))
+    }
+
+    fn check_all_leaves(&self, policy: &GroupPolicy) -> Result<()> {
+        let members = self.members()?;
+        if members.len() > usize::try_from(policy.max_members).unwrap_or(usize::MAX) {
+            return Err(Error::InvalidGroupContext("group exceeds max_members"));
+        }
+        Ok(())
+    }
+
+    fn ready(&self) -> Result<()> {
+        if !self.mls.is_active() {
+            return Err(Error::NotMember);
+        }
+        if self.has_pending_commit() {
+            return Err(Error::CommitPending);
+        }
+        Ok(())
+    }
+
+    fn set_padding<S: Store>(&mut self, client: &Client<S>, padding: usize) -> Result<()> {
+        if self.mls.configuration().padding_size() != padding {
+            self.mls
+                .set_configuration(
+                    client.provider.storage(),
+                    &join_config_with_padding(padding),
+                )
+                .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    /// Handshake messages are not bucketed; reset any application padding.
+    fn handshake_padding<S: Store>(&mut self, client: &Client<S>) -> Result<()> {
+        self.set_padding(client, 0)
+    }
+
+    /// Checks a staged commit against SPEC §3.1/§3.3 and the policy in force
+    /// (§9.2) before it is merged.
+    fn inspect_commit<S: Store>(
+        &self,
+        client: &Client<S>,
+        staged: &StagedCommit,
+        committer: LeafNodeIndex,
+    ) -> Result<Inspection> {
+        let current = check_group_context(self.mls.extensions())?;
+        let committer = self.member_info(committer)?;
+        let mut added = Vec::new();
+        let mut added_refs = Vec::new();
+        let mut removals = Vec::new();
+        let mut removed = Vec::new();
+        let mut new_ctx = None;
+        for queued in staged.queued_proposals() {
+            match queued.proposal() {
+                Proposal::Add(add) => {
+                    let kp = add.key_package();
+                    if kp.hpke_init_key().as_slice().len() != crate::mls::HPKE_PUBLIC_KEY_LEN {
+                        return Err(Error::HpkeKeyLength);
+                    }
+                    added.push(validate_leaf(kp.leaf_node())?);
+                    let kp_ref = key_package_ref(client, kp)?;
+                    if records::key_package_used(client.provider.records(), &kp_ref)? {
+                        return Err(Error::Unauthorized("key package already used"));
+                    }
+                    added_refs.push(kp_ref);
+                }
+                Proposal::Remove(remove) => {
+                    let index = remove.removed();
+                    let member = self.member_info(index)?;
+                    let self_proposed = matches!(queued.sender(), Sender::Member(s) if *s == index);
+                    removals.push(Removal {
+                        identity: member.identity.clone(),
+                        self_proposed,
+                    });
+                    removed.push(member);
+                }
+                Proposal::GroupContextExtensions(gce) => {
+                    if new_ctx.is_some() {
+                        return Err(Error::Unauthorized("duplicate GroupContextExtensions"));
+                    }
+                    let ctx = check_group_context(gce.extensions())?;
+                    if ctx.meta_bytes != current.meta_bytes {
+                        return Err(Error::Unauthorized("ac_group_meta is immutable"));
+                    }
+                    new_ctx = Some(ctx);
+                }
+                _ => return Err(Error::Unauthorized("proposal type not allowed in v0")),
+            }
+        }
+        if let Some(leaf) = staged.update_path_leaf_node()
+            && validate_leaf(leaf)?.identity != committer.identity
+        {
+            return Err(Error::CredentialMismatch("committer changed its identity"));
+        }
+        if let Some(tree) = staged
+            .export_ratchet_tree(client.provider.crypto(), self.mls.export_ratchet_tree())
+            .map_err(mls)?
+        {
+            check_tree_keys(
+                tree.leaves()
+                    .filter_map(|l| l.tls_serialize_detached().ok()),
+                tree.parents()
+                    .filter_map(|p| p.tls_serialize_detached().ok()),
+            )?;
+        }
+
+        let removed_leaves: BTreeSet<u32> = removed.iter().map(|m| m.leaf_index).collect();
+        let mut identities_after: BTreeSet<String> = self
+            .members()?
+            .into_iter()
+            .filter(|m| !removed_leaves.contains(&m.leaf_index))
+            .map(|m| m.identity)
+            .collect();
+        identities_after.extend(added.iter().map(|a| a.identity.clone()));
+        let members_before = self.mls.members().count();
+        let new_policy = new_ctx.map(|c| c.policy);
+        let policy_changed = new_policy.as_ref().is_some_and(|p| *p != current.policy);
+        let facts = CommitFacts {
+            committer: committer.identity.clone(),
+            adds: added.iter().map(|a| a.identity.clone()).collect(),
+            removes: removals,
+            new_policy,
+            members_before,
+            members_after: members_before + added.len() - removed_leaves.len(),
+            identities_after,
+        };
+        authorize(&current.policy, &facts)?;
+        Ok(Inspection {
+            committer,
+            added,
+            added_refs,
+            removed,
+            policy_changed,
+        })
+    }
+
+    fn summary(
+        &self,
+        inspection: Inspection,
+        discarded_own_pending: bool,
+    ) -> Result<CommitSummary> {
+        let members = self.members().unwrap_or_default();
+        let added = inspection
+            .added
+            .iter()
+            .map(|a| {
+                members
+                    .iter()
+                    .find(|m| leaf_mailbox(a) == m.mailbox_id)
+                    .cloned()
+                    .ok_or(Error::Internal("added member missing after merge"))
+            })
+            .collect::<Result<_>>()?;
+        Ok(CommitSummary {
+            epoch: self.epoch(),
+            committer: inspection.committer,
+            added,
+            removed: inspection.removed,
+            policy_changed: inspection.policy_changed,
+            discarded_own_pending,
+        })
+    }
+
+    fn finish_commit<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        bundle: &openmls::prelude::CommitMessageBundle,
+        invite: Option<&Invite>,
+    ) -> Result<CommitOut> {
+        let epoch = self.epoch();
+        let staged = self
+            .mls
+            .pending_commit()
+            .ok_or(Error::Internal("staged commit missing"))?;
+        let inspection = match self.inspect_commit(client, staged, self.mls.own_leaf_index()) {
+            Ok(i) => i,
+            Err(e) => {
+                self.mls
+                    .clear_pending_commit(client.provider.storage())
+                    .map_err(storage)?;
+                return Err(e);
+            }
+        };
+        let built = (|| {
+            let welcome = match (invite, bundle.to_welcome_msg()) {
+                (Some(invite), Some(w)) => {
+                    Some(invite.secret().wrap_welcome(client.rng(), &wire(&w)?)?)
+                }
+                _ => None,
+            };
+            let commit = wire(bundle.commit())?;
+            let msg_id = b64(&client.rng().array::<16>()?);
+            let mut own = OwnCommits::load(client.provider.records(), self.group_id(), epoch)?;
+            own.pending = Some(PendingRecord {
+                msg_id: msg_id.clone(),
+                hash: wire_hash(&commit),
+            });
+            own.save(client.provider.records(), self.group_id())?;
+            Ok((welcome, commit, msg_id))
+        })();
+        let (welcome, commit, msg_id) = match built {
+            Ok(b) => b,
+            Err(e) => {
+                self.mls
+                    .clear_pending_commit(client.provider.storage())
+                    .map_err(storage)?;
+                return Err(e);
+            }
+        };
+        Ok(CommitOut {
+            commit,
+            msg_id,
+            epoch,
+            routing: Routing {
+                add: inspection.added.iter().map(leaf_mailbox).collect(),
+                remove: inspection
+                    .removed
+                    .iter()
+                    .map(|m| m.mailbox_id.clone())
+                    .collect(),
+            },
+            welcome,
+        })
+    }
+
+    /// Commits `Add` for a verified joiner and wraps the Welcome
+    /// (SPEC §6.2 steps 4–6). With `switch_floor`, a group growing past two
+    /// members also moves from `free` to `mention` in the same commit
+    /// (SPEC §9.1); pass `false` if the owner set the floor explicitly.
+    ///
+    /// The request is only borrowed: after a failure (e.g. another commit
+    /// pending, or an `epoch_conflict` that discarded this one) the inviter
+    /// can retry with the same verified request.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InviteMismatch`], [`Error::InviteExpired`],
+    /// [`Error::KeyPackageReused`], [`Error::NotPermitted`],
+    /// [`Error::CommitPending`], or an MLS error.
+    pub fn add_member<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        request: &VerifiedJoinRequest,
+        invite: &Invite,
+        switch_floor: bool,
+    ) -> Result<CommitOut> {
+        if request.invite_id != *invite.secret().id() {
+            return Err(Error::InviteMismatch);
+        }
+        if invite.is_expired(client.clock()) {
+            return Err(Error::InviteExpired);
+        }
+        if records::key_package_used(
+            client.provider.records(),
+            &key_package_ref(client, &request.key_package)?,
+        )? {
+            return Err(Error::KeyPackageReused);
+        }
+        let ctx = check_group_context(self.mls.extensions())?;
+        let me = client.instance.identity();
+        if request.info.identity != me && !ctx.policy.may_invite(me) {
+            return Err(Error::NotPermitted("this identity may not invite"));
+        }
+        let before = self.mls.members().count();
+        let gce = if switch_floor && ctx.policy.floor == Floor::Free && before == 2 {
+            let policy = GroupPolicy {
+                floor: Floor::Mention,
+                ..ctx.policy
+            };
+            Some(group_context_extensions(
+                &ctx.meta_bytes,
+                &policy.to_json()?,
+            )?)
+        } else {
+            None
+        };
+        let key_package = request.key_package.clone();
+        guard(|| {
+            commit!(self, client, Some(invite), |b| {
+                let b = b.propose_adds([key_package]);
+                match gce {
+                    Some(exts) => b.propose_group_context_extensions(exts).map_err(mls)?,
+                    None => b,
+                }
+            })
+        })
+    }
+
+    /// Commits the removal of every instance of `identity` (SPEC §9.2:
+    /// removing an identity removes all its instances). Removing one's own
+    /// identity removes this identity's *other* instances.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownMember`], [`Error::NotPermitted`],
+    /// [`Error::CommitPending`], or an MLS error.
+    pub fn remove<S: Store>(&mut self, client: &Client<S>, identity: &str) -> Result<CommitOut> {
+        let own = self.mls.own_leaf_index();
+        let leaves: Vec<LeafNodeIndex> = self
+            .members()?
+            .into_iter()
+            .filter(|m| m.identity == identity && m.leaf_index != own.u32())
+            .map(|m| LeafNodeIndex::new(m.leaf_index))
+            .collect();
+        if leaves.is_empty() {
+            return Err(Error::UnknownMember);
+        }
+        let policy = self.policy()?;
+        let me = client.instance.identity();
+        if identity != me && !policy.may_remove(me) {
+            return Err(Error::NotPermitted("this identity may not remove members"));
+        }
+        commit!(self, client, None, |b| b.propose_removals(leaves))
+    }
+
+    /// Commits an Update of this instance's leaf (fresh HPKE keys; SPEC §3.1
+    /// update cadence).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::CommitPending`] or an MLS error.
+    pub fn update<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
+        commit!(self, client, None, |b| b.force_self_update(true))
+    }
+
+    /// Commits a policy change. The GroupContextExtensions proposal carries
+    /// the full set: the unchanged `ac_group_meta` and
+    /// `RequiredCapabilities` plus the new policy (SPEC §9.2).
+    ///
+    /// # Errors
+    ///
+    /// Policy validation errors, [`Error::Unauthorized`] if this instance's
+    /// role doesn't allow the change, [`Error::CommitPending`], or an MLS
+    /// error.
+    pub fn set_policy<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        policy: &GroupPolicy,
+    ) -> Result<CommitOut> {
+        policy.validate()?;
+        let ctx = check_group_context(self.mls.extensions())?;
+        let exts = group_context_extensions(&ctx.meta_bytes, &policy.to_json()?)?;
+        commit!(self, client, None, |b| b
+            .propose_group_context_extensions(exts)
+            .map_err(mls)?)
+    }
+
+    /// Commits pending proposals (other members' leaves).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotPermitted`] if none are pending, [`Error::CommitPending`],
+    /// or an MLS error.
+    pub fn commit_pending_proposals<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
+        if self.mls.pending_proposals().next().is_none() {
+            return Err(Error::NotPermitted("no pending proposals"));
+        }
+        commit!(self, client, None, |b| b)
+    }
+
+    /// Proposes this instance's own removal, as a `PrivateMessage` Remove
+    /// proposal (`kind: proposal`, SPEC §9.2). Another member commits it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotPermitted`] for a sole member (it should just delete its
+    /// state) or for the owner's last instance (it must transfer ownership
+    /// first, SPEC §9.2), [`Error::CommitPending`], or an MLS error.
+    pub fn propose_leave<S: Store>(&mut self, client: &Client<S>) -> Result<Vec<u8>> {
+        self.ready()?;
+        if self.mls.members().count() < 2 {
+            return Err(Error::NotPermitted(
+                "sole member: delete the local state instead",
+            ));
+        }
+        if self.owner_left_without(self.mls.own_leaf_index())? {
+            return Err(Error::NotPermitted(OWNER_MUST_TRANSFER));
+        }
+        self.handshake_padding(client)?;
+        let msg = self
+            .mls
+            .leave_group(&client.provider, &client.signer())
+            .map_err(mls)?;
+        wire(&msg)
+    }
+
+    /// Merges the pending commit after the relay confirmed it: `msg_id` is
+    /// the id in the relay's `accepted` frame and must be the pending
+    /// commit's [`CommitOut::msg_id`] (SPEC §8.3).
+    ///
+    /// A late `accepted` for a commit that the fan-out already confirmed
+    /// returns [`Error::NoPendingCommit`]; the daemon ignores it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoPendingCommit`], [`Error::PendingCommitMismatch`] (nothing
+    /// is merged), or an MLS error.
+    pub fn confirm_pending_commit<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        msg_id: &str,
+    ) -> Result<CommitSummary> {
+        if !self.has_pending_commit() {
+            return Err(Error::NoPendingCommit);
+        }
+        let own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+        match own.pending {
+            Some(p) if p.msg_id == msg_id => self.merge_own(client),
+            _ => Err(Error::PendingCommitMismatch),
+        }
+    }
+
+    /// The current epoch's members, taken just before a merge.
+    fn snapshot(&self) -> Result<PreviousMembers> {
+        Ok(PreviousMembers {
+            epoch: self.epoch(),
+            members: self.members()?,
+        })
+    }
+
+    /// Records kept after every merged commit: the members of the epoch
+    /// that just ended (for its grace window) and the KeyPackages it used.
+    fn after_merge<S: Store>(
+        &self,
+        client: &Client<S>,
+        previous: &PreviousMembers,
+        inspection: &Inspection,
+    ) -> Result<()> {
+        previous.save(client.provider.records(), self.group_id())?;
+        records::mark_key_packages_used(client.provider.records(), &inspection.added_refs)
+    }
+
+    /// The sender of an application message, resolved in the epoch the
+    /// message was sent in (SPEC §8.3 grace window): a member removed by the
+    /// commit that ended that epoch is still its sender.
+    fn sender_in_epoch<S: Store>(
+        &self,
+        client: &Client<S>,
+        index: LeafNodeIndex,
+        epoch: u64,
+    ) -> Result<MemberInfo> {
+        if epoch == self.epoch() {
+            return self.member_info(index);
+        }
+        PreviousMembers::load(client.provider.records(), self.group_id())?
+            .filter(|p| p.epoch == epoch)
+            .and_then(|p| p.members.into_iter().find(|m| m.leaf_index == index.u32()))
+            .ok_or(Error::UnknownMember)
+    }
+
+    fn merge_own<S: Store>(&mut self, client: &Client<S>) -> Result<CommitSummary> {
+        let staged = self.mls.pending_commit().ok_or(Error::NoPendingCommit)?;
+        let inspection = self.inspect_commit(client, staged, self.mls.own_leaf_index())?;
+        let sent = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?
+            .pending
+            .map(|p| p.hash);
+        let previous = self.snapshot()?;
+        self.mls
+            .merge_pending_commit(&client.provider)
+            .map_err(mls)?;
+        self.after_merge(client, &previous, &inspection)?;
+        OwnCommits {
+            epoch: self.epoch(),
+            confirmed: sent,
+            ..OwnCommits::default()
+        }
+        .save(client.provider.records(), self.group_id())?;
+        self.summary(inspection, false)
+    }
+
+    /// Drops the pending commit after the relay rejected it
+    /// (`epoch_conflict`, or another error for its `msg_id`; SPEC §8.3).
+    /// Process the winning commit next, then rebuild if still needed.
+    ///
+    /// Don't discard on a timeout: resend the same commit under the same
+    /// `msg_id` (the relay deduplicates it). If a discarded commit is later
+    /// delivered back, [`Group::process`] reports [`Error::OwnCommitLost`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoPendingCommit`] or a storage error.
+    pub fn discard_pending_commit<S: Store>(&mut self, client: &Client<S>) -> Result<()> {
+        if !self.has_pending_commit() {
+            return Err(Error::NoPendingCommit);
+        }
+        let mut own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+        own.discard_pending();
+        own.save(client.provider.records(), self.group_id())?;
+        self.mls
+            .clear_pending_commit(client.provider.storage())
+            .map_err(storage)
+    }
+
+    /// An MLS commit whose sender data names this instance's own leaf.
+    /// OpenMLS can't decrypt or authenticate it (the sender data is
+    /// encrypted under a key every member knows), so only an exact byte
+    /// match with what this instance sent confirms anything (SPEC §8.3).
+    fn own_commit<S: Store>(&mut self, client: &Client<S>, bytes: &[u8]) -> Result<Event> {
+        let mut own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+        let hash = wire_hash(bytes);
+        if self.has_pending_commit() && own.pending.as_ref().is_some_and(|p| p.hash == hash) {
+            return Ok(Event::OwnCommitConfirmed(self.merge_own(client)?));
+        }
+        if own.discarded.contains(&hash) {
+            // The relay accepted a commit we no longer hold: the group has
+            // moved to an epoch this instance can't enter.
+            if self.has_pending_commit() {
+                own.discard_pending();
+                own.save(client.provider.records(), self.group_id())?;
+                self.mls
+                    .clear_pending_commit(client.provider.storage())
+                    .map_err(storage)?;
+            }
+            return Err(Error::OwnCommitLost);
+        }
+        // Not something this instance sent: forged (any member can write
+        // sender data naming our leaf) or corrupted. Ignore it and keep the
+        // pending commit, which only authenticated evidence may settle.
+        Err(Error::Unauthorized(
+            "commit claims this instance as sender but was not sent by it",
+        ))
+    }
+
+    /// Encrypts an inner message (SPEC §7.2) as an application message,
+    /// padded to its bucket (SPEC §7.1). The inner `v`, `sender` and
+    /// `instance_id` must be this instance's.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`]/[`Error::CredentialMismatch`] for a bad inner
+    /// header, [`Error::TooLarge`], [`Error::CommitPending`], or an MLS error.
+    pub fn seal<S: Store>(&mut self, client: &Client<S>, inner: &[u8]) -> Result<Vec<u8>> {
+        self.ready()?;
+        let bucket = bucket_for(inner.len()).ok_or(Error::TooLarge)?;
+        let me = self.member_info(self.mls.own_leaf_index())?;
+        check_inner(inner, &me)?;
+        self.set_padding(client, bucket)?;
+        let msg = self
+            .mls
+            .create_message(&client.provider, &client.signer(), inner)
+            .map_err(mls)?;
+        wire(&msg)
+    }
+
+    /// Decrypts an application message.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnexpectedMessage`] if `ct` is not an application message,
+    /// or any [`Group::process`] error.
+    pub fn open<S: Store>(&mut self, client: &Client<S>, ct: &[u8]) -> Result<ApplicationMessage> {
+        let msg = parse_protocol(ct)?;
+        if msg.content_type() != ContentType::Application {
+            return Err(Error::UnexpectedMessage("not an application message"));
+        }
+        match self.process(client, ct)? {
+            Event::Application(m) => Ok(m),
+            _ => Err(Error::UnexpectedMessage("not an application message")),
+        }
+    }
+
+    /// Processes one MLS message from the relay. Commits are checked against
+    /// the policy in force (SPEC §9.2) and the key/certificate rules
+    /// (§3.1, §3.3) **before** they are merged; a rejected commit is not
+    /// merged and returns [`Error::Unauthorized`] (raise
+    /// `unauthorized_commit`) or a validation error.
+    ///
+    /// Processing is one-shot: a failed message has consumed its key and
+    /// can't be retried.
+    ///
+    /// # Errors
+    ///
+    /// See above; also [`Error::WrongGroup`], [`Error::WrongEpoch`],
+    /// [`Error::NotMember`], [`Error::Malformed`], and MLS errors (e.g. for
+    /// tampered or replayed messages).
+    pub fn process<S: Store>(&mut self, client: &Client<S>, bytes: &[u8]) -> Result<Event> {
+        if !self.mls.is_active() {
+            return Err(Error::NotMember);
+        }
+        let msg = parse_protocol(bytes)?;
+        if msg.group_id().as_slice() != self.group_id() {
+            return Err(Error::WrongGroup);
+        }
+        let content_type = msg.content_type();
+        let epoch = msg.epoch().as_u64();
+        if content_type == ContentType::Commit && epoch.checked_add(1) == Some(self.epoch()) {
+            // The fan-out copy of our own commit, already merged on `accepted`.
+            let own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
+            if own.confirmed == Some(wire_hash(bytes)) {
+                return Ok(Event::OwnEcho);
+            }
+        }
+        // A commit's UpdatePath KEM ciphertexts are only readable once
+        // OpenMLS has decrypted the commit, and it decapsulates ours in the
+        // same call; the provider rejects any `kem_output` that isn't
+        // KEM_CIPHERTEXT_LEN bytes (SPEC §3.1).
+        let processed = guard(|| {
+            self.mls
+                .process_message(&client.provider, msg)
+                .map_err(process_error)
+        })?;
+        let sender = processed.sender().clone();
+        let msg_epoch = processed.epoch().as_u64();
+        let credential = processed.credential().clone();
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(m) => {
+                let Sender::Member(index) = sender else {
+                    return Err(Error::UnexpectedMessage(
+                        "application message from non-member",
+                    ));
+                };
+                let sender = self.sender_in_epoch(client, index, msg_epoch)?;
+                // OpenMLS verified the message against the leaf of its own
+                // epoch; the attribution must name the same credential.
+                let identity = BasicCredential::try_from(credential)
+                    .map_err(|_| Error::CredentialMismatch("not a basic credential"))?;
+                if identity.identity() != sender.identity.as_bytes() {
+                    return Err(Error::CredentialMismatch("sender != epoch member"));
+                }
+                let plaintext = m.into_bytes();
+                check_inner(&plaintext, &sender)?;
+                Ok(Event::Application(ApplicationMessage {
+                    sender,
+                    epoch: msg_epoch,
+                    plaintext,
+                }))
+            }
+            ProcessedMessageContent::ProposalMessage(queued) => {
+                let leave = match (queued.proposal(), queued.sender()) {
+                    (Proposal::Remove(r), Sender::Member(s)) if r.removed() == *s => Some(*s),
+                    _ => None,
+                };
+                let Some(index) = leave else {
+                    return Err(Error::Unauthorized("only leave proposals are accepted"));
+                };
+                let member = self.member_info(index)?;
+                if self.owner_left_without(index)? {
+                    return Err(Error::Unauthorized(OWNER_MUST_TRANSFER));
+                }
+                self.mls
+                    .store_pending_proposal(client.provider.storage(), *queued)
+                    .map_err(storage)?;
+                Ok(Event::LeaveProposed(member))
+            }
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                let Sender::Member(committer) = sender else {
+                    return Err(Error::Unauthorized("commit from a non-member"));
+                };
+                let had_pending = self.has_pending_commit();
+                let inspection = self.inspect_commit(client, &staged, committer)?;
+                let self_removed = staged.self_removed();
+                let previous = self.snapshot()?;
+                self.mls
+                    .merge_staged_commit(&client.provider, *staged)
+                    .map_err(mls)?;
+                self.after_merge(client, &previous, &inspection)?;
+                let summary = self.summary(inspection, had_pending)?;
+                Ok(if self_removed {
+                    Event::Removed(summary)
+                } else {
+                    Event::Commit(summary)
+                })
+            }
+            ProcessedMessageContent::OwnPendingCommit
+            | ProcessedMessageContent::OwnPrivateMessage => {
+                if content_type == ContentType::Commit && epoch == self.epoch() {
+                    self.own_commit(client, bytes)
+                } else {
+                    Ok(Event::OwnEcho)
+                }
+            }
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
+                Err(Error::Unauthorized("external proposals are not accepted"))
+            }
+        }
+    }
+
+    /// Deletes the group's state from the store (after leaving or being
+    /// removed).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`].
+    pub fn delete<S: Store>(mut self, client: &Client<S>) -> Result<()> {
+        records::delete_group(client.provider.records(), self.group_id())?;
+        self.mls.delete(client.provider.storage()).map_err(storage)
+    }
+}
+
+#[cfg(test)]
+mod tests;

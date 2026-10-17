@@ -1,0 +1,61 @@
+{
+  "cases": [
+    {
+      "invite_id": "1cb8a0257b13e13248d68e9492f9d09d",
+      "invite_secret": "59f23f0bcd90172eb0732f357433cf0d618e7e95c8b523b4818dd0c43591e01d",
+      "join_key": "0d2760d42ef16462857366436fe261ff1898d5f562d586055213d275032a99aa",
+      "join_request": {
+        "display_name": "bob",
+        "key_package": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627",
+        "mac": "86391dea5501b798353e5eb25dccbade664a9c3b52034445dc16b9f6fff4601a",
+        "mac_input": "6167656e74636f6e6e6563742f76302f6a6f696e2d72657175657374000000101cb8a0257b13e13248d68e9492f9d09d00000028000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627000000166c613471796233476a6c6c774a68486a59363267794600000003626f62",
+        "mailbox_id": "la4qyb3GjllwJhHjY62gyF"
+      },
+      "welcome_key": "60cbdc150cba8680827aaf54b1f716435840e887f07328e070f7090fbb93e00e",
+      "wrapped_welcome": {
+        "nonce": "40d3d171e618bdeec882f70a",
+        "welcome": "77656c636f6d652062797465732030",
+        "wrapped": "40d3d171e618bdeec882f70ad77ebc170d56f02eff92876c6200ae1fc922230e032f2f52caaf26d65c22cc"
+      }
+    },
+    {
+      "invite_id": "512aa1e803e99eb3d89a479d2e91d08d",
+      "invite_secret": "72878cb79f3b71dcd684651c1e44f6704450441ea389ea4bb713a5313413c543",
+      "join_key": "e9d11b81c08058402635f7857064ceb97e2a1f4eaeb8758c7cc78b4b307bd76a",
+      "join_request": {
+        "display_name": "",
+        "key_package": "010003020504070609080b0a0d0c0f0e111013121514171619181b1a1d1c1f1e2120232225242726",
+        "mac": "1cb1e5c051d85425ed5d3ee20134e666cdad175a26f12cb0f31ac84c8a068fa2",
+        "mac_input": "6167656e74636f6e6e6563742f76302f6a6f696e2d7265717565737400000010512aa1e803e99eb3d89a479d2e91d08d00000028010003020504070609080b0a0d0c0f0e111013121514171619181b1a1d1c1f1e212023222524272600000016696a732d496d3933675733515959574d5a316d5a6e6d00000000",
+        "mailbox_id": "ijs-Im93gW3QYYWMZ1mZnm"
+      },
+      "welcome_key": "a4fa7d9f11835c679c0d02bf13e69d34be8a6ec8efbdb4ebaeaeb5b5a02fc501",
+      "wrapped_welcome": {
+        "nonce": "5bc8dcbfa2ddfd0c964605e2",
+        "welcome": "77656c636f6d652062797465732031",
+        "wrapped": "5bc8dcbfa2ddfd0c964605e2afb2a6a681780bf9659dc425f9ec75b7a3ed249310d84c56ddab73f6be9910"
+      }
+    },
+    {
+      "invite_id": "6282693069e75aa5a06c3b2b5afef3c1",
+      "invite_secret": "dcc2262f76981a3ac7752ee8dcf7e2efb06acf7e703394e6f272769976f6f207",
+      "join_key": "a0d483f3e5d5c2410e1e365e5f5daddcda65d197c654aad56e217c75a00fc5f2",
+      "join_request": {
+        "display_name": "Zoë's agent 𝄞",
+        "key_package": "02030001060704050a0b08090e0f0c0d12131011161714151a1b18191e1f1c1d2223202126272425",
+        "mac": "7a8964da8a9d5783a07e79f8508e929c0c6d3c519292aab7d0ef09ff8c0736c3",
+        "mac_input": "6167656e74636f6e6e6563742f76302f6a6f696e2d72657175657374000000106282693069e75aa5a06c3b2b5afef3c10000002802030001060704050a0b08090e0f0c0d12131011161714151a1b18191e1f1c1d222320212627242500000016433556455f734c51535f5246443659644e744a6d2d6f000000115a6fc3ab2773206167656e7420f09d849e",
+        "mailbox_id": "C5VE_sLQS_RFD6YdNtJm-o"
+      },
+      "welcome_key": "311feba29d7f7b61131f7789c52d8558cdad8004eb8c11f8d8c0cdaf8ba4ef66",
+      "wrapped_welcome": {
+        "nonce": "b4316b86d8f99d3a69e9a4c3",
+        "welcome": "77656c636f6d652062797465732032",
+        "wrapped": "b4316b86d8f99d3a69e9a4c3b74d5325b9e547ca964244f9f57ae7f2601cd4d2d8f9aee880c282bb7930ff"
+      }
+    }
+  ],
+  "description": "SPEC 3.5 join_key/welcome_key (HKDF-SHA256), SPEC 6.1 JoinRequest MAC over label || lp(invite_id raw bytes) || lp(key_package) || lp(mailbox_id ASCII) || lp(display_name UTF-8), lp(x) = u32be(len(x)) || x and SPEC 6.4 WrappedWelcome (nonce || ChaCha20-Poly1305). Hex unless noted.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "seed": "74adca16de55c08b12d83dafcd28ee8db2cd1014aa1db22563909a0f925cff64"
+}

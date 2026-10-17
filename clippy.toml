@@ -1,1 +1,19 @@
-doc-valid-idents = ["AgentConnect", "OpenMLS", "X-Wing", ".."]
+doc-valid-idents = [
+    "AgentConnect",
+    "OpenMLS",
+    "X-Wing",
+    "JoinRequest",
+    "KeyPackage",
+    "KeyPackages",
+    "LeafNode",
+    "GroupContext",
+    "GroupContextExtensions",
+    "RequiredCapabilities",
+    "PrivateMessage",
+    "PublicMessage",
+    "InviteMeta",
+    "WrappedWelcome",
+    "SQLCipher",
+    "SQLite",
+    "..",
+]

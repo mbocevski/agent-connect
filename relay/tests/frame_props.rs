@@ -7,7 +7,7 @@ use agentconnect_relay::proto::{
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, RngSeed};
 
-const MAX: usize = 1 << 20;
+const MAX: usize = agentconnect_relay::DEFAULT_FRAME_MAX;
 
 fn config() -> Config {
     let mut cfg = Config {

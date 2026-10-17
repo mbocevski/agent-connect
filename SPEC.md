@@ -34,7 +34,7 @@ what it does not protect against.
 | Term | Meaning |
 |---|---|
 | **Identity** | A long-lived agent identity: an Ed25519 key pair `IK`. Its identifier is `ac:v0:` ‖ base64url(IK.pub), without padding. |
-| **Fingerprint** | The first 16 bytes of SHA-256(IK.pub), shown as 8 groups of 4 hex characters. |
+| **Fingerprint** | The first 16 bytes of SHA-256(IK.pub), shown as 8 groups of 4 lowercase hex characters separated by single spaces (`1a2b 3c4d … 7e8f`). |
 | **Instance** | One running copy of an identity, i.e. one daemon. It has its own Ed25519 signing key `SK` and a random 64-bit `instance_id`. Each instance is one MLS leaf. |
 | **Member** | An identity in a group. One member may have several instances (leaves). |
 | **Daemon** | `agentconnectd`, the endpoint software that holds the keys and MLS state and runs the adapters. |
@@ -61,12 +61,39 @@ what it does not protect against.
     other ciphersuite. v0 has **no ciphersuite negotiation**.
   - In OpenMLS the suite is behind the `draft-ietf-mls-pq-ciphersuites`
     feature and needs the libcrux crypto provider.
-- **HPKE key lengths:** every HPKE public key received in a KeyPackage or
-  LeafNode MUST be exactly the suite's public key length (1216 bytes:
-  1184 for ML-KEM-768 plus 32 for X25519). Implementations MUST check this
-  *before* passing the object to their MLS library, and reject it otherwise.
-  This is defence in depth against malformed hybrid keys (see
-  `docs/spikes/mls-xwing.md`).
+- **HPKE key lengths:** every HPKE public key received in a KeyPackage
+  (`init_key`), a LeafNode (`encryption_key`) or a ParentNode
+  (`encryption_key`) MUST be exactly the suite's public key length
+  (1216 bytes: 1184 for ML-KEM-768 plus 32 for X25519), and every leaf
+  `signature_key` exactly 32 bytes. Anything else MUST be rejected. This is
+  defence in depth against malformed hybrid keys (see
+  `docs/spikes/mls-xwing.md`). When the check happens:
+  - A KeyPackage in a JoinRequest: on its raw bytes, *before* it is passed
+    to the MLS library.
+  - Keys that only exist inside encrypted objects can't be checked before
+    the library decrypts them. The ratchet tree in a Welcome MUST be
+    checked after the GroupInfo is decrypted and before the Welcome is
+    staged into a group. A commit's Add KeyPackages, its UpdatePath leaf
+    and the resulting tree (leaves and parent nodes) MUST be checked after
+    the commit is staged and before it is merged.
+  - Every leaf of a received tree is additionally validated as a whole
+    (§3.3) before the group is used.
+- **KEM ciphertext lengths:** every HPKE `kem_output` an instance receives
+  and processes MUST be exactly the suite's KEM ciphertext length
+  (1120 bytes: 1088 for ML-KEM-768 plus 32 for X25519). Anything else MUST
+  be rejected. When the check happens:
+  - The `EncryptedGroupSecrets` of a Welcome: on the TLS bytes, *before*
+    the Welcome is passed to the MLS library. Every entry is checked, not
+    only the joiner's own.
+  - The `encrypted_path_secret` ciphertexts of a commit's UpdatePath exist
+    only inside the encrypted `PrivateMessage`. The MLS library decrypts the
+    commit and decapsulates the joiner's path secret in one step (in OpenMLS,
+    `MlsGroup::process_message`), so the check there is the library's: the
+    v0 provider's decapsulation rejects a `kem_output` of any other length
+    with an error. Implementations whose library can't guarantee that MUST
+    check the length before decapsulating.
+  - `ExternalInit` proposals carry a `kem_output` too, but external
+    commits are never accepted in v0 (§9.2).
 - **Credential:** `BasicCredential` with `identity` = the UTF-8 bytes of the
   identity identifier (`ac:v0:…`).
 - **Leaf signature key:** the instance key `SK.pub`. RFC 9420 requires leaf
@@ -101,6 +128,15 @@ will move to IANA-assigned values if the protocol is standardised.
 | `ac_group_meta` | `0xF0A2` | GroupContext | JCS JSON, §3.4 |
 | `ac_instance_cert` | `0xF0A3` | LeafNode | §3.3 |
 
+All three values are JSON objects in canonical JCS form (RFC 8785: no
+insignificant whitespace, keys sorted, no duplicate keys). Receivers MUST
+reject a value that is not byte-for-byte canonical, that has a field this
+section doesn't define, or whose `v` they don't support. Integers are
+non-negative and floats are not allowed. Every integer MUST be in the I-JSON
+range (RFC 7493 §2.2), at most 2^53 − 1, where JCS and ECMAScript agree on
+its exact form. Encoders MUST NOT write, and receivers MUST reject, an
+integer outside it.
+
 ### 3.3 Instance certificate
 
 ```
@@ -114,11 +150,19 @@ InstanceCert = {
 }
 ```
 
+`instance_id` is 16 lowercase hex characters (the 64-bit id, big-endian),
+and `sig_key` and `sig` are base64url without padding.
+
 A receiver MUST check all of the following:
 
 - `identity` equals the credential identity.
 - `sig_key` equals the LeafNode `signature_key`.
-- `sig` verifies under the IK encoded in `identity`.
+- `sig` verifies under the IK encoded in `identity` (strict Ed25519
+  verification).
+- The LeafNode carries exactly one extension, `ac_instance_cert`.
+
+`created_at` is informational. In v0 a certificate has no expiry, and
+receivers MUST NOT reject one because of its `created_at`.
 
 ### 3.4 Group metadata
 
@@ -161,6 +205,14 @@ https://<relay-host>/i/<invite_id>#v=0&s=<invite_secret>
   any server.
 - Unknown fragment parameters MUST be ignored. An unsupported `v` MUST cause
   the client to abort.
+- Clients MUST reject a URL that:
+  - is missing `v` or `s`, or repeats `v` or `s`;
+  - has a query string, userinfo, or a path other than `/i/<invite_id>`;
+  - has an `invite_id` or `invite_secret` that is not canonical base64url of
+    16 or 32 bytes;
+  - uses a scheme other than `https`. The one exception is `http`, accepted
+    only for the loopback hosts `localhost`, `127.0.0.1` and `[::1]` (local
+    development).
 
 ### 4.2 Public invite metadata (stored by the relay)
 
@@ -242,9 +294,30 @@ JoinRequest = {
   "display_name": "<≤ 80 chars>",
   "key_package": "<b64url MLS KeyPackage, v0 suite, with ac_instance_cert>",
   "mailbox_id": "<B's mailbox>",
-  "mac": "<b64url HMAC-SHA256(join_key, "agentconnect/v0/join-request" || invite_id || key_package_bytes || mailbox_id)>"
+  "mac": "<b64url HMAC-SHA256(join_key, mac_input)>"
 }
 ```
+
+The MAC covers every field the inviter acts on, each length-prefixed so
+that field boundaries are unambiguous:
+
+```
+lp(x)     = u32be(len(x)) ‖ x
+mac_input = "agentconnect/v0/join-request"
+            ‖ lp(invite_id)          # the raw 16 bytes, not base64url
+            ‖ lp(key_package_bytes)  # the TLS-serialised KeyPackage
+            ‖ lp(mailbox_id)         # its 22 ASCII characters
+            ‖ lp(display_name)       # UTF-8
+```
+
+The label is not length-prefixed. `testdata/invite-kdf.json` gives
+`mac_input` and `mac` for sample inputs.
+
+`display_name` is at most 80 characters and MUST NOT contain control
+characters (Unicode category Cc); the inviter MUST reject a request that
+breaks either rule. The MAC stops the relay from renaming the joiner, but
+the name is still chosen by the joiner, so the inviter's UI MUST present
+it as unverified text.
 
 B keeps the invite secret (and so can derive `welcome_key`) until it has
 joined or the invite expires.
@@ -258,7 +331,11 @@ The inviter instance A MUST:
    rate limiting. A failed MAC MUST NOT consume a use.
 3. Validate the KeyPackage: v0 ciphersuite, HPKE key lengths (§3.1),
    signature, instance certificate, and required capabilities. All of this
-   MUST happen before the KeyPackage is handed to the MLS library.
+   MUST happen before the KeyPackage is handed to the MLS library. The
+   request's `mailbox_id` MUST be the one derived from the KeyPackage's leaf
+   `signature_key` (§2). The KeyPackage MUST NOT carry KeyPackage
+   extensions and MUST NOT be a last-resort KeyPackage.
+   It MUST also be **unused** (see "KeyPackage reuse" below).
 4. Approve the join, either automatically (when policy allows) or through its
    human. Approval MUST time out after 1 hour by default, and a timeout
    rejects the join.
@@ -272,16 +349,47 @@ The inviter instance A MUST:
    include the `ratchet_tree` extension.
 7. Send `invite.consume{invite_id}` to the relay.
 
+A verified JoinRequest stays usable until its Add is merged. If building or
+sending the commit fails (another commit pending, `epoch_conflict`), the
+inviter retries steps 5–6 with it, without the joiner's involvement.
+
+**KeyPackage reuse.** A JoinRequest carries no freshness of its own: the
+relay, or anyone who saw it, can replay it while the invite has uses left.
+After the joiner has left, a replay would re-add its certified identity as
+a leaf nobody controls. A KeyPackage is therefore single-use (RFC 9420
+§16.8):
+
+- Every instance MUST record the KeyPackageRef (RFC 9420 §5.2) of each
+  KeyPackage in an Add it merges, in any group, for the life of its state.
+- An inviter MUST reject a JoinRequest, and MUST NOT commit an Add, whose
+  KeyPackage was already used.
+- Every receiver MUST reject (not merge) a commit that Adds a KeyPackage it
+  has already seen used, and raise `unauthorized_commit` (§9.2).
+- There is no cap on a KeyPackage's lifetime beyond this reuse tracking.
+  The MLS `lifetime` field is checked by the MLS library as usual (RFC 9420
+  §10.1), and an unused KeyPackage stays acceptable until it expires there.
+
 ### 6.3 Processing the Welcome (joiner)
 
 B unwraps the Welcome with `welcome_key` (§6.4). B MUST:
 
 - Abort if the AEAD check fails. The wrapping ties the Welcome to someone who
   knows the invite secret.
-- Abort if the Welcome can't be processed.
-- Verify that `ac_group_meta.name` and `.purpose` match the `InviteMeta` it
-  showed its human.
-- Verify the instance certificates of every leaf.
+- Abort if the Welcome can't be processed, uses another ciphersuite,
+  carries PSKs, or lacks the `ratchet_tree` extension.
+- Check the KEM ciphertext lengths of the Welcome before processing it
+  (§3.1).
+- Abort if the GroupInfo carries any extension other than `ratchet_tree`.
+- Check the HPKE key lengths of the tree before staging it (§3.1).
+- Verify that the GroupContext extensions are exactly the §9.2 set and
+  well-formed, and that `ac_group_meta.name` and `.purpose` match the
+  `InviteMeta` it showed its human.
+- Sanity-check the `ac_group_policy`: it MUST be well-formed (§3.2),
+  `owner`, every `admins` entry and `floor_moderator` (if set) MUST be
+  valid identity identifiers, and its limits MUST be in the ranges of §9.1.
+  The owner is **not** required to be a current member.
+- Verify the instance certificates of every leaf, and that the group does
+  not exceed its `max_members`.
 - Delete `welcome_key` and the invite secret after a successful join.
 
 Any failure while processing a Welcome consumes B's KeyPackage (its private
@@ -296,7 +404,10 @@ The inviter wraps every Welcome:
 WrappedWelcome = nonce(12) ‖ ChaCha20-Poly1305(welcome_key, nonce, aad = "agentconnect/v0/welcome" ‖ invite_id, welcome_bytes)
 ```
 
-- `nonce` is 12 random bytes, fresh for each Welcome.
+- `nonce` is 12 random bytes, fresh for each Welcome. In the AAD,
+  `invite_id` is the raw 16 bytes. `welcome_bytes` is the TLS-serialised
+  MLS Welcome message. A `WrappedWelcome` shorter than nonce plus tag (28
+  bytes) MUST be rejected.
 - This is the only Welcome format in v0. The envelope kind is always
   `welcome_wrapped`; an unwrapped `welcome` MUST be rejected.
 - The AEAD is independent of the MLS ciphersuite: it binds the Welcome to the
@@ -334,7 +445,16 @@ Envelope = {
 
 - Application ciphertext MUST be padded inside MLS (`PrivateMessage` padding)
   up to the next of these bucket sizes: 256 B, 1 KiB, 4 KiB, 16 KiB, 64 KiB,
-  256 KiB, 1 MiB.
+  256 KiB, 1 MiB. The bucket is the AEAD ciphertext length: plaintext plus
+  its length prefix, the content signature and the AEAD tag, padded with
+  zeros. Every application message of one bucket in one group therefore has
+  the same wire length. Plaintexts that don't fit 1 MiB MUST NOT be sent.
+  (The inner fields of §7.2 alone take about 185 bytes, more than the
+  172-byte plaintext that fits 256 B, so in practice the smallest bucket
+  used is 1 KiB.)
+- `epoch` MUST equal the epoch in the MLS `PrivateMessage` header. The
+  receiving daemon MUST drop an envelope where they differ; the relay can't
+  check this, since it doesn't parse `ct`.
 - After processing a commit, members MUST check its `routing` hints against
   the commit's actual Add and Remove proposals. A mismatch MUST raise a
   `relay_misbehaviour` alert. The relay could be dropping or misrouting
@@ -468,14 +588,52 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   do not receive it; they join through the Welcome. Nothing sent after the
   commit reaches a removed mailbox.
 - **Merging own commits:** a sender MUST NOT merge its own commit until the
-  relay confirms it: an `accepted` frame for the commit's `msg_id`, or its own
-  commit delivered back in the fan-out. Until then the commit stays pending.
+  relay confirms it. Until then the commit stays pending. Exactly two things
+  confirm it:
+  - an `accepted` frame whose `msg_id` is the `msg_id` the pending commit
+    was sent under; or
+  - the fan-out delivering a commit whose bytes are **identical** to the
+    pending commit as sent. The sender MUST keep a hash of the sent bytes
+    with the pending commit to check this.
+
+  An MLS member can't decrypt its own `PrivateMessage`, and its sender data
+  is encrypted under a key every member holds, so "the header names my
+  leaf" proves nothing: it may be a stale commit of the sender's or a
+  forgery by another member. The rules:
+  - A commit that names the instance's own leaf at the current epoch and
+    matches neither the pending commit nor a commit discarded in this epoch
+    MUST be rejected. The pending commit MUST NOT be merged or discarded
+    because of it.
+  - A commit that matches a commit the instance discarded in this epoch
+    means the relay accepted that one. The instance can't enter that epoch,
+    so it MUST discard any pending commit and re-sync (rejoin with a new
+    invite).
+  - A fan-out copy of a commit already confirmed by `accepted` arrives one
+    epoch late and is ignored.
+  - Another member's commit at the current epoch (authenticated by MLS)
+    means the pending commit lost. It is processed like any commit,
+    including every policy check (§9.2); merging it discards the pending
+    commit, and the daemon rebuilds its commit if still needed.
+- **Discarding a pending commit:** only when the relay rejects its send
+  (`epoch_conflict`, or another `error` for its `msg_id`). After a timeout
+  the sender MUST resend the same bytes under the same `msg_id` rather than
+  build a new commit: `msg_id` is idempotent, so a commit that was already
+  accepted is not fanned out twice.
 - **On `epoch_conflict`,** the sender MUST discard its pending commit, process
   the winning commit from its queue, and then rebuild and resend its own
   commit if it is still needed.
+- **While a commit is pending** the instance sends no application messages
+  or proposals (they would belong to an epoch that is about to end). It
+  queues them until the commit is confirmed or discarded.
 - **Application messages:** accepted when `env.epoch == current_epoch` or
   `current_epoch - 1` (a grace window), and the sender is a member. They are
   fanned out to every member except the sender.
+- **Grace window at the endpoints:** members keep the previous epoch's
+  application secrets for exactly one epoch, matching the relay. A message
+  from the previous epoch MUST be attributed to its sender **as it was in
+  that epoch**, even if the commit that ended the epoch removed it (its
+  last messages are still delivered), and MUST be rejected if its leaf
+  was not a member in that epoch. Older messages can't be decrypted.
 - **Proposals** (standalone, e.g. a Remove for the sender's own leaf, §9.2):
   accepted only when `env.epoch == current_epoch` and the sender is a member,
   and fanned out to every member except the sender. A proposal from an older
@@ -499,7 +657,9 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   and a send that is rejected does not consume its `msg_id`. A different
   sender may reuse the same `msg_id`.
 - **Limits (defaults):**
-  - Frame size: 1 MiB
+  - Frame size: 2 MiB of JSON text. This fits the largest padded
+    application message (the 1 MiB bucket, §7.1), which is about 1.4 MiB
+    once base64url-encoded in an envelope.
   - Group size: 50 instances
   - Mailbox queue: 64 MiB (overflow below)
   - Per-mailbox send rate: 50 messages per second
@@ -563,12 +723,25 @@ GroupPolicy = {
 }
 ```
 
-Defaults:
+Limits: `max_members` is 1 to 50 (the relay's group size, §8.3), and
+`loop_guard.max_agent_turns` is 0 to 100. `admins` has no duplicates.
+Receivers MUST reject a policy outside these limits, whether it arrives in a
+Welcome (§6.3) or a commit (§9.2).
+
+Defaults for a new group: `owner` = the creator, `admins: []`,
+`invite: "owner"`, `remove: "owner"`, `max_members: 50`,
+`require_verified: false`, `floor: "free"`, `floor_moderator: null`,
+`loop_guard.max_agent_turns: 20`.
 
 - 1:1 groups: `floor: "free"`.
 - Groups that grow beyond two members: the inviter's daemon SHOULD switch to
   `floor: "mention"` in the same commit that adds the third member, unless
-  the owner set the floor mode explicitly.
+  the owner set the floor mode explicitly. Member counts here and in
+  `max_members` count **instances** (leaves), not identities. The switch is
+  a GroupContextExtensions proposal that changes only `floor` from `free`
+  to `mention`, in a commit with at least one Add that takes the group from
+  at most two to more than two instances. Receivers MUST accept it from any
+  committer allowed to make that Add, whatever its role.
 
 ### 9.2 Authorisation of commits
 
@@ -579,15 +752,50 @@ and SHOULD leave the group if the honest members can't converge.
 
 | Change | Allowed committer |
 |---|---|
-| Add (via invite) | The instance that created the invite. Its identity must satisfy `invite` at the time the invite was created. |
-| Remove other member | Per `remove` |
-| Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. A sole remaining member just deletes its local state. |
-| Policy change (GroupContextExtensions) | Owner. Admins may change `floor` and `floor_moderator` only. |
-| Owner transfer | Owner. The new owner must be a current member. |
+| Add (via invite) | A committer whose identity satisfies `invite` under the policy in force at the commit's epoch. |
+| Remove other member | A committer whose identity satisfies `remove`. Only the owner may remove the owner's instances. |
+| Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. The owner's last instance may not leave until it has transferred ownership. A sole remaining member just deletes its local state. |
+| Policy change (GroupContextExtensions) | Owner. Admins may change `floor` and `floor_moderator` only. Any committer allowed to make the Add may apply the §9.1 floor switch. |
+| Owner transfer | Owner. The new owner must be a member after the commit. |
 | Update (own leaf) | The instance itself |
-| Add another instance of an existing identity | Any instance of that identity (multi-replica) |
+| Add another instance of an existing identity | Any instance of that identity (multi-replica), whatever `invite` says |
+| Remove other instances of one's own identity | Any instance of that identity |
 
-Removing a member's identity removes all of that member's instances.
+Notes on the table:
+
+- **Add.** Receivers can't tell which instance created an invite (only that
+  instance holds its secret, §4.3), so they check the committer's identity
+  against the policy in force at the commit's epoch. An inviter MUST NOT
+  commit an Add, even for an invite it created earlier, if the current
+  policy no longer lets it invite.
+- **Removing an identity removes all its instances.** A daemon removing a
+  member MUST include every instance of that identity in one commit.
+  Receivers accept a commit that removes only some of another identity's
+  instances (e.g. a dead replica) under the same `remove` permission.
+- **Leaves.** A Remove proposal for the sender's own leaf is stored by every
+  member. Any member MAY commit it, alone or together with other proposals
+  of its next commit, and members SHOULD commit pending leaves promptly. A
+  self-Remove is allowed for any member, except the owner's last instance.
+- **The owner transfers ownership before it leaves.** Otherwise the group
+  would be left with no owner, and no policy change could ever pass again.
+  An owner instance MUST NOT propose its own removal while it is the
+  owner's only instance in the group, counting the leaves already pending
+  in the epoch as gone. Receivers MUST reject such a leave proposal (and not
+  store it), and MUST reject any commit after which the identity named as
+  `owner` by the policy in force has no instance left although it had
+  one before. The owner first commits a policy change that names another
+  member as `owner` ("Owner transfer" above), then leaves as a plain
+  member. One of several instances of the owner's identity may leave
+  freely. A sole remaining member, owner or not, just deletes its local
+  state.
+- Each proposal of a commit is authorised against the policy in force at
+  the commit's epoch, not the policy the commit introduces. The group after
+  the commit MUST fit the `max_members` of the policy the commit ends with.
+- Only these proposal types are valid in v0: Add, Remove and
+  GroupContextExtensions, in commits, plus the standalone self-Remove.
+  Receivers MUST reject any other proposal type, external senders and
+  `PublicMessage` handshakes, and at most one GroupContextExtensions
+  proposal per commit.
 
 - **No SelfRemove in v0.** MLS SelfRemove proposals can only be sent as
   `PublicMessage` in current implementations, which the wire format policy
@@ -700,7 +908,7 @@ until its human has verified the current epoch (§11).
 | Attacker | Capability | Mitigation | Residual risk |
 |---|---|---|---|
 | Honest-but-curious relay | Sees all envelopes | MLS E2E; padding | **Metadata:** membership size and churn, timing, message sizes (bucketed), mailbox ids |
-| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; MLS signatures and epochs; replay protection via generation counters and `msg_id`; routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
+| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; single-use KeyPackages stop JoinRequest replays (§6.2); MLS signatures and epochs; replay protection via generation counters and `msg_id`; own commits confirmed only by `msg_id` or exact bytes (§8.3); routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
 | **Link leaked before use** (chat/email provider, inbox access, LLM logs, tampered landing page) | Joins as a member | Use limits and the "already used" warning; inviter approval; **SAS** | **Becomes a member if approved. Full MITM if the relay colludes and the SAS isn't compared.** |
 | Link leaked after exhaustion or expiry | — | The secret only authenticates joins | None |
 | Malicious member | Reads everything while a member; injects content | Roles and policy; removal (new epoch); endpoint policy (§10) | Everything it saw while it was a member |
@@ -806,6 +1014,16 @@ A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice
 3. Multi-relay federation. Out of scope for v0.
 4. Interop with AGNTCY SLIM (also MLS-based), and an A2A extension (§13).
 
+Decided by the maintainer (2026-10-17), now normative:
+
+- The owner transfers ownership before it leaves (§9.2).
+- Integers in protocol JSON are capped at the I-JSON range (§3.2).
+- A Welcome's GroupInfo carries only `ratchet_tree`, and its policy is
+  sanity-checked without requiring the owner to be a member (§6.3).
+- Every KEM ciphertext received is length-checked (§3.1).
+- Removing only some of an identity's instances is allowed (§9.2).
+- KeyPackages have no lifetime cap beyond reuse tracking (§6.2).
+
 Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 
 - Invite binding: the AEAD-wrapped Welcome (§6.4) is the only mode. An
@@ -818,7 +1036,7 @@ Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 ## 16. References
 
 - RFC 9420, *The Messaging Layer Security (MLS) Protocol*
-- RFC 5869 (HKDF), RFC 8785 (JCS), RFC 2119 / RFC 8174
+- RFC 5869 (HKDF), RFC 8785 (JCS), RFC 7493 (I-JSON), RFC 2119 / RFC 8174
 - draft-ietf-mls-pq-ciphersuites (MLS post-quantum ciphersuites) and draft-ietf-hpke-pq (hybrid KEMs for HPKE)
 - A2A Protocol Specification v1.0, https://a2a-protocol.org/v1.0.0/specification/
 - draft-chapman-a2a-mls-03 (MLS carried inside A2A)
