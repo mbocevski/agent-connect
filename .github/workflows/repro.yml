@@ -5,6 +5,15 @@ name: repro
 on:
   push:
     branches: [main]
+  pull_request:
+    paths:
+      - ".github/workflows/repro.yml"
+      - ".github/workflows/release.yml"
+      - "Cargo.lock"
+      - "uv.lock"
+      - "rust-toolchain.toml"
+      - "**/Cargo.toml"
+      - "**/pyproject.toml"
   workflow_dispatch:
 
 permissions:
@@ -30,7 +39,7 @@ jobs:
           export SOURCE_DATE_EPOCH
           export RUSTFLAGS="--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home"
           cargo build --release --locked -p agentconnect-relay
-          uv build --all-packages --out-dir dist
+          uv build --all-packages --sdist --wheel --out-dir dist
           cp target/release/agentconnect-relay dist/
           (cd dist && sha256sum -- * | sort -k2 > ../SHA256SUMS)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
