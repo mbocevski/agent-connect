@@ -88,6 +88,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Protocol (`SPEC.md`): the twelve daemon choices that were pending in §15
+  are now normative, as the maintainer decided: the Update cadence counts
+  both directions (§3.1); the approval timeout is silent and pre-Welcome
+  traffic is parked, bounded and unacked (§6.2, §6.3); one pending approval
+  per KeyPackageRef (§6.2); the epoch drop rule covers application
+  messages and proposals while commits are merged and flagged (§7.1); the
+  inner `reply_to` field (§7.2); `control.close` prompts the human
+  (§7.3); the canonical `relay_host` (§8.1.1) and the `drained` frame
+  (§8.2); replica triggering (§9.4); `trust_state` counts identities
+  (§10.1); the reconnect-drain exemption (§10.2); `hop` checks against
+  `reply_to` (§10.3); and an owner's SAS mismatch (§11). §15 keeps one new
+  question: §9.2 doesn't let the remaining members remove that owner's leaf.
 - Daemon: a proposal whose envelope epoch isn't the current epoch is
   dropped with `relay_misbehaviour` (`epoch_mismatch`), while a commit
   with a mismatched envelope epoch is still merged and flagged (SPEC
