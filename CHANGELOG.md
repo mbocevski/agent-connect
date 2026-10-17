@@ -168,6 +168,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- The default relay is now `wss://connect.yggdrasill.network`, and the
+  planned A2A extension URI in SPEC §13 is
+  `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't
+  hold `agentconnect.dev`, so nothing refers to it any more.
 - The `text` shorthand of `POST /v0/groups/{id}/messages` (and so `agentconnect
   send`) now sends an A2A v1.0 `Message` (`messageId`, `contextId`, `role`,
   `parts`) instead of a bare `{"text": ...}` body (SPEC 7.2).
