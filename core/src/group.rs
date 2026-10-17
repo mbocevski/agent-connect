@@ -28,7 +28,9 @@ use crate::mls::{
     leaf_extensions, leaf_mailbox, validate_key_package, validate_leaf,
 };
 use crate::padding::bucket_for;
-use crate::policy::{CommitFacts, Floor, GroupMeta, GroupPolicy, Removal, authorize};
+use crate::policy::{
+    CommitFacts, Floor, GroupMeta, GroupPolicy, OWNER_MUST_TRANSFER, Removal, authorize,
+};
 use crate::provider::{Provider, Store};
 use crate::records::{self, OwnCommits, PendingRecord, PreviousMembers, wire_hash};
 use crate::rng::Rng;
@@ -651,6 +653,30 @@ impl Group {
         Ok(MemberInfo::from_leaf(index.u32(), &validate_leaf(leaf)?))
     }
 
+    /// Whether the leave of `leaving`, together with the leaves already
+    /// pending in this epoch, would remove the owner's last instance
+    /// (SPEC §9.2). Pending proposals don't outlive their epoch, so these
+    /// are all the removals the next commit can carry.
+    fn owner_left_without(&self, leaving: LeafNodeIndex) -> Result<bool> {
+        let owner = self.policy()?.owner;
+        if self.member_info(leaving)?.identity != owner {
+            return Ok(false);
+        }
+        let mut gone: BTreeSet<u32> = self
+            .mls
+            .pending_proposals()
+            .filter_map(|q| match (q.proposal(), q.sender()) {
+                (Proposal::Remove(r), Sender::Member(s)) if r.removed() == *s => Some(s.u32()),
+                _ => None,
+            })
+            .collect();
+        gone.insert(leaving.u32());
+        Ok(!self
+            .members()?
+            .iter()
+            .any(|m| m.identity == owner && !gone.contains(&m.leaf_index)))
+    }
+
     fn check_all_leaves(&self, policy: &GroupPolicy) -> Result<()> {
         let members = self.members()?;
         if members.len() > usize::try_from(policy.max_members).unwrap_or(usize::MAX) {
@@ -1015,13 +1041,17 @@ impl Group {
     /// # Errors
     ///
     /// [`Error::NotPermitted`] for a sole member (it should just delete its
-    /// state), [`Error::CommitPending`], or an MLS error.
+    /// state) or for the owner's last instance (it must transfer ownership
+    /// first, SPEC §9.2), [`Error::CommitPending`], or an MLS error.
     pub fn propose_leave<S: Store>(&mut self, client: &Client<S>) -> Result<Vec<u8>> {
         self.ready()?;
         if self.mls.members().count() < 2 {
             return Err(Error::NotPermitted(
                 "sole member: delete the local state instead",
             ));
+        }
+        if self.owner_left_without(self.mls.own_leaf_index())? {
+            return Err(Error::NotPermitted(OWNER_MUST_TRANSFER));
         }
         self.handshake_padding(client)?;
         let msg = self
@@ -1277,6 +1307,9 @@ impl Group {
                     return Err(Error::Unauthorized("only leave proposals are accepted"));
                 };
                 let member = self.member_info(index)?;
+                if self.owner_left_without(index)? {
+                    return Err(Error::Unauthorized(OWNER_MUST_TRANSFER));
+                }
                 self.mls
                     .store_pending_proposal(client.provider.storage(), *queued)
                     .map_err(storage)?;

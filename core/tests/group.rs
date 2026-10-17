@@ -819,6 +819,86 @@ fn leave_via_remove_proposal() {
     solo.delete(&peers[0].client).unwrap();
 }
 
+const OWNER_MUST_TRANSFER: Error =
+    Error::NotPermitted("the owner must transfer ownership before leaving");
+
+#[test]
+fn owner_may_not_leave_without_transferring_ownership() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    assert_eq!(
+        groups[0].propose_leave(&peers[0].client).unwrap_err(),
+        OWNER_MUST_TRANSFER
+    );
+    assert!(!groups[0].has_pending_commit());
+    // Plain members still may.
+    groups[1].propose_leave(&peers[1].client).unwrap();
+}
+
+#[test]
+fn owner_may_leave_after_transferring_ownership() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let mut p = groups[0].policy().unwrap();
+    p.owner = peers[1].identity.id();
+    let out = groups[0].set_policy(&peers[0].client, &p).unwrap();
+    groups[0]
+        .confirm_pending_commit(&peers[0].client, &out.msg_id)
+        .unwrap();
+    for i in [1, 2] {
+        expect_commit(groups[i].process(&peers[i].client, &out.commit).unwrap());
+    }
+    let proposal = groups[0].propose_leave(&peers[0].client).unwrap();
+    for i in [1, 2] {
+        let Event::LeaveProposed(m) = groups[i].process(&peers[i].client, &proposal).unwrap()
+        else {
+            panic!("expected a leave proposal");
+        };
+        assert_eq!(m.identity, peers[0].identity.id());
+    }
+    let out = groups[2]
+        .commit_pending_proposals(&peers[2].client)
+        .unwrap();
+    groups[2]
+        .confirm_pending_commit(&peers[2].client, &out.msg_id)
+        .unwrap();
+    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    let Event::Removed(_) = groups[0].process(&peers[0].client, &out.commit).unwrap() else {
+        panic!("expected removal");
+    };
+    groups.remove(0);
+    assert_converged(&groups);
+    assert_eq!(groups[0].policy().unwrap().owner, peers[1].identity.id());
+}
+
+#[test]
+fn one_of_several_owner_instances_may_leave() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let a2 = replica(&peers[0].identity, 78, &clock);
+    let (mut ga2, out) = join(&peers[0], &mut groups[0], &a2);
+    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    let proposal = ga2.propose_leave(&a2.client).unwrap();
+    groups[0].process(&peers[0].client, &proposal).unwrap();
+    groups[1].process(&peers[1].client, &proposal).unwrap();
+    // With A2's leave pending, A is now the owner's last instance.
+    assert_eq!(
+        groups[0].propose_leave(&peers[0].client).unwrap_err(),
+        OWNER_MUST_TRANSFER
+    );
+    let out = groups[1]
+        .commit_pending_proposals(&peers[1].client)
+        .unwrap();
+    groups[1]
+        .confirm_pending_commit(&peers[1].client, &out.msg_id)
+        .unwrap();
+    expect_commit(groups[0].process(&peers[0].client, &out.commit).unwrap());
+    let Event::Removed(_) = ga2.process(&a2.client, &out.commit).unwrap() else {
+        panic!("expected removal");
+    };
+    assert_converged(&groups);
+}
+
 #[test]
 fn multi_replica_identity_joins_and_is_removed_together() {
     let clock = clock();

@@ -275,12 +275,17 @@ pub(crate) struct CommitFacts {
     pub identities_after: BTreeSet<String>,
 }
 
+/// Why the owner's last instance may not leave (SPEC §9.2).
+pub(crate) const OWNER_MUST_TRANSFER: &str = "the owner must transfer ownership before leaving";
+
 /// Checks a commit against the policy in force at its epoch (SPEC §9.2).
 ///
 /// The rules of SPEC §9.1–§9.2:
 /// - An Add is allowed if the committer's identity satisfies `invite`, or
 ///   if the added identity is the committer's own (another replica).
 /// - Removing the owner's instances needs the owner, unless it's a leave.
+/// - No commit may remove the owner's last instance: the owner transfers
+///   ownership before it leaves.
 /// - The floor switch (`free` → `mention` in the commit that grows the
 ///   group past two instances) is accepted from any committer allowed to
 ///   make that Add.
@@ -301,6 +306,14 @@ pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()>
         if r.identity == policy.owner && policy.role_of(committer) != Role::Owner {
             return Err(Error::Unauthorized("only the owner may remove the owner"));
         }
+    }
+    if facts.removes.iter().any(|r| r.identity == policy.owner)
+        && !facts.identities_after.contains(&policy.owner)
+    {
+        // The committer is never removed by its own commit, so an owner
+        // committer always survives it: the owner's last instance can only
+        // go through a leave, and that needs a transfer first.
+        return Err(Error::Unauthorized(OWNER_MUST_TRANSFER));
     }
     if let Some(new) = &facts.new_policy {
         authorize_policy_change(policy, new, facts)?;
@@ -507,6 +520,38 @@ mod tests {
             authorize(&p, &f),
             Err(Error::Unauthorized("group would exceed max_members"))
         );
+    }
+
+    #[test]
+    fn owner_last_instance_may_not_leave_without_a_transfer() {
+        let id = ids(3);
+        let p = GroupPolicy::default_for(&id[0]);
+        let leave = |identity: &str| Removal {
+            identity: identity.into(),
+            self_proposed: true,
+        };
+        let mut f = facts(&id[1]);
+        f.removes = vec![leave(&id[0])];
+        f.identities_after = [id[1].clone(), id[2].clone()].into();
+        assert_eq!(
+            authorize(&p, &f),
+            Err(Error::Unauthorized(OWNER_MUST_TRANSFER))
+        );
+        // One of several owner instances may leave.
+        f.identities_after.insert(id[0].clone());
+        authorize(&p, &f).unwrap();
+        // After a transfer the former owner is a plain member.
+        let transferred = GroupPolicy {
+            owner: id[1].clone(),
+            ..p.clone()
+        };
+        f.identities_after.remove(&id[0]);
+        authorize(&transferred, &f).unwrap();
+        // A group whose owner is already gone still works.
+        let mut f = facts(&id[1]);
+        f.removes = vec![leave(&id[2])];
+        f.identities_after = [id[1].clone()].into();
+        authorize(&p, &f).unwrap();
     }
 
     #[test]

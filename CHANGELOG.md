@@ -88,6 +88,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   Python `VerifiedJoinRequest` is no longer used up by a failed
   `add_member`, so an inviter can retry after `CommitPending` or an
   `epoch_conflict`.
+- Protocol and core: the owner must transfer ownership before it leaves
+  (SPEC §9.2). `propose_leave` refuses the owner's last instance with
+  `NotPermitted`, and receivers reject that leave proposal and any commit
+  that removes the owner's last instance (`unauthorized_commit`), so a
+  group can no longer end up ownerless. One of several owner instances may
+  still leave, and a sole member still just deletes its state.
 - Core: application messages in the one-epoch grace window are attributed
   to the sender as it was in the message's epoch, so a message from a
   member removed by the latest commit is delivered instead of dropped, and

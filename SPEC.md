@@ -720,7 +720,7 @@ and SHOULD leave the group if the honest members can't converge.
 |---|---|
 | Add (via invite) | A committer whose identity satisfies `invite` under the policy in force at the commit's epoch. |
 | Remove other member | A committer whose identity satisfies `remove`. Only the owner may remove the owner's instances. |
-| Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. A sole remaining member just deletes its local state. |
+| Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. The owner's last instance may not leave until it has transferred ownership. A sole remaining member just deletes its local state. |
 | Policy change (GroupContextExtensions) | Owner. Admins may change `floor` and `floor_moderator` only. Any committer allowed to make the Add may apply the §9.1 floor switch. |
 | Owner transfer | Owner. The new owner must be a member after the commit. |
 | Update (own leaf) | The instance itself |
@@ -741,7 +741,19 @@ Notes on the table:
 - **Leaves.** A Remove proposal for the sender's own leaf is stored by every
   member. Any member MAY commit it, alone or together with other proposals
   of its next commit, and members SHOULD commit pending leaves promptly. A
-  self-Remove is allowed for any member, including the owner.
+  self-Remove is allowed for any member, except the owner's last instance.
+- **The owner transfers ownership before it leaves.** Otherwise the group
+  would be left with no owner, and no policy change could ever pass again.
+  An owner instance MUST NOT propose its own removal while it is the
+  owner's only instance in the group, counting the leaves already pending
+  in the epoch as gone. Receivers MUST reject such a leave proposal (and not
+  store it), and MUST reject any commit after which the identity named as
+  `owner` by the policy in force has no instance left although it had
+  one before. The owner first commits a policy change that names another
+  member as `owner` ("Owner transfer" above), then leaves as a plain
+  member. One of several instances of the owner's identity may leave
+  freely. A sole remaining member, owner or not, just deletes its local
+  state.
 - Each proposal of a commit is authorised against the policy in force at
   the commit's epoch, not the policy the commit introduces. The group after
   the commit MUST fit the `max_members` of the policy the commit ends with.
@@ -967,12 +979,9 @@ A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice
    cadence in §3.1.
 3. Multi-relay federation. Out of scope for v0.
 4. Interop with AGNTCY SLIM (also MLS-based), and an A2A extension (§13).
-5. The owner may leave (§9.2), after which no policy change can pass and
-   the group is ownerless for good. Should the owner have to transfer
-   ownership first?
-6. JCS integers above 2^53 − 1 are written exactly, where RFC 8785 uses the
+5. JCS integers above 2^53 − 1 are written exactly, where RFC 8785 uses the
    ECMAScript form. Should v0 cap every integer at 2^53 − 1 (I-JSON)?
-7. Constraints on GroupInfo extensions other than `ratchet_tree`, on the
+6. Constraints on GroupInfo extensions other than `ratchet_tree`, on the
    Welcome's policy (e.g. the owner being a member), and on lengths of KEM
    outputs in UpdatePaths and Welcomes, which today rely on the MLS library.
 
