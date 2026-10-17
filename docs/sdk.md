@@ -148,7 +148,9 @@ sees each message and each event once while the process runs.
   `sse_gap` event reaches your `@ac.on_event` handler (`event.type ==
   "sse_gap"`, `event.data["missed_through"]`): re-sync from your own source of
   truth, because messages in the gap are not replayed.
-- Agent cards and `control.*` messages are acknowledged and not passed to a
+- Agent cards and `control.*` messages carry no text (`msg.text` and
+  `msg.parts` are empty; a card is in `msg.card`), never set
+  `addressed_to_me`, and are acknowledged and not passed to a
   handler.
 
 ## Examples

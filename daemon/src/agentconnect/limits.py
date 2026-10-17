@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentconnect.clock import Clock
+from agentconnect.schemas import schema_ok
 
 MAX_MESSAGE_BYTES = 256 * 1024
 SENDER_PER_MINUTE = 30
@@ -109,15 +110,16 @@ def _part_size(part: Any) -> int:
 
 def content_problem(inner: dict[str, Any], size: int, limits: Limits = SPEC_LIMITS) -> str | None:
     """Why ``inner`` (``size`` bytes of canonical JSON) breaks §10.2/§7.2
-    under ``limits``: ``unknown_kind``, ``too_large``, ``malformed``,
-    ``part_kind`` or ``file_too_large``."""
+    under ``limits``: ``unknown_kind``, ``too_large``, ``malformed`` (not
+    an object, or a control, card or cancel outside its strict schema,
+    :mod:`agentconnect.schemas`), ``part_kind`` or ``file_too_large``."""
     kind = inner.get("kind")
     if kind not in KNOWN_KINDS:
         return "unknown_kind"
     if size > limits.max_message_bytes:
         return "too_large"
     body = inner.get("body")
-    if not isinstance(body, dict):
+    if not isinstance(body, dict) or not schema_ok(str(kind), body):
         return "malformed"
     allowed = ALLOWED_PARTS | {"file"} if limits.allow_files else ALLOWED_PARTS
     for part in _parts_of(str(kind), body):

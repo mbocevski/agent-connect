@@ -53,6 +53,7 @@ from agentconnect.limits import (
     RateLimiter,
     content_problem,
 )
+from agentconnect.schemas import NON_CONTENT_KINDS
 
 if TYPE_CHECKING:
     from agentconnect.store import Store
@@ -60,7 +61,8 @@ if TYPE_CHECKING:
 # SPEC 7.3: controls only a human-originated message may carry.
 HUMAN_ONLY_KINDS = frozenset({"control.resume"})
 # What require_approval holds: content from (or for) an agent. Controls and
-# Agent Cards pass, so membership, the loop guard and capabilities keep working.
+# Agent Cards carry no content (agentconnect.schemas) and pass, so membership,
+# the loop guard and capabilities keep working.
 HOLDABLE_KINDS = frozenset(
     {"a2a.message", "a2a.task_status", "a2a.task_artifact", "a2a.task_cancel"}
 )
@@ -484,6 +486,10 @@ class SafetyPolicy:
             return drop("not_human")  # SPEC 7.3: an agent can't resume
         if m.kind == "control.close" and m.sender != m.owner:
             return drop("not_owner")  # SPEC 7.3: only the owner may close
+        if m.kind in NON_CONTENT_KINDS:
+            # Controls and cards carry no content (agentconnect.schemas) and
+            # never trigger the agent, so there is nothing to hold.
+            return as_context("not_content")
         if settings.approve_inbound and m.kind in HOLDABLE_KINDS:
             return hold("require_approval")
         if m.hop > m.max_turns:
@@ -500,11 +506,15 @@ class SafetyPolicy:
         problem = content_problem(m.inner, m.size, limits)
         if problem is not None:
             return drop(problem)
+        human = m.inner.get("origin") == "human"
+        if m.kind in NON_CONTENT_KINDS and not m.internal and not human:
+            # Cards and controls come from the daemon or the human, never
+            # from the agent: it can't use them to carry content.
+            return drop("not_for_agents")
         if not m.internal and not self.limiter.allow_inner(
             m.group_id, m.instance, m.kind, m.inner.get("body"), limits, identity=m.sender
         ):
             return drop("rate_limited")
-        human = m.inner.get("origin") == "human"
         if not m.internal and not human and settings.approve_outbound and m.kind in HOLDABLE_KINDS:
             return hold("require_approval")
         return DELIVER

@@ -144,9 +144,9 @@ def test_require_approval_holds_content_but_not_controls(policy: SafetyPolicy) -
     status = {"kind": "a2a.task_status", "body": {"status": {"state": "working"}}}
     assert policy.inbound(inbound(status)).verdict is Verdict.HOLD_FOR_APPROVAL
     pause = {"kind": "control.pause", "body": {"reason": "human"}}
-    assert policy.inbound(inbound(pause)) == DELIVER
+    assert policy.inbound(inbound(pause)) == as_context("not_content")
     card = {"kind": "a2a.agent_card", "body": {"name": "x"}}
-    assert policy.inbound(inbound(card)) == DELIVER
+    assert policy.inbound(inbound(card)) == as_context("not_content")
     cancel = {"kind": "a2a.task_cancel", "body": {"id": "t1"}}
     assert policy.inbound(inbound(cancel)) == hold("require_approval")
     # Held before the loop guard or addressing apply: the human sees it.
@@ -165,8 +165,8 @@ def test_outbound_approval_holds_agent_messages_only(policy: SafetyPolicy) -> No
     assert policy.outbound(outbound()) == hold("require_approval")
     assert policy.outbound(outbound(message(origin="human"))) == DELIVER
     assert policy.outbound(outbound(internal=True)) == DELIVER
-    card = {"kind": "a2a.agent_card", "origin": "agent", "body": {}}
-    assert policy.outbound(outbound(card)) == DELIVER
+    card = {"kind": "a2a.agent_card", "origin": "agent", "body": {"name": "x"}}
+    assert policy.outbound(outbound(card, internal=True)) == DELIVER, "the daemon's own card"
     assert policy.inbound(inbound()) == DELIVER
 
 

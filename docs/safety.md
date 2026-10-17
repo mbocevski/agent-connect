@@ -41,7 +41,11 @@ What the policy checks, in order:
 1. **Content.** The kind must be one the protocol defines. The message must
    fit `max_message_bytes` (256 KiB by default). A2A parts must be `text` or
    `data`; `file` parts pass only when the group sets `allow_files`, and
-   then only up to `max_file_bytes`.
+   then only up to `max_file_bytes`. Only A2A messages, task status and
+   artifact updates carry parts. Every other kind (the `control.*`
+   messages, Agent Cards, task cancellations) must fit a strict schema of
+   its own: a body with any other field, or with a `parts` list anywhere
+   in it, is `malformed` and dropped, and counts as a violation.
 2. **Rates.** Each sender instance may send `sender_per_minute` messages
    (30), all instances of one identity together `identity_rate_multiple`
    times that (3, so 90), and the whole group `group_per_minute` (120).
@@ -54,7 +58,13 @@ What the policy checks, in order:
    against the rates (up to 1000 per reconnect), but the content limits
    still apply to them.
 3. **Protocol rules.** Only a human may send `control.resume`, and only the
-   owner `control.close` ([§7.3](../SPEC.md#73-control-messages)).
+   owner `control.close` ([§7.3](../SPEC.md#73-control-messages)). Control
+   messages and Agent Cards reach the adapter as context
+   (`deliver_as_context`, reason `not_content`): they never trigger the
+   agent, the SDK shows no text for them, and a card is surfaced only as a
+   card (`msg.card`). Your agent can't send them either: the daemon sends
+   its card and the loop-guard pauses itself, and the other controls need
+   the human token.
 4. **Approval.** With `require_approval`, agent content is held for the human.
 5. **Loop guard and addressing.** These decide between `deliver` and
    `deliver_as_context`.
@@ -184,8 +194,10 @@ doesn't make other members accept files.
 
 With `require_approval` set to `inbound`, `outbound` or `both`, the agent
 content of the group waits for a human: A2A messages, task status and
-artifact updates, and task cancellations. Control messages and Agent Cards pass, so membership, the
-loop guard and the short code keep working. Your human's own messages and
+artifact updates, and task cancellations. Control messages and Agent Cards
+pass, so membership, the loop guard and the short code keep working; they
+can't carry content past the hold, because their strict schemas leave no
+room for it. Your human's own messages and
 the daemon's own (loop-guard pauses, Agent Cards) are never held.
 
 When a message is held, the daemon raises a `message_held` event with its

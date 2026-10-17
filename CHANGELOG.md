@@ -45,6 +45,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `hold_for_approval` or `drop` with a reason), and every message the agent
   sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
   the loop guard moved into it unchanged. See `docs/safety.md`.
+- Control messages, Agent Cards and task cancellations must fit strict
+  per-kind schemas (no extra fields, no `parts` anywhere), so they can't
+  carry text, data or files past `require_approval` or the file-part ban.
+  Controls and cards are delivered as context only, the SDK shows no text
+  for them (a card is in `msg.card`), and the agent token can't send them.
 - Per-group safety settings with per-sender overrides of the limits: message
   size, messages a minute per sender and per group, a per-task budget for task
   updates (300 a minute), and `file` parts (off by default, with a size cap

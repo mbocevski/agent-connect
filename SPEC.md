@@ -1030,7 +1030,10 @@ daemon offers:
   `a2a.task_status`, `a2a.task_artifact`, `a2a.task_cancel`) in either
   direction until the member's human approves it, with an expiry. Controls
   and Agent Cards are never held, so membership, the loop guard and SAS
-  verification keep working. Approval is a human action, like SAS
+  verification keep working. They carry no content: the daemon checks each
+  control, card and cancellation against a strict schema (no fields beyond
+  §7.3 and the A2A object, no `parts` anywhere), drops anything else, and
+  delivers controls and cards as context only. Approval is a human action, like SAS
   verification (§11): it is not offered to the agent.
 - **Framing.** Besides the §10.1 fields, every delivery says whether the
   group wants the §10.1 notice shown in front of the text (`frame_text`, on

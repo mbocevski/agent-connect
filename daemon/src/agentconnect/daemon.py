@@ -159,6 +159,10 @@ OUTBOUND_PROBLEMS = {
     ),
     "file_too_large": ("too_large", "file part larger than the group's max_file_bytes"),
     "rate_limited": ("rate_limited", "over the SPEC 10.2 message rate"),
+    "not_for_agents": (
+        "forbidden",
+        "control messages and Agent Cards come from the daemon or the human, not the agent",
+    ),
 }
 
 

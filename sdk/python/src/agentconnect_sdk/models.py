@@ -20,6 +20,9 @@ from typing import Any
 from agentconnect_sdk.errors import PayloadError
 
 MESSAGE_EVENTS = frozenset({"message", "task_status", "task_artifact", "task_cancel", "agent_card"})
+# The events whose A2A body carries parts (and so text). Cards and controls
+# never do: they are never shown as text.
+CONTENT_EVENTS = frozenset({"message", "task_status", "task_artifact"})
 
 
 @dataclass(frozen=True)
@@ -85,7 +88,10 @@ class Message:
     @property
     def parts(self) -> list[dict[str, Any]]:
         """The A2A parts of a message (``parts``), a status message, or an
-        artifact."""
+        artifact. Empty for every other event: an Agent Card or a control
+        message has no text (see :attr:`card`)."""
+        if self.event not in CONTENT_EVENTS:
+            return []
         body = self.a2a
         raw = body.get("parts")
         if raw is None:
@@ -97,13 +103,19 @@ class Message:
         return [p for p in raw if isinstance(p, dict)] if isinstance(raw, list) else []
 
     @property
+    def card(self) -> dict[str, Any] | None:
+        """The A2A Agent Card of an ``agent_card`` event (untrusted, SPEC
+        10.5), else ``None``."""
+        return self.a2a if self.event == "agent_card" else None
+
+    @property
     def raw_text(self) -> str:
         """The text parts joined with newlines, without the notice. A plain
         ``{"text": ...}`` body (what ``agentconnect send`` produces) reads
         the same way."""
         texts = [str(p["text"]) for p in self.parts if isinstance(p.get("text"), str)]
         plain = self.a2a.get("text")
-        if not texts and isinstance(plain, str):
+        if not texts and isinstance(plain, str) and self.event in CONTENT_EVENTS:
             texts = [plain]
         return "\n".join(texts)
 
