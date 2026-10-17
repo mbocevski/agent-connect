@@ -156,10 +156,13 @@ def status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
 
 
 async def _run(cfg: Config, ready: asyncio.Event | None = None) -> None:
+    from agentconnect.adapters import build_adapters  # noqa: PLC0415
     from agentconnect.api import ApiServer  # noqa: PLC0415
+    from agentconnect.clock import SystemClock  # noqa: PLC0415
     from agentconnect.daemon import Daemon  # noqa: PLC0415
 
-    daemon = Daemon(cfg)
+    clock = SystemClock()
+    daemon = Daemon(cfg, build_adapters(cfg, clock), clock=clock)
     api = ApiServer(daemon)
     await daemon.start()
     await api.start()
@@ -187,7 +190,10 @@ def daemon_run(
         int, typer.Option("--tcp-port", help="Serve the API on 127.0.0.1:<port> instead.")
     ] = 0,
 ) -> None:
-    """Run agentconnectd in the foreground (JSON logs on stderr)."""
+    """Run agentconnectd in the foreground (JSON logs on stderr).
+
+    Starts the adapter named by daemon.default_adapter (webhook or sse).
+    """
     with guard(False):
         cfg = load(config)
     if tcp_port:
@@ -643,7 +649,10 @@ def send(
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
-    """Send a text message as the agent (for manual testing)."""
+    """Send a text message as the agent (for manual testing).
+
+    The daemon wraps the text as an A2A v1.0 Message (SPEC 7.2).
+    """
     with guard(as_json):
         api = connect(config)
         gid = resolve_group(api, group)

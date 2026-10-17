@@ -44,6 +44,8 @@ def test_rejects(text: str) -> None:
     "text",
     [
         "feat(sdk): add Claude Agent SDK example",
+        "uv run --with claude-agent-sdk python examples/claude-agent-sdk/agent.py",
+        'sdk = importlib.import_module("claude_agent_sdk")',
         "MCP / Claude Code Channels adapters are deferred.",
         "MCP and Claude Code support is coming later.",
         "Co-authored-by: Jane Doe <jane@example.com>",

@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from agentconnect.adapter import RecordingAdapter
-from agentconnect.clock import FakeClock
+from agentconnect.adapter import Adapter, RecordingAdapter
+from agentconnect.api import ApiServer
+from agentconnect.clock import Clock, FakeClock
 from agentconnect.config import Config
 from agentconnect.daemon import Daemon, Options
 from agentconnect.identity import Seeded
@@ -35,6 +37,7 @@ class Node:
     clock: FakeClock
     seed: int
     starts: int = 0
+    make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None
     daemon: Daemon = field(init=False)
 
     def _make(self) -> Daemon:
@@ -44,11 +47,17 @@ class Node:
         seed = self.seed + self.starts
         return Daemon(
             self.config,
-            [self.adapter],
+            [self.adapter, *self._extra_adapters()],
             clock=self.clock,
             keystore=FileKeystore(self.config.data_dir / "keys"),
             options=Options(testing=Seeded(seed), backoff_rng=random.Random(seed)),  # noqa: S311
         )
+
+    def _extra_adapters(self) -> list[Adapter]:
+        # Fresh per start: a restarted daemon gets a fresh adapter.
+        if self.make_adapters is None:
+            return []
+        return self.make_adapters(self.config, self.clock)
 
     async def start(self) -> None:
         self.daemon = self._make()
@@ -61,6 +70,7 @@ class Node:
     async def restart(self) -> None:
         """Kill (stop without any flush) and start again on the same state."""
         await self.daemon.stop()
+        await asyncio.wait_for(self.proxy.wait_no_sessions(), WAIT)
         await self.start()
 
     async def wait(self, predicate: Any, within: float = WAIT) -> None:
@@ -85,6 +95,16 @@ class Node:
         return int(self.daemon.group_info(group_id)["epoch"])
 
 
+async def serve_api(node: Node, sockdir: Path) -> ApiServer:
+    """Serve ``node``'s daemon on a Unix socket in ``sockdir``. Its tokens are
+    in ``node.config.data_dir`` (``api-token``, ``human-token``)."""
+    node.config = node.config.with_overrides(api_socket=sockdir / f"{node.name}.sock")
+    node.daemon.config = node.config
+    server = ApiServer(node.daemon)
+    await server.start()
+    return server
+
+
 def status(node: Node, group_id: str) -> str | None:
     """The group's local status on ``node`` (``None`` if unknown)."""
     g = node.daemon.store.group(group_id)
@@ -101,7 +121,14 @@ class Cluster:
         self.nodes: list[Node] = []
 
     async def node(
-        self, name: str | None = None, auto_approve: bool = True, identity_of: Node | None = None
+        self,
+        name: str | None = None,
+        auto_approve: bool = True,
+        identity_of: Node | None = None,
+        *,
+        default_adapter: str = "recording",
+        make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None,
+        **overrides: Any,
     ) -> Node:
         """A started daemon. ``identity_of`` makes it a replica (another
         instance of that node's identity)."""
@@ -121,11 +148,20 @@ class Cluster:
             relay_rest_url=self.relay.http_url,
             data_dir=data_dir,
             display_name=name,
-            default_adapter="recording",
+            default_adapter=default_adapter,
             keystore="file",
             auto_approve=auto_approve,
+            **overrides,
         )
-        node = Node(name, config, proxy, RecordingAdapter(), self.clock, self.rng.getrandbits(63))
+        node = Node(
+            name,
+            config,
+            proxy,
+            RecordingAdapter(),
+            self.clock,
+            self.rng.getrandbits(63),
+            make_adapters=make_adapters,
+        )
         await node.start()
         self.nodes.append(node)
         return node

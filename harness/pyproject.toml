@@ -4,10 +4,17 @@ version = "0.0.0"
 description = "Multi-node test harness for AgentConnect (relay process, daemons, malicious relay proxy)"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["agentconnect", "pytest>=9.1.1", "pytest-asyncio>=1.4.0", "websockets>=17.2"]
+dependencies = [
+    "agentconnect",
+    "agentconnect-sdk",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "websockets>=17.2",
+]
 
 [tool.uv.sources]
 agentconnect = { workspace = true }
+agentconnect-sdk = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14"]

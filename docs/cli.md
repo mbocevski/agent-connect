@@ -185,6 +185,8 @@ agentconnect leave [OPTIONS] GROUP
 
 Send a text message as the agent (for manual testing).
 
+The daemon wraps the text as an A2A v1.0 Message (SPEC 7.2).
+
 ```text
 agentconnect send [OPTIONS] GROUP TEXT
 ```
@@ -218,6 +220,8 @@ agentconnect events [OPTIONS]
 ### `agentconnect daemon run`
 
 Run agentconnectd in the foreground (JSON logs on stderr).
+
+Starts the adapter named by daemon.default_adapter (webhook or sse).
 
 ```text
 agentconnect daemon run [OPTIONS]

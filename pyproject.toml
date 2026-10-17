@@ -42,6 +42,7 @@ include = [
     "core-py/tests",
     "daemon/src",
     "daemon/tests",
+    "examples",
     "harness/src",
     "harness/tests",
     "sdk/python/src",

@@ -80,7 +80,10 @@ encrypts the whole file, and adds no dependency.
 - **Retention on top of encryption.** An outbox row keeps only its ids
   (`msg_id`, frame type) once the relay has answered it or the daemon gave
   up; an inbox row drops its delivery once the adapter accepted it (or it
-  was dropped); a decided JoinRequest drops its body. This limits what a
+  was dropped); a decided JoinRequest drops its body. The SSE adapter's feed
+  (the only place delivered payloads stay) is written only when that adapter
+  is enabled and is purged `sse.retention_secs` (default one hour) after each
+  item was written. This limits what a
   host attacker with the keystore finds, too.
 - **No silent re-keying.** If the keystore has no `db_key` but either
   database file exists, the daemon refuses to start instead of minting a

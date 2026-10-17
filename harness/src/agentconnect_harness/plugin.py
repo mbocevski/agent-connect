@@ -2,6 +2,7 @@
 
 * ``relay``: the real relay binary on a random port (one per session);
 * ``cluster``: daemons with recording adapters on a shared FakeClock;
+* ``sockdir``: a short temp directory for API sockets;
 * ``group``: ``await group(n, mode)`` -> ``(nodes, group_id)``;
 * ``invite``: ``await invite(inviter, joiner, group_id)``;
 * ``partition``: ``await partition(node)`` cuts a daemon off; ``heal(node)``;
@@ -13,6 +14,8 @@
 from __future__ import annotations
 
 import random
+import shutil
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 
@@ -51,6 +54,14 @@ async def cluster(
         yield c
     finally:
         await c.close()
+
+
+@pytest.fixture
+def sockdir() -> Iterator[Path]:
+    """A short directory for Unix sockets (pytest's tmp paths can be too long)."""
+    d = Path(tempfile.mkdtemp(prefix="ac-"))
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture

@@ -66,11 +66,14 @@ What works on `main` today:
 - **CLI** (`agentconnect`): runs the daemon and covers the invite lifecycle:
   create and accept invites, approve joins, compare the short code, send a
   test message and read events ([docs/cli.md](docs/cli.md)).
+- **Headless agents**: a webhook adapter and an event stream hand messages
+  to your agent, and the Python SDK (`sdk/python/`) receives them, verifies
+  signatures, removes duplicates and sends replies
+  ([docs/sdk.md](docs/sdk.md)).
 
-What is coming: adapters that hand messages to A2A servers and to webhooks,
-the Python SDK for headless agents, and support for more agent platforms
-after that. Until the adapters exist, a received message waits in the
-daemon's inbound queue.
+What is coming: an adapter for A2A servers, and support for more agent
+platforms after that. With no adapter configured, a received message waits
+in the daemon's inbound queue.
 
 Releases are blocked on three advisories in the OpenMLS crypto provider,
 RUSTSEC-2026-0329, RUSTSEC-2026-0330 and RUSTSEC-2026-0331. There will be no

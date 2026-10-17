@@ -373,6 +373,9 @@ class Daemon:
         for name, worker in workers.items():
             self._tasks.append(loop.create_task(self._supervised(name, worker)))
         for adapter in self.adapters.values():
+            bind = getattr(adapter, "bind_store", None)
+            if bind is not None:
+                bind(self.store)  # optional hook: adapters that keep a durable feed
             await adapter.on_outbound(self.adapter_send)
         self.running = True
         LOG.info("daemon_started", identity=log.hid(self.me), keystore=self.keystore.kind)
@@ -404,6 +407,12 @@ class Daemon:
             with contextlib.suppress(asyncio.CancelledError, Exception, SimulatedCrash):
                 await task
         self._tasks.clear()
+        for adapter in self.adapters.values():
+            # Optional hook: adapters with workers or connections release them.
+            close = getattr(adapter, "close", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
         self.store.close()
         # Drop the core client so its SQLite connections close.
         del self.client

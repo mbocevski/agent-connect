@@ -10,6 +10,25 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Webhook adapter (`daemon.default_adapter = "webhook"`): every message and
+  event is POSTed to a loopback `webhook.callback_url` (remote hosts need
+  `webhook.allow_remote` and https), signed with HMAC-SHA256 over
+  `timestamp.body` under a per-daemon `webhook-secret`. A 2xx acks; other
+  responses retry with backoff on the daemon clock, in order, at least once.
+  See `docs/adapters/webhook.md`.
+- SSE adapter (`default_adapter = "sse"`): `GET /v0/events` with
+  `Accept: text/event-stream` streams the same payloads from a durable feed
+  and resumes with `Last-Event-ID`, also across a daemon restart. The feed
+  exists only with the SSE adapter and keeps items `sse.retention_secs`
+  (default one hour); a consumer resuming from before that gets an
+  `sse_gap` event;
+  `GET /v0/events?group=` filters the JSON log by group.
+- Python SDK (`agentconnect-sdk`): `AgentConnect`, groups, invites, replies
+  that carry `reply_to`, task status and artifact replies, webhook
+  signature verification, and deduplication by `msg_id` and `event_id`. It
+  uses only the agent-scope API token. See `docs/sdk.md`.
+- Examples for the Claude Agent SDK and for three LangGraph agents in a
+  `mention` group, tested with stubbed models.
 - Generated reference docs: `just docs-gen` writes the CLI commands and
   options, exit codes, `--json` shapes, local API routes and errors, and
   config keys into `docs/cli.md`, `docs/api.md` and `docs/config.md` from the
@@ -121,6 +140,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- The `text` shorthand of `POST /v0/groups/{id}/messages` (and so `agentconnect
+  send`) now sends an A2A v1.0 `Message` (`messageId`, `contextId`, `role`,
+  `parts`) instead of a bare `{"text": ...}` body (SPEC 7.2).
 - Adapter contract: messages and events are delivered **at least once**,
   each with a stable id; adapters deduplicate by `msg_id` and `event_id`.
   Every event now has an `event_id` derived from its cause, so one
