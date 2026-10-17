@@ -149,6 +149,53 @@ async def test_link_authenticates_routes_replies_and_reconnects(  # noqa: PLR091
     await asyncio.wait_for(task, 5)
 
 
+async def test_a_send_on_a_closed_socket_takes_the_link_down(
+    fake_relay: FakeRelay, rng: random.Random, fake_clock: FakeClock
+) -> None:
+    """Regression: the relay closed the socket while run() was busy with a
+    frame, so the link still looked connected. A failed send must take it
+    down itself: the outbox retries on NotConnectedError via
+    wait_connected(), and if that returned at once the retry would fail
+    again without ever yielding, starving the event loop (and shutdown)."""
+    inst = instance(rng)
+    busy = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def script(ws: ServerConnection) -> None:
+        assert await handshake(ws, inst, rng.randbytes(32), "relay.test")
+        await ws.send(json.dumps({"t": "deliver", "env": {}}))
+        await ws.close()
+        closed.set()
+
+    fake_relay.script = script
+
+    async def on_frame(_frame: dict[str, Any]) -> None:
+        busy.set()
+        await release.wait()
+
+    link = RelayLink(
+        f"ws://127.0.0.1:{fake_relay.port}/v0/ws",
+        "relay.test",
+        inst,
+        fake_clock,
+        on_frame,
+        backoff=Backoff(rng=rng),
+    )
+    task = asyncio.ensure_future(link.run())
+    await asyncio.wait_for(asyncio.gather(busy.wait(), closed.wait()), 5)
+    assert link.connected  # run() hasn't seen the close yet
+    with pytest.raises(NotConnectedError):
+        await link.send({"t": "ack"})
+    assert not link.connected
+    with pytest.raises(NotConnectedError):
+        await link.request({"t": "send", "msg_id": "m"}, "m")
+    release.set()
+    await link.stop()
+    await asyncio.wait_for(task, 5)
+    assert link.connections == 1
+
+
 @pytest.mark.parametrize(
     "mode",
     [
