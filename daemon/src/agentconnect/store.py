@@ -1,4 +1,4 @@
-"""The daemon's own SQLite database, separate from the core's MLS store.
+"""The daemon's own database, separate from the core's MLS store.
 
 Per group it keeps metadata, policy, members (with the local, human-set
 ``verified`` flag), trust state, the adapter binding, peer Agent Cards and an
@@ -9,23 +9,78 @@ Per group it keeps metadata, policy, members (with the local, human-set
   ``pending`` until the adapter accepts it. This is the dedup table that
   makes delivery at-least-once without double processing.
 
-Inbox and outbox rows contain inner (decrypted) messages, and this file is
-protected only by file permissions (0600 in a 0700 directory). A delivered
-row drops its plaintext. (The core's MLS store, which holds the keys, is
-encrypted; see :mod:`agentconnect.identity`.)
+The file is a SQLCipher database (:class:`agentconnect_core.Database`,
+ADR-003) under a key the core derives from the keystore's ``db_key``: every
+page, the journal and the WAL are encrypted and authenticated, and there is
+no unencrypted mode. On top of that, plaintext is kept only while it is
+needed: an outbox row keeps just its ids once the relay has answered it, an
+inbox row drops its delivery once the adapter has it, and a decided
+JoinRequest drops its body. ``secure_delete`` overwrites what is removed.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import agentconnect_core as ac
 from agentconnect.keystore import private_file
+
+SqlParam = None | int | float | str | bytes
+
+
+class _Cursor:
+    """The result of one statement: its rows, or its change count."""
+
+    def __init__(self, rows: list[tuple[Any, ...]], rowcount: int, lastrowid: int) -> None:
+        self._rows, self.rowcount, self.lastrowid = rows, rowcount, lastrowid
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+    def __iter__(self) -> Any:
+        return iter(self._rows)
+
+
+class _Connection:
+    """A small ``sqlite3``-shaped facade over the encrypted database."""
+
+    def __init__(self, path: Path, key: bytes) -> None:
+        self._db = ac.Database(str(path), key)
+
+    def execute(self, sql: str, params: Sequence[SqlParam] = ()) -> _Cursor:
+        values = list(params)
+        if sql.lstrip().upper().startswith("SELECT"):
+            return _Cursor(self._db.query(sql, values), -1, 0)
+        changes, rowid = self._db.execute(sql, values)
+        return _Cursor([], changes, rowid)
+
+    def executescript(self, sql: str) -> None:
+        self._db.execute_script(sql)
+
+    def close(self) -> None:
+        self._db.close()
+
+
+def _scrubbed(payload: dict[str, Any]) -> dict[str, Any]:
+    """What an answered outbox row keeps: its ids, never message content."""
+    out: dict[str, Any] = {}
+    env = payload.get("env")
+    msg_id = payload.get("msg_id") or (env.get("msg_id") if isinstance(env, dict) else None)
+    if msg_id is not None:
+        out["msg_id"] = msg_id
+    frame = payload.get("frame")
+    if isinstance(frame, dict) and "t" in frame:
+        out["t"] = frame["t"]
+    return out
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -178,18 +233,22 @@ class InboxRow:
 class Store:
     """Synchronous access to the daemon database (one connection)."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, db_key: bytes) -> None:
+        """Open (or create, 0600) the encrypted database at ``path``.
+
+        ``db_key`` is the keystore's 32-byte key; a wrong key, or a file that
+        isn't an encrypted database, raises ``AgentConnectError``.
+        """
         private_file(path)
-        self._db = sqlite3.connect(path, isolation_level=None)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db = _Connection(path, db_key)
+        self._db.executescript("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         self._db.executescript(SCHEMA)
 
     def close(self) -> None:
         self._db.close()
 
     @contextmanager
-    def tx(self) -> Generator[sqlite3.Connection]:
+    def tx(self) -> Generator[_Connection]:
         self._db.execute("BEGIN IMMEDIATE")
         try:
             yield self._db
@@ -368,10 +427,8 @@ class Store:
     def add_approval(self, row: dict[str, Any]) -> bool:
         cur = self._db.execute(
             "INSERT OR IGNORE INTO approvals (request_id, invite_id, group_id, request, identity, "
-            "display_name, mailbox_id, received_at) VALUES "
-            "(:request_id, :invite_id, :group_id, :request, :identity, :display_name, "
-            ":mailbox_id, :received_at)",
-            row,
+            "display_name, mailbox_id, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [row[k] for k in self._APPROVAL_KEYS[:-1]],
         )
         return cur.rowcount == 1
 
@@ -403,8 +460,12 @@ class Store:
         return [dict(zip(self._APPROVAL_KEYS, r, strict=True)) for r in rows]
 
     def set_approval_status(self, request_id: str, status: str) -> None:
+        # A decided request no longer needs its body (key package, name).
+        keep = status in ("pending", "approving")
         self._db.execute(
-            "UPDATE approvals SET status = ? WHERE request_id = ?", (status, request_id)
+            "UPDATE approvals SET status = ?, request = CASE WHEN ? THEN request ELSE '' END "
+            "WHERE request_id = ?",
+            (status, int(keep), request_id),
         )
 
     # -- joins (joiner side) -----------------------------------------------
@@ -467,6 +528,13 @@ class Store:
     def update_outbox(
         self, seq: int, payload: dict[str, Any] | None = None, state: str | None = None
     ) -> None:
+        if state is not None and state != "queued":
+            # Answered (or given up): keep the ids, drop inner plaintext,
+            # envelopes and frames.
+            if payload is None:
+                row = self.outbox_row(seq)
+                payload = {} if row is None else row.payload
+            payload = _scrubbed(payload)
         if payload is not None:
             self._db.execute(
                 "UPDATE outbox SET payload = ? WHERE seq = ?", (json.dumps(payload), seq)

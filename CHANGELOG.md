@@ -124,6 +124,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: `daemon.sqlite3` is now encrypted at rest (SQLCipher through
+  `agentconnect_core.Database`, ADR-003). It previously was plain SQLite
+  that kept every sent message's plaintext forever. Answered outbox rows now
+  keep only their ids, delivered inbox rows drop their message, decided
+  JoinRequests drop their body, and the daemon refuses to start if the
+  keystore lost `db_key` while encrypted files exist.
 - Core: `EncryptedDb` (Python: `agentconnect_core.Database`), a SQLCipher
   database with a caller-defined schema for the daemon's own records, keyed
   under `DbKey::derive` (HKDF-SHA256, label

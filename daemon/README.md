@@ -17,8 +17,10 @@ agentconnect status [--json]                             # reads the local API
   under a `db_key` from the same keystore.
 - Its own `daemon.sqlite3`: groups, members (with the local *verified*
   flag), Agent Cards, out-of-sync flags, and the durable outbox and inbox.
-  Inbox and outbox rows hold decrypted messages until delivered or sent;
-  this file is protected by permissions only.
+  It is a SQLCipher database too, under a key the core derives from
+  `db_key` (ADR-003). Plaintext stays only while it is needed: an outbox
+  row keeps just its ids once the relay has answered it, and an inbox row
+  drops its message once the adapter has accepted it.
 
 The data directory (`~/.local/share/agentconnect`) is 0700 and every file in
 it 0600. Configuration is `~/.config/agentconnect/config.toml`; see

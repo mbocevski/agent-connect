@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import agentconnect_core as ac
-from agentconnect.keystore import Keystore, private_file
+from agentconnect.keystore import Keystore, KeystoreError, private_file
 
 DB_KEY_LEN = ac.DB_KEY_LEN
 
@@ -73,8 +73,19 @@ def load_instance(
     return instance
 
 
-def load_db_key(store: Keystore) -> bytes:
-    """The database key, created on first use."""
+def load_db_key(store: Keystore, encrypted: Iterable[Path] = ()) -> bytes:
+    """The database key, created on first use.
+
+    encrypted lists the files the key protects. If any of them already
+    has content, a missing key is an error: a fresh key could never open
+    them, and writing it would only hide the problem.
+    """
+    value = store.get("db_key")
+    if value is not None:
+        return value
+    if any(p.exists() and p.stat().st_size > 0 for p in encrypted):
+        msg = "the database key is missing from the keystore; the encrypted stores can't be opened"
+        raise KeystoreError(msg)
     return _load_or_create(store, "db_key", lambda: secrets.token_bytes(DB_KEY_LEN))
 
 

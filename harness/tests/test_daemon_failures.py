@@ -46,9 +46,10 @@ async def test_relay_errors_on_sends(
     assert await b.wait_texts(gid, 2) == ["resealed", "later"]
     # Any other error fails that message only.
     proxy.fail_next("send", "not_member", kind="application")
-    a.daemon.send_message(gid, {"text": "lost"})
+    lost = a.daemon.send_message(gid, {"text": "lost"})
     await a.idle()
-    assert [r.payload["inner"]["body"]["text"] for r in a.daemon.store.outbox("failed")] == ["lost"]
+    # The failed row keeps its msg_id, not its plaintext.
+    assert [r.payload for r in a.daemon.store.outbox("failed")] == [{"msg_id": lost}]
     # A commit the relay rejects outright is discarded, not merged.
     epoch = a.epoch(gid)
     proxy.fail_next("send", "quota_exceeded", kind="commit")
@@ -106,9 +107,7 @@ async def test_join_request_rejections(cluster: Cluster, rng: random.Random) -> 
 
 
 def _join_msg_id(node: Node) -> str:
-    (row,) = [
-        r for r in node.daemon.store.outbox("done") if r.payload.get("frame", {}).get("t") == "join"
-    ]
+    (row,) = [r for r in node.daemon.store.outbox("done") if r.payload.get("t") == "join"]
     return str(row.payload["msg_id"])
 
 

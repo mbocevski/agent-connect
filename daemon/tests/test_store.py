@@ -1,5 +1,6 @@
 """The durable queues and group tables of the daemon database."""
 
+import random
 import stat
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -12,11 +13,16 @@ Opener = Callable[[Path], Store]
 
 
 @pytest.fixture
-def opened() -> Iterator[Opener]:
+def db_key(rng: random.Random) -> bytes:
+    return rng.randbytes(32)
+
+
+@pytest.fixture
+def opened(db_key: bytes) -> Iterator[Opener]:
     stores: list[Store] = []
 
     def open_store(path: Path) -> Store:
-        stores.append(Store(path))
+        stores.append(Store(path, db_key))
         return stores[-1]
 
     yield open_store
@@ -44,7 +50,17 @@ def test_outbox_is_ordered_and_survives_reopen(tmp_path: Path, opened: Opener) -
     row = s.next_outbox()
     assert row is not None
     assert row.payload == {"n": 2}
-    assert [r.payload for r in s.outbox("done")] == [{"n": 1, "env": {}}]
+    # An answered row keeps only its ids.
+    assert [r.payload for r in s.outbox("done")] == [{}]
+    s.enqueue("frame", None, {"frame": {"t": "join", "env": {"ct": "x"}}, "msg_id": "m"}, 12)
+    s.enqueue("commit", "g1", {"intent": {}, "env": {"msg_id": "c", "ct": "x"}}, 13)
+    for r in s.outbox():
+        s.update_outbox(r.seq, state="failed")
+    assert [r.payload for r in s.outbox("failed")] == [
+        {},
+        {"msg_id": "m", "t": "join"},
+        {"msg_id": "c"},
+    ]
     assert s.outbox_row(first) is not None
     assert s.outbox_row(9999) is None
     assert stat.S_IMODE(db.stat().st_mode) == 0o600

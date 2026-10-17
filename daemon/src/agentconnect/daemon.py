@@ -149,13 +149,13 @@ class Daemon:
         )
         self.identity = load_identity(self.keystore, self.options.testing)
         self.instance = load_instance(self.keystore, self.identity, self.options.testing)
-        self.store = Store(config.data_dir / "daemon.sqlite3")
+        mls_db, daemon_db = config.data_dir / "mls.sqlite3", config.data_dir / "daemon.sqlite3"
+        db_key = load_db_key(self.keystore, (mls_db, daemon_db))
         self.client: ac.Client = open_core_client(
-            config.data_dir / "mls.sqlite3",
-            self.instance,
-            load_db_key(self.keystore),
-            self.options.testing,
+            mls_db, self.instance, db_key, self.options.testing
         )
+        # Encrypted under a key the core derives from db_key (ADR-003).
+        self.store = Store(daemon_db, db_key)
         self.link = RelayLink(
             config.relay_ws,
             config.relay_host,
