@@ -26,7 +26,13 @@ Python workspace (`uv sync --all-packages`), and all git hooks via prek.
 3. Add user-facing changes to `CHANGELOG.md` under `[Unreleased]`.
 4. `just pr` pushes the branch and opens a PR. Use a Conventional Commit PR
    title; it becomes the squash commit.
-5. Once CI is green: `just merge <pr-number>`.
+5. If `main` moved on, run `just update-branch <pr-number>` from the branch's
+   checkout. It rebases onto `origin/main`, re-signs every commit, checks the
+   signatures and pushes with `--force-with-lease`. It stops on conflicts and
+   tells you how to continue. Don't use GitHub's "Update branch" button or
+   `gh pr update-branch`: they rewrite your commits without signatures and the
+   ruleset then blocks the merge.
+6. Once CI is green: `just merge <pr-number>`.
 
 ## Merge gating
 
@@ -42,7 +48,8 @@ a GitHub ruleset on `main`:
 | CHANGELOG updated | `pre-push` hook and the CI `changelog` job (`scripts/check-changelog.sh`) |
 | Docs changed with mapped code | `pre-push` hook, `just docs-check` and the CI `docs` job (`scripts/check_docs.py`) |
 | Markdown lint, offline link check, prose rules | `pre-commit` hook and the CI `lint` job (rumdl, lychee, Vale) |
-| All required CI checks green, branch up to date, title OK | `just merge` (`scripts/merge.sh`) |
+| All required CI checks green, branch up to date, every commit verified on GitHub, title OK | `just merge` (`scripts/merge.sh`) |
+| Rust and Python dependency licences on the allowlist | `just lint`, the CI `rust` and `licences` jobs, nightly audit (`cargo deny`, `scripts/check_licences.py`) |
 | PR required, `ci-ok` green and up to date, squash-only, linear history, signed commits, no force-push or deletion | GitHub ruleset (`.github/rulesets/main.json`) |
 
 The required checks are listed in `.github/required-checks.txt`, currently

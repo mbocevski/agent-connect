@@ -52,8 +52,10 @@ just test-nightly # mutants, long property runs, quarantined tests
 just cov        # coverage gates + ratchet against coverage-baseline.json
 just cov-baseline # refresh the baseline (in the PR that raises coverage)
 just docs-check # docs changed with the code they describe (docs/MAP.toml)
+just licences   # Python dependency licences vs licences-py.toml (also run by `just lint`)
 just ci         # exactly what PR CI runs, including coverage gates
 just pr         # push branch, open/refresh PR
+just update-branch <n> # branch behind main: signed local rebase + push (never GitHub's Update branch)
 just merge <n>  # the ONLY way to merge: refuses unless every required check is green
 ```
 

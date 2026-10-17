@@ -3,8 +3,9 @@
 # ruleset and adds checks the ruleset can't express (title format, hygiene).
 #
 # Refuses unless: PR is open, not draft, targets main, has no do-not-merge
-# label, is up to date with main, has a Conventional Commit title, and every
-# check listed in .github/required-checks.txt has passed.
+# label, is up to date with main, has only GitHub-verified (signed) commits, has
+# a Conventional Commit title, and every check listed in
+# .github/required-checks.txt has passed.
 #
 # usage: scripts/merge.sh <pr-number>
 set -euo pipefail
@@ -24,9 +25,34 @@ if jq -e '.labels[].name | select(. == "do-not-merge")' <<<"$pr_json" >/dev/null
 fi
 
 case "$(field .mergeStateStatus)" in
-    BEHIND) fail "branch is behind main; update it (gh pr update-branch $pr --rebase)" ;;
+    BEHIND) fail "branch is behind main; run 'just update-branch $pr' (a signed local rebase; GitHub's Update branch drops the signatures and the ruleset then blocks the merge)" ;;
     DIRTY) fail "branch has merge conflicts" ;;
 esac
+
+# The ruleset requires verified signatures. GitHub's own rebase/update-branch
+# strips them, so check here rather than failing at the merge API.
+repo="$(gh repo view --json owner,name --jq '.owner.login + "/" + .name')"
+# shellcheck disable=SC2016  # GraphQL variables, not shell ones
+sig_query='query($owner: String!, $name: String!, $pr: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      commits(first: 100) {
+        totalCount
+        nodes { commit { abbreviatedOid signature { isValid state } } }
+      }
+    }
+  }
+}'
+sig_json="$(gh api graphql -F owner="${repo%%/*}" -F name="${repo##*/}" -F pr="$pr" -f query="$sig_query")"
+commits_total="$(jq -r '.data.repository.pullRequest.commits.totalCount' <<<"$sig_json")"
+[[ "$commits_total" -le 100 ]] || fail "PR #$pr has $commits_total commits; the signature check covers 100"
+unverified="$(jq -r '.data.repository.pullRequest.commits.nodes[].commit
+    | select((.signature.isValid // false) | not)
+    | "  " + .abbreviatedOid + ": " + (.signature.state // "UNSIGNED")' <<<"$sig_json")"
+if [[ -n "$unverified" ]]; then
+    echo "$unverified" >&2
+    fail "the commits above are not verified on GitHub; re-sign them with 'just update-branch $pr'"
+fi
 
 title="$(field .title)"
 cc='^(feat|fix|docs|test|refactor|perf|build|ci|chore|revert|style)(\([a-z0-9,-]+\))?!?: .+'
