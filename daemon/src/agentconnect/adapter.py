@@ -139,7 +139,7 @@ class Capabilities:
     agent_card: dict[str, Any] | None = None
 
 
-# group_id, body, to, kind, reply_to -> msg_id
+# group_id, body, to, kind, reply_to, addressee -> msg_id
 OutboundSend = Callable[..., Awaitable[str]]
 
 

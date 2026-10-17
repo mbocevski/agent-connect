@@ -136,7 +136,8 @@ async def test_send_and_reply_build_a2a_messages(
     msg = make_message(make_payload, msg_id="m5")
     await group.reply(msg, "answer")
     sent = daemon.last_body()
-    assert sent["to"] == ["ac:v0:peer"]
+    # SPEC 9.3: to the group, addressed to the sender.
+    assert (sent["to"], sent["addressee"]) == (["*"], ["ac:v0:peer"])
     assert sent["reply_to"] == ["m5"]
     assert sent["body"]["parts"] == [{"text": "answer"}]
 
@@ -152,6 +153,7 @@ async def test_task_replies(
     sent = daemon.last_body()
     assert sent["kind"] == "a2a.task_status"
     assert sent["reply_to"] == ["m5"]
+    assert (sent["to"], sent["addressee"]) == (["*"], ["ac:v0:peer"])
     assert sent["body"]["taskId"] == "t1"
     assert sent["body"]["status"]["state"] == "TASK_STATE_WORKING"
     assert sent["body"]["status"]["message"]["parts"] == [{"text": "on it"}]

@@ -1,0 +1,466 @@
+"""The A2A adapter: lets an A2A v1.0 server agent take part in groups
+without knowing about AgentConnect (docs/adapters/a2a.md).
+
+**Direction 1, inbound.** A message that triggers this member (SPEC §9.3,
+``addressed_to_me``) becomes a ``SendStreamingMessage`` call (``SendMessage``
+when the agent doesn't stream) on the local agent, with ``contextId`` = the
+group and the SPEC §10.1 framing in ``metadata``. Messages that don't
+trigger it are kept, bounded, and handed over with the next call as
+``metadata.context_messages``. What the agent streams back goes to the group
+as ``a2a.task_status`` / ``a2a.task_artifact`` / ``a2a.message`` with
+``reply_to`` = the triggering ``msg_id`` (SPEC §10.3), to the whole group
+(``to: ["*"]``) with the requester as the only ``addressee`` (SPEC §9.3).
+A follow-up that names one of the agent's tasks (``input-required``)
+continues it; an ``a2a.task_cancel`` from the task's requester cancels it.
+
+**Direction 2, the facade** (:mod:`.facade`): a local A2A client talks to
+the group through a server on ``127.0.0.1``.
+
+**At least once.** The daemon may repeat a delivery or an event (ADR-004);
+both are deduplicated here by ``msg_id`` and ``event_id`` (:mod:`.seen`), so
+the agent never sees one twice. The message sent to the agent also has a
+``messageId`` derived from the ``msg_id``, for the crash window between the
+agent accepting it and the adapter recording that.
+
+Peer content is untrusted. It goes to the agent as data with the framing in
+``metadata``; the peer's own ``metadata`` is nested under
+``metadata.peer_metadata`` so it can't overwrite the framing, and nothing a
+peer sends changes this adapter's configuration or the agent's credentials.
+Logs carry tags and error types, never bodies.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import secrets
+from collections import OrderedDict, deque
+from collections.abc import AsyncIterator, Coroutine, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import httpx
+from a2a.client import A2ACardResolver, A2AClientError, Client, ClientConfig, ClientFactory
+from a2a.types import (
+    AgentCard,
+    CancelTaskRequest,
+    Message,
+    Part,
+    Role,
+    SendMessageRequest,
+    StreamResponse,
+)
+from a2a.utils.errors import A2AError, UnsupportedOperationError
+from jwt import PyJWK
+
+from agentconnect import log
+from agentconnect.a2a_adapter import cards, convert
+from agentconnect.a2a_adapter.facade import Facade
+from agentconnect.a2a_adapter.seen import Seen
+from agentconnect.adapter import (
+    Capabilities,
+    Delivery,
+    DeliveryResult,
+    Event,
+    GroupView,
+    OutboundSend,
+    Sender,
+)
+
+if TYPE_CHECKING:
+    from agentconnect.config import Config
+
+LOG = log.get("a2a")
+FACADE_TOKEN_FILE = "a2a-facade-token"  # noqa: S105 - a file name
+SEEN_FILE = "a2a-seen.db"
+MAX_CONTEXT_ENTRY = 64 * 1024  # bytes of JSON; bigger context entries are summarised
+MAX_TASKS = 1024  # local agent tasks remembered for follow-ups and cancels
+CARD_TIMEOUT = 5.0
+
+
+@dataclass(frozen=True)
+class A2AOptions:
+    """The adapter's configuration (``[a2a]`` in config.toml)."""
+
+    local_agent_url: str | None = None
+    local_agent_token: str | None = field(default=None, repr=False)
+    card_keys: Mapping[str, PyJWK] = field(default_factory=dict, repr=False)
+    facade_port: int | None = None  # None: no facade; 0: any free port
+    context_messages: int = 20
+    frame_text: bool = True
+    reply_timeout: float = 600.0
+    data_dir: Path | None = None
+
+    @staticmethod
+    def from_config(config: Config) -> A2AOptions:
+        token = None
+        if config.a2a_local_agent_token_file is not None:
+            text = config.a2a_local_agent_token_file.read_text(encoding="utf-8").strip()
+            token = text or None
+        return A2AOptions(
+            local_agent_url=config.a2a_local_agent_url,
+            local_agent_token=token,
+            card_keys=cards.load_jwks(config.a2a_card_keys_file),
+            facade_port=config.a2a_facade_port if config.a2a_facade_port > 0 else None,
+            context_messages=config.a2a_context_messages,
+            frame_text=config.a2a_frame_text,
+            reply_timeout=float(config.a2a_reply_timeout),
+            data_dir=config.data_dir,
+        )
+
+
+@dataclass(frozen=True)
+class TaskRef:
+    """One of the local agent's tasks: the group and the member it runs for."""
+
+    group_id: str
+    requester: str
+    trigger: str
+
+
+class A2AAdapter:
+    """See the module docstring."""
+
+    def __init__(self, options: A2AOptions, name: str = "a2a") -> None:
+        self.name = name
+        self.options = options
+        self._seen_store: Seen | None = None
+        self._send: OutboundSend | None = None
+        self._http: httpx.AsyncClient | None = None
+        self._client: Client | None = None
+        self._plain: Client | None = None
+        self._card: AgentCard | None = None
+        self._card_json: dict[str, Any] | None = None
+        self._groups: dict[str, GroupView] = {}
+        self._cards: dict[str, dict[str, tuple[AgentCard, str]]] = {}
+        self._peers: dict[str, set[str]] = {}
+        self._context: dict[str, deque[dict[str, Any]]] = {}
+        self._tasks: OrderedDict[str, TaskRef] = OrderedDict()
+        self._running: set[asyncio.Task[None]] = set()
+        self.facade: Facade | None = None
+        self.facade_token: str | None = None
+
+    @property
+    def _seen(self) -> Seen:
+        # Opened on first use: the daemon creates the data directory.
+        if self._seen_store is None:
+            data_dir = self.options.data_dir
+            self._seen_store = Seen(None if data_dir is None else data_dir / SEEN_FILE)
+        return self._seen_store
+
+    # -- Adapter protocol ----------------------------------------------------
+
+    def capabilities(self) -> Capabilities:
+        return Capabilities(accepts=["text", "data"], originates=True, agent_card=self._card_json)
+
+    async def on_outbound(self, send: OutboundSend) -> None:
+        self._send = send
+        await self.start()
+
+    async def deliver(
+        self, group: GroupView, sender: Sender, to: list[str], inner: Delivery
+    ) -> DeliveryResult:
+        self._groups[group.group_id] = group
+        if self._seen.has("m", inner.msg_id):
+            return DeliveryResult.ACK  # redelivered (at least once)
+        self._peers.setdefault(group.group_id, set()).add(sender.identity)
+        result = await self._handle(group, inner)
+        if result is DeliveryResult.ACK:
+            self._seen.add("m", inner.msg_id)
+        return result
+
+    async def on_event(self, group: GroupView | None, event: Event) -> None:
+        if group is not None:
+            self._groups[group.group_id] = group
+        if event.event_id and self._seen.has("e", event.event_id):
+            return
+        gid = event.group_id
+        identity = event.data.get("identity")
+        if gid is not None and isinstance(identity, str):
+            if event.type == "member_joined":
+                self._peers.setdefault(gid, set()).add(identity)
+            elif event.type in ("member_left", "member_removed"):
+                self._peers.get(gid, set()).discard(identity)
+                self._cards.get(gid, {}).pop(identity, None)
+        if event.type == "joined" and self.options.local_agent_url is not None:
+            # SPEC: the card goes out on join; fetch it fresh first.
+            await self._load_card()
+        if gid is not None and event.type in ("removed", "left"):
+            self._forget(gid)
+        if event.event_id:
+            self._seen.add("e", event.event_id)
+
+    # -- lifecycle -----------------------------------------------------------
+
+    async def start(self) -> None:
+        # a2a-sdk logs card contents and events at INFO/DEBUG: peer content.
+        logging.getLogger("a2a").setLevel(logging.ERROR)
+        if self.options.local_agent_url is not None and self._http is None:
+            headers = {}
+            if self.options.local_agent_token is not None:
+                headers["Authorization"] = f"Bearer {self.options.local_agent_token}"
+            # No read timeout: a stream may stay quiet while the agent works.
+            self._http = httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30.0, read=None))
+            await self._load_card()
+        if self.options.facade_port is not None and self.facade is None:
+            self.facade_token = self._facade_token()
+            facade = Facade(self, self.facade_token, self.options.facade_port)
+            await facade.start()
+            self.facade = facade
+            LOG.info("a2a_facade_started", port=facade.port)
+
+    async def close(self) -> None:
+        """Called by ``Daemon.stop``."""
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        for task in list(self._running):
+            task.cancel()
+        await asyncio.gather(*self._running, return_exceptions=True)
+        if self.facade is not None:
+            await self.facade.stop()
+            self.facade = None
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+        if self._seen_store is not None:
+            self._seen_store.close()
+            self._seen_store = None
+
+    def _facade_token(self) -> str:
+        if self.options.data_dir is None:
+            return secrets.token_urlsafe(32)
+        from agentconnect.api import load_token  # noqa: PLC0415 - avoid an import cycle
+
+        return load_token(self.options.data_dir / FACADE_TOKEN_FILE)
+
+    # -- for the facade --------------------------------------------------------
+
+    def group_info(self, group_id: str) -> GroupView | None:
+        return self._groups.get(group_id)
+
+    def peers(self, group_id: str) -> set[str]:
+        return set(self._peers.get(group_id, set()))
+
+    def peer_cards(self, group_id: str) -> dict[str, AgentCard]:
+        return {i: card for i, (card, _status) in self._cards.get(group_id, {}).items()}
+
+    def card_status(self, group_id: str, identity: str) -> str | None:
+        entry = self._cards.get(group_id, {}).get(identity)
+        return None if entry is None else entry[1]
+
+    async def send_to_group(
+        self, group_id: str, body: dict[str, Any], to: list[str], kind: str = "a2a.message"
+    ) -> str:
+        if self._send is None:
+            msg = "the adapter has not been started"
+            raise RuntimeError(msg)
+        return await self._send(group_id, body, to=to, kind=kind)
+
+    # -- inbound -------------------------------------------------------------
+
+    async def _handle(self, group: GroupView, d: Delivery) -> DeliveryResult:
+        if d.kind == "a2a.agent_card":
+            self._keep_card(d)
+            return DeliveryResult.ACK
+        if self.facade is not None and self.facade.route_reply(d):
+            return DeliveryResult.ACK
+        if d.kind == "a2a.task_cancel":
+            await self._maybe_cancel(d)
+            return DeliveryResult.ACK
+        if d.kind != "a2a.message" or self.options.local_agent_url is None:
+            return DeliveryResult.ACK
+        if not d.addressed_to_me:
+            self._remember(d)
+            return DeliveryResult.ACK
+        return await self._trigger(group, d)
+
+    def _keep_card(self, d: Delivery) -> None:
+        card = convert.parse_card(d.body)
+        if card is None:
+            return
+        status = cards.signature_status(card, self.options.card_keys)
+        if status == "invalid":
+            LOG.warning("a2a_peer_card_invalid", group=log.hid(d.group_id))
+            return
+        self._cards.setdefault(d.group_id, {})[d.sender.identity] = (card, status)
+
+    def _remember(self, d: Delivery) -> None:
+        entry: dict[str, Any] = {
+            "msg_id": d.msg_id,
+            "sender": d.sender.identity,
+            "sender_name": d.sender.display_name or "",
+            "to": d.to,
+            "hop": d.hop,
+            "parts": convert.to_json(convert.parse_message(d.body)).get("parts", []),
+        }
+        if len(json.dumps(entry)) > MAX_CONTEXT_ENTRY:
+            entry = {k: v for k, v in entry.items() if k != "parts"} | {"omitted": "too_large"}
+        limit = max(self.options.context_messages, 0)
+        self._context.setdefault(d.group_id, deque(maxlen=limit)).append(entry)
+
+    def _local_message(self, d: Delivery) -> Message:
+        peer = convert.parse_message(d.body)
+        msg = Message(role=Role.ROLE_USER, message_id=f"ac-{d.msg_id}", context_id=d.group_id)
+        if self.options.frame_text:
+            msg.parts.append(Part(text=d.framed_text()))
+        msg.parts.extend(peer.parts)
+        ref = self._tasks.get(peer.task_id) if peer.task_id else None
+        if ref is not None and ref.group_id == d.group_id and ref.requester == d.sender.identity:
+            msg.task_id = peer.task_id  # a follow-up on one of the agent's tasks
+        meta: dict[str, Any] = {
+            "untrusted": True,
+            "scope": d.scope,
+            "sender": {
+                "identity": d.sender.identity,
+                "instance_id": d.sender.instance_id,
+                "display_name": d.sender.display_name,
+                "verified": d.sender.verified,
+            },
+            "to": list(d.to),
+            "addressed_to_me": d.addressed_to_me,
+            "trust_state": dict(d.trust_state),
+            "group_id": d.group_id,
+            "msg_id": d.msg_id,
+            "hop": d.hop,
+            "origin": d.origin,
+        }
+        context = self._context.get(d.group_id)
+        if context is not None and len(context) > 0:
+            meta["context_messages"] = list(context)
+        peer_meta = convert.to_json(peer).get("metadata")
+        if peer_meta:
+            meta["peer_metadata"] = peer_meta
+        if peer.message_id:
+            meta["peer_message_id"] = peer.message_id
+        msg.metadata.update(meta)
+        return msg
+
+    async def _ensure_client(self) -> bool:
+        return self._client is not None or await self._load_card()
+
+    async def _trigger(self, group: GroupView, d: Delivery) -> DeliveryResult:
+        if not await self._ensure_client() or self._client is None or self._plain is None:
+            return DeliveryResult.RETRY  # the local agent is unreachable for now
+        request = SendMessageRequest(message=self._local_message(d))
+        try:
+            try:
+                stream = aiter(self._client.send_message(request))
+                first = await anext(stream, None)
+            except UnsupportedOperationError:
+                # The agent refused streaming: fall back to SendMessage.
+                stream = aiter(self._plain.send_message(request))
+                first = await anext(stream, None)
+        except A2AClientError as e:
+            LOG.warning(
+                "a2a_local_unreachable", group=log.hid(group.group_id), error=type(e).__name__
+            )
+            return DeliveryResult.RETRY
+        except A2AError as e:
+            # A protocol error is the agent's answer, not a transient failure:
+            # retrying would block every later delivery.
+            LOG.warning("a2a_local_refused", group=log.hid(group.group_id), error=type(e).__name__)
+            return DeliveryResult.ACK
+        self._context.pop(d.group_id, None)
+        LOG.info("a2a_triggered", group=log.hid(group.group_id), msg=log.hid(d.msg_id))
+        if first is not None:
+            self._spawn(self._forward(d, first, stream))
+        return DeliveryResult.ACK
+
+    def _spawn(self, work: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.get_running_loop().create_task(work)
+        self._running.add(task)
+        task.add_done_callback(self._running.discard)
+
+    async def _forward(
+        self, d: Delivery, first: StreamResponse, rest: AsyncIterator[StreamResponse]
+    ) -> None:
+        """Send what the local agent streams to the group."""
+        # SPEC 9.3: everyone sees the progress; only the requester is triggered.
+        addressee = [d.sender.identity]
+        await self._emit(d, addressee, first)
+        if convert.is_final(first):
+            return
+        try:
+            async for resp in rest:
+                await self._emit(d, addressee, resp)
+                if convert.is_final(resp):
+                    break
+        except (A2AError, httpx.HTTPError) as e:
+            LOG.warning("a2a_stream_failed", group=log.hid(d.group_id), error=type(e).__name__)
+
+    async def _emit(self, d: Delivery, addressee: list[str], resp: StreamResponse) -> None:
+        task_id = convert.task_id_of(resp)
+        if task_id:
+            self._tasks[task_id] = TaskRef(d.group_id, d.sender.identity, d.msg_id)
+            self._tasks.move_to_end(task_id)
+            while len(self._tasks) > MAX_TASKS:
+                self._tasks.popitem(last=False)
+        if self._send is None:
+            return
+        for kind, body in convert.stream_to_inner(resp, d.group_id):
+            try:
+                await self._send(
+                    d.group_id,
+                    body,
+                    to=["*"],
+                    kind=kind,
+                    reply_to=[d.msg_id],
+                    addressee=addressee,
+                )
+            except Exception as e:
+                code = getattr(e, "code", type(e).__name__)
+                LOG.warning("a2a_reply_not_sent", group=log.hid(d.group_id), code=code)
+
+    async def _maybe_cancel(self, d: Delivery) -> None:
+        """SPEC 7.2: ``a2a.task_cancel`` (an A2A ``CancelTaskRequest``) from
+        the task's requester cancels the agent's task; from anyone else it is
+        ignored."""
+        request = convert.parse_cancel(d.body)
+        ref = None if request is None else self._tasks.get(request.id)
+        if (
+            request is None
+            or ref is None
+            or ref.group_id != d.group_id
+            or ref.requester != d.sender.identity
+            or self._client is None
+        ):
+            LOG.info("a2a_cancel_ignored", group=log.hid(d.group_id))
+            return
+        with contextlib.suppress(A2AError, httpx.HTTPError):
+            await self._client.cancel_task(CancelTaskRequest(id=request.id))
+            LOG.info("a2a_task_canceled", group=log.hid(d.group_id))
+
+    # -- the local agent's card ----------------------------------------------
+
+    async def _load_card(self) -> bool:
+        if self._http is None or self.options.local_agent_url is None:
+            return False
+        resolver = A2ACardResolver(self._http, self.options.local_agent_url)
+        try:
+            async with asyncio.timeout(CARD_TIMEOUT):
+                card = await resolver.get_agent_card()
+        except (A2AError, httpx.HTTPError, TimeoutError) as e:
+            LOG.warning("a2a_card_unavailable", error=type(e).__name__)
+            return False
+        status = cards.signature_status(card, self.options.card_keys)
+        if status == "invalid":
+            LOG.warning("a2a_local_card_invalid")
+            return False
+        self._card = card
+        self._card_json = convert.to_json(card)
+        self._client = ClientFactory(ClientConfig(httpx_client=self._http, streaming=True)).create(
+            card
+        )
+        self._plain = ClientFactory(ClientConfig(httpx_client=self._http, streaming=False)).create(
+            card
+        )
+        LOG.info("a2a_card_loaded", signature=status, skills=len(card.skills))
+        return True
+
+    def _forget(self, group_id: str) -> None:
+        for table in (self._groups, self._cards, self._peers, self._context):
+            table.pop(group_id, None)

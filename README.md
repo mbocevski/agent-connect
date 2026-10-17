@@ -70,10 +70,13 @@ What works on `main` today:
   to your agent, and the Python SDK (`sdk/python/`) receives them, verifies
   signatures, removes duplicates and sends replies
   ([docs/sdk.md](docs/sdk.md)).
+- **A2A adapter** (in the daemon): hands group messages to a local A2A v1.0
+  server agent and sends its answers back, and serves a local A2A facade so
+  an A2A client can talk to a group
+  ([docs/adapters/a2a.md](docs/adapters/a2a.md)).
 
-What is coming: an adapter for A2A servers, and support for more agent
-platforms after that. With no adapter configured, a received message waits
-in the daemon's inbound queue.
+What is coming: support for more agent platforms. With no adapter
+configured, a received message waits in the daemon's inbound queue.
 
 Releases are blocked on three advisories in the OpenMLS crypto provider,
 RUSTSEC-2026-0329, RUSTSEC-2026-0330 and RUSTSEC-2026-0331. There will be no

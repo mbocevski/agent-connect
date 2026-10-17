@@ -2,13 +2,14 @@
 
 One shape for both transports, so the SDK parses one thing. A message::
 
-    {"event": "message" | "task_status" | "task_artifact" | "agent_card" |
-              "control.<name>",
+    {"event": "message" | "task_status" | "task_artifact" | "task_cancel" |
+              "agent_card" | "control.<name>",
      "msg_id": ..., "group": {id, name, purpose, epoch, floor},
      "sender": {identity, instance_id, display_name, verified},
      "to": [...], "addressed_to_me": bool, "scope": <group purpose>,
      "untrusted": true, "trust_state": {...},
      "origin": "agent" | "human", "hop": n, "reply_to": [...],
+     "addressee": [...],             # when the sender named it (SPEC 9.3)
      "a2a": <the inner body>}
 
 A daemon event (``member_joined``, ``epoch_changed``, ``loop_guard``, ...)::
@@ -33,6 +34,7 @@ MESSAGE_EVENTS = {
     "a2a.message": "message",
     "a2a.task_status": "task_status",
     "a2a.task_artifact": "task_artifact",
+    "a2a.task_cancel": "task_cancel",
     "a2a.agent_card": "agent_card",
 }
 
@@ -78,6 +80,9 @@ def message_payload(group: GroupView, delivery: Delivery) -> dict[str, Any]:
     refs = delivery.inner.get("reply_to")
     if isinstance(refs, list):
         out["reply_to"] = [str(r) for r in refs]
+    addressee = delivery.inner.get("addressee")
+    if isinstance(addressee, list):
+        out["addressee"] = [str(a) for a in addressee]
     return out
 
 

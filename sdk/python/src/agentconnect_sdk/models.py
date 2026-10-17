@@ -17,7 +17,7 @@ from typing import Any
 
 from agentconnect_sdk.errors import PayloadError
 
-MESSAGE_EVENTS = frozenset({"message", "task_status", "task_artifact", "agent_card"})
+MESSAGE_EVENTS = frozenset({"message", "task_status", "task_artifact", "task_cancel", "agent_card"})
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,7 @@ class Message:
     hop: int
     a2a: dict[str, Any]
     reply_to: tuple[str, ...] = ()
+    addressee: tuple[str, ...] = ()
     untrusted: bool = True
 
     @property
@@ -204,6 +205,7 @@ def parse_payload(payload: Any) -> Message | Event:
             hop=_int(d, "hop"),
             a2a=_obj(d.get("a2a"), "a2a"),
             reply_to=_strings(d.get("reply_to", []), "reply_to"),
+            addressee=_strings(d.get("addressee", []), "addressee"),
         )
     group = d.get("group")
     return Event(
