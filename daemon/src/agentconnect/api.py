@@ -181,6 +181,11 @@ class ApiServer:
         if not isinstance(to, list) or not all(isinstance(x, str) for x in to):
             raise ApiError(400, "bad_request", "to must be a list of strings")
         kind = _str(b, "kind", "a2a.message")
+        reply_to = b.get("reply_to")
+        if reply_to is not None and (
+            not isinstance(reply_to, list) or not all(isinstance(x, str) for x in reply_to)
+        ):
+            raise ApiError(400, "bad_request", "reply_to must be a list of msg_ids")
         # SPEC 7.2/10.3: only the human's own requests are human-originated.
         # The agent token always sends as the agent, and can't send the
         # controls SPEC 7.3 reserves to humans.
@@ -188,7 +193,12 @@ class ApiServer:
         if kind in HUMAN_ONLY_KINDS and not human:
             raise ApiError(403, "human_only", f"{kind} needs the human token")
         msg_id = self.daemon.send_message(
-            p["gid"], body, to=to, kind=kind, origin="human" if human else "agent"
+            p["gid"],
+            body,
+            to=to,
+            kind=kind,
+            origin="human" if human else "agent",
+            reply_to=reply_to,
         )
         return {"msg_id": msg_id}
 

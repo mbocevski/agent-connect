@@ -99,6 +99,12 @@ def _core_error(e: Exception) -> str:
     return "rejected"
 
 
+def _max_turns(policy: dict[str, Any]) -> int:
+    guard = policy.get("loop_guard")
+    turns = guard.get("max_agent_turns") if isinstance(guard, dict) else None
+    return turns if isinstance(turns, int) and not isinstance(turns, bool) else 20
+
+
 def addressed_to_me(
     floor: str, inner: dict[str, Any], me: str, my_instance: str, moderator: str | None
 ) -> bool:
@@ -518,9 +524,17 @@ class Daemon:
                 await self._ack(msg_id)
                 return
             self.store.record_inbox(
-                sender, msg_id, group_id, "pending", now, delivery=delivery.to_json()
+                sender,
+                msg_id,
+                group_id,
+                "pending",
+                now,
+                delivery=delivery.to_json(),
+                hop=delivery.hop,
             )
             self._delivery_wake.set()
+            if delivery.hop > _max_turns(group.policy) and delivery.origin != "human":
+                await self._loop_guard(group, delivery)
             return
         if etype in ("commit", "own_commit_confirmed"):
             await self._after_commit(group_id, event, env, own=etype == "own_commit_confirmed")
@@ -553,15 +567,26 @@ class Daemon:
         )
         policy = group.policy
         to = inner.get("to") if isinstance(inner.get("to"), list) else ["*"]
-        hop = inner.get("hop") if isinstance(inner.get("hop"), int) else 0
-        max_turns = int((policy.get("loop_guard") or {}).get("max_agent_turns", 20))
-        addressed = hop <= max_turns and addressed_to_me(
+        raw_hop = inner.get("hop")
+        hop = raw_hop if isinstance(raw_hop, int) and not isinstance(raw_hop, bool) else 0
+        hop = max(hop, 0)
+        origin = "human" if inner.get("origin") == "human" else "agent"
+        if inner["kind"] in HUMAN_ONLY_KINDS:
+            if origin != "human":
+                return None  # SPEC 7.3: an agent can't resume; ignore it
+            self._reset_loop_guard(group.group_id)
+        # SPEC 10.3: past max_agent_turns the agent is not triggered.
+        addressed = hop <= _max_turns(policy) and addressed_to_me(
             str(policy.get("floor", "free")),
             inner,
             self.me,
             self.instance.instance_id_hex,
             policy.get("floor_moderator"),
         )
+        if addressed:
+            # The default "message replied to" for this instance's next
+            # agent message in the group (see _reply_hop).
+            self.store.kv_set(f"trigger_hop/{group.group_id}", str(hop))
         return Delivery(
             group_id=group.group_id,
             msg_id=msg_id,
@@ -577,10 +602,56 @@ class Daemon:
             addressed_to_me=addressed,
             scope=group.purpose,
             trust_state=self._trust_state(group.group_id),
-            origin=str(inner.get("origin", "agent")),
+            origin=origin,
             hop=hop,
             inner=inner,
         )
+
+    # -- loop guard (SPEC 10.3) ---------------------------------------------
+
+    def _reply_hop(self, group_id: str, reply_to: list[str] | None) -> int:
+        """``hop`` for an agent message: one more than the largest ``hop`` of
+        the messages it replies to.
+
+        "Replies to" is the received messages named in ``reply_to`` (their
+        ``msg_id``s) when the agent says; otherwise the last message that
+        triggered this instance in the group (0 before any, so a fresh agent
+        message has hop 1). A ``control.resume`` resets that to 0.
+        """
+        hops = self.store.inbox_hops(group_id, reply_to or [])
+        if hops:
+            return max(hops) + 1
+        return int(self.store.kv_get(f"trigger_hop/{group_id}") or "0") + 1
+
+    def _reset_loop_guard(self, group_id: str) -> None:
+        """A human ``control.resume`` (sent or received) resets the counter."""
+        self.store.kv_set(f"trigger_hop/{group_id}", "0")
+        self.store.kv_set(f"loop_paused/{group_id}", "0")
+
+    async def _loop_guard(self, group: GroupRow, delivery: Delivery) -> None:
+        """SPEC 10.3: the agent was not triggered; pause the group once and
+        tell the human (until a ``control.resume``)."""
+        key = f"loop_paused/{group.group_id}"
+        if self.store.kv_get(key) == "1":
+            return
+        self.store.kv_set(key, "1")
+        await self.emit(
+            group.group_id,
+            "loop_guard",
+            msg_id=delivery.msg_id,
+            sender=delivery.sender.identity,
+            hop=delivery.hop,
+            max_agent_turns=_max_turns(group.policy),
+        )
+        try:
+            self.send_message(
+                group.group_id,
+                {"reason": "loop_guard"},
+                kind="control.pause",
+                reply_to=[delivery.msg_id],
+            )
+        except DaemonError as e:
+            LOG.info("loop_guard_pause_not_sent", code=e.code)
 
     async def _on_leave_proposed(self, group_id: str, member: dict[str, Any]) -> None:
         self._proposed_leaves.setdefault(group_id, set()).add(member["identity"])
@@ -1279,8 +1350,10 @@ class Daemon:
         to: list[str] | None = None,
         kind: str = "a2a.message",
         origin: str = "agent",
-        hop: int = 0,
+        reply_to: list[str] | None = None,
     ) -> str:
+        """Queue an application message. ``hop`` is computed here (SPEC 10.3):
+        0 for the human's own messages, otherwise see :meth:`_reply_hop`."""
         group = self._group_or_raise(group_id)
         if not kind.startswith(("a2a.", "control.")):
             raise DaemonError("bad_request", "unknown message kind")
@@ -1288,6 +1361,7 @@ class Daemon:
             raise DaemonError("bad_request", "origin must be agent or human")
         if kind in HUMAN_ONLY_KINDS and origin != "human":
             raise DaemonError("forbidden", f"{kind} must come from the human")
+        hop = 0 if origin == "human" else self._reply_hop(group.group_id, reply_to)
         inner = self.inner(kind, body, to or ["*"], origin, hop)
         view = self._view(group_id)
         if view is not None and self.policy.outbound(view, inner) is PolicyDecision.DROP:
@@ -1296,6 +1370,8 @@ class Daemon:
             raise DaemonError("too_large", "message too large")
         msg_id = new_msg_id()
         self._enqueue("app", group.group_id, {"inner": inner, "msg_id": msg_id})
+        if kind in HUMAN_ONLY_KINDS:
+            self._reset_loop_guard(group.group_id)
         return msg_id
 
     async def adapter_send(
@@ -1304,9 +1380,13 @@ class Daemon:
         body: dict[str, Any],
         to: list[str] | None = None,
         kind: str = "a2a.message",
+        reply_to: list[str] | None = None,
     ) -> str:
-        """What adapters get through ``on_outbound``: agent-originated only."""
-        return self.send_message(group_id, body, to=to, kind=kind, origin="agent")
+        """What adapters get through ``on_outbound``: agent-originated only.
+        ``reply_to`` names the ``msg_id``s of the deliveries this answers."""
+        return self.send_message(
+            group_id, body, to=to, kind=kind, origin="agent", reply_to=reply_to
+        )
 
     def update(self, group_id: str) -> None:
         group = self._group_or_raise(group_id)

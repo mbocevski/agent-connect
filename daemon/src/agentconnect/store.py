@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS inbox (
     delivery TEXT,
     state TEXT NOT NULL,
     received_at INTEGER NOT NULL,
+    hop INTEGER,
     UNIQUE (sender, msg_id)
 );
 CREATE TABLE IF NOT EXISTS events (
@@ -557,10 +558,11 @@ class Store:
         now: int,
         *,
         delivery: dict[str, Any] | None = None,
+        hop: int | None = None,
     ) -> None:
         self._db.execute(
-            "INSERT OR IGNORE INTO inbox (sender, msg_id, group_id, delivery, state, received_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO inbox (sender, msg_id, group_id, delivery, state, received_at, "
+            "hop) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 sender,
                 msg_id,
@@ -568,8 +570,21 @@ class Store:
                 None if delivery is None else json.dumps(delivery),
                 state,
                 now,
+                hop,
             ),
         )
+
+    def inbox_hops(self, group_id: str, msg_ids: Sequence[str]) -> list[int]:
+        """The SPEC 10.3 ``hop`` of received application messages in a group."""
+        out: list[int] = []
+        for msg_id in msg_ids:
+            rows = self._all(
+                "SELECT hop FROM inbox WHERE group_id = ? AND msg_id = ? AND hop IS NOT NULL",
+                group_id,
+                msg_id,
+            )
+            out.extend(int(r[0]) for r in rows)
+        return out
 
     def pending_deliveries(self) -> list[InboxRow]:
         rows = self._all(

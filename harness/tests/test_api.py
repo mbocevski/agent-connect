@@ -115,6 +115,7 @@ async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
     assert await bob.node.wait_texts(gid, 1) == ["hello"]
     # The agent token sends as the agent (SPEC 7.2, 10.3)...
     assert bob.node.adapter.deliveries[0].origin == "agent"
+    assert bob.node.adapter.deliveries[0].hop == 1
     # ...even if the query string claims otherwise...
     status, _ = await alice.call("POST", f"/v0/groups/{gid}/messages?_scope=human", {"text": "x"})
     # ...and can't send the human-only control.resume (SPEC 7.3).

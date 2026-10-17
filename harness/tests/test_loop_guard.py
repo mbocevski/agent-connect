@@ -1,0 +1,98 @@
+"""SPEC §10.3: agent replies carry ``hop``, a member past
+``loop_guard.max_agent_turns`` is not triggered, pauses the group and tells
+its human, and a human ``control.resume`` resets the counter."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+
+from agentconnect.adapter import Delivery
+from agentconnect.daemon import new_msg_id
+from agentconnect_harness.cluster import Node
+
+GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
+
+
+def max_turns(node: Node, gid: str) -> int | None:
+    g = node.daemon.store.group(gid)
+    return None if g is None else int(g.policy["loop_guard"]["max_agent_turns"])
+
+
+def last(node: Node, kind: str = "a2a.message") -> Delivery:
+    return [d for d in node.adapter.deliveries if d.kind == kind][-1]
+
+
+async def reply(node: Node, gid: str, to: Delivery | None, text: str) -> None:
+    send = node.adapter.send
+    assert send is not None
+    await send(gid, {"text": text}, reply_to=None if to is None else [to.msg_id])
+
+
+async def test_replies_carry_hop_and_the_guard_pauses(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.set_policy(gid, loop_guard={"max_agent_turns": 3})
+    await a.idle()
+    await b.wait(lambda: max_turns(b, gid) == 3)
+
+    # A fresh agent message is one agent turn.
+    await reply(a, gid, None, "t1")
+    await b.wait_texts(gid, 1)
+    assert (last(b).hop, last(b).addressed_to_me) == (1, True)
+    # Explicit replies: max(hop of the message replied to) + 1.
+    await reply(b, gid, last(b), "t2")
+    await a.wait_texts(gid, 1)
+    assert last(a).hop == 2
+    # Without reply_to, the last message that triggered this instance.
+    await reply(a, gid, None, "t3")
+    await b.wait_texts(gid, 2)
+    assert (last(b).hop, last(b).addressed_to_me) == (3, True)
+    await reply(b, gid, last(b), "t4")
+    await a.wait_texts(gid, 2)
+    # hop 4 > 3: delivered as context only, a pause goes out, the human hears.
+    assert (last(a).hop, last(a).addressed_to_me) == (4, False)
+    await a.adapter.wait_for(lambda: bool(a.adapter.of_type("loop_guard")))
+    (event,) = a.adapter.of_type("loop_guard")
+    assert event.data["hop"] == 4
+    assert event.data["max_agent_turns"] == 3
+    await b.adapter.wait_for(lambda: any(d.kind == "control.pause" for d in b.adapter.deliveries))
+    pause = last(b, "control.pause")
+    assert pause.body == {"reason": "loop_guard"}
+    assert (pause.origin, pause.hop, pause.addressed_to_me) == ("agent", 5, False)
+    # Only one pause and one event per episode.
+    await reply(b, gid, last(b), "t5")
+    await a.wait_texts(gid, 3)
+    await a.idle()
+    assert len(a.adapter.of_type("loop_guard")) == 1
+
+    # The human resumes: hop 0, and the counter restarts on both sides.
+    a.daemon.send_message(gid, {}, kind="control.resume", origin="human")
+    await b.adapter.wait_for(lambda: any(d.kind == "control.resume" for d in b.adapter.deliveries))
+    assert last(b, "control.resume").hop == 0
+    await reply(a, gid, None, "after resume")
+    await b.wait_texts(gid, 3)
+    assert (last(b).hop, last(b).addressed_to_me) == (1, True)
+    await reply(b, gid, None, "b after resume")
+    await a.wait_texts(gid, 4)
+    # b's last trigger was the resume (hop 0) then a's hop-1 message.
+    assert (last(a).hop, last(a).addressed_to_me) == (2, True)
+    # A human message is hop 0.
+    b.daemon.send_message(gid, {"text": "from b's human"}, origin="human")
+    await a.wait_texts(gid, 5)
+    assert (last(a).hop, last(a).origin) == (0, "human")
+
+
+async def test_an_agent_resume_is_ignored(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.set_policy(gid, loop_guard={"max_agent_turns": 0})
+    await a.idle()
+    await b.wait(lambda: max_turns(b, gid) == 0)
+    await reply(a, gid, None, "x")
+    await b.adapter.wait_for(lambda: bool(b.adapter.of_type("loop_guard")))
+    # A peer daemon that claims an agent-originated resume is ignored: b
+    # stays paused and nothing reaches its adapter.
+    inner = a.daemon.inner("control.resume", {}, ["*"], origin="agent", hop=0)
+    a.daemon._enqueue("app", gid, {"inner": inner, "msg_id": new_msg_id()})
+    a.daemon.send_message(gid, {"text": "marker"})
+    await b.wait_texts(gid, 2)
+    assert not [d for d in b.adapter.deliveries if d.kind == "control.resume"]
+    assert b.daemon.store.kv_get(f"loop_paused/{gid}") == "1"

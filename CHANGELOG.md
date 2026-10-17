@@ -124,6 +124,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: the SPEC §10.3 loop guard works. Agent messages carry `hop` =
+  one more than the largest `hop` of the messages they reply to (named by
+  `reply_to` msg_ids in the API and `adapter_send`, or else the last
+  message that triggered this instance); human messages are 0. A message
+  past `loop_guard.max_agent_turns` doesn't trigger the agent, and the
+  daemon sends one `control.pause{reason: "loop_guard"}` and raises a
+  `loop_guard` event. A human `control.resume` resets the counter, and
+  an agent-originated one is ignored. Previously every message had hop 0.
 - Daemon API: a message sent with the agent token now goes out as
   `origin: "agent"`, and only the human token can send
   `control.resume` (SPEC §7.3). Previously every API send claimed

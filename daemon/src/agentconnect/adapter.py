@@ -110,7 +110,8 @@ class Event:
     """A daemon event: ``member_joined``, ``member_left``, ``member_removed``,
     ``epoch_changed`` (with the new SAS), ``policy_changed``, ``out_of_sync``,
     ``relay_misbehaviour``, ``unauthorized_commit``, ``pending_approval``,
-    ``joined``, ``removed``."""
+    ``joined``, ``removed``, ``loop_guard`` (SPEC 10.3: a message past
+    ``max_agent_turns`` did not trigger the agent and the group was paused)."""
 
     type: str
     group_id: str | None
@@ -126,7 +127,7 @@ class Capabilities:
     agent_card: dict[str, Any] | None = None
 
 
-# group_id, body, to, kind -> msg_id
+# group_id, body, to, kind, reply_to -> msg_id
 OutboundSend = Callable[..., Awaitable[str]]
 
 
