@@ -31,6 +31,7 @@ DEFAULT_POLICY = Path(__file__).resolve().parent.parent / "licences-py.toml"
 ALIASES = {
     "mit license": "MIT",
     "bsd license": "BSD-3-Clause",
+    "3-clause bsd license": "BSD-3-Clause",
     "apache software license": "Apache-2.0",
     "isc license (iscl)": "ISC",
     "mozilla public license 2.0 (mpl 2.0)": "MPL-2.0",

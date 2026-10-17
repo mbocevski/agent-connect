@@ -38,6 +38,7 @@ def test_allowed_spdx_and_classifier_names_pass() -> None:
         ("d", "BSD License"),
         ("e", "Apache Software License"),
         ("f", "DFSG approved; MIT License"),
+        ("g", "3-Clause BSD License"),
     )
     assert check_licences.check(report, _policy()) == []
 
