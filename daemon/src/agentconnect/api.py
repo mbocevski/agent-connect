@@ -148,6 +148,7 @@ class ApiServer:
             Route("DELETE", "/v0/invites/{invite_id}", self._revoke),
             Route("POST", "/v0/invites/inspect", self._inspect),
             Route("POST", "/v0/invites/accept", self._accept),
+            Route("POST", "/v0/groups/{gid}/policy", self._policy),
             Route("POST", "/v0/groups/{gid}/messages", self._send),
             Route("POST", "/v0/groups/{gid}/leave", self._leave),
             Route("GET", "/v0/approvals", lambda _p, _b: self._ok({"approvals": d.approvals()})),
@@ -174,6 +175,17 @@ class ApiServer:
         return await self.daemon.create_invite(
             p["gid"], _int(b, "ttl_secs", 86_400), _int(b, "max_uses", 1), name
         )
+
+    async def _policy(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        """Only ``require_verified``. Turning it on tightens the gate, so the
+        agent token may; turning it off needs the human (SPEC 10.4)."""
+        value = b.get("require_verified")
+        if not isinstance(value, bool):
+            raise ApiError(400, "bad_request", "require_verified must be a boolean")
+        if not value and p.get(SCOPE) != "human":
+            raise ApiError(403, "human_only", "relaxing verification needs the human token")
+        self.daemon.set_policy(p["gid"], require_verified=value)
+        return {"require_verified": value}
 
     async def _revoke(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         await self.daemon.revoke_invite(p["invite_id"])

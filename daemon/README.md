@@ -8,6 +8,13 @@ agentconnect daemon run [--config PATH] [--tcp-port N]   # foreground, JSON logs
 agentconnect status [--json]                             # reads the local API
 ```
 
+The invite lifecycle (`group`, `invite`, `accept`, `groups`, `approvals`,
+`verify`, `leave`, `send`, `events`) is documented in
+[docs/cli.md](../docs/cli.md), with the `--json` schemas and exit codes.
+`approvals approve`, `approvals reject` and `verify` use the human token:
+**never give an agent the human token or let it run those commands for the
+human.**
+
 ## What the daemon holds
 
 - One identity and one instance, created on first start, in the OS keyring
@@ -36,13 +43,14 @@ JSON over HTTP/1.1 on a Unix socket in the data directory, or on
 | `GET /v0/status` | agent |
 | `GET /v0/groups`, `POST /v0/groups` `{name, purpose}` | agent |
 | `GET /v0/groups/{id}`: members, roles, verified flags, SAS, out_of_sync, peer Agent Cards (as `{untrusted, card}`) | agent |
+| `POST /v0/groups/{id}/policy` `{require_verified}`: `true` is allowed to the agent token, `false` needs the human token | agent / **human** |
 | `POST /v0/groups/{id}/invites` `{ttl_secs, max_uses, inviter_name}` → URL | agent |
 | `DELETE /v0/invites/{invite_id}` | agent |
 | `POST /v0/invites/inspect` `{url}`: parses locally, shows the public metadata | agent |
 | `POST /v0/invites/accept` `{url, display_name}`: sends the JoinRequest | agent |
 | `POST /v0/groups/{id}/messages` `{text \| body, to, kind, reply_to}` (`reply_to`: the msg_ids answered, which set `hop`, SPEC §10.3): sent as `origin: "agent"` with the agent token, `"human"` with the human token; `control.resume` needs the human token | agent |
 | `POST /v0/groups/{id}/leave` | agent |
-| `GET /v0/approvals`, `GET /v0/events?after=N` | agent |
+| `GET /v0/approvals` (with the joiner's `fingerprint`), `GET /v0/events?after=N` | agent |
 | `POST /v0/approvals/{id}/approve`, `.../reject` | **human** |
 | `POST /v0/groups/{id}/members/{identity}/verify` `{verified}` | **human** |
 | `POST /v0/groups/{id}/sas/mismatch` `{epoch}`: the codes differ; raises `sas_mismatch` and leaves (SPEC §11) | **human** |

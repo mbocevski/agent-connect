@@ -22,6 +22,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   hook, and a local JSON control API (Unix socket or loopback TCP) whose
   approve and verify operations need a separate human token.
 - CLI: `agentconnect daemon run` and `agentconnect status`.
+- CLI invite lifecycle (`group create`, `invite create|revoke`, `accept`,
+  `groups [show]`, `approvals [approve|reject]`, `verify`, `leave`, `send`,
+  `events`), each with a stable `--json` shape and documented exit codes
+  (`docs/cli.md`). `approve`, `reject` and `verify` use the human token.
+  `accept` shows the invite, asks first and prints the short code;
+  an already used or revoked invite prints the interception warning and exits
+  with code 4.
+- Local API: `POST /v0/groups/{id}/policy` (`require_verified`; relaxing it
+  needs the human token) and the joiner's `fingerprint` in `GET /v0/approvals`.
 - Multi-node test harness (`harness/`): the real relay on a random port,
   in-process daemons with recording adapters on a shared fake clock, and a
   per-daemon proxy for partitions and malicious-relay behaviour (drop,

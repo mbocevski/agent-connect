@@ -253,7 +253,7 @@ async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
     assert node.me in result.stdout
     await server.stop()
     result = await asyncio.to_thread(runner.invoke, app, ["status", "--config", str(cfg_file)])
-    assert result.exit_code == 1
+    assert result.exit_code == 5
     assert "cannot reach" in result.output
 
 
@@ -273,8 +273,8 @@ async def test_cli_errors(tmp_path: Path) -> None:
     empty = tmp_path / "ok.toml"
     empty.write_text(f'[daemon]\ndata_dir = "{tmp_path / "none"}"\n', encoding="utf-8")
     result = runner.invoke(app, ["status", "--config", str(empty)])
-    assert result.exit_code == 1
-    assert "daemon running" in result.output
+    assert result.exit_code == 5
+    assert "cannot reach the daemon" in result.output
 
 
 async def test_daemon_run_serves_until_signalled(cluster: Cluster, sockdir: Path) -> None:
