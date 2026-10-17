@@ -74,6 +74,7 @@ MAX_PARKED_PER_GROUP = 256
 MAX_REPLY_TO = 16  # SPEC 7.2
 HOP_MEMORY_SECS = 7 * 24 * 3600
 MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain
+TRANSFER_TIMEOUT_SECS = 10.0  # owner hand-over before a SAS-mismatch exit
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
 # SPEC 7.3: controls only a human-originated message may carry.
@@ -1879,40 +1880,126 @@ class Daemon:
 
     async def sas_mismatch(self, group_id: str, epoch: int | None = None) -> str:
         """**Human-only.** The human compared the SAS of the current epoch and
-        the codes differ (SPEC 11): the group view may be forked. Raise
-        ``sas_mismatch`` and leave at once.
+        the codes differ (SPEC 11): the group view may be forked. Leave at
+        once and raise ``sas_mismatch``.
 
-        A leave proposal goes out when one is allowed (so honest members can
-        remove the leaf); either way the local group state is deleted now,
-        since nothing more from this view can be trusted. ``epoch`` guards
-        against answering for a code from an earlier epoch."""
+        * The owner's last instance first makes a best-effort ownership
+          transfer (SPEC 9.2): a policy commit naming the lowest-index admin,
+          or else the lowest-index other member, sent and awaited for at most
+          :data:`TRANSFER_TIMEOUT_SECS`. If the relay confirms it, this
+          instance is now a plain member and proposes its own removal.
+        * Anyone else sends a leave proposal when one is allowed.
+        * A sole member just deletes.
+
+        The local group state is deleted in every case, since nothing more
+        from this view can be trusted. ``epoch`` guards against answering
+        for a code from an earlier epoch."""
         group = self._group_or_raise(group_id)
         gid = unb64(group_id)
         current = self._core_epoch(gid)
         if epoch is not None and epoch != current:
             msg = f"the SAS shown was for epoch {epoch}; the group is at epoch {current}"
             raise DaemonError("stale_epoch", msg)
-        await self.emit(group_id, "sas_mismatch", epoch=current, sas=self._sas(gid))
+        sas = self._sas(gid)
+        transfer: dict[str, Any] | None = None
+        if self._is_last_owner_instance(group):
+            transfer = await self._transfer_ownership(group)
+        if transfer is None or transfer["confirmed"]:
+            self._propose_own_leave(group)
+        await self._gone(group_id, "left")
+        self.store.update_group(group_id, out_of_sync=True, out_of_sync_reason="sas_mismatch")
+        data: dict[str, Any] = {"epoch": current, "sas": sas}
+        if transfer is not None:
+            data["transfer"] = transfer
+        await self.emit(group_id, "sas_mismatch", **data)
+        return "left"
+
+    def _is_last_owner_instance(self, group: GroupRow) -> bool:
+        if group.policy.get("owner") != self.me:
+            return False
+        mine = [m for m in self.client.members(unb64(group.group_id)) if m["identity"] == self.me]
+        return len(mine) == 1
+
+    def _next_owner(self, group: GroupRow) -> str | None:
+        """The lowest-index admin, else the lowest-index other member."""
+        members = sorted(
+            (m for m in self.client.members(unb64(group.group_id)) if m["identity"] != self.me),
+            key=lambda m: m["leaf_index"],
+        )
+        admins = set(group.policy.get("admins", []))
+        for m in members:
+            if m["identity"] in admins:
+                return str(m["identity"])
+        return str(members[0]["identity"]) if members else None
+
+    async def _transfer_ownership(self, group: GroupRow) -> dict[str, Any] | None:
+        """Commit ``owner = next owner`` and wait (bounded) for the relay.
+        ``None`` for a sole member; otherwise who and whether it landed."""
+        new_owner = self._next_owner(group)
+        if new_owner is None:
+            return None
+        gid = unb64(group.group_id)
+        policy = {**json.loads(self.client.policy(gid)), "owner": new_owner}
+        policy["admins"] = [a for a in policy.get("admins", []) if a != new_owner]
+        result: dict[str, Any] = {"new_owner": new_owner, "confirmed": False}
+        try:
+            out = self.client.set_policy(gid, canonical(policy))
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            LOG.info("ownership_transfer_not_built", reason=str(e)[:60])
+            return result
+        env = {
+            "v": 0,
+            "kind": "commit",
+            "group_id": group.group_id,
+            "epoch": out["epoch"],
+            "msg_id": out["msg_id"],
+            "sender": self.mailbox,
+            "routing": out["routing"],
+            "ct": b64(out["commit"]),
+        }
+        send = asyncio.ensure_future(self._request({"t": "send", "env": env}, out["msg_id"]))
+        timer = asyncio.ensure_future(self._sleep(TRANSFER_TIMEOUT_SECS))
+        await asyncio.wait({send, timer}, return_when=asyncio.FIRST_COMPLETED)
+        timer.cancel()
+        if send.done() and send.exception() is None:
+            # Accepted; the fan-out echo may already have merged it.
+            with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+                self.client.confirm_pending_commit(gid, str(out["msg_id"]))
+        else:
+            send.cancel()
+        try:
+            confirmed = json.loads(self.client.policy(gid)).get("owner") == new_owner
+        except (ac.AgentConnectError, ac.CoreError, ValueError):
+            confirmed = False
+        for t in (send, timer):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t
+        if not confirmed:
+            with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
+                self.client.discard_pending_commit(gid)
+        result["confirmed"] = confirmed
+        LOG.info("ownership_transfer", confirmed=confirmed)
+        return result
+
+    def _propose_own_leave(self, group: GroupRow) -> None:
+        """Queue a self-Remove proposal when SPEC 9.2 allows one."""
+        gid = unb64(group.group_id)
         try:
             proposal = self.client.propose_leave(gid)
         except (ac.AgentConnectError, ac.CoreError) as e:
-            # The owner's last instance, or a sole member: no proposal.
             LOG.info("sas_mismatch_no_proposal", reason=str(e)[:60])
-        else:
-            msg_id = new_msg_id()
-            env = {
-                "v": 0,
-                "kind": "proposal",
-                "group_id": group.group_id,
-                "epoch": current,
-                "msg_id": msg_id,
-                "sender": self.mailbox,
-                "ct": b64(proposal),
-            }
-            self._enqueue("frame", None, {"frame": {"t": "send", "env": env}, "msg_id": msg_id})
-        await self._gone(group_id, "left")
-        self.store.update_group(group_id, out_of_sync=True, out_of_sync_reason="sas_mismatch")
-        return "left"
+            return
+        msg_id = new_msg_id()
+        env = {
+            "v": 0,
+            "kind": "proposal",
+            "group_id": group.group_id,
+            "epoch": self._core_epoch(gid),
+            "msg_id": msg_id,
+            "sender": self.mailbox,
+            "ct": b64(proposal),
+        }
+        self._enqueue("frame", None, {"frame": {"t": "send", "env": env}, "msg_id": msg_id})
 
     def group_info(self, group_id: str) -> dict[str, Any]:
         group = self.store.group(group_id)

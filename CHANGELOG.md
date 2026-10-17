@@ -88,6 +88,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Daemon: on a SAS mismatch the owner's last instance first commits an
+  ownership transfer (to the lowest-index admin, else the lowest-index
+  other member) and waits up to 10 s for the relay, then deletes its local
+  state whatever the outcome; `sas_mismatch` reports the new owner and
+  whether the transfer was confirmed. Once confirmed, the former owner
+  proposes its own removal like any member. SPEC §9.2 and §11 describe
+  this, including that a transfer from a forked view leaves the real group
+  ownerless and its members must recreate it.
 - Protocol (`SPEC.md`): the twelve daemon choices that were pending in §15
   are now normative, as the maintainer decided: the Update cadence counts
   both directions (§3.1); the approval timeout is silent and pre-Welcome

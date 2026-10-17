@@ -839,8 +839,9 @@ Notes on the table:
   one before. The owner first commits a policy change that names another
   member as `owner` ("Owner transfer" above), then leaves as a plain
   member. One of several instances of the owner's identity may leave
-  freely. A sole remaining member, owner or not, just deletes its local
-  state.
+  freely. An owner leaving after a SAS mismatch (§11) transfers ownership
+  the same way before it deletes its state. A sole remaining member, owner
+  or not, just deletes its local state.
 - Each proposal of a commit is authorised against the policy in force at
   the commit's epoch, not the policy the commit introduces. The group after
   the commit MUST fit the `max_members` of the policy the commit ends with.
@@ -966,10 +967,24 @@ verified too.
   - Implementations MUST NOT let an agent mark verification on its own. There
     is no agent-callable verify operation.
   - If the human answers that the codes differ, the instance MUST leave the
-    group and raise a `sas_mismatch` alert. It sends a leave proposal when
-    §9.2 allows one. The owner's last instance can't propose its own
-    removal: it deletes its local state without a proposal, and the
-    remaining members remove the dead leaf.
+    group and raise a `sas_mismatch` alert. A member that isn't the owner's
+    last instance sends a leave proposal (§9.2) and deletes its local
+    state. The owner's last instance, which may not propose its own
+    removal, MUST first attempt an ownership transfer (§9.2): a commit
+    whose GroupContextExtensions proposal carries the full extension set
+    with `owner` set to the lowest-index admin, or if there is none the
+    lowest-index other member. It sends that commit, waits a short bounded
+    time for the relay's confirmation (the reference daemon waits 10 s),
+    and then deletes its local state whatever the outcome, reporting in
+    the alert whether the transfer was confirmed. If it was, the former
+    owner is a plain member and its leaf is removed under the normal §9.2
+    rules (it SHOULD send a leave proposal first). A sole member just
+    deletes its state.
+  - A mismatch means the views may be forked. A transfer from a forked
+    view only reaches that view: the real group then keeps the departed
+    instance as its owner, no policy change or removal of it can pass, and
+    its members MUST recreate the group (new group, new invites) to
+    regain an owner.
 - **Trust states:** each instance tracks a local per-member `verified` flag.
   - A new member starts `unverified`.
   - When the epoch changes, previously verified members stay verified. The
@@ -1111,11 +1126,6 @@ A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice
    cadence in §3.1.
 3. Multi-relay federation. Out of scope for v0.
 4. Interop with AGNTCY SLIM (also MLS-based), and an A2A extension (§13).
-5. Removing the dead leaf of an owner that left after a SAS mismatch
-   (§11): §9.2 lets only the owner remove the owner's instances, and rejects
-   a commit that leaves the owner identity with no instance, so the remaining
-   members can't commit that Remove under the current rules. Needs a rule
-   (for example an owner transfer to an admin first).
 
 Decided by the maintainer (2026-10-17), now normative:
 
@@ -1142,8 +1152,8 @@ Decided by the maintainer (2026-10-17), now normative:
 - Replies name what they reply to in `reply_to`, and receivers check
   `hop` against it (§7.2, §10.3).
 - The reconnect drain is exempt from the per-minute rates (§8.2, §10.2).
-- An owner whose SAS mismatched deletes its state without a proposal
-  (§11).
+- An owner whose SAS mismatched first transfers ownership (best effort,
+  bounded wait), then deletes its state (§9.2, §11).
 - The owner transfers ownership before it leaves (§9.2).
 - Integers in protocol JSON are capped at the I-JSON range (§3.2).
 - A Welcome's GroupInfo carries only `ratchet_tree`, and its policy is
