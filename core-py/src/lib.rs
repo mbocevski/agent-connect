@@ -272,9 +272,9 @@ impl Instance {
         relay_host: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let sig = guarded(|| {
-            Ok(self
-                .0
-                .sign_relay_request(method, path, ts, body, relay_host))
+            self.0
+                .sign_relay_request(method, path, ts, body, relay_host)
+                .map_err(err)
         })?;
         Ok(PyBytes::new(py, &sig))
     }
@@ -1215,6 +1215,13 @@ fn mailbox_id(sig_key: &[u8]) -> PyResult<String> {
     guarded(|| Ok(core::identity::mailbox_id(sig_key)))
 }
 
+/// The canonical relay host (SPEC §8.1.1): no userinfo, lower-cased,
+/// explicit port kept. Raises `AgentConnectError` for an invalid host.
+#[pyfunction]
+fn canonical_relay_host(host: &str) -> PyResult<String> {
+    guarded(|| core::identity::canonical_relay_host(host).map_err(err))
+}
+
 /// Return True if `v` is a protocol version this build can speak.
 #[pyfunction]
 fn supports_protocol(v: u32) -> bool {
@@ -1250,6 +1257,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(identity_id, m)?,
         wrap_pyfunction!(fingerprint, m)?,
         wrap_pyfunction!(mailbox_id, m)?,
+        wrap_pyfunction!(canonical_relay_host, m)?,
     ] {
         m.add_function(f)?;
     }

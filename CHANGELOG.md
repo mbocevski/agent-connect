@@ -150,6 +150,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core, relay and daemon: the relay host signed into relay authentication
+  has one canonical form (`canonical_relay_host`: no userinfo, ASCII
+  lower-case, explicit port kept), applied inside the core's signing
+  messages and to the relay's `AC_RELAY_HOST` and the daemon's config, so
+  signer and verifier can't disagree on case or userinfo. Invalid hosts
+  are refused. `testdata/relay-auth.json` gains the canonical-form cases;
+  `Instance.sign_relay_request` now raises for an invalid host.
 - Core and daemon: `VerifiedJoinRequest.key_package_ref` exposes the
   KeyPackageRef, and the inviter keeps one pending approval per
   KeyPackage, so a relay replaying a JoinRequest under fresh `msg_id`s no

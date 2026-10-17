@@ -15,6 +15,56 @@
   ],
   "description": "SPEC 8.1.1/8.2 relay authentication by the instance key SK: challenge sig = Ed25519(SK, 'agentconnect/v0/relay-auth' || nonce || relay_host); REST sig = Ed25519(SK, 'agentconnect/v0/relay-rest' || METHOD '\\n' || PATH '\\n' || ts '\\n' || SHA-256(body) || relay_host). instance is Instance.to_secret_bytes of a seeded test instance.",
   "generator": "core/src/vectors.rs (just vectors)",
+  "hosts": [
+    {
+      "canonical": "relay.test",
+      "input": "relay.test"
+    },
+    {
+      "canonical": "relay.test",
+      "input": "Relay.TEST"
+    },
+    {
+      "canonical": "relay.example.org:8443",
+      "input": "RELAY.example.org:8443"
+    },
+    {
+      "canonical": "127.0.0.1:8080",
+      "input": "127.0.0.1:8080"
+    },
+    {
+      "canonical": "[::1]:8080",
+      "input": "[::1]:8080"
+    },
+    {
+      "canonical": "[fe80::1]",
+      "input": "[FE80::1]"
+    },
+    {
+      "canonical": null,
+      "input": "user@relay.test"
+    },
+    {
+      "canonical": null,
+      "input": "relay.test:0"
+    },
+    {
+      "canonical": null,
+      "input": "relay.test:08080"
+    },
+    {
+      "canonical": null,
+      "input": "relay.test:99999"
+    },
+    {
+      "canonical": null,
+      "input": "relay.test/path"
+    },
+    {
+      "canonical": null,
+      "input": ""
+    }
+  ],
   "instance": "{\"cert\":\"{\\\"created_at\\\":1735689600,\\\"identity\\\":\\\"ac:v0:9HJ2ugpKr8_Qk0Q6t7aTbBUi8uTuoQfUfMgXbuiL6IA\\\",\\\"instance_id\\\":\\\"06bde3c0a9e772c3\\\",\\\"sig\\\":\\\"OHhTIxyoDBDW7-EdbAIQJoQp9lbMzLr5KUDuCfl9DvKfOhEZPDDrX0NpL_qVhAieGtP6y3ju2AV58yrAQxMcAw\\\",\\\"sig_key\\\":\\\"9a1DdD3d18bicbzflD4MdJoFNoRDBndMjyLQ9xIYL-E\\\",\\\"v\\\":0}\",\"sk\":\"-4-5BuXWoSwzKYJXX1UsgrpIWHWGWdmQzoOQ7WAiI28\",\"v\":0}",
   "mailbox_id": "Rpd2dBpOPBn88XzWYV0v3p",
   "requests": [

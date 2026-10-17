@@ -34,6 +34,9 @@ impl Config {
         let host = get("AC_RELAY_HOST")
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| addr_text.clone());
+        // The same canonical form the daemons sign (SPEC §8.1.1).
+        let host = agentconnect_core::identity::canonical_relay_host(&host)
+            .map_err(|_| format!("AC_RELAY_HOST is not a valid relay host: {host}"))?;
         Ok(Self {
             addr,
             db: get("AC_RELAY_DB").unwrap_or_else(|| DEFAULT_DB.to_owned()),

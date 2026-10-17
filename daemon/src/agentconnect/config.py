@@ -38,6 +38,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import agentconnect_core as ac
+
 DEFAULT_RELAY_URL = "wss://relay.agentconnect.dev"
 KEYSTORES = ("auto", "keyring", "file")
 
@@ -173,5 +175,11 @@ def load_config(
     values.update(overrides)
     values["relay_url"] = _check_relay_url(values["relay_url"])
     if not values["relay_host"]:
-        values["relay_host"] = urlsplit(values["relay_url"]).netloc
+        # The URL's authority without any userinfo (SPEC 8.1.1).
+        values["relay_host"] = urlsplit(values["relay_url"]).netloc.rpartition("@")[2]
+    try:
+        values["relay_host"] = ac.canonical_relay_host(values["relay_host"])
+    except ac.AgentConnectError:
+        msg = f"relay host {values['relay_host']!r} is not a valid host[:port]"
+        raise ConfigError(msg) from None
     return Config(**values)

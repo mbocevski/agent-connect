@@ -180,6 +180,14 @@ def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911
     return None
 
 
+def _same_relay(a: str, b: str) -> bool:
+    """SPEC 4.4/8.1.1: compare relay hosts in canonical form."""
+    try:
+        return ac.canonical_relay_host(a) == ac.canonical_relay_host(b)
+    except ac.AgentConnectError:
+        return False
+
+
 def _max_turns(policy: dict[str, Any]) -> int:
     guard = policy.get("loop_guard")
     turns = guard.get("max_agent_turns") if isinstance(guard, dict) else None
@@ -1573,7 +1581,7 @@ class Daemon:
             link = ac.parse_invite_url(url)
         except ac.AgentConnectError as e:
             raise DaemonError("bad_request", str(e)) from None
-        if link.relay_host != self.config.relay_host:
+        if not _same_relay(link.relay_host, self.config.relay_host):
             raise DaemonError("bad_request", "the invite is for a different relay")
         return link
 

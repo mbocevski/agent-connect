@@ -88,8 +88,20 @@ tcp_port = 7787
         ('[policy]\nauto_approve = "yes"', "auto_approve"),
         ('relay = "x"', r"\[relay\] must be a table"),
         ("[relay", "config.toml"),
+        ('[relay]\nhost = "me@relay.test"', "not a valid host"),
+        ('[relay]\nhost = "relay.test:0"', "not a valid host"),
     ],
 )
 def test_invalid_values_are_rejected(tmp_path: Path, text: str, match: str) -> None:
     with pytest.raises(ConfigError, match=match):
         load_config(write(tmp_path, text), environ={"HOME": str(tmp_path)})
+
+
+def test_the_relay_host_is_canonical(tmp_path: Path) -> None:
+    # SPEC 8.1.1: lower-cased, explicit port kept, userinfo never included;
+    # the relay applies the same core function to its configured host.
+    env = {"HOME": str(tmp_path)}
+    cfg = load_config(write(tmp_path, '[relay]\nurl = "ws://User@LocalHost:8080"'), environ=env)
+    assert cfg.relay_host == "localhost:8080"
+    cfg = load_config(write(tmp_path, '[relay]\nhost = "Relay.TEST:8443"'), environ=env)
+    assert cfg.relay_host == "relay.test:8443"

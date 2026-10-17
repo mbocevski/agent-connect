@@ -22,7 +22,25 @@ use serde_json::{Value, json};
 use crate::Error;
 use crate::clock::FakeClock;
 use crate::encoding::{b64, hex, hex_decode};
-use crate::identity::{Identity, fingerprint, mailbox_id, relay_auth_message, relay_rest_message};
+use crate::identity::{
+    Identity, canonical_relay_host, fingerprint, mailbox_id, relay_auth_message, relay_rest_message,
+};
+
+/// Relay hosts for the canonical-form vector (none is a secret).
+const HOST_CASES: [&str; 12] = [
+    "relay.test",
+    "Relay.TEST",
+    "RELAY.example.org:8443",
+    "127.0.0.1:8080",
+    "[::1]:8080",
+    "[FE80::1]",
+    "user@relay.test",
+    "relay.test:0",
+    "relay.test:08080",
+    "relay.test:99999",
+    "relay.test/path",
+    "",
+];
 use crate::invite::{InviteLink, InviteSecret, derive_join_key, derive_welcome_key};
 use crate::join::{MacInput, join_request_mac};
 use crate::padding::{BUCKETS, bucket_for, max_plaintext_len};
@@ -275,14 +293,14 @@ fn relay_auth_vectors() {
     .zip([1_735_689_600_u64, 1_735_689_900])
     .map(|((method, path, body), ts)| {
         let sig =
-            b64(&instance.sign_relay_request(method, path, ts, body.as_bytes(), "relay.test"));
+            b64(&instance.sign_relay_request(method, path, ts, body.as_bytes(), "relay.test").unwrap());
         json!({
             "method": method,
             "path": path,
             "ts": ts,
             "body": body,
             "relay_host": "relay.test",
-            "message": hex(&relay_rest_message(method, path, ts, body.as_bytes(), "relay.test")),
+            "message": hex(&relay_rest_message(method, path, ts, body.as_bytes(), "relay.test").unwrap()),
             "sig": sig,
             "authorization": format!(
                 "AgentConnect-Ed25519 {}.{ts}.{sig}",
@@ -301,6 +319,12 @@ fn relay_auth_vectors() {
     v["mailbox_id"] = instance.mailbox_id().into();
     v["challenges"] = challenges.into();
     v["requests"] = requests.into();
+    // SPEC 8.1.1: the canonical relay host, applied by signer and verifier.
+    v["hosts"] = HOST_CASES
+        .iter()
+        .map(|h| json!({"input": h, "canonical": canonical_relay_host(h).ok()}))
+        .collect::<Vec<_>>()
+        .into();
     check_or_write("relay-auth.json", &v);
 }
 

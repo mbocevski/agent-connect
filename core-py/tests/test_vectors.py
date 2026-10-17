@@ -171,3 +171,23 @@ def test_relay_challenge_nonce_must_be_32_bytes() -> None:
     for bad in (b"", nonce[:31], nonce + b"x", nonce + b"x."):
         with pytest.raises(ac.AgentConnectError, match="nonce"):
             instance.sign_relay_challenge(bad, "relay.test")
+
+
+def test_relay_host_canonical_form() -> None:
+    v = load("relay-auth.json")
+    for case in v["hosts"]:
+        if case["canonical"] is None:
+            with pytest.raises(ac.AgentConnectError, match="relay host"):
+                ac.canonical_relay_host(case["input"])
+        else:
+            assert ac.canonical_relay_host(case["input"]) == case["canonical"]
+    # The signers apply it: mixed case signs what the relay verifies.
+    instance = ac.Instance.from_secret_bytes(v["instance"].encode())
+    c = v["challenges"][0]
+    nonce = _unb64(c["nonce"])
+    assert _b64(instance.sign_relay_challenge(nonce, c["relay_host"].upper())) == c["sig"]
+    r = v["requests"][0]
+    sig = instance.sign_relay_request(
+        r["method"], r["path"], r["ts"], r["body"].encode(), r["relay_host"].upper()
+    )
+    assert _b64(sig) == r["sig"]

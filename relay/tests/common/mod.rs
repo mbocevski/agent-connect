@@ -328,7 +328,7 @@ pub fn signed_request(
     ts: u64,
     host: &str,
 ) -> axum::http::Request<axum::body::Body> {
-    let sig = key.sign(&rest_auth_message(method, path, ts, body, host));
+    let sig = key.sign(&rest_auth_message(method, path, ts, body, host).unwrap());
     let auth = format!(
         "AgentConnect-Ed25519 {}.{ts}.{}",
         b64_encode(key.verifying_key().as_bytes()),

@@ -38,7 +38,8 @@ pub fn ws_auth_message(nonce: &[u8], relay_host: &str) -> Option<Vec<u8>> {
 
 /// The bytes a client signs for a REST request (built by `agentconnect_core`).
 ///
-/// `label || method \n path \n ts \n SHA-256(body) || relay_host`
+/// `label || method \n path \n ts \n SHA-256(body) || relay_host`, with the
+/// host canonical. `None` for an invalid host.
 #[must_use]
 pub fn rest_auth_message(
     method: &str,
@@ -46,8 +47,8 @@ pub fn rest_auth_message(
     ts: u64,
     body: &[u8],
     relay_host: &str,
-) -> Vec<u8> {
-    agentconnect_core::identity::relay_rest_message(method, path, ts, body, relay_host)
+) -> Option<Vec<u8>> {
+    agentconnect_core::identity::relay_rest_message(method, path, ts, body, relay_host).ok()
 }
 
 fn verify(sig_key_b64: &str, sig_b64: &str, message: &[u8]) -> Option<String> {
@@ -101,7 +102,7 @@ pub fn verify_rest_auth(
     let mailbox = verify(
         key,
         sig,
-        &rest_auth_message(method, path, ts, body, relay_host),
+        &rest_auth_message(method, path, ts, body, relay_host).ok_or("bad relay host")?,
     )
     .ok_or("bad signature")?;
     Ok(RestCredentials {
@@ -182,7 +183,7 @@ mod tests {
     }
 
     fn rest_header(k: &SigningKey, method: &str, path: &str, ts: u64, body: &[u8]) -> String {
-        let sig = k.sign(&rest_auth_message(method, path, ts, body, "relay.test"));
+        let sig = k.sign(&rest_auth_message(method, path, ts, body, "relay.test").unwrap());
         format!(
             "{REST_SCHEME} {}.{ts}.{}",
             pub_b64(k),

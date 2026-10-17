@@ -3,6 +3,7 @@
 //! `verify_ws_auth` and `verify_rest_auth`, and nothing else does.
 
 use agentconnect_relay::auth::{verify_rest_auth, verify_ws_auth};
+use agentconnect_relay::config::Config;
 use agentconnect_relay::proto::b64_decode;
 use serde_json::Value;
 
@@ -46,4 +47,33 @@ fn rest_signatures_verify_for_their_request_only() {
         assert!(verify_rest_auth(auth, method, path, b"tampered", host, ts).is_err());
         assert!(verify_rest_auth(auth, method, path, body, "relay.other", ts).is_err());
     }
+}
+
+#[test]
+fn the_relay_canonicalises_its_host_like_the_signers() {
+    let v = vector();
+    for case in v["hosts"].as_array().unwrap() {
+        let input = s(case, "input").to_owned();
+        let got = Config::from_lookup(|k| (k == "AC_RELAY_HOST").then(|| input.clone()));
+        match case["canonical"].as_str() {
+            Some(canonical) => assert_eq!(got.unwrap().host, canonical, "{input}"),
+            // The empty host falls back to the listen address; others fail.
+            None if input.is_empty() => assert!(got.is_ok()),
+            None => assert!(got.is_err(), "{input}"),
+        }
+    }
+    // A challenge signed for the canonical host verifies at a relay whose
+    // configured host differs only in case (both sides canonicalise).
+    let mailbox = s(&v, "mailbox_id");
+    let c = &v["challenges"][0];
+    let nonce = b64_decode(s(c, "nonce")).unwrap();
+    let upper = s(c, "relay_host").to_ascii_uppercase();
+    assert_eq!(
+        verify_ws_auth(&nonce, &upper, s(&v, "sig_key"), s(c, "sig")).as_deref(),
+        Some(mailbox)
+    );
+    assert_eq!(
+        verify_ws_auth(&nonce, &format!("u@{upper}"), s(&v, "sig_key"), s(c, "sig")),
+        None
+    );
 }

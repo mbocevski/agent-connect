@@ -24,6 +24,61 @@ pub const RELAY_AUTH_LABEL: &[u8] = b"agentconnect/v0/relay-auth";
 /// Domain-separation label of signed relay REST requests (SPEC §8.1.1).
 pub const RELAY_REST_LABEL: &[u8] = b"agentconnect/v0/relay-rest";
 
+/// The canonical form of a relay host as signed into relay authentication
+/// (SPEC §8.1.1, §8.2): the URL authority without userinfo, ASCII
+/// lower-cased, with an explicit port kept as given (a default port is not
+/// added or removed). Signer and verifier both run every host through this,
+/// so `Relay.Example:8443` and `relay.example:8443` sign the same bytes.
+///
+/// # Errors
+///
+/// [`Error::Malformed`] if the host is empty, carries userinfo (`@`), a
+/// path, query or fragment, whitespace or control characters, a port that
+/// isn't a decimal number from 1 to 65535 (no leading zeros), or an
+/// unbracketed IPv6 address.
+pub fn canonical_relay_host(host: &str) -> Result<String> {
+    const BAD: Error = Error::Malformed("relay host");
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "@/?#\\".contains(c))
+    {
+        return Err(BAD);
+    }
+    let (name, port) = if let Some(rest) = host.strip_prefix('[') {
+        let (inner, after) = rest.split_once(']').ok_or(BAD)?;
+        if inner.is_empty() || inner.contains('[') {
+            return Err(BAD);
+        }
+        match after {
+            "" => (&host[..inner.len() + 2], None),
+            p => (
+                &host[..inner.len() + 2],
+                Some(p.strip_prefix(':').ok_or(BAD)?),
+            ),
+        }
+    } else {
+        match host.split_once(':') {
+            Some((n, p)) if !p.contains(':') => (n, Some(p)),
+            Some(_) => return Err(BAD),
+            None => (host, None),
+        }
+    };
+    if name.is_empty() || name.contains(['[', ']']) && !name.starts_with('[') {
+        return Err(BAD);
+    }
+    if let Some(p) = port {
+        let ok = !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit())
+            && !p.starts_with('0')
+            && p.parse::<u16>().is_ok_and(|n| n > 0);
+        if !ok {
+            return Err(BAD);
+        }
+    }
+    Ok(host.to_ascii_lowercase())
+}
+
 /// Length of the relay's WebSocket challenge nonce (SPEC §8.2).
 pub const RELAY_NONCE_LEN: usize = 32;
 
@@ -37,30 +92,37 @@ pub const RELAY_NONCE_LEN: usize = 32;
 ///
 /// # Errors
 ///
-/// [`Error::Malformed`] if `nonce` is not 32 bytes long.
+/// [`Error::Malformed`] if `nonce` is not 32 bytes long, or the host isn't
+/// a valid relay host ([`canonical_relay_host`], which is applied).
 pub fn relay_auth_message(nonce: &[u8], relay_host: &str) -> Result<Vec<u8>> {
     if nonce.len() != RELAY_NONCE_LEN {
         return Err(Error::Malformed("relay challenge nonce (must be 32 bytes)"));
     }
-    Ok([RELAY_AUTH_LABEL, nonce, relay_host.as_bytes()].concat())
+    let host = canonical_relay_host(relay_host)?;
+    Ok([RELAY_AUTH_LABEL, nonce, host.as_bytes()].concat())
 }
 
 /// The bytes signed for a relay REST request (SPEC §8.1.1):
 /// `"agentconnect/v0/relay-rest" || METHOD "\n" || PATH "\n" || ts "\n" ||
-/// SHA-256(body) || relay_host`, with `ts` in decimal unix seconds.
-#[must_use]
+/// SHA-256(body) || relay_host`, with `ts` in decimal unix seconds and the
+/// host in [`canonical_relay_host`] form.
+///
+/// # Errors
+///
+/// [`Error::Malformed`] if the host isn't a valid relay host.
 pub fn relay_rest_message(
     method: &str,
     path: &str,
     ts: u64,
     body: &[u8],
     relay_host: &str,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
+    let host = canonical_relay_host(relay_host)?;
     let mut m = RELAY_REST_LABEL.to_vec();
     m.extend_from_slice(format!("{method}\n{path}\n{ts}\n").as_bytes());
     m.extend_from_slice(&Sha256::digest(body));
-    m.extend_from_slice(relay_host.as_bytes());
-    m
+    m.extend_from_slice(host.as_bytes());
+    Ok(m)
 }
 
 /// Parses an identity identifier `ac:v0:<b64url IK.pub>` into the public key.
@@ -383,7 +445,10 @@ impl Instance {
     /// Signs a relay REST request (SPEC §8.1.1):
     /// `Ed25519(SK, "agentconnect/v0/relay-rest" || METHOD "\n" PATH "\n" ts
     /// "\n" || SHA-256(body) || relay_host)`. Use a fresh `ts` per request.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] if the host isn't a valid relay host.
     pub fn sign_relay_request(
         &self,
         method: &str,
@@ -391,8 +456,8 @@ impl Instance {
         ts: u64,
         body: &[u8],
         relay_host: &str,
-    ) -> [u8; 64] {
-        self.sign(&relay_rest_message(method, path, ts, body, relay_host))
+    ) -> Result<[u8; 64]> {
+        Ok(self.sign(&relay_rest_message(method, path, ts, body, relay_host)?))
     }
 
     /// Serialises the instance (secret key and certificate) so the daemon can
@@ -518,7 +583,9 @@ mod tests {
         assert!(ok(&other_host, sig).is_err());
 
         let body = b"{\"invite_id\":\"x\"}";
-        let sig = inst.sign_relay_request("POST", "/v0/invites", 42, body, "relay.test");
+        let sig = inst
+            .sign_relay_request("POST", "/v0/invites", 42, body, "relay.test")
+            .unwrap();
         let mut expected = b"agentconnect/v0/relay-rest".to_vec();
         expected.extend_from_slice(b"POST\n/v0/invites\n42\n");
         expected.extend_from_slice(&Sha256::digest(body));
@@ -530,12 +597,64 @@ mod tests {
             ("POST", "/v0/invites", 43, body.as_slice()),
             ("POST", "/v0/invites", 42, b"{}".as_slice()),
         ] {
-            assert!(ok(&relay_rest_message(m, p, ts, b, "relay.test"), sig).is_err());
+            assert!(ok(&relay_rest_message(m, p, ts, b, "relay.test").unwrap(), sig).is_err());
         }
         // The two labels never produce interchangeable signatures.
         assert_ne!(
             inst.sign_relay_challenge(&nonce, "h").unwrap(),
-            inst.sign_relay_request("", "", 0, b"", "h")
+            inst.sign_relay_request("", "", 0, b"", "h").unwrap()
+        );
+    }
+
+    #[test]
+    fn relay_hosts_are_canonicalised_on_both_sides() {
+        for (input, canonical) in [
+            ("relay.test", Some("relay.test")),
+            ("Relay.TEST:8443", Some("relay.test:8443")),
+            ("[::1]:8080", Some("[::1]:8080")),
+            ("[FE80::1]", Some("[fe80::1]")),
+            ("relay.test:443", Some("relay.test:443")),
+            ("user@relay.test", None),
+            ("relay.test/x", None),
+            ("relay test", None),
+            ("relay.test:", None),
+            ("relay.test:0", None),
+            ("relay.test:080", None),
+            ("relay.test:65536", None),
+            ("relay.test:8a", None),
+            ("::1", None),
+            ("[::1", None),
+            ("[]", None),
+            ("[::1]x", None),
+            (":8080", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                canonical_relay_host(input).ok().as_deref(),
+                canonical,
+                "{input}"
+            );
+        }
+        // Mixed case signs the same bytes as the canonical host, for the
+        // challenge and for REST requests; userinfo never signs.
+        let (_, inst) = instance();
+        let nonce: [u8; 32] = Rng::for_test("host-nonce").array().unwrap();
+        assert_eq!(
+            inst.sign_relay_challenge(&nonce, "Relay.Test:8443")
+                .unwrap(),
+            inst.sign_relay_challenge(&nonce, "relay.test:8443")
+                .unwrap()
+        );
+        assert_eq!(
+            inst.sign_relay_request("GET", "/", 1, b"", "RELAY.test")
+                .unwrap(),
+            inst.sign_relay_request("GET", "/", 1, b"", "relay.test")
+                .unwrap()
+        );
+        assert!(inst.sign_relay_challenge(&nonce, "u@relay.test").is_err());
+        assert!(
+            inst.sign_relay_request("GET", "/", 1, b"", "u@relay.test")
+                .is_err()
         );
     }
 
