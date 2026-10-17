@@ -23,9 +23,9 @@ def test_defaults_follow_xdg(tmp_path: Path) -> None:
     env = {"HOME": str(tmp_path)}
     cfg = load_config(environ=env)
     assert cfg.relay_url == DEFAULT_RELAY_URL
-    assert cfg.relay_host == "relay.agentconnect.dev"
-    assert cfg.relay_http == "https://relay.agentconnect.dev"
-    assert cfg.relay_ws == "wss://relay.agentconnect.dev/v0/ws"
+    assert cfg.relay_host == "connect.yggdrasill.network"
+    assert cfg.relay_http == "https://connect.yggdrasill.network"
+    assert cfg.relay_ws == "wss://connect.yggdrasill.network/v0/ws"
     assert cfg.data_dir == tmp_path / ".local/share/agentconnect"
     assert cfg.socket_path == cfg.data_dir / "agentconnectd.sock"
     assert not cfg.auto_approve
