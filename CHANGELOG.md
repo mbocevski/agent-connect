@@ -67,6 +67,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Relay: the frame limit is now 2 MiB (SPEC §8.3), so an application
+  message padded to the 1 MiB bucket fits once base64url-encoded in an
+  envelope. Before, anything above about 786 KiB was refused as
+  `too_large`.
 - Protocol and core: the JoinRequest MAC now covers `display_name`, and
   every MAC field is length-prefixed (`u32be(len) ‖ bytes`, SPEC §6.1), so
   the relay can't rename the joiner the inviter approves. Display names

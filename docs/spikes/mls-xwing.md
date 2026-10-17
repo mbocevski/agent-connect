@@ -263,7 +263,7 @@ How to read the table:
   Add, so parent nodes are blank and path secrets are encrypted to whole
   resolutions. As members commit their own updates the tree fills, and
   commits trend towards O(log N).
-- Everything fits comfortably in the 1 MiB frame limit (§8.3) at the
+- Everything fits comfortably in the relay frame limit (2 MiB, §8.3) at the
   50-member cap.
 - CPU cost is negligible.
 

@@ -37,6 +37,11 @@ impl From<sqlx::migrate::MigrateError> for StoreError {
 /// Result alias for storage operations.
 pub type StoreResult<T> = Result<T, StoreError>;
 
+/// Default frame limit (SPEC §8.3): 2 MiB. The largest padded application
+/// message (the 1 MiB bucket) is about 1.4 MiB once base64url-encoded in an
+/// envelope, so it fits with room to spare.
+pub const DEFAULT_FRAME_MAX: usize = 2 << 20;
+
 /// Operating limits (SPEC §8.3 defaults).
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -59,7 +64,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            frame_max: 1 << 20,
+            frame_max: DEFAULT_FRAME_MAX,
             group_max: 50,
             queue_max_bytes: 64 << 20,
             sends_per_sec: 50,

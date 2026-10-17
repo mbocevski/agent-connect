@@ -160,6 +160,26 @@ async fn oversized_frames_get_too_large() {
     assert_eq!(r["code"], "unknown_group");
 }
 
+/// SPEC §8.3: the 2 MiB frame carries the largest padded application
+/// message. An MLS `PrivateMessage` in the 1 MiB bucket is the bucket plus
+/// at most 256 bytes of framing (checked by
+/// `core/tests/group.rs::largest_application_message_fits_the_relay_frame`),
+/// base64url-encoded in `ct`.
+#[tokio::test]
+async fn largest_padded_application_message_fits_the_frame() {
+    assert_eq!(Limits::default().frame_max, 2 << 20);
+    let h = Harness::start().await;
+    let mut a = h.client(1).await;
+    let b = h.client(2).await;
+    let gid = common::make_group(&mut a, &[&b]).await;
+    let mls_len: usize = (1 << 20) + 256;
+    let mut env = a.envelope("application", &gid, 1);
+    env["ct"] = json!("A".repeat(mls_len.div_ceil(3) * 4));
+    let frame = json!({"t": "send", "env": env}).to_string();
+    assert!(frame.len() < Limits::default().frame_max);
+    assert_eq!(a.send(&env).await["t"], "accepted");
+}
+
 #[tokio::test]
 async fn sender_must_match_the_authenticated_mailbox() {
     let h = Harness::start().await;

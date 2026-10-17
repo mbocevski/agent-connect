@@ -858,6 +858,46 @@ fn padding_hides_length_within_a_bucket() {
     );
 }
 
+/// The relay's frame limit (SPEC §8.3).
+const RELAY_FRAME_MAX: usize = 2 << 20;
+
+/// SPEC §8.3 and §10.2: a maximal 256 KiB application message, and the
+/// largest plaintext `seal` accepts at all (the 1 MiB bucket), both fit one
+/// relay frame once sealed, base64url-encoded and put in an envelope.
+#[test]
+fn largest_application_message_fits_the_relay_frame() {
+    use agentconnect_core::encoding::b64;
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let base = inner(&peers[0], "").len();
+    for len in [256 << 10, agentconnect_core::padding::max_plaintext_len()] {
+        let msg = inner(&peers[0], &"x".repeat(len - base));
+        assert_eq!(msg.len(), len);
+        let ct = groups[0].seal(&peers[0].client, &msg).unwrap();
+        // The relay test of the same limit assumes at most 256 bytes of MLS
+        // framing around the 1 MiB bucket.
+        assert!(ct.len() <= (1 << 20) + 256, "{}", ct.len());
+        let frame = serde_json::json!({
+            "t": "send",
+            "env": {
+                "v": 0,
+                "kind": "application",
+                "group_id": b64(groups[0].group_id()),
+                "epoch": u64::MAX,
+                "msg_id": b64(&[0xff; 16]),
+                "sender": peers[0].client.instance().mailbox_id(),
+                "ct": b64(&ct),
+            },
+        })
+        .to_string();
+        assert!(frame.len() <= RELAY_FRAME_MAX, "{}", frame.len());
+        assert_eq!(
+            groups[1].open(&peers[1].client, &ct).unwrap().plaintext,
+            msg
+        );
+    }
+}
+
 #[test]
 fn sqlite_store_persists_across_reopen() {
     let clock = clock();

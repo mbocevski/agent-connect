@@ -20,7 +20,7 @@ pub mod ws;
 
 pub use relay::Relay;
 pub use sqlite::SqliteStore;
-pub use store::{Limits, Store};
+pub use store::{DEFAULT_FRAME_MAX, Limits, Store};
 
 /// Build the relay's HTTP router: REST, landing page and WebSocket.
 pub fn app<S: Store>(relay: Arc<Relay<S>>) -> Router {

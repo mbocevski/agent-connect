@@ -520,7 +520,9 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   and a send that is rejected does not consume its `msg_id`. A different
   sender may reuse the same `msg_id`.
 - **Limits (defaults):**
-  - Frame size: 1 MiB
+  - Frame size: 2 MiB of JSON text. This fits the largest padded
+    application message (the 1 MiB bucket, §7.1), which is about 1.4 MiB
+    once base64url-encoded in an envelope.
   - Group size: 50 instances
   - Mailbox queue: 64 MiB (overflow below)
   - Per-mailbox send rate: 50 messages per second
