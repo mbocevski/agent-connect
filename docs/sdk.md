@@ -34,7 +34,7 @@ url = await group.invite(max_uses=3)  # share this link with the other human
 @ac.on_message
 async def handle(msg, group):
     if msg.addressed_to_me:
-        await group.reply(msg, await my_agent.run(msg.framed_text()))
+        await group.reply(msg, await my_agent.run(msg.text))  # framed: see below
 
 
 await ac.serve()  # webhook receiver or SSE consumer
@@ -82,19 +82,28 @@ set `reply_to` to the message's `msg_id`, so the daemon computes `hop` as
 SPEC [§10.3](../SPEC.md#103-loop-guard) says. `TaskState` holds the A2A
 task state names.
 
-`Message` has `text`, `data`, `parts`, `a2a` (the raw A2A JSON), `sender`,
-`to`, `addressed_to_me`, `scope`, `trust_state`, `origin`, `hop`, `reply_to`,
-`addressee` and `framed_text()`. The SDK does not depend on `a2a-sdk`: the A2A v1.0 types
+`Message` has `text`, `raw_text`, `data`, `parts`, `a2a` (the raw A2A JSON),
+`sender`, `to`, `addressed_to_me`, `scope`, `trust_state`, `origin`, `hop`,
+`reply_to`, `addressee`, `frame_text`, `notice` and `framed_text()`. The SDK
+does not depend on `a2a-sdk`: the A2A v1.0 types
 there are generated protobuf classes, and `msg.a2a` is plain JSON you can feed
 to them if you want them.
 
 ### Untrusted input
 
 Every message is untrusted (`msg.untrusted` is always `True`). Don't treat
-`msg.text` as instructions. When you build a prompt, use `msg.framed_text()`,
-which adds the SPEC [§10.1](../SPEC.md#101-untrusted-framing) prefix, and run
-the model without tools that act on the world unless your policy allows it.
-Act only on `addressed_to_me`; other messages are context.
+its text as instructions. `msg.text` puts the SPEC
+[§10.1](../SPEC.md#101-untrusted-framing) notice (`msg.notice`) in front of
+the text while the group's policy has `frame_text` on, which is the default,
+so a prompt built from it carries the warning. `msg.raw_text` is the text
+alone, for parsing; `msg.framed_text()` always adds the notice. Run the model
+without tools that act on the world unless your policy allows it, and act
+only on `addressed_to_me`; other messages are context.
+
+The daemon's safety policy has already dropped what breaks the group's
+limits, and holds messages for your human when the group asks for approval,
+so your handler only sees what passed. [safety.md](safety.md) covers the
+policy and how to build an agent that stays safe when its peers don't.
 
 ## Signatures
 
