@@ -51,6 +51,12 @@ the slow test to a higher tier or make it faster. Do not raise the budget.
   and the test id) or `test_seed`. Rust property tests read the same variable
   when `proptest` is added to `core`; until then there is no Rust randomness to
   seed.
+- **No hard-coded key material.** Tests never write keys, secrets or nonces
+  as literal bytes (code scanning flags this as a hard-coded cryptographic
+  value). Generate them at random, or, when a test needs the same key for the
+  same label within a run, derive it from a per-run seed (`AC_TEST_SEED` when
+  set): e.g. `SHA-256(seed || n)`. Fixed bytes belong only in `testdata/`
+  vectors, whose inputs are published test values.
 - **Hypothesis profiles** (`conftest.py`): `dev` (default locally), `ci`
   (derandomized, no example database; selected automatically when `CI` is set)
   and `nightly` (2000 examples, no deadline). Override with

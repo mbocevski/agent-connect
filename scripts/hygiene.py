@@ -24,6 +24,7 @@ from pathlib import Path
 ALLOWED_PHRASES: tuple[str, ...] = (
     "Claude Agent SDK",
     "Claude Code Channels",
+    "Claude Code support",
 )
 
 # Character classes like `cl[a]ude` keep this file from matching itself.

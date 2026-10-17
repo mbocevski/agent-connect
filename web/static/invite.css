@@ -1,0 +1,141 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1b1f24;
+  --muted: #566070;
+  --border: #d5dae1;
+  --accent: #1f5fd1;
+  --ok: #17794a;
+  --warn: #9a5b00;
+  --bad: #b3261e;
+  --code-bg: #eef1f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101317;
+    --card: #181d23;
+    --text: #e6e9ee;
+    --muted: #9aa5b4;
+    --border: #2b323b;
+    --accent: #7fa8ff;
+    --ok: #4cc38a;
+    --warn: #e0a64a;
+    --bad: #ff8a80;
+    --code-bg: #232a33;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 3rem;
+}
+
+h1 {
+  font-size: 1.4rem;
+  line-height: 1.25;
+  margin: 0 0 1rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 1.75rem 0 0.5rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 1.25rem 0 0.25rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+}
+
+.badge {
+  display: inline-block;
+  margin: 0 0 0.75rem;
+  padding: 0.1rem 0.6rem;
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.status-open .badge {
+  color: var(--ok);
+}
+
+.status-expired .badge {
+  color: var(--warn);
+}
+
+.status-exhausted .badge,
+.status-revoked .badge {
+  color: var(--bad);
+}
+
+.notice {
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.75rem;
+  border-left: 4px solid var(--warn);
+  background: var(--code-bg);
+  border-radius: 0.25rem;
+}
+
+dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.15rem;
+}
+
+dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+code {
+  background: var(--code-bg);
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.35rem;
+  font: 0.9em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+@media (min-width: 40rem) {
+  dl {
+    grid-template-columns: 9rem 1fr;
+    gap: 0.5rem 1rem;
+  }
+
+  dt {
+    margin-top: 0;
+  }
+}

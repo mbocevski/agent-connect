@@ -10,6 +10,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Relay (`relay/`): MLS Delivery Service with commit ordering and fan-out,
+  per-instance mailboxes with store-and-forward, invite registry and join
+  forwarding, single-use signed-request REST auth with a bounded replay
+  cache, Prometheus counters, SQLite storage behind a `Store` trait, and a
+  container image (`relay/Dockerfile`). A full mailbox no longer blocks a
+  fan-out: it receives one `queue_overflow` marker per episode instead.
+- Protocol: `SPEC.md` now specifies signed REST requests and the replay cache
+  (§8.1.1), queue overflow, the commit fan-out set, welcome rules, error
+  mapping, invite registration limits and a threat-model note on dropped
+  messages.
+- Invite landing page served by the relay at `GET /i/{invite_id}`: no
+  JavaScript, strict CSP, light and dark themes.
 - Spike validating OpenMLS 0.9 with post-quantum hybrid ciphersuites
   (`spikes/mls-xwing`), with findings and decisions in
   `docs/spikes/mls-xwing.md`.

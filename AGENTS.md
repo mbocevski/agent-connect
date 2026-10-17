@@ -92,6 +92,9 @@ Python. Don't use `pip install` or global venvs.
 - Tests must be deterministic: use the fake `Clock` (`agentconnect_core::clock`,
   `agentconnect.clock`) and the seeded RNG (`AC_TEST_SEED`, `rng` fixture).
   No `sleep` and no network in the `just test` tier.
+- No keys, secrets or nonces as literal bytes in tests: generate them, or
+  derive them from the per-run seed (`TESTING.md`). Code scanning blocks
+  merges on hard-coded cryptographic values.
 - Wire formats live in `testdata/` (vectors and JSON schemas). Rust and Python
   must both pass them, so change both sides together. Every file is listed in
   `testdata/MANIFEST.json` (`just contract` checks it).

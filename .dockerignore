@@ -1,0 +1,10 @@
+target/
+**/target/
+.git/
+.venv/
+**/__pycache__/
+relay/fuzz/corpus/
+relay/fuzz/artifacts/
+*.db
+*.db-wal
+*.db-shm
