@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import random
 from collections.abc import Awaitable, Callable
@@ -276,3 +277,23 @@ async def test_commit_epoch_hint_mismatch(group: GroupFixture, malicious_relay: 
     a.daemon.update(gid)
     await b.adapter.wait_for(lambda: bool(b.adapter.of_type("relay_misbehaviour")))
     assert b.adapter.of_type("relay_misbehaviour")[0].data["reason"] == "epoch_mismatch"
+
+
+async def test_a_dead_worker_is_restarted(cluster: Cluster, advance: Advance) -> None:
+    n = await cluster.node("w")
+    calls = 0
+
+    async def flaky() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            msg = "worker bug"
+            raise RuntimeError(msg)
+        n.daemon.running = False  # the second run ends with the daemon
+
+    task = asyncio.ensure_future(n.daemon._supervised("flaky", flaky))
+    await n.wait(lambda: calls == 1 and n.clock.sleepers > 0)
+    await advance(60)
+    await asyncio.wait_for(task, 5)
+    assert calls == 2
+    n.daemon.running = True

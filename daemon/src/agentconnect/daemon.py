@@ -23,7 +23,7 @@ import contextlib
 import json
 import random
 import secrets
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -252,12 +252,34 @@ class Daemon:
     async def start(self) -> None:
         self._recover()
         loop = asyncio.get_running_loop()
-        for coro in (self._inbound(), self._outbox(), self._delivery(), self.link.run()):
-            self._tasks.append(loop.create_task(coro))
+        workers: dict[str, Callable[[], Awaitable[None]]] = {
+            "inbound": self._inbound,
+            "outbox": self._outbox,
+            "delivery": self._delivery,
+            "relay_link": self.link.run,
+        }
+        for name, worker in workers.items():
+            self._tasks.append(loop.create_task(self._supervised(name, worker)))
         for adapter in self.adapters.values():
             await adapter.on_outbound(self.adapter_send)
         self.running = True
         LOG.info("daemon_started", identity=log.hid(self.me), keystore=self.keystore.kind)
+
+    async def _supervised(self, name: str, worker: Callable[[], Awaitable[None]]) -> None:
+        """Run a worker forever: if it ever returns or raises (a bug), log the
+        type only and restart it after a pause, instead of leaving the daemon
+        "running" with a dead queue."""
+        backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
+        while True:
+            try:
+                await worker()
+                reason = "returned"
+            except Exception as e:
+                reason = type(e).__name__
+            if not self.running:
+                return
+            LOG.error("worker_died", worker=name, reason=reason)
+            await self._sleep(backoff.next())
 
     async def stop(self) -> None:
         """Stop the workers and close the databases (also used to simulate a
@@ -890,15 +912,15 @@ class Daemon:
         g = self.store.group(group_id)
         if g is None:
             return False
+        required = bool(g.policy.get("require_verified"))
         if g.status == "active":
-            # The core's policy is the source of truth; the cache follows it.
-            with contextlib.suppress(ac.AgentConnectError, ac.CoreError, ValueError):
-                if json.loads(self.client.policy(unb64(group_id))).get("require_verified"):
-                    return bool(self._trust_state(group_id)["self"] != "verified")
-                return False
-        if not g.policy.get("require_verified"):
-            return False
-        return bool(self._trust_state(group_id)["self"] != "verified")
+            # The core's policy is the source of truth; if it can't be read,
+            # hold (fail closed).
+            try:
+                required = bool(json.loads(self.client.policy(unb64(group_id)))["require_verified"])
+            except (ac.AgentConnectError, ac.CoreError, ValueError, KeyError):
+                required = True
+        return required and str(self._trust_state(group_id)["self"]) != "verified"
 
     async def _delivery(self) -> None:
         while True:

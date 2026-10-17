@@ -143,7 +143,21 @@ async def test_link_authenticates_routes_replies_and_reconnects(
     await asyncio.wait_for(task, 5)
 
 
-@pytest.mark.parametrize("mode", ["no_challenge", "bad_ready", "close"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "no_challenge",
+        "bad_ready",
+        "close",
+        "missing_nonce",
+        "nonce_not_str",
+        "nonce_not_b64",
+        "short_nonce",
+        "long_nonce",
+        "challenge_array",
+        "ready_array",
+    ],
+)
 async def test_link_retries_on_failed_authentication(
     fake_relay: FakeRelay, rng: random.Random, fake_clock: FakeClock, mode: str
 ) -> None:
@@ -157,6 +171,23 @@ async def test_link_retries_on_failed_authentication(
             await ws.send(json.dumps({"t": "ready"}))
         elif mode == "bad_ready":
             await handshake(ws, inst, rng.randbytes(32), "other.host")
+        elif mode == "ready_array":
+            await ws.send(json.dumps({"t": "challenge", "nonce": b64(rng.randbytes(32))}))
+            await ws.recv()
+            await ws.send("[1]")
+        else:
+            # Malformed challenges (SPEC 8.2): each must cause a reconnect,
+            # never end the link task.
+            challenge: Any = {
+                "missing_nonce": {"t": "challenge"},
+                "nonce_not_str": {"t": "challenge", "nonce": 7},
+                "nonce_not_b64": {"t": "challenge", "nonce": "!!!"},
+                "short_nonce": {"t": "challenge", "nonce": b64(rng.randbytes(31))},
+                "long_nonce": {"t": "challenge", "nonce": b64(rng.randbytes(32) + b"x.")},
+                "challenge_array": ["challenge"],
+            }.get(mode)
+            if challenge is not None:
+                await ws.send(json.dumps(challenge))
         await ws.close()
 
     fake_relay.script = script
@@ -178,6 +209,11 @@ async def test_link_retries_on_failed_authentication(
     await watch.until(lambda: fake_clock.sleepers > 0)
     assert not link.connected
     assert attempts == 1
+    assert not task.done(), "the link keeps retrying"
+    # It does retry: a second attempt after the backoff.
+    fake_clock.advance(60)
+    await watch.until(lambda: attempts == 2 and fake_clock.sleepers > 0)
+    assert not task.done()
     await link.stop()
     fake_clock.advance(60)
     await asyncio.wait_for(task, 5)

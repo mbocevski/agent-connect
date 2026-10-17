@@ -124,6 +124,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: a malformed relay frame during authentication (a challenge
+  without a 32-byte base64url nonce, a non-object challenge or `ready`)
+  now causes a reconnect with backoff instead of ending the relay link
+  task for good, and every daemon worker is supervised and restarted if it
+  ever dies.
 - Daemon: envelope fields the relay controls (`v`, `kind`, ids, `epoch`,
   `to`, `routing`) are type-checked before the core processes anything;
   a malformed envelope is dropped with `relay_misbehaviour`, and a dropped

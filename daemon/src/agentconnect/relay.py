@@ -30,6 +30,7 @@ LOG = log.get("agentconnect.relay")
 # The relay's frame limit is 2 MiB of JSON; leave headroom.
 MAX_FRAME = 4 << 20
 REQUEST_TIMEOUT = 30.0
+NONCE_LEN = 32  # SPEC 8.2
 
 
 def b64(raw: bytes) -> str:
@@ -112,6 +113,10 @@ class RelayLink:
                         await self._dispatch(raw)
             except (OSError, websockets.WebSocketException, TimeoutError, ValueError) as e:
                 LOG.info("relay_disconnected", reason=type(e).__name__)
+            except Exception as e:
+                # Anything else a relay frame can provoke (a bug included) must
+                # not end the link for good: log the type only and reconnect.
+                LOG.warning("relay_link_error", reason=type(e).__name__)
             finally:
                 self._down()
             if self._stop.is_set():
@@ -133,17 +138,33 @@ class RelayLink:
         self._on_state()
 
     async def _authenticate(self, ws: ClientConnection) -> None:
+        """SPEC 8.2. Every malformed frame raises ``ValueError`` (reconnect)."""
         challenge = json.loads(await asyncio.wait_for(ws.recv(), REQUEST_TIMEOUT))
-        if challenge.get("t") != "challenge":
+        if not isinstance(challenge, dict) or challenge.get("t") != "challenge":
             msg = "expected a challenge"
             raise ValueError(msg)
-        nonce = unb64(challenge["nonce"])
+        nonce_text = challenge.get("nonce")
+        if not isinstance(nonce_text, str):
+            msg = "challenge without a nonce"
+            raise ValueError(msg)
+        try:
+            nonce = unb64(nonce_text)
+        except (ValueError, TypeError):
+            msg = "challenge nonce is not base64url"
+            raise ValueError(msg) from None
+        if len(nonce) != NONCE_LEN:
+            msg = "challenge nonce is not 32 bytes"
+            raise ValueError(msg)
         sig = self._instance.sign_relay_challenge(nonce, self._host)
         await ws.send(
             json.dumps({"t": "auth", "sig_key": b64(self._instance.public_key), "sig": b64(sig)})
         )
         ready = json.loads(await asyncio.wait_for(ws.recv(), REQUEST_TIMEOUT))
-        if ready.get("t") != "ready" or ready.get("mailbox_id") != self._instance.mailbox_id:
+        if (
+            not isinstance(ready, dict)
+            or ready.get("t") != "ready"
+            or ready.get("mailbox_id") != self._instance.mailbox_id
+        ):
             msg = "relay authentication failed"
             raise ValueError(msg)
 
