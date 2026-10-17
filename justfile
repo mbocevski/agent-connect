@@ -87,7 +87,7 @@ cov-rust: _cov-rust-run
 cov-py: _cov-py-run
     uv run --no-project python scripts/cov_ratchet.py check python=target/cov/python.json
 
-# Rewrite coverage-baseline.json from a fresh run. Run on main after merge.
+# Rewrite coverage-baseline.json from a fresh run. Commit it in the PR that raises coverage.
 cov-baseline: _cov-rust-run _cov-py-run
     uv run --no-project python scripts/cov_ratchet.py update core=target/cov/core.json relay=target/cov/relay.json python=target/cov/python.json
 

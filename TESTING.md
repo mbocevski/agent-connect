@@ -94,10 +94,11 @@ gating. Revisit when `--branch` stabilises.
 **Ratchet.** `coverage-baseline.json` records current coverage per component.
 `just cov-rust` and `just cov-py` run `scripts/cov_ratchet.py check`, which
 fails if a component is more than 0.5 percentage points below its baseline,
-even when it is still above the gate. Raise the baseline when coverage
-improves: after a PR merges, run `just cov-baseline` on an up-to-date `main`
-checkout and commit the result as `chore(ci): update coverage baseline`. Never
-lower it to make a failure pass; add tests instead.
+even when it is still above the gate. Raise the baseline in the same PR that
+improves coverage: run `just cov-baseline` on the branch and commit the
+updated `coverage-baseline.json` with the change. (`main` only changes through
+PRs, so there is no separate baseline step after merging.) Never lower the
+baseline to make a failure pass; add tests instead.
 
 ## Flaky tests
 

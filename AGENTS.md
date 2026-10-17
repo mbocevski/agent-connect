@@ -47,7 +47,7 @@ just contract   # testdata/MANIFEST.json vs. the Rust and Python suites
 just test-int   # docker compose integration + demos
 just test-nightly # mutants, long property runs, quarantined tests
 just cov        # coverage gates + ratchet against coverage-baseline.json
-just cov-baseline # refresh the baseline (on main, after merge)
+just cov-baseline # refresh the baseline (in the PR that raises coverage)
 just ci         # exactly what PR CI runs, including coverage gates
 just pr         # push branch, open/refresh PR
 just merge <n>  # the ONLY way to merge: refuses unless every required check is green
