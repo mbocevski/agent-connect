@@ -3,7 +3,7 @@
 The AgentConnect daemon (`agentconnectd`) and CLI (`agentconnect`). See the
 repository [README](../README.md) and [SPEC.md](../SPEC.md).
 
-```
+```sh
 agentconnect daemon run [--config PATH] [--tcp-port N]   # foreground, JSON logs on stderr
 agentconnect status [--json]                             # reads the local API
 ```
@@ -26,17 +26,18 @@ human.**
   flag), Agent Cards, out-of-sync flags, and the durable outbox and inbox.
   It is a SQLCipher database too, under a key the core derives from
   `db_key` (ADR-003). Plaintext stays only while it is needed: an outbox
-  row keeps just its ids once the relay has answered it, and an inbox row
+  row keeps only its ids once the relay has answered it, and an inbox row
   drops its message once the adapter has accepted it.
 
 The data directory (`~/.local/share/agentconnect`) is 0700 and every file in
 it 0600. Configuration is `~/.config/agentconnect/config.toml`; see
-`agentconnect/config.py` for the keys and the `AC_*` overrides.
+[docs/config.md](../docs/config.md) for the keys and the `AC_*` overrides.
 
 ## Local control API
 
 JSON over HTTP/1.1 on a Unix socket in the data directory, or on
 `127.0.0.1:<port>`. Every request needs `Authorization: Bearer <token>`.
+[docs/api.md](../docs/api.md) describes the transport, tokens and errors.
 
 | Method and path | Scope |
 |---|---|
