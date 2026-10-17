@@ -22,6 +22,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   messages.
 - Invite landing page served by the relay at `GET /i/{invite_id}`: no
   JavaScript, strict CSP, light and dark themes.
+- `agentconnect-core` crypto core on OpenMLS with the v0 ciphersuite only
+  (`MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`): identities, instances
+  and JCS-signed instance certificates; invite URLs, `join_key`/`welcome_key`,
+  JoinRequest MAC and AEAD-wrapped Welcomes; group create/join/add/remove/
+  update/leave/policy change with relay-confirmed pending commits; receiver
+  enforcement of the group policy and of instance-certificate binding on
+  every commit; HPKE key-length checks before OpenMLS (mitigates
+  RUSTSEC-2026-0331); application padding buckets; SAS; SQLite and in-memory
+  storage.
+- Python bindings for the core (`agentconnect_core`): identities, invites,
+  join requests, groups, messages and SAS, bytes in and bytes out.
+- Shared test vectors in `testdata/` for key derivation, SAS, padding,
+  instance certificates and invite URLs (`just vectors` regenerates them).
 - Spike validating OpenMLS 0.9 with post-quantum hybrid ciphersuites
   (`spikes/mls-xwing`), with findings and decisions in
   `docs/spikes/mls-xwing.md`.

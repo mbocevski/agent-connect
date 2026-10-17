@@ -1,0 +1,93 @@
+{
+  "description": "SPEC 4.1 invite URLs. error: unsupported_version (abort on v != 0) or invalid_url. http is accepted for loopback hosts only.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "invalid": [
+    {
+      "error": "unsupported_version",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg#v=1&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg#s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg#v=0"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg?s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "http://relay.example/i/WxONgYS309T0dqEN5c4Dmg#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "ftp://relay.example/i/WxONgYS309T0dqEN5c4Dmg#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/x/WxONgYS309T0dqEN5c4Dmg#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmgx#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6EA"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://user@relay.example/i/WxONgYS309T0dqEN5c4Dmg#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https:///i/WxONgYS309T0dqEN5c4Dmg#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    },
+    {
+      "error": "invalid_url",
+      "url": "relay.example"
+    },
+    {
+      "error": "invalid_url",
+      "url": "https://relay.example#v=0&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E"
+    }
+  ],
+  "seed": "d6d8a5183bb70d23f522f1f11187acc94f2ae1e8144ddc6fbe9b1b90198f7d86",
+  "valid": [
+    {
+      "invite_id": "NPGnoTXqGHGuNeRSKAWOOQ",
+      "invite_secret": "HO4KBYEwk2k60162Sy3F5naiUKpyRAw96qrrUtwifFw",
+      "relay_host": "relay.example",
+      "url": "https://relay.example/i/NPGnoTXqGHGuNeRSKAWOOQ#v=0&s=HO4KBYEwk2k60162Sy3F5naiUKpyRAw96qrrUtwifFw"
+    },
+    {
+      "invite_id": "7lzgbaRnLBEAgAHwyk5yrw",
+      "invite_secret": "lTnBXQxsd2tS_bdP0AZMI9wWC7eiqDRXS2OIWigOUEw",
+      "relay_host": "relay.example:8443",
+      "url": "https://relay.example:8443/i/7lzgbaRnLBEAgAHwyk5yrw#v=0&s=lTnBXQxsd2tS_bdP0AZMI9wWC7eiqDRXS2OIWigOUEw"
+    },
+    {
+      "invite_id": "QDv1VxTtCKNOh7jpu-FcTg",
+      "invite_secret": "dmnYn3Mm_VVdt4zFzr-0HJb2hXm9iFbRyxpR_2L8KP8",
+      "relay_host": "localhost:8080",
+      "url": "http://localhost:8080/i/QDv1VxTtCKNOh7jpu-FcTg#v=0&s=dmnYn3Mm_VVdt4zFzr-0HJb2hXm9iFbRyxpR_2L8KP8"
+    },
+    {
+      "invite_id": "WxONgYS309T0dqEN5c4Dmg",
+      "invite_secret": "jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E",
+      "relay_host": "relay.example",
+      "url": "https://relay.example/i/WxONgYS309T0dqEN5c4Dmg#x=1&s=jQ7p3RZDgN57aRoTqg4TGDgtO0OEnNnY18i__-juz6E&v=0"
+    }
+  ]
+}

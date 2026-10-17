@@ -55,6 +55,10 @@ test-rust:
 test-py:
     uv run --all-packages --frozen pytest -q
 
+# Regenerate the core test vectors in testdata/ (review the diff before committing)
+vectors:
+    AC_REGENERATE_VECTORS=1 cargo test -p agentconnect-core --lib --locked vectors
+
 # Contract data: every testdata/ file is in MANIFEST.json and used by its suites
 contract:
     uv run --no-project python scripts/check_manifest.py

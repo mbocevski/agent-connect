@@ -1,0 +1,89 @@
+{
+  "buckets": [
+    256,
+    1024,
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576
+  ],
+  "cases": [
+    {
+      "bucket": 256,
+      "plaintext_len": 0
+    },
+    {
+      "bucket": 256,
+      "plaintext_len": 1
+    },
+    {
+      "bucket": 256,
+      "plaintext_len": 63
+    },
+    {
+      "bucket": 256,
+      "plaintext_len": 64
+    },
+    {
+      "bucket": 256,
+      "plaintext_len": 172
+    },
+    {
+      "bucket": 1024,
+      "plaintext_len": 173
+    },
+    {
+      "bucket": 1024,
+      "plaintext_len": 940
+    },
+    {
+      "bucket": 4096,
+      "plaintext_len": 941
+    },
+    {
+      "bucket": 4096,
+      "plaintext_len": 4012
+    },
+    {
+      "bucket": 16384,
+      "plaintext_len": 4013
+    },
+    {
+      "bucket": 16384,
+      "plaintext_len": 16300
+    },
+    {
+      "bucket": 65536,
+      "plaintext_len": 16301
+    },
+    {
+      "bucket": 65536,
+      "plaintext_len": 65450
+    },
+    {
+      "bucket": 262144,
+      "plaintext_len": 65451
+    },
+    {
+      "bucket": 262144,
+      "plaintext_len": 262058
+    },
+    {
+      "bucket": 1048576,
+      "plaintext_len": 262059
+    },
+    {
+      "bucket": 1048576,
+      "plaintext_len": 1048490
+    },
+    {
+      "bucket": null,
+      "plaintext_len": 1048491
+    }
+  ],
+  "description": "SPEC 7.1 padding buckets. The PrivateMessage AEAD ciphertext of an application message is exactly `bucket` bytes: plaintext + varint length + 66-byte signature field + 16-byte tag, padded. null = too large.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "max_plaintext_len": 1048490,
+  "seed": "0eee4ce31ec85527eb9c9afb72a7c96fde6ee33478ba0a7c15bde0a82f3862f8"
+}

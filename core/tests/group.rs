@@ -1,0 +1,713 @@
+//! Group lifecycle and negative tests (SPEC §5–§9, §11).
+
+mod common;
+
+use std::time::Duration;
+
+use agentconnect_core::group::Event;
+use agentconnect_core::policy::{Floor, InvitePermission};
+use agentconnect_core::{Error, InviteLink, InviteMeta, InviteSecret, SqliteStore};
+use common::*;
+
+#[test]
+fn one_to_one_create_join_talk() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    assert_converged(&groups);
+    assert_eq!(groups[0].epoch(), 1);
+    assert_eq!(groups[1].meta().unwrap().purpose, PURPOSE);
+    let members = groups[1].members().unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0].identity, peers[0].identity.id());
+    assert_eq!(
+        members[1].mailbox_id,
+        peers[1].client.instance().mailbox_id()
+    );
+
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "hi B"))
+        .unwrap();
+    let msg = groups[1].open(&peers[1].client, &ct).unwrap();
+    assert_eq!(msg.plaintext, inner(&peers[0], "hi B"));
+    assert_eq!(msg.sender.identity, peers[0].identity.id());
+    assert_eq!(
+        msg.sender.instance_id,
+        peers[0].client.instance().instance_id()
+    );
+    assert!(
+        !format!("{msg:?}").contains("hi B"),
+        "Debug must not show bodies"
+    );
+
+    let ct = groups[1]
+        .seal(&peers[1].client, &inner(&peers[1], "hi A"))
+        .unwrap();
+    let Event::Application(m) = groups[0].process(&peers[0].client, &ct).unwrap() else {
+        panic!("expected an application message");
+    };
+    assert_eq!(m.sender.identity, peers[1].identity.id());
+    // The owner is the creator; 1:1 groups keep floor "free".
+    assert_eq!(groups[0].policy().unwrap().owner, peers[0].identity.id());
+    assert_eq!(groups[0].policy().unwrap().floor, Floor::Free);
+}
+
+#[test]
+fn third_member_switches_floor_and_converges() {
+    let clock = clock();
+    let (peers, groups) = group_of(3, &clock);
+    assert_converged(&groups);
+    for g in &groups {
+        assert_eq!(g.policy().unwrap().floor, Floor::Mention);
+        assert_eq!(g.members().unwrap().len(), 3);
+    }
+    assert_eq!(groups[2].own_leaf_index(), 2);
+    drop(peers);
+}
+
+#[test]
+fn commit_summary_and_routing_match() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let c = peer(30, &clock);
+    let (gc, out) = join(&peers[0], &mut groups[0], &c);
+    assert_eq!(out.routing.add, vec![c.client.instance().mailbox_id()]);
+    assert_eq!(out.epoch, 1);
+    let summary = expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    assert_eq!(summary.routing(), out.routing);
+    assert_eq!(summary.added[0].identity, c.identity.id());
+    assert_eq!(summary.committer.identity, peers[0].identity.id());
+    assert!(summary.policy_changed);
+    assert!(!summary.discarded_own_pending);
+    groups.push(gc);
+    assert_converged(&groups);
+}
+
+#[test]
+fn removed_member_cannot_decrypt_next_epoch() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let out = groups[0]
+        .remove(&peers[0].client, &peers[2].identity.id())
+        .unwrap();
+    assert_eq!(
+        out.routing.remove,
+        vec![peers[2].client.instance().mailbox_id()]
+    );
+    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    let s = expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    assert_eq!(s.removed[0].identity, peers[2].identity.id());
+    let Event::Removed(_) = groups[2].process(&peers[2].client, &out.commit).unwrap() else {
+        panic!("expected removal");
+    };
+    assert!(!groups[2].is_active());
+
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "secret"))
+        .unwrap();
+    groups[1].open(&peers[1].client, &ct).unwrap();
+    assert_eq!(groups[2].open(&peers[2].client, &ct), Err(Error::NotMember));
+    assert_eq!(
+        groups[2].seal(&peers[2].client, &inner(&peers[2], "x")),
+        Err(Error::NotMember)
+    );
+}
+
+#[test]
+fn member_that_missed_its_removal_cannot_decrypt_either() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let out = groups[0]
+        .remove(&peers[0].client, &peers[2].identity.id())
+        .unwrap();
+    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "secret"))
+        .unwrap();
+    // C never sees the removal commit and has no next-epoch secrets.
+    assert!(groups[2].open(&peers[2].client, &ct).is_err());
+    drop(out);
+}
+
+#[test]
+fn tampered_and_replayed_messages_are_rejected() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "once"))
+        .unwrap();
+    let mut tampered = ct.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    assert!(groups[1].open(&peers[1].client, &tampered).is_err());
+
+    let ct2 = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "twice"))
+        .unwrap();
+    groups[1].open(&peers[1].client, &ct2).unwrap();
+    // Replay: the generation's key is gone.
+    assert!(groups[1].open(&peers[1].client, &ct2).is_err());
+
+    // Garbage, and messages for another group.
+    assert_eq!(
+        groups[1].process(&peers[1].client, b"junk"),
+        Err(Error::Malformed("MLS message"))
+    );
+    let other = peers[0].client.create_group("other", "x").unwrap();
+    let mut other = other;
+    let foreign = other
+        .seal(&peers[0].client, &inner(&peers[0], "x"))
+        .unwrap();
+    assert_eq!(
+        groups[1].process(&peers[1].client, &foreign),
+        Err(Error::WrongGroup)
+    );
+}
+
+#[test]
+fn inner_sender_must_match_mls_sender() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    // A claims to be B in the inner message.
+    assert_eq!(
+        groups[0].seal(&peers[0].client, &inner(&peers[1], "spoof")),
+        Err(Error::CredentialMismatch("inner sender != MLS sender"))
+    );
+    assert_eq!(
+        groups[0].seal(&peers[0].client, b"not json"),
+        Err(Error::Malformed("inner message"))
+    );
+    let mut v = serde_json::from_slice::<serde_json::Value>(&inner(&peers[0], "x")).unwrap();
+    v["instance_id"] = "0000000000000000".into();
+    assert_eq!(
+        groups[0].seal(&peers[0].client, &serde_json::to_vec(&v).unwrap()),
+        Err(Error::CredentialMismatch("inner instance_id != MLS sender"))
+    );
+    v["v"] = 1.into();
+    assert_eq!(
+        groups[0].seal(&peers[0].client, &serde_json::to_vec(&v).unwrap()),
+        Err(Error::UnsupportedVersion)
+    );
+}
+
+#[test]
+fn wrong_invite_secret_fails_mac_and_welcome() {
+    let clock = clock();
+    let a = peer(1, &clock);
+    let b = peer(2, &clock);
+    let mut ga = a.client.create_group(NAME, PURPOSE).unwrap();
+    let inv = invite(&a);
+    let wrong_secret = agentconnect_core::Rng::for_test("wrong-secret")
+        .array::<32>()
+        .unwrap();
+    let wrong = InviteSecret::from_parts(*inv.secret().id(), wrong_secret);
+    let req = b.client.create_join_request(&wrong, "b").unwrap();
+    assert_eq!(
+        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        Error::BadMac
+    );
+
+    // Right MAC, but the joiner unwraps with the wrong secret: rejected
+    // before MLS touches the KeyPackage, so a retry with the right secret works.
+    let req = b.client.create_join_request(inv.secret(), "b").unwrap();
+    let verified = a.client.verify_join_request(&req, &inv).unwrap();
+    assert_eq!(verified.identity(), b.identity.id());
+    assert_eq!(verified.display_name(), "b");
+    assert_eq!(verified.mailbox_id(), b.client.instance().mailbox_id());
+    assert_eq!(verified.instance_id(), b.client.instance().instance_id());
+    let out = ga.add_member(&a.client, verified, &inv, true).unwrap();
+    ga.confirm_pending_commit(&a.client).unwrap();
+    let wrapped = out.welcome.unwrap();
+    assert_eq!(
+        b.client
+            .join_from_wrapped_welcome(
+                &wrong,
+                &InviteMeta::expected(wrong.id(), NAME, PURPOSE),
+                &wrapped
+            )
+            .unwrap_err(),
+        Error::WelcomeAuth
+    );
+    let mut tampered = wrapped.clone();
+    tampered[20] ^= 1;
+    assert_eq!(
+        b.client
+            .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), &tampered)
+            .unwrap_err(),
+        Error::WelcomeAuth
+    );
+    let gb = b
+        .client
+        .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), &wrapped)
+        .unwrap();
+    assert_eq!(gb.sas(), ga.sas());
+}
+
+#[test]
+fn join_request_for_another_invite_or_expired_is_rejected() {
+    let clock = clock();
+    let a = peer(1, &clock);
+    let b = peer(2, &clock);
+    let inv = invite(&a);
+    let other = invite(&a);
+    let req = b.client.create_join_request(other.secret(), "b").unwrap();
+    assert_eq!(
+        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        Error::InviteMismatch
+    );
+    let req = b.client.create_join_request(inv.secret(), "b").unwrap();
+    clock.advance(Duration::from_secs(3600));
+    assert_eq!(
+        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        Error::InviteExpired
+    );
+    assert_eq!(
+        b.client
+            .create_join_request(inv.secret(), &"x".repeat(81))
+            .unwrap_err(),
+        Error::Malformed("display_name")
+    );
+}
+
+#[test]
+fn mailbox_must_match_key_package() {
+    let clock = clock();
+    let a = peer(1, &clock);
+    let b = peer(2, &clock);
+    let inv = invite(&a);
+    let mut req = b.client.create_join_request(inv.secret(), "b").unwrap();
+    req.mailbox_id = a.client.instance().mailbox_id();
+    req.mac = agentconnect_core::join::join_request_mac(
+        &inv.secret().join_key(),
+        inv.secret().id(),
+        &req.key_package,
+        &req.mailbox_id,
+    );
+    assert_eq!(
+        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        Error::CredentialMismatch("mailbox_id != key package signature key")
+    );
+}
+
+#[test]
+fn welcome_meta_must_match_invite_meta() {
+    let clock = clock();
+    let a = peer(1, &clock);
+    let b = peer(2, &clock);
+    let mut ga = a.client.create_group(NAME, PURPOSE).unwrap();
+    let inv = invite(&a);
+    let req = b.client.create_join_request(inv.secret(), "b").unwrap();
+    let verified = a.client.verify_join_request(&req, &inv).unwrap();
+    let out = ga.add_member(&a.client, verified, &inv, true).unwrap();
+    let wrong_meta = InviteMeta::expected(inv.secret().id(), NAME, "something else");
+    assert_eq!(
+        b.client
+            .join_from_wrapped_welcome(inv.secret(), &wrong_meta, out.welcome.as_ref().unwrap())
+            .unwrap_err(),
+        Error::MetaMismatch
+    );
+    // Meta for a different invite id is refused outright.
+    let foreign = InviteMeta::expected(&[0; 16], NAME, PURPOSE);
+    assert_eq!(
+        b.client
+            .join_from_wrapped_welcome(inv.secret(), &foreign, out.welcome.as_ref().unwrap())
+            .unwrap_err(),
+        Error::InviteMismatch
+    );
+    // The KeyPackage was consumed by the failed attempt (SPEC §6.3).
+    assert!(
+        b.client
+            .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), out.welcome.as_ref().unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+fn non_welcome_payload_is_rejected() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let inv = invite(&peers[0]);
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "x"))
+        .unwrap();
+    let wrapped = inv
+        .secret()
+        .wrap_welcome(peers[0].client.rng(), &ct)
+        .unwrap();
+    assert_eq!(
+        peers[1]
+            .client
+            .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), &wrapped)
+            .unwrap_err(),
+        Error::UnexpectedMessage("not a Welcome")
+    );
+    let wrapped = inv
+        .secret()
+        .wrap_welcome(peers[0].client.rng(), b"junk")
+        .unwrap();
+    assert_eq!(
+        peers[1]
+            .client
+            .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), &wrapped)
+            .unwrap_err(),
+        Error::Malformed("welcome")
+    );
+}
+
+#[test]
+fn members_may_not_remove_or_change_policy_locally() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    assert_eq!(
+        groups[1]
+            .remove(&peers[1].client, &peers[2].identity.id())
+            .unwrap_err(),
+        Error::NotPermitted("this identity may not remove members")
+    );
+    let mut p = groups[1].policy().unwrap();
+    p.require_verified = true;
+    assert_eq!(
+        groups[1].set_policy(&peers[1].client, &p).unwrap_err(),
+        Error::Unauthorized("committer may not change this policy")
+    );
+    // The rejected commit was not left pending.
+    assert!(!groups[1].has_pending_commit());
+    assert_eq!(
+        groups[0]
+            .remove(&peers[0].client, "ac:v0:nobody")
+            .unwrap_err(),
+        Error::UnknownMember
+    );
+    // Member may not invite under the default policy.
+    let c = peer(40, &clock);
+    let inv = invite(&peers[1]);
+    let req = c.client.create_join_request(inv.secret(), "c").unwrap();
+    let v = peers[1].client.verify_join_request(&req, &inv).unwrap();
+    assert_eq!(
+        groups[1]
+            .add_member(&peers[1].client, v, &inv, true)
+            .unwrap_err(),
+        Error::NotPermitted("this identity may not invite")
+    );
+}
+
+#[test]
+fn owner_policy_change_round_trips() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let mut p = groups[0].policy().unwrap();
+    p.invite = InvitePermission::Members;
+    p.admins = vec![peers[1].identity.id()];
+    let out = groups[0].set_policy(&peers[0].client, &p).unwrap();
+    assert_eq!(
+        groups[0].seal(&peers[0].client, &inner(&peers[0], "x")),
+        Err(Error::CommitPending)
+    );
+    let s = groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    assert!(s.policy_changed);
+    let s = expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    assert!(s.policy_changed);
+    assert_eq!(groups[1].policy().unwrap(), p);
+    assert_converged(&groups);
+
+    // Admin may change the floor only.
+    let mut floor = p.clone();
+    floor.floor = Floor::Moderated;
+    floor.floor_moderator = Some(peers[1].identity.id());
+    let out = groups[1].set_policy(&peers[1].client, &floor).unwrap();
+    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    expect_commit(groups[0].process(&peers[0].client, &out.commit).unwrap());
+    assert_converged(&groups);
+
+    // Now a member may invite: B adds C.
+    let c = peer(50, &clock);
+    let (gc, out) = {
+        let (a, b) = groups.split_at_mut(1);
+        let r = join(&peers[1], &mut b[0], &c);
+        expect_commit(a[0].process(&peers[0].client, &r.1.commit).unwrap());
+        r
+    };
+    groups.push(gc);
+    assert_converged(&groups);
+    drop(out);
+}
+
+#[test]
+fn update_commits_converge_and_change_sas() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let before = groups[0].sas();
+    let out = groups[1].update(&peers[1].client).unwrap();
+    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    for i in [0, 2] {
+        expect_commit(groups[i].process(&peers[i].client, &out.commit).unwrap());
+    }
+    assert_converged(&groups);
+    assert_ne!(groups[0].sas(), before);
+}
+
+#[test]
+fn epoch_conflict_discard_process_rebuild() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let a = groups[0].update(&peers[0].client).unwrap();
+    let _b = groups[1].update(&peers[1].client).unwrap();
+    assert_eq!(
+        groups[1].update(&peers[1].client).unwrap_err(),
+        Error::CommitPending
+    );
+    // The relay accepts A's commit; B gets epoch_conflict.
+    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    groups[1].discard_pending_commit(&peers[1].client).unwrap();
+    assert_eq!(
+        groups[1].discard_pending_commit(&peers[1].client),
+        Err(Error::NoPendingCommit)
+    );
+    expect_commit(groups[1].process(&peers[1].client, &a.commit).unwrap());
+    expect_commit(groups[2].process(&peers[2].client, &a.commit).unwrap());
+    let b = groups[1].update(&peers[1].client).unwrap();
+    assert_eq!(b.epoch, a.epoch + 1);
+    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    for i in [0, 2] {
+        expect_commit(groups[i].process(&peers[i].client, &b.commit).unwrap());
+    }
+    assert_converged(&groups);
+}
+
+#[test]
+fn winner_commit_drops_pending_commit() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let a = groups[0].update(&peers[0].client).unwrap();
+    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    let _b = groups[1].update(&peers[1].client).unwrap();
+    let s = expect_commit(groups[1].process(&peers[1].client, &a.commit).unwrap());
+    assert!(s.discarded_own_pending);
+    assert!(!groups[1].has_pending_commit());
+    assert_converged(&groups);
+}
+
+#[test]
+fn own_commit_echo_confirms() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let out = groups[0].update(&peers[0].client).unwrap();
+    let Event::OwnCommitConfirmed(s) = groups[0].process(&peers[0].client, &out.commit).unwrap()
+    else {
+        panic!("expected confirmation");
+    };
+    assert_eq!(s.epoch, 2);
+    assert!(!groups[0].has_pending_commit());
+    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    assert_converged(&groups);
+    // A second echo after confirmation is harmless.
+    assert!(matches!(
+        groups[0].process(&peers[0].client, &out.commit),
+        Ok(Event::OwnEcho) | Err(_)
+    ));
+    assert_eq!(
+        groups[0].confirm_pending_commit(&peers[0].client),
+        Err(Error::NoPendingCommit)
+    );
+}
+
+#[test]
+fn forked_group_view_gives_different_sas() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    // A and B commit concurrently. A malicious relay confirms both senders
+    // and gives A's commit to C: A and C share a view, B is forked off.
+    let a = groups[0].update(&peers[0].client).unwrap();
+    let _b = groups[1].update(&peers[1].client).unwrap();
+    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    expect_commit(groups[2].process(&peers[2].client, &a.commit).unwrap());
+    assert!(groups.iter().all(|g| g.epoch() == groups[0].epoch()));
+    assert_eq!(groups[0].sas(), groups[2].sas());
+    assert_ne!(groups[0].sas(), groups[1].sas());
+    assert_ne!(groups[0].sas().decimal(), groups[1].sas().decimal());
+}
+
+#[test]
+fn two_parallel_groups_have_different_sas() {
+    // SPEC §14.4: the attacker runs one group with A and another with B.
+    let clock = clock();
+    let (_, g1) = group_of(2, &clock);
+    let (_, g2) = group_of_seeded(2, 100, &clock);
+    assert_ne!(g1[0].sas(), g2[0].sas());
+}
+
+#[test]
+fn leave_via_remove_proposal() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let proposal = groups[2].propose_leave(&peers[2].client).unwrap();
+    for i in [0, 1] {
+        let Event::LeaveProposed(m) = groups[i].process(&peers[i].client, &proposal).unwrap()
+        else {
+            panic!("expected a leave proposal");
+        };
+        assert_eq!(m.identity, peers[2].identity.id());
+    }
+    // B (a plain member) commits C's leave: allowed for self-removals.
+    let out = groups[1]
+        .commit_pending_proposals(&peers[1].client)
+        .unwrap();
+    assert_eq!(
+        out.routing.remove,
+        vec![peers[2].client.instance().mailbox_id()]
+    );
+    groups[1].confirm_pending_commit(&peers[1].client).unwrap();
+    expect_commit(groups[0].process(&peers[0].client, &out.commit).unwrap());
+    let Event::Removed(_) = groups[2].process(&peers[2].client, &out.commit).unwrap() else {
+        panic!("expected removal");
+    };
+    groups.truncate(2);
+    assert_converged(&groups);
+    assert_eq!(
+        groups[0]
+            .commit_pending_proposals(&peers[0].client)
+            .unwrap_err(),
+        Error::NotPermitted("no pending proposals")
+    );
+    // A sole member doesn't propose; it deletes its state.
+    let mut solo = peers[0].client.create_group("solo", "").unwrap();
+    assert_eq!(
+        solo.propose_leave(&peers[0].client).unwrap_err(),
+        Error::NotPermitted("sole member: delete the local state instead")
+    );
+    solo.delete(&peers[0].client).unwrap();
+}
+
+#[test]
+fn multi_replica_identity_joins_and_is_removed_together() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    // B's second instance joins via an invite from A.
+    let b2 = replica(&peers[1].identity, 77, &clock);
+    let (gb2, out) = join(&peers[0], &mut groups[0], &b2);
+    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    groups.push(gb2);
+    assert_converged(&groups);
+    // Removing B's identity removes both instances.
+    let out = groups[0]
+        .remove(&peers[0].client, &peers[1].identity.id())
+        .unwrap();
+    assert_eq!(out.routing.remove.len(), 2);
+    groups[0].confirm_pending_commit(&peers[0].client).unwrap();
+    assert_eq!(groups[0].members().unwrap().len(), 1);
+}
+
+#[test]
+fn padding_hides_length_within_a_bucket() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let base = inner(&peers[0], "").len();
+    // 940 + 2 (length prefix) + 66 (signature) + 16 (tag) = 1024.
+    let sizes: Vec<usize> = [0, 50, 940 - base]
+        .iter()
+        .map(|extra| {
+            let msg = inner(&peers[0], &"x".repeat(*extra));
+            let ct = groups[0].seal(&peers[0].client, &msg).unwrap();
+            groups[1].open(&peers[1].client, &ct).unwrap();
+            ct.len()
+        })
+        .collect();
+    assert!(sizes.iter().all(|s| *s == sizes[0]), "{sizes:?}");
+    let bigger = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], &"x".repeat(941 - base)))
+        .unwrap();
+    assert_eq!(bigger.len(), sizes[0] + 4096 - 1024, "next bucket");
+    let huge = vec![b' '; agentconnect_core::padding::max_plaintext_len() + 1];
+    assert_eq!(
+        groups[0].seal(&peers[0].client, &huge),
+        Err(Error::TooLarge)
+    );
+}
+
+#[test]
+fn sqlite_store_persists_across_reopen() {
+    let clock = clock();
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("core-sqlite-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let a = peer(1, &clock);
+    let b_identity =
+        agentconnect_core::Identity::generate(&agentconnect_core::Rng::for_test("seed-2")).unwrap();
+    let b_instance = b_identity
+        .create_instance(&agentconnect_core::Rng::for_test("seed-3"), clock.as_ref())
+        .unwrap();
+    let saved_instance = b_instance.to_secret_bytes().unwrap();
+    let open = |inst| {
+        agentconnect_core::Client::new(
+            SqliteStore::open(&path).unwrap(),
+            agentconnect_core::Rng::os().unwrap(),
+            inst,
+            clock.clone(),
+        )
+        .unwrap()
+    };
+    let b = open(b_instance);
+    let mut ga = a.client.create_group(NAME, PURPOSE).unwrap();
+    let inv = invite(&a);
+    let link = InviteLink::parse(&inv.url()).unwrap();
+    let req = b.create_join_request(link.secret(), "b").unwrap();
+    let v = a.client.verify_join_request(&req, &inv).unwrap();
+    let out = ga.add_member(&a.client, v, &inv, true).unwrap();
+    ga.confirm_pending_commit(&a.client).unwrap();
+    let gid = b
+        .join_from_wrapped_welcome(
+            link.secret(),
+            &meta_for(&inv),
+            out.welcome.as_ref().unwrap(),
+        )
+        .unwrap()
+        .group_id()
+        .to_vec();
+    drop(b);
+
+    let b = open(agentconnect_core::Instance::from_secret_bytes(&saved_instance).unwrap());
+    let mut gb = b.load_group(&gid).unwrap().unwrap();
+    assert_eq!(gb.sas(), ga.sas());
+    let ct = ga.seal(&a.client, &inner(&a, "persisted")).unwrap();
+    gb.open(&b, &ct).unwrap();
+    assert!(b.load_group(&[0; 16]).unwrap().is_none());
+    assert!(format!("{gb:?} {b:?}").contains("Group"));
+    drop(b);
+    let _ = std::fs::remove_file(&path);
+    assert!(SqliteStore::open_in_memory().is_ok());
+}
+
+#[test]
+fn real_ciphertexts_follow_padding_vectors() {
+    // testdata/padding-vectors.json: within one length-prefix class, the
+    // serialised message minus its bucket is a per-group constant.
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../testdata/padding-vectors.json"
+    ))
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let base = inner(&peers[0], "").len();
+    let mut overheads = std::collections::BTreeSet::new();
+    for case in v["cases"].as_array().unwrap() {
+        let (Some(len), Some(bucket)) = (case["plaintext_len"].as_u64(), case["bucket"].as_u64())
+        else {
+            continue;
+        };
+        let (len, bucket) = (
+            usize::try_from(len).unwrap(),
+            usize::try_from(bucket).unwrap(),
+        );
+        if len < base || bucket > 4096 {
+            continue;
+        }
+        let msg = inner(&peers[0], &"x".repeat(len - base));
+        assert_eq!(msg.len(), len);
+        let ct = groups[0].seal(&peers[0].client, &msg).unwrap();
+        groups[1].open(&peers[1].client, &ct).unwrap();
+        overheads.insert(ct.len() - bucket);
+    }
+    assert_eq!(overheads.len(), 1, "{overheads:?}");
+}

@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "cert_json": "{\"created_at\":1735689600,\"identity\":\"ac:v0:9prl4VijsdmdHDI8fNOxKT8K6QCmve5qPGxNWhcN3BA\",\"instance_id\":\"b9d4306c5a0dce51\",\"sig\":\"8ROlDxMWp-HUFUA4uOStdKsB_ElF3gvr9GSd3zyW2MUNxv6jnFNYzVWwAEMCe9v0YFP9t_n3XeSqVK-NSzfQAA\",\"sig_key\":\"hWz8hj20Gd24CU9E1WZBpBcbi705tDWvONjXx6p9BfM\",\"v\":0}",
+      "created_at": 1735689600,
+      "fingerprint": "f00b a78d 7dd1 eb9c 2359 27d8 3113 d949",
+      "identity": "ac:v0:9prl4VijsdmdHDI8fNOxKT8K6QCmve5qPGxNWhcN3BA",
+      "ik_pub": "f69ae5e158a3b1d99d1c323c7cd3b1293f0ae900a6bdee6a3c6c4d5a170ddc10",
+      "ik_secret": "09b09d21a4048beabfd364a837f490e17569b5c1d271607c34f2695e9a0830a8",
+      "instance_id": "b9d4306c5a0dce51",
+      "mailbox_id": "nxDrrRcI1QQTd3M-M3kRyf",
+      "sig": "8ROlDxMWp-HUFUA4uOStdKsB_ElF3gvr9GSd3zyW2MUNxv6jnFNYzVWwAEMCe9v0YFP9t_n3XeSqVK-NSzfQAA",
+      "sig_key": "856cfc863db419ddb8094f44d56641a4171b8bbd39b435af38d8d7c7aa7d05f3",
+      "signing_input": "agentconnect/v0/instance-cert{\"created_at\":1735689600,\"identity\":\"ac:v0:9prl4VijsdmdHDI8fNOxKT8K6QCmve5qPGxNWhcN3BA\",\"instance_id\":\"b9d4306c5a0dce51\",\"sig_key\":\"hWz8hj20Gd24CU9E1WZBpBcbi705tDWvONjXx6p9BfM\",\"v\":0}"
+    },
+    {
+      "cert_json": "{\"created_at\":1735689600,\"identity\":\"ac:v0:HYG2EalnL4moOpOXC1f9S3RYoJpFPW1gxP4xfRDru9c\",\"instance_id\":\"580040d5f7d0c094\",\"sig\":\"tYa6BbZ_KD6RkdDeJNaBKcrJNCSlHvuzl0BFj0H9d02apoiL9VzD03vcrIiWvpVNfIS37tgtcELUEwdZQVblAw\",\"sig_key\":\"fHWccdxZNSf7HBlOripqfdlKn4XHSbMHyMl2HD06D3E\",\"v\":0}",
+      "created_at": 1735689600,
+      "fingerprint": "9995 28dd c390 699f 0dde 1805 0ea9 e30a",
+      "identity": "ac:v0:HYG2EalnL4moOpOXC1f9S3RYoJpFPW1gxP4xfRDru9c",
+      "ik_pub": "1d81b611a9672f89a83a93970b57fd4b7458a09a453d6d60c4fe317d10ebbbd7",
+      "ik_secret": "d5f7b0913d588944a013fe97af1d5076115a8d7b45e8faa049eaea20fbbffb82",
+      "instance_id": "580040d5f7d0c094",
+      "mailbox_id": "SIp6VtnKsP9W98opNRPZyL",
+      "sig": "tYa6BbZ_KD6RkdDeJNaBKcrJNCSlHvuzl0BFj0H9d02apoiL9VzD03vcrIiWvpVNfIS37tgtcELUEwdZQVblAw",
+      "sig_key": "7c759c71dc593527fb1c194eae2a6a7dd94a9f85c749b307c8c9761c3d3a0f71",
+      "signing_input": "agentconnect/v0/instance-cert{\"created_at\":1735689600,\"identity\":\"ac:v0:HYG2EalnL4moOpOXC1f9S3RYoJpFPW1gxP4xfRDru9c\",\"instance_id\":\"580040d5f7d0c094\",\"sig_key\":\"fHWccdxZNSf7HBlOripqfdlKn4XHSbMHyMl2HD06D3E\",\"v\":0}"
+    }
+  ],
+  "description": "SPEC 2/3.3 identity id, fingerprint, mailbox id and InstanceCert: sig = Ed25519(IK, 'agentconnect/v0/instance-cert' || JCS(cert without sig)); cert_json is the JCS encoding carried in ac_instance_cert.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "seed": "2ff40a3a5a3586d566f3b372d12554e7da2f8e57ced443b2f18efb7a14cf0b09"
+}

@@ -1,0 +1,55 @@
+{
+  "cases": [
+    {
+      "invite_id": "8863b1431fa243e1475bc9c865af1d91",
+      "invite_secret": "90e20ced436b70f66c0b2d17a2a3fdad75c4a5b379599701b275aa23b600d090",
+      "join_key": "2c16e091d14bdbc7585996e35ac046fedc8e0097c775a21dd22408ba626b6a9b",
+      "join_request": {
+        "key_package": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627",
+        "mac": "46fed6691022add91e3e067ac190618d73a6d664b9dc91bc5d290d684f8b3d23",
+        "mailbox_id": "hHYR8qHfI-bAsMLKVrmFd8"
+      },
+      "welcome_key": "f04b084f89adfee2ae82c13b53a81abafd5ca23f301556eb02f040e19299872b",
+      "wrapped_welcome": {
+        "nonce": "ebf820ffabfa8a93359cbee5",
+        "welcome": "77656c636f6d652062797465732030",
+        "wrapped": "ebf820ffabfa8a93359cbee5489dda4c77182b6102a895e3f31feb6a1be7f854b80460f76e05768feea31b"
+      }
+    },
+    {
+      "invite_id": "2424d653fdbef09c613b5b54629a0c36",
+      "invite_secret": "f0038c9e18729b1646e6d70db84e77288888303271a0a02a7e11ca0b1049388f",
+      "join_key": "5e681a1e74a23276be8b7d3e8b5f632a85932f0838d9440555ee2db574dccaa8",
+      "join_request": {
+        "key_package": "010003020504070609080b0a0d0c0f0e111013121514171619181b1a1d1c1f1e2120232225242726",
+        "mac": "85a8bed77584cbbe92804984f2f49ccc747c0a41943c6fdcc666dd6a673e5f90",
+        "mailbox_id": "zMGdBjvA266GEGktXrWRmB"
+      },
+      "welcome_key": "aa7137959640b763c4d529ac9ee463b7c49324459adaaff0638282dbd975ebd6",
+      "wrapped_welcome": {
+        "nonce": "42e6da86335fff0476ff74b3",
+        "welcome": "77656c636f6d652062797465732031",
+        "wrapped": "42e6da86335fff0476ff74b3fbe527a909e085db4e6cad2943fc47f3940d0ec1a31f89294146a56c88452b"
+      }
+    },
+    {
+      "invite_id": "4248884ab65dac3c1a5f877ea4167016",
+      "invite_secret": "3f58ac1213d86418e9f7e601d8ae310d2fcec179e1a189805c197fcde32de76a",
+      "join_key": "3c49a0b065b824ee80502d6f0777424770e501a25baf8471047db460f96e8ff0",
+      "join_request": {
+        "key_package": "02030001060704050a0b08090e0f0c0d12131011161714151a1b18191e1f1c1d2223202126272425",
+        "mac": "2863f3a0b831e51279d8e896c93c61bebcbeb84b7ac4255ce9ed0351097b9766",
+        "mailbox_id": "vG-YUV1KChBFN7f_piwuZu"
+      },
+      "welcome_key": "5a062cbee031cc3ab1f4001134bc111f4cacd9d4ef267b6113a45525f3994319",
+      "wrapped_welcome": {
+        "nonce": "43639e79d3ced750dd18b9de",
+        "welcome": "77656c636f6d652062797465732032",
+        "wrapped": "43639e79d3ced750dd18b9de716656bbfd63e2b0e3e27b2da7ff87120416b28c81441f004ae7cf00a8c3df"
+      }
+    }
+  ],
+  "description": "SPEC 3.5 join_key/welcome_key (HKDF-SHA256), SPEC 6.1 JoinRequest MAC (invite_id raw bytes, mailbox_id ASCII) and SPEC 6.4 WrappedWelcome (nonce || ChaCha20-Poly1305). Hex unless noted.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "seed": "c969aa7ae24f3e9c68d15bafd8f9daf101776820ee949a5ffda16e3bf70d75d4"
+}

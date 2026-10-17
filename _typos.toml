@@ -1,5 +1,16 @@
 [files]
-extend-exclude = ["Cargo.lock", "uv.lock", "LICENSE", "testdata/sas-emoji.json"]
+# Generated vectors are hex/base64 (core/src/vectors.rs).
+extend-exclude = [
+    "Cargo.lock",
+    "uv.lock",
+    "LICENSE",
+    "testdata/sas-emoji.json",
+    "testdata/instance-cert.json",
+    "testdata/invite-kdf.json",
+    "testdata/invite-urls.json",
+    "testdata/padding-vectors.json",
+    "testdata/sas-vectors.json",
+]
 
 [default.extend-words]
 # hax: the verification toolchain libcrux is built with (hax-lib crates).
