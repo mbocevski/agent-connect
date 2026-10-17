@@ -290,3 +290,50 @@ async def test_daemon_run_serves_until_signalled(cluster: Cluster, sockdir: Path
     os.kill(os.getpid(), signal.SIGTERM)
     await asyncio.wait_for(task, 10)
     assert not sock.exists()
+
+
+async def test_api_hardening(
+    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = await serve(cluster, "h", sockdir, auto_approve=False)
+    addr = str(api.server.address)
+    monkeypatch.setattr("agentconnect.api.READ_TIMEOUT", 0.3)
+    monkeypatch.setattr("agentconnect.api.MAX_CONNECTIONS", 1)
+    # A client that never finishes its request is cut off (408)...
+    reader, writer = await asyncio.open_unix_connection(addr)
+    writer.write(b"GET /v0/status HTTP/1.1\r\n")
+    await writer.drain()
+    # ...and while it holds the only slot, others get 503.
+    r2, w2 = await asyncio.open_unix_connection(addr)
+    assert b" 503 " in await r2.read()
+    w2.close()
+    assert b" 408 " in await reader.read()
+    writer.close()
+    await api.server.stop()
+    # The socket path must not be some other file.
+    other = sockdir / "not-a-socket"
+    other.write_text("keep me", encoding="utf-8")
+    api.node.daemon.config = api.node.config.with_overrides(api_socket=other)
+    with pytest.raises(FileExistsError, match="not a socket"):
+        await ApiServer(api.node.daemon).start()
+    assert other.read_text(encoding="utf-8") == "keep me"
+    # Token files must stay private.
+    token = api.node.config.data_dir / "api-token"
+    token.chmod(0o644)
+    with pytest.raises(PermissionError, match="0600"):
+        ApiServer(api.node.daemon)
+
+
+async def test_tcp_api_refuses_browser_requests(cluster: Cluster) -> None:
+    node = await cluster.node("tcp")
+    node.daemon.config = node.config.with_overrides(api_tcp_port=_free())
+    server = ApiServer(node.daemon)
+    await server.start()
+    auth = {"authorization": f"Bearer {server.tokens['agent']}"}
+    async with httpx.AsyncClient(base_url=str(server.address)) as c:
+        assert (await c.get("/v0/status", headers=auth)).status_code == 200
+        bad_origin = {**auth, "origin": "https://evil.example"}
+        assert (await c.get("/v0/status", headers=bad_origin)).status_code == 403
+        rebound = {**auth, "host": "evil.example"}
+        assert (await c.get("/v0/status", headers=rebound)).status_code == 403
+    await server.stop()

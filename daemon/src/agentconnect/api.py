@@ -26,8 +26,10 @@ import asyncio
 import contextlib
 import hmac
 import json
+import os
 import re
 import secrets
+import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,8 @@ LOG = log.get("agentconnect.api")
 
 MAX_BODY = 1 << 20
 MAX_HEADER = 16 << 10
+READ_TIMEOUT = 10.0  # seconds to send a whole request
+MAX_CONNECTIONS = 64
 API_TOKEN_FILE = "api-token"  # noqa: S105 - a file name
 HUMAN_TOKEN_FILE = "human-token"  # noqa: S105 - a file name
 SCOPE = "_scope"  # handler parameter carrying the request's token scope
@@ -49,6 +53,7 @@ STATUS_TEXT = {
     200: "OK",
     400: "Bad Request",
     401: "Unauthorized",
+    408: "Request Timeout",
     403: "Forbidden",
     404: "Not Found",
     405: "Method Not Allowed",
@@ -57,6 +62,7 @@ STATUS_TEXT = {
     429: "Too Many Requests",
     500: "Internal Server Error",
     502: "Bad Gateway",
+    503: "Service Unavailable",
 }
 ERROR_STATUS = {
     "bad_request": 400,
@@ -78,8 +84,13 @@ class ApiError(Exception):
 
 
 def load_token(path: Path) -> str:
-    """Read the token at ``path``, creating it (0600) if missing."""
+    """Read the token at ``path``, creating it (0600) if missing. An existing
+    token file must be ours and private (no group or other bits)."""
     if path.exists():
+        st = path.stat()
+        if st.st_mode & 0o077 or st.st_uid != os.geteuid():
+            msg = f"{path.name} must be owned by this user with mode 0600"
+            raise PermissionError(msg)
         return path.read_text(encoding="ascii").strip()
     token = secrets.token_urlsafe(32)
     write_private(path, token.encode("ascii"))
@@ -124,6 +135,8 @@ class ApiServer:
             "human": load_token(data_dir / HUMAN_TOKEN_FILE),
         }
         self._server: asyncio.Server | None = None
+        self._connections = 0
+        self._port: int | None = None
         self.address: str | Path | None = None
         d = daemon
         self.routes = [
@@ -277,22 +290,34 @@ class ApiServer:
         raise ApiError(404, "not_found", "no such endpoint")
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._connections >= MAX_CONNECTIONS:
+            await self._reply(writer, 503, {"code": "busy", "message": "too many connections"})
+            return
+        self._connections += 1
+        try:
+            status, payload = await self._request(reader)
+        finally:
+            self._connections -= 1
+        await self._reply(writer, status, payload)
+
+    def _check_origin(self, headers: dict[str, str]) -> None:
+        """Loopback TCP: no browser requests (no ``Origin``), and a ``Host``
+        naming this listener only (DNS rebinding). Defence in depth: the
+        bearer token already stops both."""
+        if self._port is None:
+            return
+        if "origin" in headers:
+            raise ApiError(403, "forbidden", "browser requests are not accepted")
+        allowed = {f"127.0.0.1:{self._port}", f"localhost:{self._port}"}
+        if headers.get("host") not in allowed:
+            raise ApiError(403, "forbidden", "unexpected Host header")
+
+    async def _request(self, reader: asyncio.StreamReader) -> tuple[int, Any]:
         status, payload = 500, {"code": "internal", "message": "internal error"}
         try:
-            head = await reader.readuntil(b"\r\n\r\n")
-            if len(head) > MAX_HEADER:
-                raise ApiError(413, "too_large", "headers too large")
-            lines = head.decode("latin-1").split("\r\n")
-            method, target, _version = lines[0].split(" ", 2)
-            headers = {}
-            for line in lines[1:]:
-                if ":" in line:
-                    k, _, v = line.partition(":")
-                    headers[k.strip().lower()] = v.strip()
-            length = int(headers.get("content-length", "0") or 0)
-            if length < 0 or length > MAX_BODY:
-                raise ApiError(413, "too_large", "body too large")
-            body = await reader.readexactly(length) if length else b""
+            async with asyncio.timeout(READ_TIMEOUT):
+                method, target, headers, body = await self._read(reader)
+            self._check_origin(headers)
             status, payload = await self.handle(method, target, headers, body)
         except ApiError as e:
             status, payload = e.status, {"code": e.code, "message": str(e)}
@@ -300,10 +325,34 @@ class ApiServer:
             status, payload = ERROR_STATUS.get(e.code, 409), {"code": e.code, "message": str(e)}
         except RelayError as e:
             status, payload = 502, {"code": e.code, "message": str(e)}
+        except TimeoutError:
+            status, payload = 408, {"code": "timeout", "message": "request not received in time"}
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError):
             status, payload = 400, {"code": "bad_request", "message": "malformed request"}
         except Exception:
             LOG.exception("api_failed")
+        return status, payload
+
+    @staticmethod
+    async def _read(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:
+        head = await reader.readuntil(b"\r\n\r\n")
+        if len(head) > MAX_HEADER:
+            raise ApiError(413, "too_large", "headers too large")
+        lines = head.decode("latin-1").split("\r\n")
+        method, target, _version = lines[0].split(" ", 2)
+        headers = {}
+        for line in lines[1:]:
+            if ":" in line:
+                k, _, v = line.partition(":")
+                headers[k.strip().lower()] = v.strip()
+        length = int(headers.get("content-length", "0") or 0)
+        if length < 0 or length > MAX_BODY:
+            raise ApiError(413, "too_large", "body too large")
+        body = await reader.readexactly(length) if length else b""
+        return method, target, headers, body
+
+    @staticmethod
+    async def _reply(writer: asyncio.StreamWriter, status: int, payload: Any) -> None:
         data = json.dumps(payload).encode()
         writer.write(
             f"HTTP/1.1 {status} {STATUS_TEXT.get(status, 'Error')}\r\n"
@@ -323,11 +372,22 @@ class ApiServer:
                 self._serve, "127.0.0.1", port, limit=MAX_HEADER
             )
             sock = self._server.sockets[0].getsockname()
+            self._port = int(sock[1])
             self.address = f"http://127.0.0.1:{sock[1]}"
         else:
             path = cfg.socket_path
-            path.unlink(missing_ok=True)
-            self._server = await asyncio.start_unix_server(self._serve, path, limit=MAX_HEADER)
+            with contextlib.suppress(FileNotFoundError):
+                if not stat.S_ISSOCK(path.lstat().st_mode):
+                    msg = f"{path} exists and is not a socket; refusing to replace it"
+                    raise FileExistsError(msg)
+                path.unlink()
+            # Bind under a 0077 umask so the socket is never connectable by
+            # others, not even between bind and chmod.
+            old = os.umask(0o077)
+            try:
+                self._server = await asyncio.start_unix_server(self._serve, path, limit=MAX_HEADER)
+            finally:
+                os.umask(old)
             path.chmod(0o600)
             self.address = path
         LOG.info("api_listening", transport="tcp" if cfg.api_tcp_port else "unix")

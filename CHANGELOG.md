@@ -137,6 +137,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon API hardening: a request must arrive within 10 s (408), at most 64
+  connections are served at once (503), the Unix socket is bound under a
+  0077 umask and an existing non-socket file at its path is never
+  replaced, token files must be owned by the user with mode 0600, and in
+  TCP mode requests with an `Origin` header or a foreign `Host` are
+  refused.
 - Daemon: invite and join secrets no longer outlive their invites. An open
   invite past `expires_at` is marked expired and its secret deleted, and a
   pending join past its invite's expiry fails (`join_failed`, reason
