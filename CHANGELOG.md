@@ -98,6 +98,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   refs of the Adds it merges and rejects a JoinRequest, a local Add or a
   received Add that reuses one, so a replayed JoinRequest can no longer
   re-add a departed member as a leaf nobody controls.
+- Core and bindings: the instance key and invite secrets no longer pass
+  through unzeroized copies (JSON values, base64 temporaries, by-value
+  arrays). `InviteSecret::from_parts` takes the secret by reference.
 - Dependency policy allows MPL-2.0 for the three `hpke-rs` crates only.
   Advisories RUSTSEC-2026-0329/0330/0331 in the OpenMLS libcrux provider are
   temporarily ignored, and releases are blocked until a fixed provider ships.

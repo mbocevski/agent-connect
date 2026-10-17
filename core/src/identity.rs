@@ -2,13 +2,16 @@
 
 use std::fmt;
 
+use base64ct::{Base64UrlUnpadded, Encoding};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::clock::Clock;
-use crate::encoding::{b64, b64_decode_array, from_jcs, hex, hex_decode, jcs};
+use crate::encoding::{
+    b64, b64_decode_array, b64_decode_secret, from_jcs, hex, hex_decode, jcs, jcs_string,
+};
 use crate::error::{Error, Result};
 use crate::rng::Rng;
 
@@ -279,11 +282,12 @@ pub struct Instance {
     cert: InstanceCert,
 }
 
-#[derive(Serialize, Deserialize)]
+/// The parsed form of [`Instance::to_secret_bytes`].
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InstanceJson {
+struct InstanceIn<'a> {
     v: u32,
-    sk: String,
+    sk: &'a str,
     cert: String,
 }
 
@@ -330,39 +334,58 @@ impl Instance {
     ///
     /// Only if JSON serialisation fails, which can't happen for this type.
     pub fn to_secret_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
+        // JCS of {"cert": <cert JSON as a string>, "sk": <b64url SK>, "v": 0},
+        // written by hand into one zeroizing buffer of the exact size so the
+        // secret key never lands in a temporary `String` or `Value`.
         let cert = String::from_utf8(self.cert.to_json()?)
             .map_err(|_| Error::Internal("cert json is not utf-8"))?;
-        let mut json = InstanceJson {
-            v: 0,
-            sk: b64(self.key.as_bytes()),
-            cert,
-        };
-        let out = jcs(&json).map(Zeroizing::new);
-        json.sk.zeroize();
-        out
+        let cert = jcs_string(&cert);
+        let mut sk = Zeroizing::new([0u8; 43]);
+        let sk = Base64UrlUnpadded::encode(self.key.as_bytes(), sk.as_mut_slice())
+            .map_err(|_| Error::Internal("instance key encoding"))?;
+        let parts: [&[u8]; 5] = [
+            b"{\"cert\":",
+            cert.as_bytes(),
+            b",\"sk\":\"",
+            sk.as_bytes(),
+            b"\",\"v\":0}",
+        ];
+        let mut out = Zeroizing::new(Vec::with_capacity(parts.iter().map(|p| p.len()).sum()));
+        for p in parts {
+            out.extend_from_slice(p);
+        }
+        Ok(out)
     }
 
-    /// Restores an instance from [`Instance::to_secret_bytes`]. The
-    /// certificate is re-verified and must match the key.
+    /// Restores an instance from [`Instance::to_secret_bytes`]. The input
+    /// must be exactly that canonical encoding; the certificate is
+    /// re-verified and must match the key.
     ///
     /// # Errors
     ///
     /// [`Error::Malformed`], [`Error::InvalidCert`] or
     /// [`Error::CredentialMismatch`].
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self> {
-        let raw: InstanceJson = from_jcs(bytes, "instance")?;
-        let raw_sk = Zeroizing::new(raw.sk);
+        // `sk` is borrowed from `bytes` (canonical base64url has no escapes),
+        // so parsing makes no copy of the secret key.
+        let raw: InstanceIn<'_> =
+            serde_json::from_slice(bytes).map_err(|_| Error::Malformed("instance"))?;
         if raw.v != 0 {
             return Err(Error::UnsupportedVersion);
         }
-        let sk = Zeroizing::new(b64_decode_array::<32>(&raw_sk, "instance key")?);
+        let sk = b64_decode_secret::<32>(raw.sk, "instance key")?;
         let key = SigningKey::from_bytes(&sk);
         let cert = InstanceCert::from_json(raw.cert.as_bytes())?;
         cert.verify()?;
         if cert.sig_key != key.verifying_key().to_bytes() {
             return Err(Error::CredentialMismatch("instance key != cert sig_key"));
         }
-        Ok(Self { key, cert })
+        let instance = Self { key, cert };
+        // Canonical form: exactly what `to_secret_bytes` writes.
+        if instance.to_secret_bytes()?.as_slice() != bytes {
+            return Err(Error::Malformed("instance"));
+        }
+        Ok(instance)
     }
 }
 
@@ -379,6 +402,7 @@ impl fmt::Debug for Instance {
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
+    use serde::Serialize;
 
     fn instance() -> (Identity, Instance) {
         let rng = Rng::for_test("seed-1");
@@ -522,6 +546,46 @@ mod tests {
         assert_eq!(back.sign(b"m"), inst.sign(b"m"));
         assert_eq!(back.identity(), inst.identity());
         assert_eq!(back.instance_id(), inst.instance_id());
+    }
+
+    #[derive(Serialize)]
+    struct InstanceJson {
+        v: u32,
+        sk: String,
+        cert: String,
+    }
+
+    /// The hand-written encoding (no secret in a temporary `Value`) is
+    /// byte-for-byte the generic JCS one, and parsing accepts nothing else.
+    #[test]
+    fn instance_secret_bytes_are_canonical_jcs() {
+        let (_, inst) = instance();
+        let json = InstanceJson {
+            v: 0,
+            sk: b64(inst.key.as_bytes()),
+            cert: String::from_utf8(inst.cert().to_json().unwrap()).unwrap(),
+        };
+        let canonical = jcs(&json).unwrap();
+        assert_eq!(inst.to_secret_bytes().unwrap().as_slice(), canonical);
+        let s = String::from_utf8(canonical).unwrap();
+        let first = &json.sk[..1];
+        let escaped = format!("\\u{:04x}", u32::from(first.as_bytes()[0]));
+        for bad in [
+            s.replacen("{\"cert\":", "{ \"cert\":", 1),
+            s.replacen(",\"v\":0}", ",\"v\":0,\"x\":1}", 1),
+            s.replacen(
+                &format!("\"sk\":\"{first}"),
+                &format!("\"sk\":\"{escaped}"),
+                1,
+            ),
+            format!("{{\"v\":0,{}", &s[1..s.len() - 7]) + "}",
+        ] {
+            assert_eq!(
+                Instance::from_secret_bytes(bad.as_bytes()).unwrap_err(),
+                Error::Malformed("instance"),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

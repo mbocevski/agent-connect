@@ -16,6 +16,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use zeroize::Zeroizing;
 
 create_exception!(
     _native,
@@ -40,6 +41,16 @@ fn rng(seed: Option<u64>) -> CoreResult<core::Rng> {
 fn array<const N: usize>(b: &[u8], what: &'static str) -> PyResult<[u8; N]> {
     b.try_into()
         .map_err(|_| AgentConnectError::new_err(format!("{what} must be {N} bytes")))
+}
+
+/// A 32-byte secret copied straight into a zeroizing buffer.
+fn secret32(b: &[u8]) -> PyResult<Zeroizing<[u8; 32]>> {
+    let mut out = Zeroizing::new([0u8; 32]);
+    if b.len() != 32 {
+        return Err(AgentConnectError::new_err("secret must be 32 bytes"));
+    }
+    out.copy_from_slice(b);
+    Ok(out)
 }
 
 /// System time, or a fixed time set from Python (tests).
@@ -75,9 +86,7 @@ impl Identity {
     /// Restores an identity from its 32-byte secret.
     #[staticmethod]
     fn from_secret_bytes(secret: &[u8]) -> PyResult<Self> {
-        Ok(Self(core::Identity::from_secret_bytes(&array(
-            secret, "secret",
-        )?)))
+        Ok(Self(core::Identity::from_secret_bytes(&*secret32(secret)?)))
     }
 
     /// The 32-byte secret (store it encrypted).
@@ -185,10 +194,7 @@ impl Invite {
         secret: &[u8],
         expires_at: u64,
     ) -> PyResult<Self> {
-        let s = core::InviteSecret::from_parts(
-            array(invite_id, "invite_id")?,
-            array(secret, "secret")?,
-        );
+        let s = core::InviteSecret::from_parts(array(invite_id, "invite_id")?, &*secret32(secret)?);
         Ok(Self(core::Invite::from_parts(relay_host, s, expires_at)))
     }
 
@@ -908,8 +914,7 @@ fn unwrap_welcome<'py>(
     secret: &[u8],
     wrapped: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let s =
-        core::InviteSecret::from_parts(array(invite_id, "invite_id")?, array(secret, "secret")?);
+    let s = core::InviteSecret::from_parts(array(invite_id, "invite_id")?, &*secret32(secret)?);
     Ok(PyBytes::new(py, &s.unwrap_welcome(wrapped).map_err(err)?))
 }
 

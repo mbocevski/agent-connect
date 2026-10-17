@@ -91,7 +91,7 @@ fn invite_kdf_vectors() {
     for (i, display_name) in (0..3u8).zip(["bob", "", "Zo\u{eb}'s agent \u{1D11E}"]) {
         let id: [u8; 16] = rng.array().unwrap();
         let secret: [u8; 32] = rng.array().unwrap();
-        let invite = InviteSecret::from_parts(id, secret);
+        let invite = InviteSecret::from_parts(id, &secret);
         let key_package: Vec<u8> = (0..40).map(|b| b ^ i).collect();
         let mailbox = mailbox_id(&rng.array::<32>().unwrap());
         let input = MacInput {
@@ -261,7 +261,7 @@ fn invite_url_vectors() {
     let (seed, rng) = vector_rng("invite-urls.json");
     let mut valid = Vec::new();
     for host in ["relay.example", "relay.example:8443", "localhost:8080"] {
-        let s = InviteSecret::from_parts(rng.array().unwrap(), rng.array().unwrap());
+        let s = InviteSecret::from_parts(rng.array().unwrap(), &rng.array().unwrap());
         let link = InviteLink::parse(&format!(
             "{}://{host}/i/{}#v=0&s={}",
             if host.starts_with("localhost") {

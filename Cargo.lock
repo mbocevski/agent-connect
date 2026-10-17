@@ -65,6 +65,7 @@ version = "0.0.0"
 dependencies = [
  "agentconnect-core",
  "pyo3",
+ "zeroize",
 ]
 
 [[package]]

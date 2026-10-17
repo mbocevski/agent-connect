@@ -15,6 +15,7 @@ crate-type = ["cdylib"]
 [dependencies]
 agentconnect-core.workspace = true
 pyo3.workspace = true
+zeroize.workspace = true
 
 # PyO3's macros expand to unsafe code, so this crate can't inherit
 # the workspace-wide `unsafe_code = "forbid"`.

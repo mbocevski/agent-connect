@@ -13,7 +13,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::clock::Clock;
-use crate::encoding::{b64, b64_decode_array};
+use crate::encoding::{b64, b64_decode_array, b64_decode_secret};
 use crate::error::{Error, Result};
 use crate::rng::Rng;
 
@@ -67,13 +67,13 @@ pub struct InviteSecret {
 }
 
 impl InviteSecret {
-    /// From raw parts.
+    /// From raw parts. The secret is copied into a zeroizing buffer; the
+    /// caller keeps (and should zeroize) its own copy.
     #[must_use]
-    pub fn from_parts(id: [u8; 16], secret: [u8; 32]) -> Self {
-        Self {
-            id,
-            secret: Zeroizing::new(secret),
-        }
+    pub fn from_parts(id: [u8; 16], secret: &[u8; 32]) -> Self {
+        let mut copy = Zeroizing::new([0u8; 32]);
+        copy.copy_from_slice(secret);
+        Self { id, secret: copy }
     }
 
     /// A fresh random invite id and secret.
@@ -320,13 +320,11 @@ impl InviteLink {
             None => return Err(Error::InvalidInviteUrl("missing v")),
         }
         let secret_b64 = secret.ok_or(Error::InvalidInviteUrl("missing s"))?;
-        let secret = Zeroizing::new(
-            b64_decode_array::<32>(secret_b64, "invite_secret")
-                .map_err(|_| Error::InvalidInviteUrl("invite_secret"))?,
-        );
+        let secret = b64_decode_secret::<32>(secret_b64, "invite_secret")
+            .map_err(|_| Error::InvalidInviteUrl("invite_secret"))?;
         Ok(Self {
             relay_host: host.to_owned(),
-            secret: InviteSecret::from_parts(id, *secret),
+            secret: InviteSecret { id, secret },
         })
     }
 
@@ -467,7 +465,7 @@ mod tests {
 
     fn link() -> InviteSecret {
         let (id, secret, _) = parts();
-        InviteSecret::from_parts(id, secret)
+        InviteSecret::from_parts(id, &secret)
     }
 
     #[test]
@@ -479,11 +477,11 @@ mod tests {
         assert_eq!(s.unwrap_welcome(&wrapped).unwrap(), b"welcome bytes");
 
         let (id, secret, other) = parts();
-        let wrong = InviteSecret::from_parts(id, other);
+        let wrong = InviteSecret::from_parts(id, &other);
         assert_eq!(wrong.unwrap_welcome(&wrapped), Err(Error::WelcomeAuth));
         let mut other_id_bytes = id;
         other_id_bytes[0] ^= 1;
-        let other_id = InviteSecret::from_parts(other_id_bytes, secret);
+        let other_id = InviteSecret::from_parts(other_id_bytes, &secret);
         assert_eq!(other_id.unwrap_welcome(&wrapped), Err(Error::WelcomeAuth));
         for i in [0, 12, wrapped.len() - 1] {
             let mut t = wrapped.clone();

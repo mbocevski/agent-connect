@@ -11,6 +11,7 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 
@@ -42,9 +43,41 @@ pub fn b64_decode(s: &str, what: &'static str) -> Result<Vec<u8>> {
 ///
 /// [`Error::Malformed`] if `s` isn't canonical base64url of `N` bytes.
 pub fn b64_decode_array<const N: usize>(s: &str, what: &'static str) -> Result<[u8; N]> {
-    b64_decode(s, what)?
-        .try_into()
-        .map_err(|_| Error::Malformed(what))
+    Ok(*b64_decode_secret(s, what)?)
+}
+
+/// Decodes unpadded base64url into exactly `N` bytes held in a
+/// [`Zeroizing`] buffer, with no intermediate copies: use it for secrets.
+///
+/// # Errors
+///
+/// [`Error::Malformed`] if `s` isn't canonical base64url of `N` bytes.
+pub fn b64_decode_secret<const N: usize>(
+    s: &str,
+    what: &'static str,
+) -> Result<Zeroizing<[u8; N]>> {
+    let mut out = Zeroizing::new([0u8; N]);
+    let len = Base64UrlUnpadded::decode(s, out.as_mut_slice())
+        .map_err(|_| Error::Malformed(what))?
+        .len();
+    if len != N {
+        return Err(Error::Malformed(what));
+    }
+    // Re-encoding makes canonicality explicit (no stray trailing bits).
+    let mut encoded = Zeroizing::new(vec![0u8; Base64UrlUnpadded::encoded_len(out.as_slice())]);
+    let canonical = Base64UrlUnpadded::encode(out.as_slice(), &mut encoded).is_ok_and(|e| e == s);
+    if canonical {
+        Ok(out)
+    } else {
+        Err(Error::Malformed(what))
+    }
+}
+
+/// `s` as a JCS (RFC 8785) string literal, quotes included.
+pub(crate) fn jcs_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    write_string(s, &mut out);
+    out
 }
 
 /// Lowercase hex.
@@ -243,6 +276,18 @@ mod tests {
             b64_decode_array::<3>("-_8", "x"),
             Err(Error::Malformed("x"))
         );
+        assert_eq!(
+            b64_decode_array::<1>("-_8", "x"),
+            Err(Error::Malformed("x"))
+        );
+        assert_eq!(*b64_decode_secret::<2>("-_8", "x").unwrap(), [0xfb, 0xff]);
+        for bad in ["-_9", "-_8=", "-_"] {
+            assert_eq!(
+                b64_decode_secret::<2>(bad, "x").map(|s| *s),
+                Err(Error::Malformed("x"))
+            );
+        }
+        assert_eq!(jcs_string("a\"\n"), "\"a\\\"\\n\"");
     }
 
     #[test]

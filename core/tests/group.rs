@@ -241,7 +241,7 @@ fn wrong_invite_secret_fails_mac_and_welcome() {
     let wrong_secret = agentconnect_core::Rng::for_test("wrong-secret")
         .array::<32>()
         .unwrap();
-    let wrong = InviteSecret::from_parts(*inv.secret().id(), wrong_secret);
+    let wrong = InviteSecret::from_parts(*inv.secret().id(), &wrong_secret);
     let req = b.client.create_join_request(&wrong, "b").unwrap();
     assert_eq!(
         a.client.verify_join_request(&req, &inv).unwrap_err(),
