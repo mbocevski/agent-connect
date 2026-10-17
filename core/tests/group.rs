@@ -166,7 +166,10 @@ fn member_that_missed_its_removal_cannot_decrypt_either() {
         .seal(&peers[0].client, &inner(&peers[0], "secret"))
         .unwrap();
     // C never sees the removal commit and has no next-epoch secrets.
-    assert!(groups[2].open(&peers[2].client, &ct).is_err());
+    assert_eq!(
+        groups[2].open(&peers[2].client, &ct),
+        Err(Error::WrongEpoch)
+    );
     drop(out);
 }
 
@@ -180,14 +183,20 @@ fn tampered_and_replayed_messages_are_rejected() {
     let mut tampered = ct.clone();
     let last = tampered.len() - 1;
     tampered[last] ^= 1;
-    assert!(groups[1].open(&peers[1].client, &tampered).is_err());
+    assert!(matches!(
+        groups[1].open(&peers[1].client, &tampered),
+        Err(Error::Mls(_))
+    ));
 
     let ct2 = groups[0]
         .seal(&peers[0].client, &inner(&peers[0], "twice"))
         .unwrap();
     groups[1].open(&peers[1].client, &ct2).unwrap();
     // Replay: the generation's key is gone.
-    assert!(groups[1].open(&peers[1].client, &ct2).is_err());
+    assert!(matches!(
+        groups[1].open(&peers[1].client, &ct2),
+        Err(Error::Mls(_))
+    ));
 
     // Garbage, and messages for another group.
     assert_eq!(
@@ -813,22 +822,57 @@ fn leave_via_remove_proposal() {
 #[test]
 fn multi_replica_identity_joins_and_is_removed_together() {
     let clock = clock();
-    let (peers, mut groups) = group_of(2, &clock);
+    let (peers, mut groups) = group_of(3, &clock);
     // B's second instance joins via an invite from A.
     let b2 = replica(&peers[1].identity, 77, &clock);
     let (gb2, out) = join(&peers[0], &mut groups[0], &b2);
-    expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
+    for i in [1, 2] {
+        expect_commit(groups[i].process(&peers[i].client, &out.commit).unwrap());
+    }
     groups.push(gb2);
     assert_converged(&groups);
-    // Removing B's identity removes both instances.
+    assert_eq!(groups[2].members().unwrap().len(), 4);
+    // Removing B's identity removes both instances, for every member.
     let out = groups[0]
         .remove(&peers[0].client, &peers[1].identity.id())
         .unwrap();
-    assert_eq!(out.routing.remove.len(), 2);
+    // OpenMLS orders the proposals; compare as sets.
+    let mut removed = out.routing.remove.clone();
+    removed.sort();
+    let mut expected = vec![
+        peers[1].client.instance().mailbox_id(),
+        b2.client.instance().mailbox_id(),
+    ];
+    expected.sort();
+    assert_eq!(removed, expected);
     groups[0]
         .confirm_pending_commit(&peers[0].client, &out.msg_id)
         .unwrap();
-    assert_eq!(groups[0].members().unwrap().len(), 1);
+    let seen_by_c = expect_commit(groups[2].process(&peers[2].client, &out.commit).unwrap());
+    assert_eq!(seen_by_c.removed.len(), 2);
+    assert!(
+        seen_by_c
+            .removed
+            .iter()
+            .all(|m| m.identity == peers[1].identity.id())
+    );
+    assert_eq!(seen_by_c.routing(), out.routing);
+    for (g, p) in [(1, &peers[1]), (3, &b2)] {
+        let Event::Removed(_) = groups[g].process(&p.client, &out.commit).unwrap() else {
+            panic!("replica {g} should see its removal");
+        };
+    }
+    let remaining = [peers[0].identity.id(), peers[2].identity.id()];
+    for g in [0, 2] {
+        let ids: Vec<String> = groups[g]
+            .members()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.identity)
+            .collect();
+        assert_eq!(ids, remaining);
+    }
+    assert_eq!(groups[0].sas(), groups[2].sas());
 }
 
 #[test]

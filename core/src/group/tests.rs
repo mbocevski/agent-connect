@@ -521,3 +521,220 @@ fn inner(c: &C) -> Vec<u8> {
     }))
     .unwrap()
 }
+
+/// SPEC §7.2, receiver side: B skips `seal` and sends an application
+/// message whose inner header claims to be from A. Every receiver drops it.
+#[test]
+fn receivers_drop_inner_sender_that_is_not_the_mls_sender() {
+    let (cs, mut gs) = trio();
+    let spoofed = |gs: &mut Vec<Group>, body: serde_json::Value| {
+        let msg = gs[1]
+            .mls
+            .create_message(
+                &cs[1].provider,
+                &cs[1].signer(),
+                &serde_json::to_vec(&body).unwrap(),
+            )
+            .unwrap();
+        wire(&msg).unwrap()
+    };
+    let as_a = spoofed(
+        &mut gs,
+        serde_json::json!({
+            "v": 0,
+            "sender": cs[0].instance().identity(),
+            "instance_id": cs[0].instance().cert().instance_id_hex(),
+        }),
+    );
+    let wrong_instance = spoofed(
+        &mut gs,
+        serde_json::json!({
+            "v": 0,
+            "sender": cs[1].instance().identity(),
+            "instance_id": cs[0].instance().cert().instance_id_hex(),
+        }),
+    );
+    for i in [0, 2] {
+        assert_eq!(
+            gs[i].open(&cs[i], &as_a),
+            Err(Error::CredentialMismatch("inner sender != MLS sender")),
+            "member {i}"
+        );
+        assert_eq!(
+            gs[i].open(&cs[i], &wrong_instance),
+            Err(Error::CredentialMismatch("inner instance_id != MLS sender")),
+            "member {i}"
+        );
+    }
+}
+
+fn vl(b: &[u8]) -> Vec<u8> {
+    openmls::prelude::tls_codec::VLBytes::new(b.to_vec())
+        .tls_serialize_detached()
+        .unwrap()
+}
+
+/// RFC 9420 `SignWithLabel`.
+fn sign_with_label(c: &C, label: &str, content: &[u8]) -> Vec<u8> {
+    let msg = [vl(format!("MLS 1.0 {label}").as_bytes()), vl(content)].concat();
+    c.instance().sign(&msg).to_vec()
+}
+
+/// A KeyPackage from `c`, validly signed (leaf and package) by `c`'s
+/// instance key, whose leaf HPKE encryption key is only 32 bytes: the
+/// RUSTSEC-2026-0331 shape, as a malicious joiner would build it.
+fn key_package_with_short_leaf_key(c: &C, inv: &Invite) -> KeyPackage {
+    use openmls::prelude::tls_codec::VLBytes;
+    let kp = c
+        .create_join_request(inv.secret(), "evil")
+        .unwrap()
+        .key_package;
+    let mut rest = &kp[4..];
+    let skip = |rest: &mut &[u8]| {
+        VLBytes::tls_deserialize(rest).unwrap();
+    };
+    let at = |rest: &[u8]| kp.len() - rest.len();
+    skip(&mut rest); // init_key
+    let leaf_start = at(rest);
+    skip(&mut rest); // encryption_key
+    let after_key = at(rest);
+    skip(&mut rest); // signature_key
+    rest = &rest[2..]; // credential_type (basic)
+    skip(&mut rest); // identity
+    for _ in 0..5 {
+        skip(&mut rest); // capabilities: versions, suites, extensions, proposals, credentials
+    }
+    rest = &rest[1 + 16..]; // leaf_node_source = key_package, lifetime
+    skip(&mut rest); // leaf extensions
+    let leaf_tbs_end = at(rest);
+    skip(&mut rest); // leaf signature
+    let exts_start = at(rest);
+    skip(&mut rest); // key package extensions
+    let exts_end = at(rest);
+
+    let short = Rng::for_test("short-leaf-key").array::<32>().unwrap();
+    let leaf_tbs = [vl(&short), kp[after_key..leaf_tbs_end].to_vec()].concat();
+    let leaf_sig = sign_with_label(c, "LeafNodeTBS", &leaf_tbs);
+    let tbs = [
+        kp[..leaf_start].to_vec(),
+        leaf_tbs,
+        vl(&leaf_sig),
+        kp[exts_start..exts_end].to_vec(),
+    ]
+    .concat();
+    let sig = sign_with_label(c, "KeyPackageTBS", &tbs);
+    let evil = [tbs, vl(&sig)].concat();
+    // The raw-byte precheck stops it at the inviter's JoinRequest check...
+    assert_eq!(
+        crate::mls::precheck_key_package(&evil),
+        Err(Error::HpkeKeyLength)
+    );
+    // ...but OpenMLS itself accepts it, so a member that skips the
+    // precheck can put it in a commit.
+    openmls::prelude::KeyPackageIn::tls_deserialize_exact(evil.as_slice())
+        .unwrap()
+        .validate(
+            c.provider.crypto(),
+            openmls::prelude::ProtocolVersion::Mls10,
+        )
+        .unwrap()
+}
+
+/// Review F10: the receiver-side HPKE length check runs on a real commit.
+/// A (the owner, so the Add is authorised) commits a raw Add of a
+/// KeyPackage with a short leaf key; every other member rejects it with
+/// `HpkeKeyLength` before merging, and nothing panics.
+#[test]
+fn receivers_reject_a_real_add_with_a_short_hpke_key() {
+    let (cs, mut gs) = trio();
+    let clock = Arc::new(FakeClock::default());
+    let d = client(95, &clock);
+    let inv = Invite::create(d.rng(), d.clock(), "r.example", Duration::from_secs(60)).unwrap();
+    let evil = key_package_with_short_leaf_key(&d, &inv);
+    let bytes = raw_commit!(gs[0], cs[0], |b| b.propose_adds([evil]));
+    all_reject(&cs, &mut gs, 0, &bytes, &Error::HpkeKeyLength);
+}
+
+/// Review F10: the joiner's HPKE length check runs on a real Welcome. A
+/// skips its own checks, merges an Add of a short-key leaf, then invites E:
+/// the ratchet tree in E's Welcome carries the short key, and E refuses the
+/// Welcome before OpenMLS stages it.
+#[test]
+fn joiner_rejects_a_real_welcome_whose_tree_has_a_short_hpke_key() {
+    let clock = Arc::new(FakeClock::default());
+    let a = client(10, &clock);
+    let mut ga = a.create_group("g", "p").unwrap();
+    let d = client(94, &clock);
+    let inv_d = Invite::create(d.rng(), d.clock(), "r.example", Duration::from_secs(60)).unwrap();
+    let evil = key_package_with_short_leaf_key(&d, &inv_d);
+    let signer = a.signer();
+    ga.mls
+        .commit_builder()
+        .propose_adds([evil])
+        .load_psks(a.provider.storage())
+        .unwrap()
+        .build(a.provider.rand(), a.provider.crypto(), &signer, |_| true)
+        .unwrap()
+        .stage_commit(&a.provider)
+        .unwrap();
+    ga.mls.merge_pending_commit(&a.provider).unwrap();
+
+    let e = client(93, &clock);
+    let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
+    let req = e.create_join_request(inv.secret(), "e").unwrap();
+    let kp = a.verify_join_request(&req, &inv).unwrap().key_package;
+    let bundle = ga
+        .mls
+        .commit_builder()
+        .propose_adds([kp])
+        .load_psks(a.provider.storage())
+        .unwrap()
+        .build(a.provider.rand(), a.provider.crypto(), &signer, |_| true)
+        .unwrap()
+        .stage_commit(&a.provider)
+        .unwrap();
+    let welcome = wire(&bundle.to_welcome_msg().unwrap()).unwrap();
+    let wrapped = inv.secret().wrap_welcome(a.rng(), &welcome).unwrap();
+    let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
+    assert_eq!(
+        e.join_from_wrapped_welcome(inv.secret(), &meta, &wrapped)
+            .unwrap_err(),
+        Error::HpkeKeyLength
+    );
+}
+
+/// Review F10: a GroupContextExtensions proposal that keeps all three
+/// extensions but changes `RequiredCapabilities` is rejected.
+#[test]
+fn gce_modifying_required_capabilities_is_rejected() {
+    use openmls::prelude::{ProposalType, RequiredCapabilitiesExtension};
+    let (cs, mut gs) = trio();
+    let ctx = check_group_context(gs[0].mls.extensions()).unwrap();
+    let mut types = crate::mls::ac_extension_types();
+    types.push(openmls::prelude::ExtensionType::RatchetTree);
+    let exts = Extensions::from_vec(vec![
+        Extension::Unknown(EXT_GROUP_META, UnknownExtension(ctx.meta_bytes.clone())),
+        Extension::Unknown(
+            EXT_GROUP_POLICY,
+            UnknownExtension(ctx.policy.to_json().unwrap()),
+        ),
+        // Same extension types, plus a required proposal type every member
+        // supports, so OpenMLS itself has no objection.
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+            &types,
+            &[ProposalType::Add],
+            &[],
+        )),
+    ])
+    .unwrap();
+    let bytes = raw_commit!(gs[0], cs[0], |b| b
+        .propose_group_context_extensions(exts)
+        .unwrap());
+    all_reject(
+        &cs,
+        &mut gs,
+        0,
+        &bytes,
+        &Error::InvalidGroupContext("RequiredCapabilities"),
+    );
+}

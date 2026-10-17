@@ -275,11 +275,10 @@ pub(crate) fn validate_key_package(
             .validate(crypto, ProtocolVersion::Mls10)
             .map_err(|_| Error::InvalidKeyPackage("signature or lifetime"))
     })?;
+    // `precheck_key_package` already checked the ciphersuite and the init key
+    // length on the raw bytes that `kp` was parsed from.
     if kp.ciphersuite() != CS {
         return Err(Error::WrongCiphersuite);
-    }
-    if kp.hpke_init_key().as_slice().len() != HPKE_PUBLIC_KEY_LEN {
-        return Err(Error::HpkeKeyLength);
     }
     if kp.extensions().iter().next().is_some() || kp.last_resort() {
         return Err(Error::InvalidKeyPackage("unexpected key package extension"));
@@ -351,7 +350,13 @@ mod tests {
 
     #[test]
     fn tree_key_checks() {
-        let vl = |n: usize| VLBytes::new(vec![1; n]).tls_serialize_detached().unwrap();
+        // Random bytes of the given length (TESTING.md: no literal key bytes).
+        let rng = crate::rng::Rng::for_test("tree-key-checks");
+        let vl = |n: usize| {
+            let mut key = vec![0u8; n];
+            rng.fill(&mut key).unwrap();
+            VLBytes::new(key).tls_serialize_detached().unwrap()
+        };
         let leaf = |e: usize, s: usize| [vl(e), vl(s)].concat();
         check_tree_keys([leaf(1216, 32)].into_iter(), [vl(1216)].into_iter()).unwrap();
         assert_eq!(
