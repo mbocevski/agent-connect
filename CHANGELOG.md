@@ -10,6 +10,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Spike validating OpenMLS 0.9 with the X-Wing ciphersuite (`spikes/mls-xwing`)
+  and its findings and recommendation in `docs/spikes/mls-xwing.md`.
 - Protocol specification v0 draft (`SPEC.md`): MLS groups with the X-Wing
   post-quantum ciphersuite, invite links, SAS verification, relay Delivery
   Service, group roles and floor control, threat model.

@@ -1,2 +1,6 @@
 [files]
 extend-exclude = ["Cargo.lock", "uv.lock", "LICENSE", "testdata/sas-emoji.json"]
+
+[default.extend-words]
+# hax: the verification toolchain libcrux is built with (hax-lib crates).
+hax = "hax"
