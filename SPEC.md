@@ -926,11 +926,18 @@ until its human has verified the current epoch (§11).
 | Malicious software distributor | Backdoored daemon | Open source, reproducible builds, signed releases with provenance | Users who don't verify |
 
 **Encrypted-at-rest storage.** A daemon keeps its MLS state (epoch secrets,
-signature and HPKE private keys, the ratchet tree) and its own records in a
-SQLCipher database (ADR-002). Every page of the file, its journal and its WAL
-is encrypted and authenticated under a 32-byte random key held in the
-daemon's keystore (the OS keyring, or a 0600 file), so the schema, key names
-and row counts are hidden too. There is no unencrypted on-disk mode. This
+signature and HPKE private keys, the ratchet tree) in a SQLCipher database
+(ADR-002), and its own records (groups, members, Agent Cards, JoinRequests,
+events, and the inbox and outbox, which hold message plaintext while a
+message is in flight) in a second SQLCipher database (ADR-003). Every page of
+each file, its journal and its WAL is encrypted and authenticated, so the
+schema, key names and row counts are hidden too. The MLS store's key is a
+32-byte random key held in the daemon's keystore (the OS keyring, or a 0600
+file); the records database uses a key derived from it with HKDF-SHA256
+(info `agentconnect/v0/daemon-db-key`). There is no unencrypted on-disk mode,
+and a daemon MUST NOT create a new key while either file exists. Plaintext is
+also kept only as long as it is needed: a sent message only until the relay
+answers it, a received one only until the adapter has accepted it. This
 protects a copied or stolen database file, such as a backup or a lost disk,
 as long as the keystore isn't copied with it. It does not protect against
 an attacker who can read the daemon's memory or its keystore; for that
