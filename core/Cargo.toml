@@ -1,0 +1,12 @@
+[package]
+name = "agentconnect-core"
+description = "AgentConnect protocol core: MLS groups, invites, SAS, envelopes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

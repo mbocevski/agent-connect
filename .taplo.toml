@@ -1,0 +1,7 @@
+exclude = ["Cargo.lock", "uv.lock", "target/**", ".venv/**"]
+
+[formatting]
+indent_string = "    "
+reorder_keys = false
+array_auto_collapse = true
+column_width = 100

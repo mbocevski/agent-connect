@@ -1,0 +1,22 @@
+[package]
+name = "agentconnect-core-py"
+description = "Python bindings for agentconnect-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "agentconnect_core_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+agentconnect-core.workspace = true
+pyo3.workspace = true
+
+# PyO3's macros expand to unsafe code, so this crate can't inherit
+# the workspace-wide `unsafe_code = "forbid"`.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
