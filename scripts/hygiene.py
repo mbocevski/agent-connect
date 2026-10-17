@@ -82,7 +82,8 @@ def _scan_files(paths: list[str]) -> list[Finding]:
 
 def _scan_range(base: str) -> list[Finding]:
     out = subprocess.run(  # noqa: S603
-        ["git", "log", "--format=%H%x00%B%x1e", f"{base}..HEAD"],  # noqa: S607
+        # --no-merges: CI checks out GitHub's synthetic "Merge X into Y" commit.
+        ["git", "log", "--no-merges", "--format=%H%x00%B%x1e", f"{base}..HEAD"],  # noqa: S607
         check=True,
         capture_output=True,
         text=True,

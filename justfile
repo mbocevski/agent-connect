@@ -87,7 +87,7 @@ relay:
 # Release builds: relay binary and Python wheels
 build:
     cargo build --release --locked -p agentconnect-relay
-    uv build --all-packages --out-dir dist
+    uv build --all-packages --sdist --wheel --out-dir dist
 
 # Push branch and open/refresh its PR
 pr:
