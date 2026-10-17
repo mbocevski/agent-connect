@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import agentconnect_core as ac
-from agentconnect.keystore import FileKeystore, KeystoreError
+from agentconnect.keystore import DataDirLockedError, FileKeystore, KeystoreError
 from agentconnect_harness.cluster import Cluster, Node
 
 MARKERS = (
@@ -91,3 +91,14 @@ async def test_a_wrong_or_missing_key_fails_cleanly(cluster: Cluster, rng: rando
     keys.put("db_key", original)
     await node.start()
     assert [g["name"] for g in node.daemon.list_groups()] == ["g"]
+
+
+async def test_a_second_daemon_on_the_same_data_dir_fails_fast(cluster: Cluster) -> None:
+    node = await cluster.node("solo")
+    with pytest.raises(DataDirLockedError, match="another agentconnect daemon"):
+        node._make()
+    # The running daemon is unaffected, and its keys weren't touched.
+    gid = node.daemon.create_group("still mine", "")
+    await node.idle()
+    await node.restart()  # stop releases the lock
+    assert [g["group_id"] for g in node.daemon.list_groups()] == [gid]

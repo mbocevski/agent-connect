@@ -52,7 +52,7 @@ from agentconnect.identity import (
     load_instance,
     open_core_client,
 )
-from agentconnect.keystore import Keystore, open_keystore, private_dir
+from agentconnect.keystore import DataDirLock, Keystore, open_keystore
 from agentconnect.limits import KNOWN_KINDS, RateLimiter, content_problem
 from agentconnect.relay import NotConnectedError, RelayError, RelayLink, RelayRest, b64, unb64
 from agentconnect.store import GroupRow, OutboxRow, Store
@@ -229,7 +229,16 @@ class Daemon:
         self.adapters: dict[str, Adapter] = {a.name: a for a in adapters}
         self.policy: PolicyHook = policy or PassThroughPolicy()
         self.options = options or Options()
-        private_dir(config.data_dir)
+        # Before touching keys or databases: one daemon per data directory.
+        self._lock = DataDirLock(config.data_dir)
+        try:
+            self._open(keystore)
+        except BaseException:
+            self._lock.release()
+            raise
+
+    def _open(self, keystore: Keystore | None) -> None:
+        config = self.config
         self.keystore = keystore or open_keystore(
             config.keystore, config.data_dir, self.options.keyring_backend
         )
@@ -324,6 +333,7 @@ class Daemon:
         self.store.close()
         # Drop the core client so its SQLite connections close.
         del self.client
+        self._lock.release()
         LOG.info("daemon_stopped")
 
     def _recover(self) -> None:

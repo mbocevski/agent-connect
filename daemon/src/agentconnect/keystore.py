@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import fcntl
 import hashlib
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Protocol, override
 
@@ -46,16 +48,57 @@ def private_file(path: Path) -> Path:
 
 
 def write_private(path: Path, data: bytes) -> None:
-    """Atomically replace ``path`` with ``data``, mode 0600."""
+    """Atomically replace ``path`` with ``data``, mode 0600: write a fresh
+    temporary file (unique name, created 0600) in the same directory, fsync
+    it, then ``os.replace`` it into place."""
     private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    tmp.replace(path)
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+class DataDirLockedError(RuntimeError):
+    """Another daemon holds the data directory."""
+
+
+class DataDirLock:
+    """An exclusive ``flock`` on ``<data_dir>/daemon.lock``, held for the
+    daemon's lifetime, so two daemons (or a daemon and a tool that opens
+    the same state) never share keys, databases or a mailbox."""
+
+    FILE = "daemon.lock"
+
+    def __init__(self, data_dir: Path) -> None:
+        private_dir(data_dir)
+        path = data_dir / self.FILE
+        self._fd: int | None = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(self._fd)
+            self._fd = None
+            msg = (
+                f"another agentconnect daemon is using {data_dir} "
+                "(stop it, or use another data directory)"
+            )
+            raise DataDirLockedError(msg) from None
+
+    def release(self) -> None:
+        if self._fd is not None:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            os.close(self._fd)
+            self._fd = None
 
 
 def _check_name(name: str) -> str:

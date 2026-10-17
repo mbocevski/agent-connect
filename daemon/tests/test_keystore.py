@@ -9,6 +9,8 @@ import keyring.errors
 import pytest
 
 from agentconnect.keystore import (
+    DataDirLock,
+    DataDirLockedError,
     FileKeystore,
     KeyringKeystore,
     KeystoreError,
@@ -125,3 +127,37 @@ def test_open_keystore_selection(tmp_path: Path) -> None:
         open_keystore("keyring", tmp_path, fail)
     with pytest.raises(KeystoreError, match="unknown"):
         open_keystore("vault", tmp_path, good)
+
+
+def test_write_private_is_atomic_and_leaves_no_temp_files(
+    tmp_path: Path, rng: random.Random, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "k" / "secret"
+    # A stale temp file from an old fixed-name scheme doesn't matter.
+    target.parent.mkdir(mode=0o700)
+    (target.parent / ".secret.tmp").write_bytes(b"stale")
+    value = rng.randbytes(32)
+    write_private(target, value)
+    assert target.read_bytes() == value
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert sorted(p.name for p in target.parent.iterdir()) == [".secret.tmp", "secret"]
+
+    # A failed write leaves the old value and no temp file behind.
+    def boom(_fd: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("os.fsync", boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_private(target, rng.randbytes(32))
+    assert target.read_bytes() == value
+    assert sorted(p.name for p in target.parent.iterdir()) == [".secret.tmp", "secret"]
+
+
+def test_the_data_dir_lock_is_exclusive(tmp_path: Path) -> None:
+    first = DataDirLock(tmp_path / "data")
+    with pytest.raises(DataDirLockedError, match="another agentconnect daemon"):
+        DataDirLock(tmp_path / "data")
+    assert stat.S_IMODE((tmp_path / "data" / "daemon.lock").stat().st_mode) == 0o600
+    first.release()
+    first.release()  # idempotent
+    DataDirLock(tmp_path / "data").release()

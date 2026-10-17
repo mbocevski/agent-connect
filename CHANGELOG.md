@@ -130,6 +130,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: an exclusive `flock` on `<data_dir>/daemon.lock` is taken
+  before any key or database is touched, so a second daemon on the same
+  data directory fails fast with a clear error instead of racing first-run
+  key creation (which could leave `mls.sqlite3` under an overwritten key).
+  Key files are written to a unique 0600 temporary file and `os.replace`d.
 - Daemon: the SPEC §10.2 limits are enforced on receive and on send:
   messages of at most 256 KiB, 30 per minute per sender and 120 per group,
   and only `text` and `data` A2A parts (`file` parts are refused).
