@@ -17,16 +17,20 @@
 //! - [`provider`]: storage backends ([`MemoryStore`], the SQLCipher-encrypted
 //!   [`SqliteStore`] and its [`DbKey`])
 //! - [`db`]: [`EncryptedDb`], the SQLCipher database for a daemon's own records
+//! - [`journal`]: the processing journal that makes processing crash-safe (ADR-004)
 #![warn(clippy::pedantic, missing_docs)]
 
 pub mod clock;
 pub mod db;
 pub mod encoding;
 mod error;
+#[doc(hidden)]
+pub mod failpoint;
 pub mod group;
 pub mod identity;
 pub mod invite;
 pub mod join;
+pub mod journal;
 mod mls;
 pub mod padding;
 pub mod policy;
@@ -46,6 +50,7 @@ pub use group::{
 pub use identity::{Identity, Instance, InstanceCert};
 pub use invite::{Invite, InviteLink, InviteMeta, InviteSecret};
 pub use join::JoinRequest;
+pub use journal::{JournalEntry, Journaled};
 pub use mls::{EXT_GROUP_META, EXT_GROUP_POLICY, EXT_INSTANCE_CERT, HPKE_PUBLIC_KEY_LEN};
 pub use policy::{GroupMeta, GroupPolicy};
 pub use provider::{DbKey, MemoryStore, SqliteStore, Store};

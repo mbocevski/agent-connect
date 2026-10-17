@@ -7,8 +7,8 @@
 //! and a panic is raised as `CoreError` (an `Exception`, unlike PyO3's
 //! `PanicException`). A `Client` whose operation panicked drops its cached
 //! groups, which are reloaded from storage on next use, so the client stays
-//! usable; a group whose stored state the panic left inconsistent then
-//! fails on its own and must be re-synced.
+//! usable. Every operation runs in one store transaction that a panic rolls
+//! back, so the stored state is what it was before the operation.
 //!
 //! Test-only entry points are named `_..._for_testing`: seeded randomness
 //! (keys from a 64-bit seed are guessable) and a settable clock. Production
@@ -814,17 +814,35 @@ impl Client {
 
     /// Joins from a wrapped Welcome, checking it against the InviteMeta
     /// (relay JSON) shown to the human. Returns the group id.
+    ///
+    /// With `key`, the join is journalled (ADR-004) with `context`: joining
+    /// again under the same key returns the same group instead of failing.
+    #[pyo3(signature = (link, invite_meta, wrapped_welcome, key=None, context=None))]
     fn join<'py>(
         &self,
         py: Python<'py>,
         link: &InviteLink,
         invite_meta: &[u8],
         wrapped_welcome: &[u8],
+        key: Option<&str>,
+        context: Option<&[u8]>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let id = py.detach(|| {
             with_client!(self, |c, groups| {
                 let meta = core::InviteMeta::from_json(invite_meta)?;
-                let g = c.join_from_wrapped_welcome(link.0.secret(), &meta, wrapped_welcome)?;
+                let g = match key {
+                    Some(k) => {
+                        c.join_journaled(
+                            link.0.secret(),
+                            &meta,
+                            wrapped_welcome,
+                            k,
+                            context.unwrap_or_default(),
+                        )?
+                        .value
+                    }
+                    None => c.join_from_wrapped_welcome(link.0.secret(), &meta, wrapped_welcome)?,
+                };
                 let id = g.group_id().to_vec();
                 groups.insert(id.clone(), g);
                 Ok(id)
@@ -834,17 +852,90 @@ impl Client {
     }
 
     /// Processes one MLS message; returns an event dict.
+    ///
+    /// With `key` (the caller's id for the message, e.g. `sender/msg_id`),
+    /// the event is journalled with `context` in the same transaction as
+    /// the state change (ADR-004), and the dict has `replayed`: true when
+    /// it is the journalled result of an earlier call under this key.
+    #[pyo3(signature = (group_id, message, key=None, context=None))]
     fn process<'py>(
         &self,
         py: Python<'py>,
         group_id: &[u8],
         message: &[u8],
+        key: Option<&str>,
+        context: Option<&[u8]>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let e = py.detach(|| {
-            with_client!(self, |c, groups| group(c, groups, group_id)?
-                .process(c, message))
+        let (e, replayed) = py.detach(|| {
+            with_client!(self, |c, groups| {
+                let g = group(c, groups, group_id)?;
+                match key {
+                    Some(k) => g
+                        .process_journaled(c, k, context.unwrap_or_default(), message)
+                        .map(|j| (j.value, Some(j.replayed))),
+                    None => g.process(c, message).map(|e| (e, None)),
+                }
+            })
         })?;
-        event(py, &e)
+        let d = event(py, &e)?;
+        if let Some(r) = replayed {
+            d.set_item("replayed", r)?;
+        }
+        Ok(d)
+    }
+
+    /// Journal entries not consumed yet, oldest first: dicts with
+    /// `group_id`, `key`, `welcome`, `context` and `event` (an event dict,
+    /// or `None` for a Welcome).
+    fn journal_pending<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let entries = with_client!(self, |c, _g| c.journal_pending())?;
+        let out = PyList::empty(py);
+        for e in &entries {
+            let d = PyDict::new(py);
+            d.set_item("group_id", PyBytes::new(py, &e.group_id))?;
+            d.set_item("key", &e.key)?;
+            d.set_item("welcome", e.welcome)?;
+            d.set_item("context", PyBytes::new(py, &e.context))?;
+            match &e.event {
+                Some(ev) => d.set_item("event", event(py, ev)?)?,
+                None => d.set_item("event", py.None())?,
+            }
+            out.append(d)?;
+        }
+        Ok(out)
+    }
+
+    /// Consumes a journal entry (its result and context are deleted, its
+    /// key kept to recognise a redelivery). `group_id=None` for a Welcome
+    /// entry. Returns whether the entry exists.
+    #[pyo3(signature = (key, group_id=None))]
+    fn journal_consume(&self, key: &str, group_id: Option<&[u8]>) -> PyResult<bool> {
+        with_client!(self, |c, _g| c.journal_consume(group_id, key))
+    }
+
+    /// Deletes consumed journal entries older than `before` (Unix seconds).
+    fn journal_purge(&self, before: u64) -> PyResult<u64> {
+        with_client!(self, |c, _g| c.journal_purge(before))
+    }
+
+    /// **Tests only**: arm a core failpoint (`action` is `"error"` or
+    /// `"panic"`) to fire `times` times.
+    #[pyo3(signature = (name, action="error", times=1))]
+    fn _arm_failpoint_for_testing(&self, name: &str, action: &str, times: u32) -> PyResult<()> {
+        let action = match action {
+            "error" => core::failpoint::Action::Error,
+            "panic" => core::failpoint::Action::Panic,
+            _ => return Err(AgentConnectError::new_err("action must be error or panic")),
+        };
+        with_client!(self, |c, _g| c.failpoints().arm(name, action, times))
+    }
+
+    /// **Tests only**: disarm every core failpoint.
+    fn _clear_failpoints_for_testing(&self) -> PyResult<()> {
+        with_client!(self, |c, _g| {
+            c.failpoints().clear();
+            Ok(())
+        })
     }
 
     /// Encrypts an inner message (JSON bytes).
@@ -972,17 +1063,34 @@ impl Client {
     }
 
     /// Merges the pending commit on the relay's `accepted{msg_id}`.
+    ///
+    /// With `key`, journalled like `process` (use the key the commit's
+    /// fan-out copy is processed under); the dict then has `replayed`.
+    #[pyo3(signature = (group_id, msg_id, key=None, context=None))]
     fn confirm_pending_commit<'py>(
         &self,
         py: Python<'py>,
         group_id: &[u8],
         msg_id: &str,
+        key: Option<&str>,
+        context: Option<&[u8]>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let s = py.detach(|| {
-            with_client!(self, |c, groups| group(c, groups, group_id)?
-                .confirm_pending_commit(c, msg_id))
+        let (s, replayed) = py.detach(|| {
+            with_client!(self, |c, groups| {
+                let g = group(c, groups, group_id)?;
+                match key {
+                    Some(k) => g
+                        .confirm_pending_commit_journaled(c, msg_id, k, context.unwrap_or_default())
+                        .map(|j| (j.value, Some(j.replayed))),
+                    None => g.confirm_pending_commit(c, msg_id).map(|s| (s, None)),
+                }
+            })
         })?;
-        summary(py, &s)
+        let d = summary(py, &s)?;
+        if let Some(r) = replayed {
+            d.set_item("replayed", r)?;
+        }
+        Ok(d)
     }
 
     fn discard_pending_commit(&self, group_id: &[u8]) -> PyResult<()> {
