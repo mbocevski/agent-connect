@@ -6,6 +6,19 @@
 - **Question:** Can `core/` be built on OpenMLS with the post-quantum hybrid
   ciphersuite of SPEC §3.1, and what has to change in SPEC first?
 
+## Decisions (maintainer, 2026-10-17)
+
+| Question | Decision |
+|---|---|
+| Go / no-go | **GO** on OpenMLS 0.9 with `openmls_libcrux_crypto`. |
+| hpke-rs MPL-2.0 | **Allowed, scoped** to the three hpke-rs crates (ADR-001 §4). |
+| Ciphersuite | **WG track:** `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`, draft-ietf-mls-pq-ciphersuites TBD1, OpenMLS provisional `0x004F`. `0x004D` (X-Wing) is not used. |
+| Provider advisories | **Build `core` now, mitigate:** check HPKE key lengths before OpenMLS; the `deny.toml` ignores are temporary; no release or public relay until a fixed provider ships (ADR-001 §2). |
+| Invite binding | **AEAD-wrapped Welcome only** (SPEC §6.4); the PSK binding is dropped. |
+
+The proposed SPEC edits below are applied in a follow-up change with these
+choices.
+
 ## Recommendation: GO, with conditions
 
 OpenMLS 0.9.1 with `openmls_libcrux_crypto` 0.4.0 does everything SPEC v0

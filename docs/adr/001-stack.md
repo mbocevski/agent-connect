@@ -88,10 +88,20 @@ upstream docs.
   protocol version.
 - The libcrux provider is newer than the rust-crypto one.
 
-`docs/spikes/mls-xwing.md` (task: *Spike: validate OpenMLS + X-Wing*)
-validates all three before the core is built. If X-Wing proves unworkable,
-the fallback is classical X25519 (`0x0003`) with post-quantum deferred. That
-fallback needs the maintainer's sign-off.
+**Spike outcome (2026-10-17): GO** (`docs/spikes/mls-xwing.md`). OpenMLS
+covers everything v0 needs, so the classical fallback isn't needed.
+
+**Accepted risk: provider advisories.** `openmls_libcrux_crypto` 0.4.0, the
+only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
+- RUSTSEC-2026-0331 is reachable: a validly signed KeyPackage with a short
+  hybrid key panics the inviter, so anyone holding an invite link can crash
+  the inviter's daemon. RUSTSEC-2026-0329 and RUSTSEC-2026-0330 are also open.
+- Fixed crates exist upstream, but no provider release ships them yet.
+- Decision: build `core` on 0.4.0 now. `core` MUST check the length of every
+  HPKE public key before handing it to OpenMLS, with a regression test. The
+  advisories are ignored in `deny.toml` as **temporary**.
+- **Release blocker:** no release and no public relay until a fixed provider
+  is published and the ignores are removed.
 
 ### 3. Tooling
 
@@ -133,6 +143,13 @@ fallback needs the maintainer's sign-off.
   of our dependencies. Only MIT, Apache-2.0, BSD, ISC and Zlib licences are
   allowed in dependencies; `cargo-deny` enforces this. **AGPL and GPL are
   banned.**
+  - **One scoped exception (approved 2026-10-17):** MPL-2.0 for `hpke-rs`,
+    `hpke-rs-crypto` and `hpke-rs-libcrux`. They're the HPKE layer of both
+    OpenMLS crypto providers, so OpenMLS can't be used without them. MPL-2.0
+    is file-level copyleft. Using the crates unmodified is compatible with
+    Apache-2.0 distribution and a hosted relay; if we ever modify their
+    files, we must publish those files. MPL-2.0 stays banned for every other
+    crate.
 - **Hosting:** a public repo on the maintainer's personal GitHub
   (`mbocevski/agent-connect`), open from the start.
   - Gating runs in two layers. Locally: hooks plus `just merge`, which
