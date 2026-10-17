@@ -86,7 +86,7 @@ pub fn verify_rest_auth(
     body: &[u8],
     relay_host: &str,
     now_secs: u64,
-) -> Result<String, &'static str> {
+) -> Result<RestCredentials, &'static str> {
     let token = header
         .strip_prefix(REST_SCHEME)
         .and_then(|r| r.strip_prefix(' '))
@@ -101,12 +101,28 @@ pub fn verify_rest_auth(
     if ts.abs_diff(now_secs) > REST_MAX_SKEW_SECS {
         return Err("timestamp outside the accepted window");
     }
-    verify(
+    let mailbox = verify(
         key,
         sig,
         &rest_auth_message(method, path, ts, body, relay_host),
     )
-    .ok_or("bad signature")
+    .ok_or("bad signature")?;
+    Ok(RestCredentials {
+        mailbox,
+        sig: sig.to_owned(),
+        ts,
+    })
+}
+
+/// A verified signed REST request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestCredentials {
+    /// The authenticated mailbox.
+    pub mailbox: String,
+    /// The request signature (the replay-cache key, with the mailbox).
+    pub sig: String,
+    /// The signed timestamp, unix seconds.
+    pub ts: u64,
 }
 
 #[cfg(test)]

@@ -38,6 +38,7 @@ pub struct Metrics {
     accepted: AtomicU64,
     duplicates: AtomicU64,
     delivered: AtomicU64,
+    overflows: AtomicU64,
     commits: AtomicU64,
     joins_forwarded: AtomicU64,
     invites_created: AtomicU64,
@@ -64,6 +65,11 @@ impl Metrics {
 
     pub(crate) fn delivered(&self, n: usize) {
         self.delivered
+            .fetch_add(u64::try_from(n).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    pub(crate) fn overflows(&self, n: usize) {
+        self.overflows
             .fetch_add(u64::try_from(n).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
@@ -113,6 +119,11 @@ impl Metrics {
             "agentconnect_relay_deliveries_total",
             "Message copies queued for mailboxes.",
             &self.delivered,
+        );
+        counter(
+            "agentconnect_relay_queue_overflows_total",
+            "Mailbox queue overflow episodes started.",
+            &self.overflows,
         );
         counter(
             "agentconnect_relay_commits_total",
@@ -212,6 +223,17 @@ impl Rates {
     }
 }
 
+/// Maximum number of live entries in the REST replay cache.
+pub const REPLAY_CACHE_CAP: usize = 10_000;
+
+/// Signatures of recently accepted signed REST requests.
+#[derive(Debug, Default)]
+struct ReplayCache {
+    /// (mailbox, signature) -> last second at which the request would still
+    /// have been inside the accepted window.
+    seen: HashMap<(String, String), u64>,
+}
+
 /// `POST /v0/invites` body: `InviteMeta` minus status and `uses_left`, plus
 /// the inviter's mailbox (SPEC §8.1).
 #[derive(Debug, Deserialize)]
@@ -282,6 +304,8 @@ pub struct Relay<S: Store> {
     limits: Limits,
     hub: Arc<Hub>,
     rates: Mutex<Rates>,
+    replays: Mutex<ReplayCache>,
+    replay_cap: usize,
     metrics: Metrics,
 }
 
@@ -296,8 +320,52 @@ impl<S: Store> Relay<S> {
             limits,
             hub: Arc::default(),
             rates: Mutex::default(),
+            replays: Mutex::default(),
+            replay_cap: REPLAY_CACHE_CAP,
             metrics: Metrics::default(),
         }
+    }
+
+    /// Override the replay-cache capacity (tests).
+    #[must_use]
+    pub fn with_replay_cap(mut self, cap: usize) -> Self {
+        self.replay_cap = cap;
+        self
+    }
+
+    /// Record a verified signed REST request and refuse a repeat.
+    ///
+    /// Entries live until the request would have left the accepted window.
+    /// Expired entries are evicted first; if the cache is still full the new
+    /// request is refused rather than evicting a live entry.
+    ///
+    /// # Errors
+    ///
+    /// `auth_failed` for a replay, `rate_limited` when the cache is full.
+    pub fn check_replay(&self, creds: &crate::auth::RestCredentials) -> Result<(), RelayError> {
+        let now = self.now_secs();
+        let mut cache = lock(&self.replays);
+        let key = (creds.mailbox.clone(), creds.sig.clone());
+        if cache.seen.get(&key).is_some_and(|until| *until >= now) {
+            return Err(RelayError::new(
+                ErrorCode::AuthFailed,
+                "request already used",
+            ));
+        }
+        if cache.seen.len() >= self.replay_cap {
+            cache.seen.retain(|_, until| *until >= now);
+            if cache.seen.len() >= self.replay_cap {
+                return Err(RelayError::new(
+                    ErrorCode::RateLimited,
+                    "too many signed requests; retry later",
+                ));
+            }
+        }
+        cache.seen.insert(
+            key,
+            creds.ts.saturating_add(crate::auth::REST_MAX_SKEW_SECS),
+        );
+        Ok(())
     }
 
     /// The host string signed into authentication.
@@ -495,7 +563,11 @@ impl<S: Store> Relay<S> {
             .await
             .map_err(|e| internal(&e))?;
         match outcome {
-            GroupOutcome::Delivered { recipients, .. } => {
+            GroupOutcome::Delivered {
+                recipients,
+                overflowed,
+                ..
+            } => {
                 Metrics::inc(&self.metrics.accepted);
                 if env.kind == Kind::Commit {
                     Metrics::inc(&self.metrics.commits);
@@ -508,7 +580,15 @@ impl<S: Store> Relay<S> {
                     recipients = recipients.len(),
                     "accepted"
                 );
-                self.wake(&recipients);
+                if !overflowed.is_empty() {
+                    self.metrics.overflows(overflowed.len());
+                    tracing::warn!(
+                        group = %log_tag(group_id),
+                        members = overflowed.len(),
+                        "mailbox queues full; overflow markers queued"
+                    );
+                }
+                self.wake(recipients.iter().chain(&overflowed));
                 Ok(env.msg_id)
             }
             GroupOutcome::Duplicate => {
@@ -526,10 +606,6 @@ impl<S: Store> Relay<S> {
             GroupOutcome::GroupFull => Err(E::new(
                 ErrorCode::QuotaExceeded,
                 format!("group is limited to {} instances", self.limits.group_max),
-            )),
-            GroupOutcome::QuotaExceeded => Err(E::new(
-                ErrorCode::QuotaExceeded,
-                "a recipient queue is full",
             )),
         }
     }

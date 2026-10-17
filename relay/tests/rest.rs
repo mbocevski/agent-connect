@@ -27,7 +27,7 @@ async fn create(h: &Harness, key: u8, body: &Value) -> (StatusCode, Value) {
         "POST",
         "/v0/invites",
         &bytes,
-        h.now_secs(),
+        h.ts(),
         HOST,
     );
     call(h, req).await
@@ -58,7 +58,7 @@ async fn create_get_and_revoke_an_invite() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, meta);
 
-    let del = |key: u8| signed_request(&signing_key(key), "DELETE", &path, b"", h.now_secs(), HOST);
+    let del = |key: u8| signed_request(&signing_key(key), "DELETE", &path, b"", h.ts(), HOST);
     let (status, err) = call(&h, del(2)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(err["code"], "auth_failed");
@@ -88,7 +88,7 @@ async fn unknown_invites_are_404() {
         let (status, err) = call(&h, Request::get(&path).body(Body::empty()).unwrap()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(err["code"], "invite_not_open");
-        let req = signed_request(&signing_key(1), "DELETE", &path, b"", h.now_secs(), HOST);
+        let req = signed_request(&signing_key(1), "DELETE", &path, b"", h.ts(), HOST);
         assert_eq!(call(&h, req).await.0, StatusCode::NOT_FOUND);
     }
 }
@@ -202,26 +202,84 @@ async fn duplicate_invite_ids_and_malformed_bodies_are_bad_requests() {
     assert_eq!(create(&h, 1, &body).await.0, StatusCode::BAD_REQUEST);
 
     let junk = b"not json".to_vec();
-    let req = signed_request(
-        &signing_key(1),
-        "POST",
-        "/v0/invites",
-        &junk,
-        h.now_secs(),
-        HOST,
-    );
+    let req = signed_request(&signing_key(1), "POST", "/v0/invites", &junk, h.ts(), HOST);
     assert_eq!(call(&h, req).await.0, StatusCode::BAD_REQUEST);
 
     let huge = vec![b' '; 32 * 1024];
-    let req = signed_request(
-        &signing_key(1),
-        "POST",
-        "/v0/invites",
-        &huge,
-        h.now_secs(),
-        HOST,
-    );
+    let req = signed_request(&signing_key(1), "POST", "/v0/invites", &huge, h.ts(), HOST);
     assert_eq!(call(&h, req).await.0, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn a_replayed_signed_request_is_refused_but_a_fresh_one_is_not() {
+    let h = Harness::start().await;
+    let key = signing_key(1);
+    let id = fresh_id();
+    let body = body_for(&h, 1, &id).to_string().into_bytes();
+    let ts = h.now_secs();
+    let make = |ts| signed_request(&key, "POST", "/v0/invites", &body, ts, HOST);
+
+    assert_eq!(call(&h, make(ts)).await.0, StatusCode::CREATED);
+    let (status, err) = call(&h, make(ts)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(err["code"], "auth_failed");
+    // Same request with a new timestamp is a new request (and now a duplicate invite).
+    let (status, err) = call(&h, make(ts + 1)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+
+    // DELETE replays too: the second use of one signature is refused.
+    let path = format!("/v0/invites/{id}");
+    let del = || signed_request(&key, "DELETE", &path, b"", ts + 2, HOST);
+    assert_eq!(call(&h, del()).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(call(&h, del()).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn replay_entries_expire_with_the_accepted_window() {
+    use agentconnect_relay::auth::RestCredentials;
+    let h = Harness::start().await;
+    let creds = RestCredentials {
+        mailbox: mailbox_of(&signing_key(1)),
+        sig: "sig".into(),
+        ts: h.now_secs(),
+    };
+    assert!(h.relay.check_replay(&creds).is_ok());
+    h.clock.advance(Duration::from_secs(300));
+    assert!(
+        h.relay.check_replay(&creds).is_err(),
+        "still inside the window"
+    );
+    h.clock.advance(Duration::from_secs(1));
+    assert!(
+        h.relay.check_replay(&creds).is_ok(),
+        "entry expired with the window"
+    );
+}
+
+#[tokio::test]
+async fn the_replay_cache_is_bounded_and_never_evicts_live_entries() {
+    let h = Harness::with_replay_cap(2).await;
+    let key = signing_key(1);
+    let get_invite_del = |n: u64| {
+        let path = format!("/v0/invites/{}", fresh_id());
+        signed_request(&key, "DELETE", &path, b"", h.now_secs() + n, HOST)
+    };
+    // Both are well-formed signed requests; the invites do not exist (404),
+    // but each one occupies a cache slot.
+    assert_eq!(call(&h, get_invite_del(0)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&h, get_invite_del(1)).await.0, StatusCode::NOT_FOUND);
+    let (status, err) = call(&h, get_invite_del(2)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(err["code"], "rate_limited");
+    // The first two are still protected from replay at the cap.
+    let first = {
+        let path = "/v0/invites/x".to_owned();
+        signed_request(&key, "DELETE", &path, b"", h.ts(), HOST)
+    };
+    assert_eq!(call(&h, first).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // Once the window has passed the expired entries make room.
+    h.clock.advance(Duration::from_secs(400));
+    assert_eq!(call(&h, get_invite_del(0)).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

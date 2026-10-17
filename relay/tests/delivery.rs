@@ -376,45 +376,139 @@ async fn groups_are_limited_to_50_instances() {
     assert_eq!(r["t"], "accepted");
 }
 
-#[tokio::test]
-async fn a_full_recipient_queue_rejects_the_send_atomically() {
-    let h = Harness::with_limits(Limits {
+fn is_marker(e: &Value) -> bool {
+    e["t"] == "queue_overflow"
+}
+
+async fn fill(a: &mut Client, gid: &str, n: usize) {
+    for _ in 0..n {
+        let m = a.envelope("application", gid, 1);
+        assert_eq!(a.send(&m).await["t"], "accepted");
+    }
+}
+
+async fn small_queue_harness() -> Harness {
+    Harness::with_limits(Limits {
         queue_max_bytes: 3000,
         sends_per_sec: 100_000,
         ..Limits::default()
     })
-    .await;
+    .await
+}
+
+#[tokio::test]
+async fn a_full_member_does_not_block_the_others() {
+    let h = small_queue_harness().await;
     let mut a = h.client(1).await;
     let b = h.client(2).await;
-    let c = h.client(3).await;
+    let mut c = h.client(3).await;
     let gid = make_group(&mut a, &[&b, &c]).await;
-    let mut accepted = 0;
-    loop {
-        let r = a.send(&a.envelope("application", &gid, 1)).await;
-        if r["t"] == "error" {
-            assert_eq!(r["code"], "quota_exceeded");
-            break;
-        }
-        accepted += 1;
-        assert!(accepted < 100, "quota never hit");
+
+    let mut sent = Vec::new();
+    for _ in 0..40 {
+        let m = a.envelope("application", &gid, 1);
+        sent.push(m["msg_id"].as_str().unwrap().to_owned());
+        // The sender always gets `accepted`.
+        assert_eq!(a.send(&m).await["t"], "accepted");
+        // C keeps up; B never acks.
+        let got = c.deliver().await;
+        c.ack(got["msg_id"].as_str().unwrap()).await;
     }
-    assert!(accepted > 0);
-    // All-or-nothing: B and C hold the same messages.
-    assert_eq!(queued(&h, &b.mailbox).await.len(), accepted);
-    assert_eq!(queued(&h, &c.mailbox).await.len(), accepted);
-    // Acking frees room.
+    let b_queue = queued(&h, &b.mailbox).await;
+    let b_msgs: Vec<_> = b_queue.iter().filter(|e| !is_marker(e)).collect();
+    let b_markers: Vec<_> = b_queue.iter().filter(|e| is_marker(e)).collect();
+    assert!(!b_msgs.is_empty() && b_msgs.len() < sent.len());
+    assert_eq!(b_markers.len(), 1, "one marker for the whole episode");
+
+    // The marker names the first dropped message, right after the last queued.
+    let first_dropped = &sent[b_msgs.len()];
+    assert_eq!(b_markers[0]["msg_id"], *first_dropped);
+    assert_eq!(b_markers[0]["group_id"], gid);
+    assert_eq!(b_markers[0]["epoch"], 1);
+    assert_eq!(
+        h.relay
+            .metrics()
+            .render()
+            .matches("queue_overflows_total 1")
+            .count(),
+        1
+    );
+
+    // B's connection receives the queued messages and then the marker.
     let mut b = b;
+    for m in &b_msgs {
+        assert_eq!(b.deliver().await["msg_id"], m["msg_id"]);
+    }
+    let marker = b.marker().await;
+    assert_eq!(marker["t"], "queue_overflow");
+    assert_eq!(marker["msg_id"], *first_dropped);
+}
+
+#[tokio::test]
+async fn overflow_marker_is_sent_once_per_episode_and_delivery_resumes_after_drain() {
+    let h = small_queue_harness().await;
+    let mut a = h.client(1).await;
+    let mut b = h.client(2).await;
+    let gid = make_group(&mut a, &[&b]).await;
+
+    let markers = |q: &[Value]| q.iter().filter(|e| is_marker(e)).count();
+    fill(&mut a, &gid, 30).await;
+    let q = queued(&h, &b.mailbox).await;
+    assert_eq!(markers(&q), 1);
+    fill(&mut a, &gid, 10).await;
+    assert_eq!(
+        markers(&queued(&h, &b.mailbox).await),
+        1,
+        "still the same episode"
+    );
+
+    // B drains everything, marker included.
     let ids: Vec<String> = queued(&h, &b.mailbox)
         .await
         .iter()
         .map(|e| e["msg_id"].as_str().unwrap().to_owned())
         .collect();
     b.ack_and_sync(&ids).await;
-    let mut c = c;
-    c.ack_and_sync(&ids).await;
-    assert_eq!(
-        a.send(&a.envelope("application", &gid, 1)).await["t"],
-        "accepted"
+    assert!(queued(&h, &b.mailbox).await.is_empty());
+
+    // Delivery resumes with ordinary copies and no marker.
+    let m = a.envelope("application", &gid, 1);
+    assert_eq!(a.send(&m).await["t"], "accepted");
+    let q = queued(&h, &b.mailbox).await;
+    assert_eq!((q.len(), markers(&q)), (1, 0));
+    assert_eq!(q[0]["msg_id"], m["msg_id"]);
+
+    // A second overflow is a new episode with its own marker.
+    fill(&mut a, &gid, 40).await;
+    let q = queued(&h, &b.mailbox).await;
+    assert_eq!(markers(&q), 1);
+    assert!(
+        h.relay
+            .metrics()
+            .render()
+            .contains("queue_overflows_total 2")
+    );
+}
+
+#[tokio::test]
+async fn an_overflowed_commit_still_advances_the_group() {
+    let h = small_queue_harness().await;
+    let mut a = h.client(1).await;
+    let b = h.client(2).await;
+    let gid = make_group(&mut a, &[&b]).await;
+    for _ in 0..30 {
+        a.send(&a.envelope("application", &gid, 1)).await;
+    }
+    let c = commit(&a, &gid, 1, &[], &[]);
+    assert_eq!(a.send(&c).await["t"], "accepted");
+    let g = h.relay.store().get_group(&gid).await.unwrap().unwrap();
+    assert_eq!(g.current_epoch, 2);
+    assert!(
+        !queued(&h, &b.mailbox)
+            .await
+            .iter()
+            .any(|e| e["msg_id"] == c["msg_id"]),
+        "the dropped commit is not in B's queue"
     );
 }
 

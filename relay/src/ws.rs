@@ -96,7 +96,11 @@ async fn flush<S: Store>(
         for m in batch {
             // The stored envelope JSON is forwarded verbatim; it is never
             // inspected or logged.
-            let text = format!(r#"{{"t":"deliver","env":{}}}"#, m.json);
+            let text = if m.marker {
+                m.json
+            } else {
+                format!(r#"{{"t":"deliver","env":{}}}"#, m.json)
+            };
             if socket.send(Message::text(text)).await.is_err() {
                 return false;
             }

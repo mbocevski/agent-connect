@@ -35,10 +35,10 @@ group and invite ids) appear only as a short SHA-256 tag.
 | `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. |
 | `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers. |
 
-### Signed REST requests (not yet in SPEC 8.1)
+### Signed REST requests (SPEC 8.1.1)
 
-SPEC 8.1 says `POST` and `DELETE /v0/invites` need "mailbox auth" without
-defining it. The relay uses the same Ed25519 instance key as the WebSocket:
+`POST` and `DELETE /v0/invites` use the same Ed25519 instance key as the
+WebSocket:
 
 ```
 Authorization: AgentConnect-Ed25519 <SK.pub b64url>.<unix seconds>.<signature b64url>
@@ -53,18 +53,30 @@ mailbox is derived from `SK.pub` exactly as for the WebSocket, and
 `inviter_mailbox` in the body must equal it. A reverse proxy must not rewrite
 the path.
 
+Each signed request is single use: the relay keeps an in-memory cache of
+accepted `(mailbox, signature)` pairs until the request would fall outside the
+window, and answers a repeat with `auth_failed`. The cache holds at most
+10,000 live entries; when it is full, new signed requests get `rate_limited`
+(live entries are never evicted). Use a fresh timestamp for every request.
+
 ## Behaviour notes
 
 - Commits fan out to the members from before the commit (including the sender
   and any member the commit removes); members added by the commit receive a
   Welcome instead. After the commit, removed mailboxes receive nothing new.
-- A send is all-or-nothing: if any recipient's queue (64 MiB) is full, nothing
-  is queued and the sender gets `quota_exceeded`.
+- A full mailbox queue (64 MiB) never blocks a fan-out: every recipient with
+  room gets the message and the sender gets `accepted`. A recipient without
+  room gets one `queue_overflow` frame per overflow episode
+  (`{"t":"queue_overflow","group_id","msg_id","epoch"}`, naming the first
+  dropped message). It is cleared by acking that `msg_id`, and the episode
+  ends once the queue has room again. A `join` to a full inviter queue still
+  gets `quota_exceeded`.
 - `msg_id` idempotency is scoped to the sender and lasts as long as the
-  message TTL (7 days).
+  message TTL (7 days). A rejected send does not consume its `msg_id`.
 - `group.create` and `invite.consume` echo an optional client-supplied
-  `msg_id` in their `accepted` or `error` reply, and otherwise the group or
-  invite id.
+  `msg_id` (up to 64 characters) in their `accepted` or `error` reply, and
+  otherwise the group or invite id. `epoch_conflict` errors carry
+  `current_epoch`.
 - The SQLite store uses a single connection, so every operation is serialised.
   The `Store` trait keeps each decision (commit ordering, invite use, quota,
   idempotency) a single atomic call so a Postgres backend can replace it.

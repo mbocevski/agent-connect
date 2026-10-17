@@ -7,6 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Longest optional correlation `msg_id` on `group.create` / `invite.consume`.
+pub const MAX_CORRELATION_ID: usize = 64;
 /// Length of a base64url `mailbox_id` (SPEC §2).
 pub const MAILBOX_ID_LEN: usize = 22;
 /// Maximum number of recipients in a `welcome_wrapped` envelope.
@@ -326,6 +328,18 @@ pub enum ServerFrame {
         /// The envelope.
         env: Box<Envelope>,
     },
+    /// This mailbox's queue was full and messages for a group were dropped.
+    /// Sent once per overflow episode; the member must re-sync or be removed.
+    #[serde(rename = "queue_overflow")]
+    QueueOverflow {
+        /// The group whose traffic was dropped.
+        group_id: String,
+        /// The first dropped message.
+        msg_id: String,
+        /// That message's epoch (absent for a Welcome).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
+    },
     /// A send was accepted.
     #[serde(rename = "accepted")]
     Accepted {
@@ -387,6 +401,14 @@ pub fn parse_client_frame(text: &str, max_len: usize) -> Result<ClientFrame, (Er
             .map_err(|e| (ErrorCode::BadRequest, e.to_owned()))?,
         ClientFrame::Ack { msg_id } if !is_id16(msg_id) => {
             return Err((ErrorCode::BadRequest, "malformed msg_id".into()));
+        }
+        ClientFrame::GroupCreate {
+            msg_id: Some(m), ..
+        }
+        | ClientFrame::InviteConsume {
+            msg_id: Some(m), ..
+        } if m.chars().count() > MAX_CORRELATION_ID => {
+            return Err((ErrorCode::BadRequest, "msg_id is too long".into()));
         }
         _ => {}
     }
@@ -548,6 +570,12 @@ mod tests {
             ErrorCode::BadRequest
         );
         assert_eq!(code(r#"{"t":"ack","msg_id":"x"}"#, 5), ErrorCode::TooLarge);
+        let long = format!(
+            r#"{{"t":"invite.consume","invite_id":"{}","msg_id":"{}"}}"#,
+            id16(1),
+            "m".repeat(65)
+        );
+        assert_eq!(code(&long, 1000), ErrorCode::BadRequest);
         assert_eq!(
             code(r#"{"t":"send","env":{"v":0,"kind":"commit"}}"#, 1000),
             ErrorCode::BadRequest
@@ -571,6 +599,15 @@ mod tests {
         assert_eq!(
             f.to_json(),
             r#"{"t":"error","code":"not_member","detail":"no"}"#
+        );
+        let f = ServerFrame::QueueOverflow {
+            group_id: "g".into(),
+            msg_id: "m".into(),
+            epoch: None,
+        };
+        assert_eq!(
+            f.to_json(),
+            r#"{"t":"queue_overflow","group_id":"g","msg_id":"m"}"#
         );
         let f = ServerFrame::Deliver {
             env: Box::new(env(Kind::Application)),

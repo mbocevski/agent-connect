@@ -40,9 +40,21 @@ impl Harness {
     }
 
     pub async fn with_limits(limits: Limits) -> Self {
+        Self::build(limits, None).await
+    }
+
+    pub async fn with_replay_cap(cap: usize) -> Self {
+        Self::build(Limits::default(), Some(cap)).await
+    }
+
+    async fn build(limits: Limits, replay_cap: Option<usize>) -> Self {
         let clock = Arc::new(FakeClock::default());
         let store = SqliteStore::in_memory().await.unwrap();
-        let relay = Arc::new(Relay::new(store, clock.clone(), HOST, limits));
+        let mut relay = Relay::new(store, clock.clone(), HOST, limits);
+        if let Some(cap) = replay_cap {
+            relay = relay.with_replay_cap(cap);
+        }
+        let relay = Arc::new(relay);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let router = app(relay.clone());
@@ -62,6 +74,12 @@ impl Harness {
     pub fn now_secs(&self) -> u64 {
         self.relay.now_secs()
     }
+
+    /// A timestamp inside the accepted window that differs on every call, so
+    /// repeated signed requests are not replays of one another.
+    pub fn ts(&self) -> u64 {
+        self.now_secs() + NEXT_TS.fetch_add(1, Ordering::Relaxed) % 250
+    }
 }
 
 pub fn signing_key(n: u8) -> SigningKey {
@@ -73,6 +91,7 @@ pub fn mailbox_of(key: &SigningKey) -> String {
 }
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TS: AtomicU64 = AtomicU64::new(0);
 
 /// A process-unique 16-byte id in base64url.
 pub fn fresh_id() -> String {
@@ -131,6 +150,7 @@ pub struct Client {
     pub mailbox: String,
     delivers: VecDeque<Value>,
     replies: VecDeque<Value>,
+    markers: VecDeque<Value>,
 }
 
 impl Client {
@@ -150,6 +170,7 @@ impl Client {
             mailbox,
             delivers: VecDeque::new(),
             replies: VecDeque::new(),
+            markers: VecDeque::new(),
         }
     }
 
@@ -161,6 +182,8 @@ impl Client {
         let v = raw_recv(&mut self.ws).await.expect("connection closed");
         if v["t"] == "deliver" {
             self.delivers.push_back(v);
+        } else if v["t"] == "queue_overflow" {
+            self.markers.push_back(v);
         } else {
             self.replies.push_back(v);
         }
@@ -172,6 +195,14 @@ impl Client {
             self.pump().await;
         }
         self.replies.pop_front().unwrap()
+    }
+
+    /// The next `queue_overflow` marker frame.
+    pub async fn marker(&mut self) -> Value {
+        while self.markers.is_empty() {
+            self.pump().await;
+        }
+        self.markers.pop_front().unwrap()
     }
 
     /// The next `deliver` frame's envelope.

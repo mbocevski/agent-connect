@@ -94,7 +94,7 @@ fn authenticate<S: Store>(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| denied("missing Authorization header"))?;
-    verify_rest_auth(
+    let creds = verify_rest_auth(
         value,
         method.as_str(),
         uri.path(),
@@ -102,7 +102,10 @@ fn authenticate<S: Store>(
         relay.host(),
         relay.now_secs(),
     )
-    .map_err(denied)
+    .map_err(denied)?;
+    // Signed requests are single use (SPEC 8.1).
+    relay.check_replay(&creds)?;
+    Ok(creds.mailbox)
 }
 
 async fn create_invite<S: Store>(

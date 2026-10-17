@@ -12,7 +12,7 @@ use std::time::Duration;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
-use crate::proto::Kind;
+use crate::proto::{Kind, ServerFrame};
 use crate::store::{
     ConsumeOutcome, CreateGroupOutcome, DirectOutcome, GroupOutcome, GroupSend, GroupState,
     InviteRecord, Limits, NewMessage, PurgeStats, RevokeOutcome, Store, StoreError, StoreResult,
@@ -125,34 +125,76 @@ async fn queue_bytes(
     Ok(u64_of(row.try_get::<i64, _>(0)?))
 }
 
-/// Queue `msg` for each recipient and record its idempotency key. Returns
-/// false (and writes nothing) if any queue would exceed its quota.
+/// Where a dropped group message came from, for the overflow marker.
+struct MarkerInfo<'a> {
+    group_id: &'a str,
+    epoch: Option<u64>,
+}
+
+/// Recipients of a fan-out, split by what happened.
+struct Fanout {
+    delivered: Vec<String>,
+    overflowed: Vec<String>,
+}
+
+/// Queue `msg` for each recipient and record its idempotency key.
+///
+/// With a `marker`, a recipient whose queue is full is skipped and gets one
+/// overflow marker per episode. Without one (direct sends), a full queue
+/// aborts before anything is written and `None` is returned.
 async fn enqueue_all(
     tx: &mut Transaction<'_, Sqlite>,
     recipients: &BTreeSet<String>,
     msg: &NewMessage,
     limits: &Limits,
     now_ms: u64,
-) -> StoreResult<bool> {
+    marker: Option<&MarkerInfo<'_>>,
+) -> StoreResult<Option<Fanout>> {
     let size = u64::try_from(msg.json.len()).unwrap_or(u64::MAX);
-    for r in recipients {
-        if queue_bytes(tx, r, now_ms).await?.saturating_add(size) > limits.queue_max_bytes {
-            return Ok(false);
-        }
-    }
     let ttl = u64::try_from(limits.message_ttl.as_millis()).unwrap_or(u64::MAX);
     let expires = i64_of(now_ms.saturating_add(ttl));
+    let mut room = Vec::with_capacity(recipients.len());
     for r in recipients {
-        sqlx::query(
-            "INSERT INTO messages (mailbox, msg_id, env, size, expires_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(r)
-        .bind(&msg.msg_id)
-        .bind(&msg.json)
-        .bind(i64_of(size))
-        .bind(expires)
-        .execute(&mut **tx)
-        .await?;
+        let full = queue_bytes(tx, r, now_ms).await?.saturating_add(size) > limits.queue_max_bytes;
+        if full && marker.is_none() {
+            return Ok(None);
+        }
+        room.push(!full);
+    }
+    let mut out = Fanout {
+        delivered: Vec::new(),
+        overflowed: Vec::new(),
+    };
+    for (r, has_room) in recipients.iter().zip(room) {
+        let flagged = sqlx::query("SELECT 1 FROM overflow WHERE mailbox = ?")
+            .bind(r)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some();
+        if has_room {
+            if flagged {
+                // The queue drained below the limit: the episode is over.
+                sqlx::query("DELETE FROM overflow WHERE mailbox = ?")
+                    .bind(r)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            insert_message(tx, r, &msg.msg_id, &msg.json, false, expires).await?;
+            out.delivered.push(r.clone());
+        } else if !flagged && let Some(info) = marker {
+            sqlx::query("INSERT INTO overflow (mailbox) VALUES (?)")
+                .bind(r)
+                .execute(&mut **tx)
+                .await?;
+            let frame = ServerFrame::QueueOverflow {
+                group_id: info.group_id.to_owned(),
+                msg_id: msg.msg_id.clone(),
+                epoch: info.epoch,
+            }
+            .to_json();
+            insert_message(tx, r, &msg.msg_id, &frame, true, expires).await?;
+            out.overflowed.push(r.clone());
+        }
     }
     sqlx::query("INSERT INTO seen (sender, msg_id, expires_at) VALUES (?, ?, ?)")
         .bind(&msg.sender)
@@ -160,7 +202,30 @@ async fn enqueue_all(
         .bind(expires)
         .execute(&mut **tx)
         .await?;
-    Ok(true)
+    Ok(Some(out))
+}
+
+async fn insert_message(
+    tx: &mut Transaction<'_, Sqlite>,
+    mailbox: &str,
+    msg_id: &str,
+    json: &str,
+    marker: bool,
+    expires: i64,
+) -> StoreResult<()> {
+    sqlx::query(
+        "INSERT INTO messages (mailbox, msg_id, env, size, expires_at, marker) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(mailbox)
+    .bind(msg_id)
+    .bind(json)
+    .bind(i64_of(u64::try_from(json.len()).unwrap_or(u64::MAX)))
+    .bind(expires)
+    .bind(i64::from(marker))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn invite_from_row(r: &sqlx::sqlite::SqliteRow) -> StoreResult<InviteRecord> {
@@ -363,9 +428,15 @@ impl Store for SqliteStore {
                 .collect(),
             Kind::WelcomeWrapped | Kind::JoinRequest => send.to.iter().cloned().collect(),
         };
-        if !enqueue_all(&mut tx, &recipients, send.msg, limits, now_ms).await? {
-            return Ok(GroupOutcome::QuotaExceeded);
-        }
+        let info = MarkerInfo {
+            group_id: send.group_id,
+            epoch: (send.kind != Kind::WelcomeWrapped).then_some(send.epoch),
+        };
+        let Some(fanout) =
+            enqueue_all(&mut tx, &recipients, send.msg, limits, now_ms, Some(&info)).await?
+        else {
+            return Err(StoreError("fan-out without a marker aborted".into()));
+        };
         let mut epoch = current;
         if send.kind == Kind::Commit {
             epoch = current + 1;
@@ -397,7 +468,8 @@ impl Store for SqliteStore {
         }
         tx.commit().await?;
         Ok(GroupOutcome::Delivered {
-            recipients: recipients.into_iter().collect(),
+            recipients: fanout.delivered,
+            overflowed: fanout.overflowed,
             epoch,
         })
     }
@@ -414,7 +486,10 @@ impl Store for SqliteStore {
             return Ok(DirectOutcome::Duplicate);
         }
         let recipients = BTreeSet::from([recipient.to_owned()]);
-        if !enqueue_all(&mut tx, &recipients, msg, limits, now_ms).await? {
+        if enqueue_all(&mut tx, &recipients, msg, limits, now_ms, None)
+            .await?
+            .is_none()
+        {
             return Ok(DirectOutcome::QuotaExceeded);
         }
         tx.commit().await?;
@@ -429,7 +504,7 @@ impl Store for SqliteStore {
         now_ms: u64,
     ) -> StoreResult<Vec<StoredMessage>> {
         let rows = sqlx::query(
-            "SELECT seq, msg_id, env FROM messages \
+            "SELECT seq, msg_id, env, marker FROM messages \
              WHERE mailbox = ? AND seq > ? AND expires_at > ? ORDER BY seq LIMIT ?",
         )
         .bind(mailbox)
@@ -444,6 +519,7 @@ impl Store for SqliteStore {
                     seq: r.try_get(0)?,
                     msg_id: r.try_get(1)?,
                     json: r.try_get(2)?,
+                    marker: r.try_get::<i64, _>(3)? != 0,
                 })
             })
             .collect()

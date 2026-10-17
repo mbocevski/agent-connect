@@ -193,8 +193,11 @@ pub struct StoredMessage {
     pub seq: i64,
     /// Message id.
     pub msg_id: String,
-    /// Serialised envelope.
+    /// Serialised envelope, or the `queue_overflow` frame for a marker.
     pub json: String,
+    /// True for an overflow marker, which is sent as-is rather than wrapped
+    /// in a `deliver` frame.
+    pub marker: bool,
 }
 
 /// A group-bound send, decided atomically by the store.
@@ -225,6 +228,10 @@ pub enum GroupOutcome {
     Delivered {
         /// Recipients that received a copy.
         recipients: Vec<String>,
+        /// Recipients whose queue was full and who got an overflow marker
+        /// (first drop of an episode). Recipients already in an episode are
+        /// in neither list.
+        overflowed: Vec<String>,
         /// The group's epoch after the operation.
         epoch: u64,
     },
@@ -241,8 +248,6 @@ pub enum GroupOutcome {
     },
     /// The commit would exceed the group size limit.
     GroupFull,
-    /// A recipient's queue would exceed its quota.
-    QuotaExceeded,
 }
 
 /// Outcome of a direct (non-group) send.
