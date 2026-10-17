@@ -460,6 +460,15 @@ class Store:
         )
         return [dict(zip(self._APPROVAL_KEYS, r, strict=True)) for r in rows]
 
+    def uses_taken(self, invite_id: str) -> int:
+        """Approvals that hold one of the invite's uses (approving or done)."""
+        row = self._one(
+            "SELECT count(*) FROM approvals WHERE invite_id = ? "
+            "AND status IN ('approving', 'approved')",
+            invite_id,
+        )
+        return 0 if row is None else int(row[0])
+
     def set_approval_status(self, request_id: str, status: str) -> None:
         # A decided request no longer needs its body (key package, name).
         keep = status in ("pending", "approving")

@@ -27,6 +27,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
+import httpx
+
 import agentconnect_core as ac
 from agentconnect import log
 from agentconnect.adapter import (
@@ -59,6 +61,7 @@ LOG = log.get("agentconnect.daemon")
 UPDATE_AFTER_SECS = 24 * 3600  # SPEC §3.1 update cadence
 UPDATE_AFTER_MESSAGES = 1000
 APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
+JOIN_CLOSED_GRACE_SECS = 60
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
 # SPEC 7.3: controls only a human-originated message may carry.
@@ -272,6 +275,10 @@ class Daemon:
         self._outbox_wake.set()
         self._delivery_wake.set()
         self._pulse()
+        try:
+            await self.check_joins()
+        except Exception as e:  # never let the reconnect hook die
+            LOG.warning("check_joins_failed", error=type(e).__name__)
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         await self._frames.put(frame)
@@ -687,6 +694,11 @@ class Daemon:
         if invite is None or obj is None:
             LOG.info("join_request_unknown_invite", invite=log.hid(invite_id))
             return
+        if self._invite_closed(invite):
+            # SPEC 6.2 step 1: no uses left (or expired). The joiner sees the
+            # SPEC 4.3 "already used" warning when its join lapses.
+            LOG.info("join_request_invite_used", invite=log.hid(invite_id))
+            return
         try:
             verified = self.client.verify_join_request(raw, obj)
         except (ac.AgentConnectError, ac.CoreError) as e:
@@ -715,6 +727,45 @@ class Daemon:
         )
         if self.config.auto_approve:
             self.approve(request_id)
+
+    async def check_joins(self) -> None:
+        """SPEC 4.3: a pending join whose invite was used up or revoked
+        lapses with the "already used" warning, so a joiner beaten to a
+        single-use link (perhaps by whoever intercepted it) hears about it.
+
+        The relay marks an invite used only after the inviter sent the
+        Welcome, so a join is failed only once the invite has been seen
+        closed for :data:`JOIN_CLOSED_GRACE_SECS` (its Welcome may still be
+        on the way). Runs on every (re)connect.
+        """
+        for pending in self.store.pending_joins():
+            invite_id = pending["invite_id"]
+            try:
+                status = (await self.rest.invite_meta(invite_id)).get("status")
+            except RelayError as e:
+                status = "revoked" if e.code == "invite_not_open" else None
+            except (OSError, httpx.HTTPError, ValueError):
+                status = None
+            key = f"join_closed/{invite_id}"
+            if status not in ("exhausted", "revoked", "expired"):
+                continue
+            seen = self.store.kv_get(key)
+            if seen is None:
+                self.store.kv_set(key, str(self.now()))
+                continue
+            if self.now() - int(seen) < JOIN_CLOSED_GRACE_SECS:
+                continue
+            if self.store.join_status(invite_id) != ("pending", None):
+                continue  # the Welcome arrived meanwhile
+            self.store.finish_join(invite_id, "failed")
+            self.keystore.delete(f"join/{invite_id}")
+            await self.emit(
+                None,
+                "join_failed",
+                invite_id=invite_id,
+                reason="invite_used",
+                warning=INVITE_WARNING,
+            )
 
     async def _on_welcome(self, env: dict[str, Any]) -> str | None:
         wrapped = unb64(str(env.get("ct", "")))
@@ -1303,14 +1354,33 @@ class Daemon:
             )
         return out
 
+    def _invite_closed(self, invite: dict[str, Any]) -> bool:
+        """No uses left (counting approvals already under way) or expired."""
+        return bool(
+            str(invite["status"]) != "open"
+            or self.now() >= int(invite["expires_at"])
+            or self.store.uses_taken(str(invite["invite_id"])) >= int(invite["max_uses"])
+        )
+
     def approve(self, request_id: str) -> None:
-        """Human-gated: commit the Add for a verified JoinRequest."""
+        """Human-gated: commit the Add for a verified JoinRequest.
+
+        Each approval reserves one of the invite's uses before its Add is
+        queued (SPEC 6.2 step 1), so a single-use link admits one joiner even
+        when two redemptions arrive together. A failed Add releases it.
+        """
+        # Synchronous on the event loop: the check and the reservation can't
+        # interleave with another approval.
         approval = self.store.approval(request_id)
         if approval is None or approval["status"] != "pending":
             raise DaemonError("not_found", "no such pending request")
         if self.now() - approval["received_at"] > APPROVAL_TIMEOUT_SECS:
             self.store.set_approval_status(request_id, "expired")
             raise DaemonError("expired", "the approval window (1 hour) has passed")
+        invite = self.store.invite(approval["invite_id"])
+        if invite is None or self._invite_closed(invite):
+            self.store.set_approval_status(request_id, "rejected")
+            raise DaemonError("invite_not_open", "the invite has no uses left or expired")
         self.store.set_approval_status(request_id, "approving")
         self._enqueue(
             "commit", approval["group_id"], {"intent": {"type": "add", "request_id": request_id}}

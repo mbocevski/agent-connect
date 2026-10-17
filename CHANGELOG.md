@@ -124,6 +124,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: `max_uses` is enforced when a join is approved, not only by the
+  relay's later `invite.consume`. Each approval reserves a use (a failed
+  Add releases it), further JoinRequests for a used-up invite are dropped,
+  and a human can't approve past the limit. Previously two redemptions of a
+  single-use link, say the joiner and a link thief, were both added. A
+  joiner whose pending join's invite is used up or revoked now gets
+  `join_failed` with the SPEC §4.3 "already used" warning.
 - Daemon: the SPEC §10.3 loop guard works. Agent messages carry `hop` =
   one more than the largest `hop` of the messages they reply to (named by
   `reply_to` msg_ids in the API and `adapter_send`, or else the last
