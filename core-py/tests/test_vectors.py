@@ -30,15 +30,24 @@ def lp(field: bytes) -> bytes:
     return len(field).to_bytes(4, "big") + field
 
 
+def hkdf_sha256(ikm: bytes, salt: bytes, info: bytes) -> bytes:
+    """RFC 5869 HKDF-SHA256 with a 32-byte output (one expand block)."""
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
+
+
 def test_invite_kdf_vectors() -> None:
     for case in load("invite-kdf.json")["cases"]:
         invite_id, secret = h(case["invite_id"]), h(case["invite_secret"])
-        join_key = ac.derive_join_key(invite_id, secret)
+        # The bindings never hand out join_key or welcome_key; check the
+        # derivation (SPEC 3.5) independently here.
+        join_key = hkdf_sha256(secret, invite_id, b"agentconnect/v0/join")
         assert join_key.hex() == case["join_key"]
-        assert ac.derive_welcome_key(invite_id, secret).hex() == case["welcome_key"]
+        welcome_key = hkdf_sha256(secret, invite_id, b"agentconnect/v0/welcome")
+        assert welcome_key.hex() == case["welcome_key"]
         req = case["join_request"]
         mac = ac.join_request_mac(
-            join_key, invite_id, h(req["key_package"]), req["mailbox_id"], req["display_name"]
+            invite_id, secret, h(req["key_package"]), req["mailbox_id"], req["display_name"]
         )
         assert mac.hex() == req["mac"]
         # The MAC input, rebuilt independently (SPEC 6.1 length-prefixed fields).

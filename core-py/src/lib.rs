@@ -1,9 +1,21 @@
 //! Python bindings for `agentconnect-core`, exposed as `agentconnect_core._native`.
 //!
 //! Synchronous, bytes in and bytes out. MLS work runs with the GIL
-//! released. Every error is raised as `AgentConnectError`.
+//! released. Errors from the core are raised as `AgentConnectError`.
+//!
+//! No panic crosses into Python: every binding runs under `catch_unwind`
+//! and a panic is raised as `CoreError` (an `Exception`, unlike PyO3's
+//! `PanicException`). A `Client` whose operation panicked drops its cached
+//! groups, which are reloaded from storage on next use, so the client stays
+//! usable; a group whose stored state the panic left inconsistent then
+//! fails on its own and must be re-synced.
+//!
+//! Test-only entry points are named `_..._for_testing`: seeded randomness
+//! (keys from a 64-bit seed are guessable) and a settable clock. Production
+//! code never needs them.
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,7 +25,7 @@ use agentconnect_core::clock::Clock;
 use agentconnect_core::group::{CommitOut, CommitSummary, Event, MemberInfo};
 use agentconnect_core::{Group, MemoryStore, SqliteStore};
 use pyo3::create_exception;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use zeroize::Zeroizing;
@@ -25,17 +37,34 @@ create_exception!(
     "An error from the AgentConnect core."
 );
 
+create_exception!(
+    _native,
+    CoreError,
+    PyException,
+    "An internal failure (a panic) inside the AgentConnect core. The operation \
+     did not complete. A Client drops its cached group state and reloads it \
+     from storage on next use."
+);
+
 fn err(e: core::Error) -> PyErr {
     AgentConnectError::new_err(e.to_string())
 }
 
+fn panicked() -> PyErr {
+    // The panic payload is not included: it could carry data we must not
+    // surface (AGENTS.md: no secrets or bodies in errors).
+    CoreError::new_err("the core panicked; the operation did not complete")
+}
+
+/// Runs a binding body, turning a panic into `CoreError`.
+fn guarded<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| Err(panicked()))
+}
+
 type CoreResult<T> = core::Result<T>;
 
-fn rng(seed: Option<u64>) -> CoreResult<core::Rng> {
-    Ok(match seed {
-        Some(s) => core::Rng::from_u64(s),
-        None => core::Rng::os()?,
-    })
+fn panic_for_testing() -> CoreResult<()> {
+    panic!("panic requested by a test")
 }
 
 fn array<const N: usize>(b: &[u8], what: &'static str) -> PyResult<[u8; N]> {
@@ -53,6 +82,18 @@ fn secret32(b: &[u8]) -> PyResult<Zeroizing<[u8; 32]>> {
     Ok(out)
 }
 
+/// The latest time the test clock accepts: 9999-12-31T23:59:59Z.
+const MAX_TEST_TIME: u64 = 253_402_300_799;
+
+fn test_time(now: u64) -> PyResult<u64> {
+    if now == 0 || now > MAX_TEST_TIME {
+        return Err(AgentConnectError::new_err(
+            "time must be between 1 and 253402300799 (Unix seconds)",
+        ));
+    }
+    Ok(now)
+}
+
 /// System time, or a fixed time set from Python (tests).
 #[derive(Debug, Default)]
 struct SettableClock {
@@ -63,7 +104,9 @@ impl Clock for SettableClock {
     fn now(&self) -> SystemTime {
         match self.fixed_secs.load(Ordering::SeqCst) {
             0 => SystemTime::now(),
-            s => UNIX_EPOCH + Duration::from_secs(s),
+            s => UNIX_EPOCH
+                .checked_add(Duration::from_secs(s))
+                .unwrap_or_else(SystemTime::now),
         }
     }
 }
@@ -74,58 +117,86 @@ struct Identity(core::Identity);
 
 #[pymethods]
 impl Identity {
-    /// A fresh identity. `seed` is for tests only.
+    /// A fresh identity from OS randomness.
     #[staticmethod]
-    #[pyo3(signature = (seed=None))]
-    fn generate(seed: Option<u64>) -> PyResult<Self> {
-        Ok(Self(
-            core::Identity::generate(&rng(seed).map_err(err)?).map_err(err)?,
-        ))
+    fn generate() -> PyResult<Self> {
+        guarded(|| {
+            let rng = core::Rng::os().map_err(err)?;
+            Ok(Self(core::Identity::generate(&rng).map_err(err)?))
+        })
+    }
+
+    /// **Tests only**: an identity from a 64-bit seed (guessable keys).
+    #[staticmethod]
+    fn _generate_for_testing(seed: u64) -> PyResult<Self> {
+        guarded(|| {
+            Ok(Self(
+                core::Identity::generate(&core::Rng::from_u64(seed)).map_err(err)?,
+            ))
+        })
     }
 
     /// Restores an identity from its 32-byte secret.
     #[staticmethod]
     fn from_secret_bytes(secret: &[u8]) -> PyResult<Self> {
-        Ok(Self(core::Identity::from_secret_bytes(&*secret32(secret)?)))
+        guarded(|| Ok(Self(core::Identity::from_secret_bytes(&*secret32(secret)?))))
     }
 
     /// The 32-byte secret (store it encrypted).
-    fn secret_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.0.secret_bytes().as_slice())
+    fn secret_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, self.0.secret_bytes().as_slice())))
     }
 
     #[getter]
-    fn public_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.0.public_key())
+    fn public_key<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, &self.0.public_key())))
     }
 
     #[getter]
-    fn id(&self) -> String {
-        self.0.id()
+    fn id(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.id()))
     }
 
     #[getter]
-    fn fingerprint(&self) -> String {
-        self.0.fingerprint()
+    fn fingerprint(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.fingerprint()))
     }
 
-    /// A new instance (signing key + certificate). `seed` and `now` (Unix
-    /// seconds) are for tests only.
+    /// A new instance (signing key + certificate) from OS randomness.
+    fn create_instance(&self) -> PyResult<Instance> {
+        guarded(|| {
+            let rng = core::Rng::os().map_err(err)?;
+            let inst = self
+                .0
+                .create_instance(&rng, &core::clock::SystemClock)
+                .map_err(err)?;
+            Ok(Instance(inst))
+        })
+    }
+
+    /// **Tests only**: an instance from a 64-bit seed and/or created at a
+    /// fixed time `now` (Unix seconds).
     #[pyo3(signature = (seed=None, now=None))]
-    fn create_instance(&self, seed: Option<u64>, now: Option<u64>) -> PyResult<Instance> {
-        let clock = SettableClock::default();
-        if let Some(n) = now {
-            clock.fixed_secs.store(n, Ordering::SeqCst);
-        }
-        let inst = self
-            .0
-            .create_instance(&rng(seed).map_err(err)?, &clock)
-            .map_err(err)?;
-        Ok(Instance(inst))
+    fn _create_instance_for_testing(
+        &self,
+        seed: Option<u64>,
+        now: Option<u64>,
+    ) -> PyResult<Instance> {
+        guarded(|| {
+            let clock = SettableClock::default();
+            if let Some(n) = now {
+                clock.fixed_secs.store(test_time(n)?, Ordering::SeqCst);
+            }
+            let rng = match seed {
+                Some(s) => core::Rng::from_u64(s),
+                None => core::Rng::os().map_err(err)?,
+            };
+            Ok(Instance(self.0.create_instance(&rng, &clock).map_err(err)?))
+        })
     }
 
-    fn __repr__(&self) -> String {
-        format!("Identity({})", self.0.id())
+    fn __repr__(&self) -> PyResult<String> {
+        guarded(|| Ok(format!("Identity({})", self.0.id())))
     }
 }
 
@@ -137,46 +208,46 @@ struct Instance(core::Instance);
 impl Instance {
     #[staticmethod]
     fn from_secret_bytes(data: &[u8]) -> PyResult<Self> {
-        Ok(Self(core::Instance::from_secret_bytes(data).map_err(err)?))
+        guarded(|| Ok(Self(core::Instance::from_secret_bytes(data).map_err(err)?)))
     }
 
     /// Secret key and certificate (store it encrypted).
     fn to_secret_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        Ok(PyBytes::new(py, &self.0.to_secret_bytes().map_err(err)?))
+        guarded(|| Ok(PyBytes::new(py, &self.0.to_secret_bytes().map_err(err)?)))
     }
 
     #[getter]
-    fn identity(&self) -> String {
-        self.0.identity().to_owned()
+    fn identity(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.identity().to_owned()))
     }
 
     #[getter]
-    fn instance_id(&self) -> u64 {
-        self.0.instance_id()
+    fn instance_id(&self) -> PyResult<u64> {
+        guarded(|| Ok(self.0.instance_id()))
     }
 
     #[getter]
-    fn instance_id_hex(&self) -> String {
-        self.0.cert().instance_id_hex()
+    fn instance_id_hex(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.cert().instance_id_hex()))
     }
 
     #[getter]
-    fn mailbox_id(&self) -> String {
-        self.0.mailbox_id()
+    fn mailbox_id(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.mailbox_id()))
     }
 
     #[getter]
-    fn public_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.0.public_key())
+    fn public_key<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, &self.0.public_key())))
     }
 
     #[getter]
     fn cert_json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        Ok(PyBytes::new(py, &self.0.cert().to_json().map_err(err)?))
+        guarded(|| Ok(PyBytes::new(py, &self.0.cert().to_json().map_err(err)?)))
     }
 
-    fn __repr__(&self) -> String {
-        format!("{:?}", self.0)
+    fn __repr__(&self) -> PyResult<String> {
+        guarded(|| Ok(format!("{:?}", self.0)))
     }
 }
 
@@ -194,42 +265,45 @@ impl Invite {
         secret: &[u8],
         expires_at: u64,
     ) -> PyResult<Self> {
-        let s = core::InviteSecret::from_parts(array(invite_id, "invite_id")?, &*secret32(secret)?);
-        Ok(Self(core::Invite::from_parts(relay_host, s, expires_at)))
+        guarded(|| {
+            let s =
+                core::InviteSecret::from_parts(array(invite_id, "invite_id")?, &*secret32(secret)?);
+            Ok(Self(core::Invite::from_parts(relay_host, s, expires_at)))
+        })
     }
 
     #[getter]
-    fn url(&self) -> String {
-        self.0.url()
+    fn url(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.url()))
     }
 
     #[getter]
-    fn relay_host(&self) -> String {
-        self.0.relay_host().to_owned()
+    fn relay_host(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.relay_host().to_owned()))
     }
 
     #[getter]
-    fn invite_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.0.secret().id())
+    fn invite_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, self.0.secret().id())))
     }
 
     #[getter]
-    fn invite_id_b64(&self) -> String {
-        self.0.secret().id_b64()
+    fn invite_id_b64(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.secret().id_b64()))
     }
 
     #[getter]
-    fn expires_at(&self) -> u64 {
-        self.0.expires_at()
+    fn expires_at(&self) -> PyResult<u64> {
+        guarded(|| Ok(self.0.expires_at()))
     }
 
     /// The invite secret (store it encrypted; it belongs only in the URL fragment).
-    fn secret_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.0.secret().secret())
+    fn secret_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, self.0.secret().secret())))
     }
 
-    fn __repr__(&self) -> String {
-        format!("Invite({})", self.0.secret().id_b64())
+    fn __repr__(&self) -> PyResult<String> {
+        guarded(|| Ok(format!("Invite({})", self.0.secret().id_b64())))
     }
 }
 
@@ -240,31 +314,31 @@ struct InviteLink(core::InviteLink);
 #[pymethods]
 impl InviteLink {
     #[getter]
-    fn url(&self) -> String {
-        self.0.url()
+    fn url(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.url()))
     }
 
     #[getter]
-    fn relay_host(&self) -> String {
-        self.0.relay_host().to_owned()
+    fn relay_host(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.relay_host().to_owned()))
     }
 
     #[getter]
-    fn invite_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.0.secret().id())
+    fn invite_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, self.0.secret().id())))
     }
 
     #[getter]
-    fn invite_id_b64(&self) -> String {
-        self.0.secret().id_b64()
+    fn invite_id_b64(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.secret().id_b64()))
     }
 
-    fn secret_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, self.0.secret().secret())
+    fn secret_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, self.0.secret().secret())))
     }
 
-    fn __repr__(&self) -> String {
-        format!("InviteLink({})", self.0.secret().id_b64())
+    fn __repr__(&self) -> PyResult<String> {
+        guarded(|| Ok(format!("InviteLink({})", self.0.secret().id_b64())))
     }
 }
 
@@ -275,37 +349,42 @@ struct Sas(core::Sas);
 #[pymethods]
 impl Sas {
     #[getter]
-    fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.0.bytes())
+    fn bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, &self.0.bytes())))
     }
 
     #[getter]
-    fn emoji_indices(&self) -> Vec<u32> {
+    fn emoji_indices(&self) -> PyResult<Vec<u32>> {
         // Vec<u8> would become `bytes`; indices are a list of ints.
-        self.0
-            .emoji_indices()
-            .iter()
-            .map(|i| u32::from(*i))
-            .collect()
+        guarded(|| {
+            Ok(self
+                .0
+                .emoji_indices()
+                .iter()
+                .map(|i| u32::from(*i))
+                .collect())
+        })
     }
 
     #[getter]
-    fn decimal(&self) -> String {
-        self.0.decimal()
+    fn decimal(&self) -> PyResult<String> {
+        guarded(|| Ok(self.0.decimal()))
     }
 
     fn __eq__(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 
-    fn __hash__(&self) -> u64 {
-        let mut b = [0u8; 8];
-        b[..6].copy_from_slice(&self.0.bytes());
-        u64::from_be_bytes(b)
+    fn __hash__(&self) -> PyResult<u64> {
+        guarded(|| {
+            let mut b = [0u8; 8];
+            b[..6].copy_from_slice(&self.0.bytes());
+            Ok(u64::from_be_bytes(b))
+        })
     }
 
-    fn __repr__(&self) -> String {
-        format!("Sas({})", self.0.decimal())
+    fn __repr__(&self) -> PyResult<String> {
+        guarded(|| Ok(format!("Sas({})", self.0.decimal())))
     }
 }
 
@@ -360,10 +439,13 @@ struct Client {
     clock: Arc<SettableClock>,
 }
 
+/// Runs `$body` with the client's core client and group cache, under the
+/// state lock and `catch_unwind`. A panic drops the cached groups (they are
+/// reloaded from storage) and is raised as `CoreError`.
 macro_rules! with_client {
-    ($self:ident, |$c:ident, $groups:ident| $body:expr) => {
-        (|| -> CoreResult<_> {
-            let mut guard = $self.lock()?;
+    ($self:ident, |$c:ident, $groups:ident| $body:expr) => {{
+        let mut guard = $self.lock();
+        let result = catch_unwind(AssertUnwindSafe(|| -> CoreResult<_> {
             let State {
                 inner,
                 groups: $groups,
@@ -372,8 +454,15 @@ macro_rules! with_client {
                 Inner::Memory($c) => $body,
                 Inner::Sqlite($c) => $body,
             }
-        })()
-    };
+        }));
+        match result {
+            Ok(r) => r.map_err(err),
+            Err(_) => {
+                guard.groups.clear();
+                Err(panicked())
+            }
+        }
+    }};
 }
 
 fn group<'a, S: core::Store>(
@@ -475,41 +564,34 @@ fn event<'py>(py: Python<'py>, e: &Event) -> PyResult<Bound<'py, PyDict>> {
 }
 
 impl Client {
-    fn lock(&self) -> CoreResult<MutexGuard<'_, State>> {
-        self.state
-            .lock()
-            .map_err(|_| core::Error::Internal("client lock poisoned"))
+    /// The state lock. Bodies run under `catch_unwind`, so the lock is not
+    /// poisoned by core panics; if it ever is, the cache is dropped and the
+    /// state reused.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let mut g = poisoned.into_inner();
+            g.groups.clear();
+            self.state.clear_poison();
+            g
+        })
     }
-}
 
-#[pymethods]
-impl Client {
-    /// `path=None` keeps state in memory (tests). `seed` is for tests only.
-    #[new]
-    #[pyo3(signature = (path, instance, seed=None))]
-    fn new(
-        py: Python<'_>,
-        path: Option<String>,
-        instance: &[u8],
-        seed: Option<u64>,
-    ) -> PyResult<Self> {
+    fn with_rng(path: Option<String>, instance: &[u8], rng: core::Rng) -> PyResult<Self> {
         let clock = Arc::new(SettableClock::default());
         let c = clock.clone();
-        let inner = py
-            .detach(move || -> CoreResult<Inner> {
-                let inst = core::Instance::from_secret_bytes(instance)?;
-                let r = rng(seed)?;
-                Ok(match path {
-                    Some(p) => Inner::Sqlite(core::Client::new(
-                        SqliteStore::open(std::path::Path::new(&p))?,
-                        r,
-                        inst,
-                        c,
-                    )?),
-                    None => Inner::Memory(core::Client::new(MemoryStore::new(), r, inst, c)?),
-                })
+        let inner = (|| -> CoreResult<Inner> {
+            let inst = core::Instance::from_secret_bytes(instance)?;
+            Ok(match path {
+                Some(p) => Inner::Sqlite(core::Client::new(
+                    SqliteStore::open(std::path::Path::new(&p))?,
+                    rng,
+                    inst,
+                    c,
+                )?),
+                None => Inner::Memory(core::Client::new(MemoryStore::new(), rng, inst, c)?),
             })
-            .map_err(err)?;
+        })()
+        .map_err(err)?;
         Ok(Self {
             state: Mutex::new(State {
                 inner,
@@ -518,29 +600,62 @@ impl Client {
             clock,
         })
     }
+}
 
-    /// Fix the client's clock at `now` (Unix seconds), or `None` for system
-    /// time. Tests only.
+#[pymethods]
+impl Client {
+    /// `path=None` keeps state in memory (tests).
+    #[new]
+    fn new(py: Python<'_>, path: Option<String>, instance: &[u8]) -> PyResult<Self> {
+        py.detach(|| {
+            guarded(|| {
+                let rng = core::Rng::os().map_err(err)?;
+                Self::with_rng(path, instance, rng)
+            })
+        })
+    }
+
+    /// **Tests only**: a client whose randomness comes from a 64-bit seed.
+    #[staticmethod]
+    fn _for_testing(
+        py: Python<'_>,
+        path: Option<String>,
+        instance: &[u8],
+        seed: u64,
+    ) -> PyResult<Self> {
+        py.detach(|| guarded(|| Self::with_rng(path, instance, core::Rng::from_u64(seed))))
+    }
+
+    /// **Tests only**: fix the client's clock at `now` (Unix seconds), or
+    /// `None` for system time.
     #[pyo3(signature = (now))]
-    fn set_time(&self, now: Option<u64>) {
-        self.clock
-            .fixed_secs
-            .store(now.unwrap_or(0), Ordering::SeqCst);
+    fn _set_time_for_testing(&self, now: Option<u64>) -> PyResult<()> {
+        guarded(|| {
+            let secs = now.map(test_time).transpose()?.unwrap_or(0);
+            self.clock.fixed_secs.store(secs, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    /// **Tests only**: panics inside the core while holding the client's
+    /// state, to exercise panic recovery.
+    fn _panic_for_testing(&self) -> PyResult<()> {
+        with_client!(self, |_c, _g| panic_for_testing())
     }
 
     #[getter]
     fn identity(&self) -> PyResult<String> {
-        with_client!(self, |c, _g| Ok(c.instance().identity().to_owned())).map_err(err)
+        with_client!(self, |c, _g| Ok(c.instance().identity().to_owned()))
     }
 
     #[getter]
     fn mailbox_id(&self) -> PyResult<String> {
-        with_client!(self, |c, _g| Ok(c.instance().mailbox_id())).map_err(err)
+        with_client!(self, |c, _g| Ok(c.instance().mailbox_id()))
     }
 
     #[getter]
     fn instance_id_hex(&self) -> PyResult<String> {
-        with_client!(self, |c, _g| Ok(c.instance().cert().instance_id_hex())).map_err(err)
+        with_client!(self, |c, _g| Ok(c.instance().cert().instance_id_hex()))
     }
 
     /// Creates a group with this instance as owner; returns the group id.
@@ -550,16 +665,14 @@ impl Client {
         name: &str,
         purpose: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let id = py
-            .detach(|| {
-                with_client!(self, |c, groups| {
-                    let g = c.create_group(name, purpose)?;
-                    let id = g.group_id().to_vec();
-                    groups.insert(id.clone(), g);
-                    Ok(id)
-                })
+        let id = py.detach(|| {
+            with_client!(self, |c, groups| {
+                let g = c.create_group(name, purpose)?;
+                let id = g.group_id().to_vec();
+                groups.insert(id.clone(), g);
+                Ok(id)
             })
-            .map_err(err)?;
+        })?;
         Ok(PyBytes::new(py, &id))
     }
 
@@ -573,7 +686,6 @@ impl Client {
             Duration::from_secs(ttl_secs)
         ))
         .map(Invite)
-        .map_err(err)
     }
 
     /// Creates a JoinRequest (JSON bytes) for a parsed invite link.
@@ -583,13 +695,11 @@ impl Client {
         link: &InviteLink,
         display_name: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let json = py
-            .detach(|| {
-                with_client!(self, |c, _g| c
-                    .create_join_request(link.0.secret(), display_name)?
-                    .to_json())
-            })
-            .map_err(err)?;
+        let json = py.detach(|| {
+            with_client!(self, |c, _g| c
+                .create_join_request(link.0.secret(), display_name)?
+                .to_json())
+        })?;
         Ok(PyBytes::new(py, &json))
     }
 
@@ -600,12 +710,12 @@ impl Client {
         request: &[u8],
         invite: &Invite,
     ) -> PyResult<VerifiedJoinRequest> {
-        let v = py
-            .detach(|| {
+        let v = py.detach(|| {
+            with_client!(self, |c, _g| {
                 let req = core::JoinRequest::from_json(request)?;
-                with_client!(self, |c, _g| c.verify_join_request(&req, &invite.0))
+                c.verify_join_request(&req, &invite.0)
             })
-            .map_err(err)?;
+        })?;
         Ok(VerifiedJoinRequest {
             identity: v.identity().to_owned(),
             instance_id: v.instance_id(),
@@ -625,16 +735,14 @@ impl Client {
         invite: &Invite,
         switch_floor: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let out = py
-            .detach(|| {
-                with_client!(self, |c, groups| group(c, groups, group_id)?.add_member(
-                    c,
-                    &request.inner,
-                    &invite.0,
-                    switch_floor
-                ))
-            })
-            .map_err(err)?;
+        let out = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?.add_member(
+                c,
+                &request.inner,
+                &invite.0,
+                switch_floor
+            ))
+        })?;
         commit_out(py, &out)
     }
 
@@ -647,17 +755,15 @@ impl Client {
         invite_meta: &[u8],
         wrapped_welcome: &[u8],
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let id = py
-            .detach(|| {
+        let id = py.detach(|| {
+            with_client!(self, |c, groups| {
                 let meta = core::InviteMeta::from_json(invite_meta)?;
-                with_client!(self, |c, groups| {
-                    let g = c.join_from_wrapped_welcome(link.0.secret(), &meta, wrapped_welcome)?;
-                    let id = g.group_id().to_vec();
-                    groups.insert(id.clone(), g);
-                    Ok(id)
-                })
+                let g = c.join_from_wrapped_welcome(link.0.secret(), &meta, wrapped_welcome)?;
+                let id = g.group_id().to_vec();
+                groups.insert(id.clone(), g);
+                Ok(id)
             })
-            .map_err(err)?;
+        })?;
         Ok(PyBytes::new(py, &id))
     }
 
@@ -668,12 +774,10 @@ impl Client {
         group_id: &[u8],
         message: &[u8],
     ) -> PyResult<Bound<'py, PyDict>> {
-        let e = py
-            .detach(|| {
-                with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .process(c, message))
-            })
-            .map_err(err)?;
+        let e = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?
+                .process(c, message))
+        })?;
         event(py, &e)
     }
 
@@ -684,9 +788,9 @@ impl Client {
         group_id: &[u8],
         inner: &[u8],
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let ct = py
-            .detach(|| with_client!(self, |c, groups| group(c, groups, group_id)?.seal(c, inner)))
-            .map_err(err)?;
+        let ct = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?.seal(c, inner))
+        })?;
         Ok(PyBytes::new(py, &ct))
     }
 
@@ -697,12 +801,10 @@ impl Client {
         group_id: &[u8],
         ciphertext: &[u8],
     ) -> PyResult<Bound<'py, PyDict>> {
-        let m = py
-            .detach(|| {
-                with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .open(c, ciphertext))
-            })
-            .map_err(err)?;
+        let m = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?
+                .open(c, ciphertext))
+        })?;
         application(py, &m)
     }
 
@@ -710,18 +812,15 @@ impl Client {
         with_client!(self, |c, groups| group(c, groups, group_id)
             .map(|g| g.sas()))
         .map(Sas)
-        .map_err(err)
     }
 
     fn epoch(&self, group_id: &[u8]) -> PyResult<u64> {
         with_client!(self, |c, groups| group(c, groups, group_id)
             .map(|g| g.epoch()))
-        .map_err(err)
     }
 
     fn members<'py>(&self, py: Python<'py>, group_id: &[u8]) -> PyResult<Bound<'py, PyList>> {
-        let ms =
-            with_client!(self, |c, groups| group(c, groups, group_id)?.members()).map_err(err)?;
+        let ms = with_client!(self, |c, groups| group(c, groups, group_id)?.members())?;
         members(py, &ms)
     }
 
@@ -729,8 +828,7 @@ impl Client {
     fn policy<'py>(&self, py: Python<'py>, group_id: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         let p = with_client!(self, |c, groups| group(c, groups, group_id)?
             .policy()?
-            .to_json())
-        .map_err(err)?;
+            .to_json())?;
         Ok(PyBytes::new(py, &p))
     }
 
@@ -738,15 +836,13 @@ impl Client {
     fn meta<'py>(&self, py: Python<'py>, group_id: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         let m = with_client!(self, |c, groups| group(c, groups, group_id)?
             .meta()?
-            .to_json())
-        .map_err(err)?;
+            .to_json())?;
         Ok(PyBytes::new(py, &m))
     }
 
     fn has_pending_commit(&self, group_id: &[u8]) -> PyResult<bool> {
         with_client!(self, |c, groups| group(c, groups, group_id)
             .map(|g| g.has_pending_commit()))
-        .map_err(err)
     }
 
     fn remove<'py>(
@@ -755,19 +851,16 @@ impl Client {
         group_id: &[u8],
         identity: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let out = py
-            .detach(|| {
-                with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .remove(c, identity))
-            })
-            .map_err(err)?;
+        let out = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?
+                .remove(c, identity))
+        })?;
         commit_out(py, &out)
     }
 
     fn update<'py>(&self, py: Python<'py>, group_id: &[u8]) -> PyResult<Bound<'py, PyDict>> {
-        let out = py
-            .detach(|| with_client!(self, |c, groups| group(c, groups, group_id)?.update(c)))
-            .map_err(err)?;
+        let out =
+            py.detach(|| with_client!(self, |c, groups| group(c, groups, group_id)?.update(c)))?;
         commit_out(py, &out)
     }
 
@@ -778,13 +871,12 @@ impl Client {
         group_id: &[u8],
         policy: &[u8],
     ) -> PyResult<Bound<'py, PyDict>> {
-        let out = py
-            .detach(|| {
+        let out = py.detach(|| {
+            with_client!(self, |c, groups| {
                 let p = core::GroupPolicy::from_json(policy)?;
-                with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .set_policy(c, &p))
+                group(c, groups, group_id)?.set_policy(c, &p)
             })
-            .map_err(err)?;
+        })?;
         commit_out(py, &out)
     }
 
@@ -793,12 +885,10 @@ impl Client {
         py: Python<'py>,
         group_id: &[u8],
     ) -> PyResult<Bound<'py, PyDict>> {
-        let out = py
-            .detach(|| {
-                with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .commit_pending_proposals(c))
-            })
-            .map_err(err)?;
+        let out = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?
+                .commit_pending_proposals(c))
+        })?;
         commit_out(py, &out)
     }
 
@@ -808,12 +898,10 @@ impl Client {
         py: Python<'py>,
         group_id: &[u8],
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let p = py
-            .detach(|| {
-                with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .propose_leave(c))
-            })
-            .map_err(err)?;
+        let p = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?
+                .propose_leave(c))
+        })?;
         Ok(PyBytes::new(py, &p))
     }
 
@@ -824,19 +912,16 @@ impl Client {
         group_id: &[u8],
         msg_id: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let s = py
-            .detach(|| {
-                with_client!(self, |c, groups| group(c, groups, group_id)?
-                    .confirm_pending_commit(c, msg_id))
-            })
-            .map_err(err)?;
+        let s = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?
+                .confirm_pending_commit(c, msg_id))
+        })?;
         summary(py, &s)
     }
 
     fn discard_pending_commit(&self, group_id: &[u8]) -> PyResult<()> {
         with_client!(self, |c, groups| group(c, groups, group_id)?
             .discard_pending_commit(c))
-        .map_err(err)
     }
 
     /// Deletes the group's local state.
@@ -848,65 +933,43 @@ impl Client {
                 None => Ok(()),
             }
         })
-        .map_err(err)
     }
 }
 
 /// Parses an invite URL (SPEC §4.1).
 #[pyfunction]
 fn parse_invite_url(url: &str) -> PyResult<InviteLink> {
-    core::InviteLink::parse(url).map(InviteLink).map_err(err)
+    guarded(|| core::InviteLink::parse(url).map(InviteLink).map_err(err))
 }
 
-/// `join_key` (SPEC §3.5).
-#[pyfunction]
-fn derive_join_key<'py>(
-    py: Python<'py>,
-    invite_id: &[u8],
-    secret: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
-    let k =
-        core::invite::derive_join_key(&array(invite_id, "invite_id")?, &array(secret, "secret")?);
-    Ok(PyBytes::new(py, k.as_slice()))
-}
-
-/// `welcome_key` (SPEC §3.5).
-#[pyfunction]
-fn derive_welcome_key<'py>(
-    py: Python<'py>,
-    invite_id: &[u8],
-    secret: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
-    let k = core::invite::derive_welcome_key(
-        &array(invite_id, "invite_id")?,
-        &array(secret, "secret")?,
-    );
-    Ok(PyBytes::new(py, k.as_slice()))
-}
-
-/// The JoinRequest MAC (SPEC §6.1).
+/// The JoinRequest MAC (SPEC §6.1) under the invite's `join_key`, which is
+/// derived and dropped inside the core.
 #[pyfunction]
 fn join_request_mac<'py>(
     py: Python<'py>,
-    join_key: &[u8],
     invite_id: &[u8],
+    secret: &[u8],
     key_package: &[u8],
     mailbox_id: &str,
     display_name: &str,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let mac = core::join::join_request_mac(
-        &array(join_key, "join_key")?,
-        &core::join::MacInput {
-            invite_id: &array(invite_id, "invite_id")?,
-            key_package,
-            mailbox_id,
-            display_name,
-        },
-    );
-    Ok(PyBytes::new(py, &mac))
+    guarded(|| {
+        let invite =
+            core::InviteSecret::from_parts(array(invite_id, "invite_id")?, &*secret32(secret)?);
+        let mac = core::join::join_request_mac(
+            &invite.join_key(),
+            &core::join::MacInput {
+                invite_id: invite.id(),
+                key_package,
+                mailbox_id,
+                display_name,
+            },
+        );
+        Ok(PyBytes::new(py, &mac))
+    })
 }
 
-/// Opens a WrappedWelcome (SPEC §6.4).
+/// Opens a WrappedWelcome (SPEC §6.4) under the invite's `welcome_key`.
 #[pyfunction]
 fn unwrap_welcome<'py>(
     py: Python<'py>,
@@ -914,55 +977,59 @@ fn unwrap_welcome<'py>(
     secret: &[u8],
     wrapped: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let s = core::InviteSecret::from_parts(array(invite_id, "invite_id")?, &*secret32(secret)?);
-    Ok(PyBytes::new(py, &s.unwrap_welcome(wrapped).map_err(err)?))
+    guarded(|| {
+        let s = core::InviteSecret::from_parts(array(invite_id, "invite_id")?, &*secret32(secret)?);
+        Ok(PyBytes::new(py, &s.unwrap_welcome(wrapped).map_err(err)?))
+    })
 }
 
 /// The SAS for given epoch authenticator, group id and epoch (SPEC §3.5).
 #[pyfunction]
-fn derive_sas(epoch_authenticator: &[u8], group_id: &[u8], epoch: u64) -> Sas {
-    Sas(core::Sas::derive(epoch_authenticator, group_id, epoch))
+fn derive_sas(epoch_authenticator: &[u8], group_id: &[u8], epoch: u64) -> PyResult<Sas> {
+    guarded(|| Ok(Sas(core::Sas::derive(epoch_authenticator, group_id, epoch))))
 }
 
 /// The padding bucket for an application plaintext length, or None.
 #[pyfunction]
-fn padding_bucket(plaintext_len: usize) -> Option<usize> {
-    core::padding::bucket_for(plaintext_len)
+fn padding_bucket(plaintext_len: usize) -> PyResult<Option<usize>> {
+    guarded(|| Ok(core::padding::bucket_for(plaintext_len)))
 }
 
 /// Verifies an instance certificate (signature only) and returns its fields.
 #[pyfunction]
 fn verify_instance_cert<'py>(py: Python<'py>, cert_json: &[u8]) -> PyResult<Bound<'py, PyDict>> {
-    let cert = core::InstanceCert::from_json(cert_json).map_err(err)?;
-    cert.verify().map_err(err)?;
-    let d = PyDict::new(py);
-    d.set_item("identity", &cert.identity)?;
-    d.set_item("instance_id", cert.instance_id_hex())?;
-    d.set_item("sig_key", PyBytes::new(py, &cert.sig_key))?;
-    d.set_item("created_at", cert.created_at)?;
-    d.set_item(
-        "signing_input",
-        PyBytes::new(py, &cert.signing_input().map_err(err)?),
-    )?;
-    Ok(d)
+    guarded(|| {
+        let cert = core::InstanceCert::from_json(cert_json).map_err(err)?;
+        cert.verify().map_err(err)?;
+        let d = PyDict::new(py);
+        d.set_item("identity", &cert.identity)?;
+        d.set_item("instance_id", cert.instance_id_hex())?;
+        d.set_item("sig_key", PyBytes::new(py, &cert.sig_key))?;
+        d.set_item("created_at", cert.created_at)?;
+        d.set_item(
+            "signing_input",
+            PyBytes::new(py, &cert.signing_input().map_err(err)?),
+        )?;
+        Ok(d)
+    })
 }
 
 /// `ac:v0:<b64url IK.pub>`.
 #[pyfunction]
 fn identity_id(ik_pub: &[u8]) -> PyResult<String> {
-    Ok(core::identity::identity_id(&array(ik_pub, "ik_pub")?))
+    guarded(|| Ok(core::identity::identity_id(&array(ik_pub, "ik_pub")?)))
 }
 
 /// The identity fingerprint (SPEC §2).
 #[pyfunction]
 fn fingerprint(ik_pub: &[u8]) -> PyResult<String> {
-    Ok(core::identity::fingerprint(&array(ik_pub, "ik_pub")?))
+    guarded(|| Ok(core::identity::fingerprint(&array(ik_pub, "ik_pub")?)))
 }
 
 /// The mailbox id of an instance key (SPEC §2).
 #[pyfunction]
-fn mailbox_id(sig_key: &[u8]) -> String {
-    core::identity::mailbox_id(sig_key)
+fn mailbox_id(sig_key: &[u8]) -> PyResult<String> {
+    guarded(|| Ok(core::identity::mailbox_id(sig_key)))
 }
 
 /// Return True if `v` is a protocol version this build can speak.
@@ -978,6 +1045,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CIPHERSUITE_V0", core::CIPHERSUITE_V0)?;
     m.add("PADDING_BUCKETS", core::padding::BUCKETS.to_vec())?;
     m.add("AgentConnectError", m.py().get_type::<AgentConnectError>())?;
+    m.add("CoreError", m.py().get_type::<CoreError>())?;
     m.add_class::<Identity>()?;
     m.add_class::<Instance>()?;
     m.add_class::<Invite>()?;
@@ -988,8 +1056,6 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     for f in [
         wrap_pyfunction!(supports_protocol, m)?,
         wrap_pyfunction!(parse_invite_url, m)?,
-        wrap_pyfunction!(derive_join_key, m)?,
-        wrap_pyfunction!(derive_welcome_key, m)?,
         wrap_pyfunction!(join_request_mac, m)?,
         wrap_pyfunction!(unwrap_welcome, m)?,
         wrap_pyfunction!(derive_sas, m)?,

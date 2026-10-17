@@ -17,12 +17,12 @@ PURPOSE = "Plan the offsite"
 
 
 def make_client(rng: random.Random, path: Path | None = None) -> ac.Client:
-    identity = ac.Identity.generate(seed=rng.getrandbits(64))
-    instance = identity.create_instance(seed=rng.getrandbits(64))
-    return ac.Client(
+    identity = ac.Identity._generate_for_testing(rng.getrandbits(64))
+    instance = identity._create_instance_for_testing(seed=rng.getrandbits(64))
+    return ac.Client._for_testing(
         None if path is None else str(path),
         instance.to_secret_bytes(),
-        seed=rng.getrandbits(64),
+        rng.getrandbits(64),
     )
 
 
@@ -153,18 +153,20 @@ def test_wrong_secret_and_bad_inputs(rng: random.Random) -> None:
     with pytest.raises(ac.AgentConnectError, match="unknown group"):
         a.epoch(b"\x00" * 16)
     with pytest.raises(ac.AgentConnectError, match="16 bytes"):
-        ac.derive_join_key(b"x", b"y")
-    a.set_time(invite.expires_at)
+        ac.unwrap_welcome(b"x", bytes(32), b"")
+    with pytest.raises(ac.AgentConnectError, match="32 bytes"):
+        ac.unwrap_welcome(bytes(16), b"y", b"")
+    a._set_time_for_testing(invite.expires_at)
     good = b.create_join_request(ac.parse_invite_url(invite.url), "b")
     with pytest.raises(ac.AgentConnectError, match="expired"):
         a.verify_join_request(good, invite)
-    a.set_time(None)
+    a._set_time_for_testing(None)
 
 
 def test_persistence_and_invite_parts(rng: random.Random, tmp_path: Path) -> None:
     db = tmp_path / "b.sqlite"
-    identity = ac.Identity.generate(seed=rng.getrandbits(64))
-    instance = identity.create_instance(seed=rng.getrandbits(64), now=1_800_000_000)
+    identity = ac.Identity._generate_for_testing(rng.getrandbits(64))
+    instance = identity._create_instance_for_testing(seed=rng.getrandbits(64), now=1_800_000_000)
     assert json.loads(instance.cert_json)["created_at"] == 1_800_000_000
     saved = instance.to_secret_bytes()
     a = make_client(rng)

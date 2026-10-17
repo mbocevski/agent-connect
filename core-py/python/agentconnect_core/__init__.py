@@ -1,4 +1,12 @@
-"""Python bindings for the AgentConnect protocol core (see SPEC.md)."""
+"""Python bindings for the AgentConnect protocol core (see SPEC.md).
+
+Errors from the core raise ``AgentConnectError``. An internal failure (a
+panic) raises ``CoreError``; the operation did not complete, and a
+``Client`` reloads its group state from storage on next use.
+
+Names of the form ``_..._for_testing`` are test-only (seeded randomness, a
+settable clock) and must not be used in production.
+"""
 
 from agentconnect_core._native import (
     CIPHERSUITE_V0,
@@ -6,15 +14,14 @@ from agentconnect_core._native import (
     PROTOCOL_VERSION,
     AgentConnectError,
     Client,
+    CoreError,
     Identity,
     Instance,
     Invite,
     InviteLink,
     Sas,
     VerifiedJoinRequest,
-    derive_join_key,
     derive_sas,
-    derive_welcome_key,
     fingerprint,
     identity_id,
     join_request_mac,
@@ -32,15 +39,14 @@ __all__ = [
     "PROTOCOL_VERSION",
     "AgentConnectError",
     "Client",
+    "CoreError",
     "Identity",
     "Instance",
     "Invite",
     "InviteLink",
     "Sas",
     "VerifiedJoinRequest",
-    "derive_join_key",
     "derive_sas",
-    "derive_welcome_key",
     "fingerprint",
     "identity_id",
     "join_request_mac",

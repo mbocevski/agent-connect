@@ -101,6 +101,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Core and bindings: the instance key and invite secrets no longer pass
   through unzeroized copies (JSON values, base64 temporaries, by-value
   arrays). `InviteSecret::from_parts` takes the secret by reference.
+- Python bindings: no panic crosses into Python. Every binding runs under
+  `catch_unwind` and a panic raises the new `agentconnect_core.CoreError`
+  (an `Exception`); the client drops its cached groups and reloads them
+  from storage instead of failing with a poisoned lock forever. The test
+  clock rejects out-of-range times instead of overflowing.
+- Python bindings: seeded randomness (64-bit seeds give guessable keys)
+  and the settable clock are only reachable through test-only entry points
+  (`Identity._generate_for_testing`, `Identity._create_instance_for_testing`,
+  `Client._for_testing`, `Client._set_time_for_testing`); the production
+  constructors take no seed.
+- Python bindings: `derive_join_key` and `derive_welcome_key` are removed;
+  derived invite keys stay inside the core. `join_request_mac` now takes the
+  invite id and secret.
 - Dependency policy allows MPL-2.0 for the three `hpke-rs` crates only.
   Advisories RUSTSEC-2026-0329/0330/0331 in the OpenMLS libcrux provider are
   temporarily ignored, and releases are blocked until a fixed provider ships.
