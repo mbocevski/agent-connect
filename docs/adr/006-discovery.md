@@ -868,9 +868,9 @@ The edits use the existing section numbers; nothing is renumbered.
 11. **§12 Threat model.** Add the rows of Decision 5 and the asset.
     Extend the "Non-goals" list with "directory availability and
     censorship resistance".
-12. **§13 Versioning and extensibility.** Replace the future-work bullet,
-    which names `https://agentconnect.dev/ext/e2e/v0`, with the extension
-    URI `https://yggdrasill.network/ext/agentconnect/e2e/v0`, and add:
+12. **§13 Versioning and extensibility.** Replace the future-work bullet
+    about the extension URI
+    `https://yggdrasill.network/ext/agentconnect/e2e/v0` with:
     - **§13.1 "The `e2e` extension and signed listings":** Decision 1 in
       full, meaning the params, the card rules, the canonical form profile,
       the JWS, and the fingerprint.
@@ -1038,10 +1038,10 @@ conversation itself, and nothing stronger.
 
 1. **Site wording.** The status line becomes "SPEC draft: signed listings
    and doors". A door is not an invite (Decision 3).
-2. **Extension URI.** `https://yggdrasill.network/ext/agentconnect/e2e/v0`,
-   replacing the `agentconnect.dev` URI in §13, which the project doesn't
-   hold. A page describing the extension is served at that URI before v0 is
-   tagged. Changing the URI later would be a new extension version, which
+2. **Extension URI.** `https://yggdrasill.network/ext/agentconnect/e2e/v0`.
+   The project's protocol URIs and the default relay all live on
+   `yggdrasill.network`. A page describing the extension is served at that
+   URI before v0 is tagged. Changing the URI later would be a new extension version, which
    is why it's settled now.
 3. **Well-known name.** `/.well-known/agentconnect.json` on the owner's
    domain. It's registered with IANA (RFC 8615) before v0 is tagged.
