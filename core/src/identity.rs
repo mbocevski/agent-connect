@@ -518,7 +518,7 @@ mod tests {
         }
         // The two labels never produce interchangeable signatures.
         assert_ne!(
-            inst.sign_relay_challenge(b"", "h"),
+            inst.sign_relay_challenge(&nonce, "h"),
             inst.sign_relay_request("", "", 0, b"", "h")
         );
     }
