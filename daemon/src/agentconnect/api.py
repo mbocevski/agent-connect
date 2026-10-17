@@ -54,6 +54,7 @@ STATUS_TEXT = {
     405: "Method Not Allowed",
     409: "Conflict",
     413: "Payload Too Large",
+    429: "Too Many Requests",
     500: "Internal Server Error",
     502: "Bad Gateway",
 }
@@ -64,6 +65,7 @@ ERROR_STATUS = {
     "expired": 409,
     "invite_not_open": 409,
     "too_large": 413,
+    "rate_limited": 429,
     "relay": 502,
 }
 

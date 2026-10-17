@@ -53,6 +53,7 @@ from agentconnect.identity import (
     open_core_client,
 )
 from agentconnect.keystore import Keystore, open_keystore, private_dir
+from agentconnect.limits import KNOWN_KINDS, RateLimiter, content_problem
 from agentconnect.relay import NotConnectedError, RelayError, RelayLink, RelayRest, b64, unb64
 from agentconnect.store import GroupRow, OutboxRow, Store
 
@@ -111,6 +112,11 @@ TRANSIENT_PREFIXES = (
     "internal error",
 )
 MAX_TRANSIENT_RETRIES = 8
+OUTBOUND_PROBLEMS = {
+    "unknown_kind": ("bad_request", "unknown message kind"),
+    "too_large": ("too_large", "message too large (SPEC 10.2: 256 KiB)"),
+    "part_kind": ("forbidden", "only text and data parts are allowed (SPEC 10.2)"),
+}
 
 
 def _core_error(e: Exception) -> str:
@@ -256,6 +262,7 @@ class Daemon:
         self._proposed_leaves: dict[str, set[str]] = {}
         self._tasks: list[asyncio.Task[None]] = []
         self._delivery_backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
+        self.limits = RateLimiter(self.clock)
         self.running = False
 
     # -- lifecycle ------------------------------------------------------------
@@ -712,6 +719,13 @@ class Daemon:
             return None
         sender = event["sender"]
         identity = sender["identity"]
+        # SPEC 7.2 (unknown kinds are ignored) and 10.2 (size, parts, rate).
+        problem = content_problem(inner, len(event["plaintext"]))
+        if problem is None and not self.limits.allow(group.group_id, identity):
+            problem = "rate_limited"
+        if problem is not None:
+            LOG.info("message_dropped", group=log.hid(group.group_id), reason=problem)
+            return None
         body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
         if inner["kind"] == "a2a.agent_card" and identity != self.me:
             self.store.put_card(group.group_id, identity, body)
@@ -805,6 +819,7 @@ class Daemon:
                 {"reason": "loop_guard"},
                 kind="control.pause",
                 reply_to=[delivery.msg_id],
+                internal=True,
             )
         except DaemonError as e:
             LOG.info("loop_guard_pause_not_sent", code=e.code)
@@ -1348,7 +1363,7 @@ class Daemon:
         adapter = self._adapter_for(group_id)
         card = adapter.capabilities().agent_card if adapter is not None else None
         if card is not None:
-            self.send_message(group_id, card, to=to, kind="a2a.agent_card")
+            self.send_message(group_id, card, to=to, kind="a2a.agent_card", internal=True)
 
     # -- operations (local API and adapters) --------------------------------
 
@@ -1578,11 +1593,17 @@ class Daemon:
         kind: str = "a2a.message",
         origin: str = "agent",
         reply_to: list[str] | None = None,
+        internal: bool = False,
     ) -> str:
         """Queue an application message. ``hop`` is computed here (SPEC 10.3):
-        0 for the human's own messages, otherwise see :meth:`_reply_hop`."""
+        0 for the human's own messages, otherwise see :meth:`_reply_hop`.
+
+        SPEC 10.2 applies: at most 256 KiB, ``text``/``data`` parts only, and
+        30 messages a minute from this sender (120 in the group). The
+        daemon's own messages (``internal``: Agent Cards, loop-guard pauses)
+        don't count against the rate."""
         group = self._group_or_raise(group_id)
-        if not kind.startswith(("a2a.", "control.")):
+        if kind not in KNOWN_KINDS:
             raise DaemonError("bad_request", "unknown message kind")
         if origin not in ("agent", "human"):
             raise DaemonError("bad_request", "origin must be agent or human")
@@ -1593,8 +1614,12 @@ class Daemon:
         view = self._view(group_id)
         if view is not None and self.policy.outbound(view, inner) is PolicyDecision.DROP:
             raise DaemonError("forbidden", "blocked by policy")
-        if ac.padding_bucket(len(canonical(inner))) is None:
-            raise DaemonError("too_large", "message too large")
+        problem = content_problem(inner, len(canonical(inner)))
+        if problem is not None:
+            code, text = OUTBOUND_PROBLEMS.get(problem, ("bad_request", "malformed message"))
+            raise DaemonError(code, text)
+        if not internal and not self.limits.allow(group.group_id, self.me):
+            raise DaemonError("rate_limited", "over the SPEC 10.2 message rate")
         msg_id = new_msg_id()
         self._enqueue("app", group.group_id, {"inner": inner, "msg_id": msg_id})
         if kind in HUMAN_ONLY_KINDS:

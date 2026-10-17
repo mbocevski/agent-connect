@@ -130,6 +130,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: the SPEC §10.2 limits are enforced on receive and on send:
+  messages of at most 256 KiB, 30 per minute per sender and 120 per group,
+  and only `text` and `data` A2A parts (`file` parts are refused).
+  Unknown kinds are ignored on receive (§7.2) and refused on send, instead
+  of reaching the adapter. Over-limit API sends get 429 `rate_limited`.
 - Daemon logging: every logger runs one fixed JSON chain regardless of the
   embedding application's structlog configuration. Tracebacks are plain
   (no local variables), content-like fields (`body`, `ct`, `env`,
