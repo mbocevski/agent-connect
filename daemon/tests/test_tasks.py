@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
+from agentconnect.a2a_adapter import A2AAdapter, A2AOptions
 from agentconnect.clock import FakeClock
 from agentconnect.sse import SseAdapter
 from agentconnect.store import Store
@@ -119,3 +120,14 @@ async def test_webhook_close_lets_the_caller_be_cancelled(fake_clock: FakeClock)
         adapter._worker = t
 
     await stuck_closing(adapter.close, install)
+
+
+async def test_a2a_close_lets_the_caller_be_cancelled_and_still_releases(tmp_path: Path) -> None:
+    adapter = A2AAdapter(A2AOptions(local_agent_url="http://127.0.0.1:9/", data_dir=tmp_path))
+    assert adapter._seen is not None  # opens the dedup store
+
+    def install(t: asyncio.Task[Any]) -> None:
+        adapter._running.add(t)
+
+    await stuck_closing(adapter.aclose, install)
+    assert adapter._seen_store is None

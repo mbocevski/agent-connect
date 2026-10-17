@@ -277,7 +277,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Daemon: cancelling a task while it was cleaning up helper tasks (the wait
   for a winning commit, the ownership hand-over, `stop()`, and closing the
   webhook and SSE adapters) no longer swallows the cancellation; the task
-  stops. `stop()` still releases its databases and data-directory lock.
+  stops. `stop()` still releases its databases and data-directory lock,
+  and a cancelled A2A adapter close still stops its facade and closes its
+  deduplication store.
 - Daemon: an application message or proposal whose envelope `epoch` or
   `group_id` disagrees with its MLS header is now dropped before the core
   processes it (SPEC §7.1), so it no longer consumes the message's key; a

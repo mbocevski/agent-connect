@@ -69,6 +69,7 @@ from agentconnect.adapter import (
     OutboundSend,
     Sender,
 )
+from agentconnect.tasks import cancel_and_wait
 
 if TYPE_CHECKING:
     from agentconnect.config import Config
@@ -217,18 +218,20 @@ class A2AAdapter:
         await self.aclose()
 
     async def aclose(self) -> None:
-        for task in list(self._running):
-            task.cancel()
-        await asyncio.gather(*self._running, return_exceptions=True)
-        if self.facade is not None:
-            await self.facade.stop()
-            self.facade = None
-        if self._http is not None:
-            await self._http.aclose()
-            self._http = None
-        if self._seen_store is not None:
-            self._seen_store.close()
-            self._seen_store = None
+        try:
+            await cancel_and_wait(*self._running, ignore=(Exception,))
+        finally:
+            try:
+                if self.facade is not None:
+                    await self.facade.stop()
+                    self.facade = None
+                if self._http is not None:
+                    await self._http.aclose()
+                    self._http = None
+            finally:
+                if self._seen_store is not None:
+                    self._seen_store.close()
+                    self._seen_store = None
 
     def _facade_token(self) -> str:
         if self.options.data_dir is None:
