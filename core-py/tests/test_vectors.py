@@ -5,6 +5,7 @@ The Rust side (core/src/vectors.rs) generates and checks the same files.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -121,3 +122,72 @@ def test_invite_url_vectors() -> None:
         }[case["error"]]
         with pytest.raises(ac.AgentConnectError, match=expected):
             ac.parse_invite_url(case["url"])
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _unb64(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def test_relay_auth_vectors() -> None:
+    v = load("relay-auth.json")
+    instance = ac.Instance.from_secret_bytes(v["instance"].encode())
+    assert _b64(instance.public_key) == v["sig_key"]
+    assert instance.mailbox_id == v["mailbox_id"]
+    for c in v["challenges"]:
+        nonce = _unb64(c["nonce"])
+        # The signed bytes, rebuilt independently (SPEC 8.2).
+        message = b"agentconnect/v0/relay-auth" + nonce + c["relay_host"].encode()
+        assert message.hex() == c["message"]
+        assert _b64(instance.sign_relay_challenge(nonce, c["relay_host"])) == c["sig"]
+        assert _b64(instance.sign_relay_challenge(nonce, "relay.other")) != c["sig"]
+    for r in v["requests"]:
+        body = r["body"].encode()
+        head = f"{r['method']}\n{r['path']}\n{r['ts']}\n".encode()
+        message = (
+            b"agentconnect/v0/relay-rest"
+            + head
+            + hashlib.sha256(body).digest()
+            + r["relay_host"].encode()
+        )
+        assert message.hex() == r["message"]
+        sig = instance.sign_relay_request(r["method"], r["path"], r["ts"], body, r["relay_host"])
+        assert _b64(sig) == r["sig"]
+        assert r["authorization"] == f"AgentConnect-Ed25519 {v['sig_key']}.{r['ts']}.{r['sig']}"
+    # Only domain-separated signing is exposed, never a generic signer.
+    assert not hasattr(instance, "sign")
+
+
+def test_relay_challenge_nonce_must_be_32_bytes() -> None:
+    # SPEC 8.2: the nonce is 32 bytes. Any other length is refused, because
+    # nonce `X || "x."` at `relay.test` would sign the same bytes as nonce
+    # `X` at `x.relay.test`.
+    v = load("relay-auth.json")
+    instance = ac.Instance.from_secret_bytes(v["instance"].encode())
+    nonce = _unb64(v["challenges"][0]["nonce"])
+    for bad in (b"", nonce[:31], nonce + b"x", nonce + b"x."):
+        with pytest.raises(ac.AgentConnectError, match="nonce"):
+            instance.sign_relay_challenge(bad, "relay.test")
+
+
+def test_relay_host_canonical_form() -> None:
+    v = load("relay-auth.json")
+    for case in v["hosts"]:
+        if case["canonical"] is None:
+            with pytest.raises(ac.AgentConnectError, match="relay host"):
+                ac.canonical_relay_host(case["input"])
+        else:
+            assert ac.canonical_relay_host(case["input"]) == case["canonical"]
+    # The signers apply it: mixed case signs what the relay verifies.
+    instance = ac.Instance.from_secret_bytes(v["instance"].encode())
+    c = v["challenges"][0]
+    nonce = _unb64(c["nonce"])
+    assert _b64(instance.sign_relay_challenge(nonce, c["relay_host"].upper())) == c["sig"]
+    r = v["requests"][0]
+    sig = instance.sign_relay_request(
+        r["method"], r["path"], r["ts"], r["body"].encode(), r["relay_host"].upper()
+    )
+    assert _b64(sig) == r["sig"]

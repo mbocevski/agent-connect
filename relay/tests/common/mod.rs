@@ -117,7 +117,7 @@ pub fn id_from(n: u64) -> String {
 
 pub fn auth_frame(key: &SigningKey, nonce_b64: &str, host: &str) -> Value {
     let nonce = b64_decode(nonce_b64).unwrap();
-    let sig = key.sign(&ws_auth_message(&nonce, host));
+    let sig = key.sign(&ws_auth_message(&nonce, host).unwrap());
     json!({
         "t": "auth",
         "sig_key": b64_encode(key.verifying_key().as_bytes()),
@@ -161,6 +161,9 @@ pub struct Client {
     delivers: VecDeque<Value>,
     replies: VecDeque<Value>,
     markers: VecDeque<Value>,
+    /// `delivers.len()` when each `drained` frame arrived.
+    pub drained_after: Vec<usize>,
+    seen_delivers: usize,
 }
 
 impl Client {
@@ -181,6 +184,8 @@ impl Client {
             delivers: VecDeque::new(),
             replies: VecDeque::new(),
             markers: VecDeque::new(),
+            drained_after: Vec::new(),
+            seen_delivers: 0,
         }
     }
 
@@ -191,7 +196,10 @@ impl Client {
     async fn pump(&mut self) {
         let v = raw_recv(&mut self.ws).await.expect("connection closed");
         if v["t"] == "deliver" {
+            self.seen_delivers += 1;
             self.delivers.push_back(v);
+        } else if v["t"] == "drained" {
+            self.drained_after.push(self.seen_delivers);
         } else if v["t"] == "queue_overflow" {
             self.markers.push_back(v);
         } else {
@@ -213,6 +221,14 @@ impl Client {
             self.pump().await;
         }
         self.markers.pop_front().unwrap()
+    }
+
+    /// Wait for the `drained` frame of this connection.
+    pub async fn drained(&mut self) -> usize {
+        while self.drained_after.is_empty() {
+            self.pump().await;
+        }
+        self.drained_after[0]
     }
 
     /// The next `deliver` frame's envelope.
@@ -328,7 +344,7 @@ pub fn signed_request(
     ts: u64,
     host: &str,
 ) -> axum::http::Request<axum::body::Body> {
-    let sig = key.sign(&rest_auth_message(method, path, ts, body, host));
+    let sig = key.sign(&rest_auth_message(method, path, ts, body, host).unwrap());
     let auth = format!(
         "AgentConnect-Ed25519 {}.{ts}.{}",
         b64_encode(key.verifying_key().as_bytes()),

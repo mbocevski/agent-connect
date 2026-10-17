@@ -340,6 +340,10 @@ pub enum ServerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u64>,
     },
+    /// Every message that was queued for the mailbox when it authenticated
+    /// has been sent (SPEC §8.2): the end of the reconnect drain.
+    #[serde(rename = "drained")]
+    Drained,
     /// A send was accepted.
     #[serde(rename = "accepted")]
     Accepted {
@@ -602,6 +606,7 @@ mod tests {
             mailbox_id: "m".into(),
         };
         assert_eq!(f.to_json(), r#"{"t":"ready","mailbox_id":"m"}"#);
+        assert_eq!(ServerFrame::Drained.to_json(), r#"{"t":"drained"}"#);
         let f = ServerFrame::error(None, ErrorCode::NotMember, "no");
         assert_eq!(
             f.to_json(),

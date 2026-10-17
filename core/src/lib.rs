@@ -16,9 +16,11 @@
 //! - [`padding`]: application padding buckets (§7.1)
 //! - [`provider`]: storage backends ([`MemoryStore`], the SQLCipher-encrypted
 //!   [`SqliteStore`] and its [`DbKey`])
+//! - [`db`]: [`EncryptedDb`], the SQLCipher database for a daemon's own records
 #![warn(clippy::pedantic, missing_docs)]
 
 pub mod clock;
+pub mod db;
 pub mod encoding;
 mod error;
 pub mod group;
@@ -35,6 +37,7 @@ pub mod sas;
 #[cfg(test)]
 mod vectors;
 
+pub use db::EncryptedDb;
 pub use error::{Error, Result};
 pub use group::{
     ApplicationMessage, Client, CommitOut, CommitSummary, Event, Group, MemberInfo, Routing,

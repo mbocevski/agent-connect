@@ -7,7 +7,7 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 
 | Command | Contents | Budget | Network / docker | Runs |
 |---|---|---|---|---|
-| `just test` | Rust and Python unit, property and contract tests (`just contract`) | < 60 s | none | pre-push, CI |
+| `just test` | Rust and Python unit, property and contract tests (`just contract`), multi-node harness scenarios | < 60 s | loopback only | pre-push, CI |
 | `just test-int` | docker compose integration (relay + daemons) and demos | < 10 min | docker | CI (once populated) |
 | `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests; fuzzing and criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
 | `just ci` | exactly the PR pipeline: `lint`, `test`, `cov` (gates and ratchet), `changelog-check` | minutes | none | PR CI (`ci-ok`) |
@@ -21,9 +21,9 @@ the slow test to a higher tier or make it faster. Do not raise the budget.
 |---|---|
 | Rust unit tests | inline `#[cfg(test)] mod tests` in the file under test |
 | Rust integration tests | `<crate>/tests/*.rs` |
-| Python tests | `<package>/tests/` (`core-py/tests`, `daemon/tests`, `sdk/python/tests`, `scripts/tests`) |
+| Python tests | `<package>/tests/` (`core-py/tests`, `daemon/tests`, `harness/tests`, `sdk/python/tests`, `scripts/tests`) |
 | Shared vectors and schemas | `testdata/`, listed in `testdata/MANIFEST.json` |
-| Multi-node harness (phase 2) | `harness/` |
+| Multi-node harness (phase 2) | `harness/src` (fixtures), `harness/tests` (scenarios) |
 
 `conftest.py` at the repository root is shared by every Python test directory.
 
@@ -33,8 +33,8 @@ the slow test to a higher tier or make it faster. Do not raise the budget.
 - **Test first for protocol and crypto code** (`core/`, wire formats). Crypto
   changes need vectors plus negative tests (see `AGENTS.md`).
 - **No sleeps.** Code under test takes a `Clock`; tests drive a `FakeClock`.
-- **No network and no docker in the fast tier.** Bind to loopback only in
-  integration tests.
+- **No external network and no docker in the fast tier.** Loopback only:
+  the relay's tests and the multi-node harness bind `127.0.0.1`.
 - Tests are independent and order-insensitive. No shared mutable state, no
   writes outside a temp directory.
 
@@ -133,27 +133,53 @@ are added with the core and run in the nightly workflow. They are
 non-gating: results are stored as artifacts and compared by hand until there
 is enough history to alert on regressions.
 
-## Phase 2: multi-node harness (spec)
+## Phase 2: multi-node harness
 
-Lands with the daemon. It lives in `harness/` and runs inside `just test`.
+The harness lives in `harness/` (package `agentconnect_harness`, fixtures
+registered by the root `conftest.py`) and runs inside `just test`. The
+scenarios are in `harness/tests/`.
 
-- **In-process.** One relay and N daemons in a single process, wired over
-  in-memory transports. No sockets, no docker, no threads that sleep.
-- **Shared fake clock.** Every component takes the same `FakeClock`;
-  `advance(time)` is the only way time moves, and it runs timers
-  deterministically.
-- **Recording adapter.** A test adapter on each daemon records every
-  delivered, rejected and policy-blocked message so tests assert on what
-  agents saw.
+- **Real relay, in-process daemons.** The relay is the real binary,
+  built once per session (`just build-relay-dev`, which `test-py` and the
+  coverage run invoke first; the fixture rebuilds only if the binary is
+  missing or older than `relay/src` and `core/src`; `AC_RELAY_BIN` points at
+  a prebuilt one). It runs on a random loopback port with a temporary SQLite
+  database and is torn down at the end of the session. Daemons run in the
+  test process, so coverage measures them directly. Traffic is loopback
+  only; there is no docker and nothing sleeps.
+- **One proxy per daemon.** Each daemon reaches the relay through a small
+  WebSocket proxy (`proxy.py`). It is honest by default and is how
+  `partition` and `malicious_relay` work. REST calls go straight to the
+  relay.
+- **Shared fake clock, daemons only.** Every daemon takes the cluster's
+  `FakeClock`, which starts at the real current time so signed REST
+  timestamps and invite expiries agree with the relay. `advance(time)` is
+  the only way daemon time moves; reconnect backoff, delivery retries and
+  rate-limit pauses all wait on it. **The relay uses the system clock**, so
+  relay-side time behaviour (message and invite TTLs, replay-cache expiry)
+  stays covered by the relay's own Rust tests, not by the harness.
+- **Recording adapter.** `agentconnect.adapter.RecordingAdapter` records
+  every delivery (with its untrusted framing) and every event, and can
+  return `retry` on demand.
 - **Fixtures:**
-  - `group(n, mode)`: a group of `n` members in the given mode, fully joined
-    and with one epoch settled.
-  - `invite`: create and redeem an invite link, with options for use limits,
-    expiry and a wrong secret.
-  - `partition(member)`: cut a member off from the relay, and heal it later.
-  - `advance(time)`: advance the shared clock.
-  - `malicious_relay(...)`: a relay that drops, delays, reorders, replays,
-    injects or forks, to exercise the threat model in SPEC section 12.
-- **Seeded.** Scheduling and fault injection draw from `AC_TEST_SEED`.
-- **Budget.** A 5-member scenario (create, join, message round, one commit,
-  SAS compare) finishes in under 2 s.
+  - `cluster`: `await cluster.node(name, auto_approve=..., identity_of=...)`
+    starts a daemon; `identity_of` makes a replica of another node's
+    identity.
+  - `group(n, mode)`: `n` members fully joined and settled; `mode` is
+    `"distinct"` (one identity each) or `"replicas"` (instances of one
+    identity).
+  - `invite(inviter, joiner, group_id)`: create, redeem and approve an
+    invite, waiting until every member is on the new epoch.
+  - `partition(node)` / `heal(node)`: cut a daemon's connection; healing
+    advances the clock past its reconnect backoff.
+  - `advance(seconds)`: move daemon time.
+  - `malicious_relay(node)`: that node's proxy. It can drop, reorder,
+    replay and inject frames, rewrite routing hints, forge replies (an
+    `epoch_conflict` for a commit it really forwarded, any error for any
+    frame), hold a Welcome back, and fork (confirm a node's commits without
+    forwarding them).
+- **Seeded.** Each daemon's core randomness and backoff jitter come from the
+  `rng` fixture (so from `AC_TEST_SEED`), with a fresh derived seed on every
+  restart so a restarted daemon never replays its previous keys.
+- **Budget.** Each scenario takes well under 2 s; the whole harness takes a
+  few seconds.

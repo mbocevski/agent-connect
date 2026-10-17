@@ -18,11 +18,13 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Mutex;
 
+use hkdf::Hkdf;
 use openmls_libcrux_crypto::CryptoProvider;
 use openmls_memory_storage::MemoryStorage;
 use openmls_sqlite_storage::{Codec, Connection, SqliteStorageProvider};
 use openmls_traits::OpenMlsProvider;
 use rusqlite::{ErrorCode, OpenFlags};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result, storage};
@@ -67,6 +69,23 @@ impl DbKey {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; DB_KEY_LEN] {
         &self.0
+    }
+
+    /// A key for another database, derived from this one:
+    /// HKDF-SHA256(ikm = this key, no salt, `info`, L = 32). Distinct `info`
+    /// labels give independent keys, so one keystore entry can key several
+    /// files without any two sharing a key (ADR-003).
+    #[must_use]
+    pub fn derive(&self, info: &[u8]) -> Self {
+        let mut key = Zeroizing::new([0u8; DB_KEY_LEN]);
+        // 32 bytes is far below HKDF-SHA256's 8160-byte limit, so this can't fail.
+        if Hkdf::<Sha256>::new(None, self.0.as_slice())
+            .expand(info, key.as_mut_slice())
+            .is_err()
+        {
+            unreachable!("HKDF-SHA256 output of 32 bytes is always valid");
+        }
+        Self(key)
     }
 
     /// `PRAGMA <pragma> = "x'<hex>'";`, the raw-key form, in a buffer that
@@ -213,7 +232,7 @@ fn apply_key(conn: &Connection, key: &DbKey) -> Result<()> {
     Ok(())
 }
 
-fn open_keyed(path: &Path, key: &DbKey, flags: OpenFlags) -> Result<Connection> {
+pub(crate) fn open_keyed(path: &Path, key: &DbKey, flags: OpenFlags) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, flags).map_err(storage)?;
     apply_key(&conn, key)?;
     Ok(conn)

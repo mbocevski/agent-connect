@@ -331,6 +331,9 @@ async fn welcome_goes_to_the_named_mailbox_even_if_it_never_connected() {
     let mut late = common::Client::connect(h.addr, signing_key(9)).await;
     let got = late.deliver().await;
     assert_eq!(got["kind"], "welcome_wrapped");
+    // The queued Welcome came before the end-of-drain marker (SPEC §8.2).
+    assert_eq!(late.drained().await, 1);
+    assert_eq!(late.drained_after, vec![1]);
     assert_eq!(got["msg_id"], w["msg_id"]);
     assert_eq!(got["ct"], w["ct"]);
 
