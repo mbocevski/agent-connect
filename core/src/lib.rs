@@ -44,8 +44,8 @@ mod vectors;
 pub use db::EncryptedDb;
 pub use error::{Error, Result};
 pub use group::{
-    ApplicationMessage, Client, CommitOut, CommitSummary, Event, Group, MemberInfo, Routing,
-    VerifiedJoinRequest,
+    ApplicationMessage, Client, CommitOut, CommitSummary, Event, Group, MemberInfo, MessageHeader,
+    MessageKind, Routing, VerifiedJoinRequest,
 };
 pub use identity::{Identity, Instance, InstanceCert};
 pub use invite::{Invite, InviteLink, InviteMeta, InviteSecret};

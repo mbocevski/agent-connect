@@ -219,6 +219,8 @@ async def test_an_invite_for_another_relay_is_refused_before_anything_is_sent(
     code, out = await bob.run("accept", other, "--yes")
     assert code == 3
     assert "different relay" in out
+    code, refused = await bob.json("accept", other, "--yes")
+    assert (code, refused["error"]["code"]) == (3, "wrong_relay")
     assert bob.node.daemon.store.pending_joins() == []
 
 

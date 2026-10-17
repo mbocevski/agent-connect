@@ -252,6 +252,10 @@ A delivery is acknowledged once the agent sent its first event. Until then:
 The daemon's delivery queue is shared by all groups, so while the agent is
 unreachable, later deliveries wait.
 
+Stopping the daemon cancels calls to the agent that are still running,
+stops the facade and closes `a2a-seen.db`, even if the daemon is
+interrupted again while the adapter closes.
+
 ## Limits
 
 SPEC §10.2 applies to everything the adapter and the facade send:

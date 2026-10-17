@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use agentconnect_core::group::Event;
+use agentconnect_core::group::{Event, MessageHeader, MessageKind, peek_header};
 use agentconnect_core::policy::{Floor, InvitePermission};
 use agentconnect_core::{Error, InviteLink, InviteMeta, InviteSecret, SqliteStore};
 use common::*;
@@ -1141,4 +1141,86 @@ fn event_kind_names_the_variant_without_content() {
     let removed = groups[2].process(&peers[2].client, &out.commit).unwrap();
     assert_eq!(removed.kind(), "removed");
     assert_eq!(Event::OwnEcho.kind(), "own_echo");
+}
+
+/// SPEC §7.1: the receiver compares the envelope with the unprotected
+/// `PrivateMessage` header before processing anything.
+#[test]
+fn peek_header_reads_group_epoch_and_content_type() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(3, &clock);
+    let gid = groups[0].group_id().to_vec();
+    let epoch = groups[0].epoch();
+
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "peeked"))
+        .unwrap();
+    let head = peek_header(&ct).unwrap();
+    assert_eq!(
+        head,
+        MessageHeader {
+            group_id: gid.clone(),
+            epoch,
+            content_type: MessageKind::Application,
+        }
+    );
+    assert_eq!(head.content_type.as_str(), "application");
+
+    let proposal = groups[2].propose_leave(&peers[2].client).unwrap();
+    let head = peek_header(&proposal).unwrap();
+    assert_eq!(
+        (head.epoch, head.content_type.as_str()),
+        (epoch, "proposal")
+    );
+
+    let out = groups[1].update(&peers[1].client).unwrap();
+    let head = peek_header(&out.commit).unwrap();
+    assert_eq!(head.group_id, gid);
+    assert_eq!(
+        (head.epoch, head.content_type),
+        (epoch, MessageKind::Commit)
+    );
+    assert_eq!(MessageKind::Commit.as_str(), "commit");
+}
+
+/// A peek is not processing: a message whose envelope epoch disagrees with
+/// its header is dropped without consuming its key, and the same bytes
+/// still process under a correct envelope.
+#[test]
+fn peek_header_consumes_no_key() {
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "kept"))
+        .unwrap();
+    let claimed = groups[1].epoch() + 1; // what a lying envelope says
+    for _ in 0..3 {
+        assert_ne!(peek_header(&ct).unwrap().epoch, claimed);
+    }
+    let msg = groups[1].open(&peers[1].client, &ct).unwrap();
+    assert_eq!(msg.epoch, groups[1].epoch());
+    // Processing does consume it.
+    assert!(matches!(
+        groups[1].open(&peers[1].client, &ct),
+        Err(Error::Mls(_))
+    ));
+    assert_eq!(peek_header(&ct).unwrap().epoch, groups[1].epoch());
+}
+
+#[test]
+fn peek_header_validates_like_process() {
+    assert_eq!(peek_header(b"junk"), Err(Error::Malformed("MLS message")));
+    assert_eq!(peek_header(b""), Err(Error::Malformed("MLS message")));
+    let clock = clock();
+    let (peers, mut groups) = group_of(2, &clock);
+    let mut ct = groups[0]
+        .seal(&peers[0].client, &inner(&peers[0], "x"))
+        .unwrap();
+    // Trailing bytes: exact deserialisation, as for `process`.
+    ct.push(0);
+    assert_eq!(peek_header(&ct), Err(Error::Malformed("MLS message")));
+    assert_eq!(
+        groups[1].process(&peers[1].client, &ct),
+        Err(Error::Malformed("MLS message"))
+    );
 }

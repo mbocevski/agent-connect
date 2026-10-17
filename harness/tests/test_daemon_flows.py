@@ -178,8 +178,11 @@ async def test_invite_errors(cluster: Cluster, group: GroupFixture) -> None:
         await c.daemon.accept_invite(invite["url"])
     with pytest.raises(DaemonError):
         await a.daemon.revoke_invite("nope")
-    with pytest.raises(DaemonError, match="different relay"):
-        await c.daemon.inspect_invite(invite["url"].replace("127.0.0.1", "localhost"))
+    elsewhere = invite["url"].replace("127.0.0.1", "localhost")
+    for refused in (c.daemon.inspect_invite, c.daemon.accept_invite):
+        with pytest.raises(DaemonError, match="different relay") as caught:
+            await refused(elsewhere)
+        assert caught.value.code == "wrong_relay"
     with pytest.raises(DaemonError, match="invalid invite URL"):
         await c.daemon.inspect_invite("https://example.org/x")
     unknown = invite["url"].replace(invite["invite_id"], "A" * 22)

@@ -13,7 +13,7 @@ import pytest
 
 from agentconnect.daemon import _envelope_problem
 from agentconnect.store import GroupRow
-from agentconnect_harness.cluster import Node
+from agentconnect_harness.cluster import Cluster, Node
 from agentconnect_harness.proxy import RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -139,6 +139,93 @@ async def test_a_proposal_with_a_mismatched_epoch_is_dropped(
     assert alert.data["reason"] == "epoch_mismatch"
     await a.idle()
     assert b.me in {m.identity for m in a.daemon.store.members(gid)}
+
+
+async def test_an_application_epoch_mismatch_is_dropped_before_processing(
+    group: GroupFixture, malicious_relay: Proxy
+) -> None:
+    (a, b), gid = await group(2)
+    originals: list[bytes] = []
+
+    def bump(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "deliver" and env.get("kind") == "application":
+            originals.append(raw(env["ct"]))
+            env["epoch"] += 1
+        return [frame]
+
+    malicious_relay(b).server_filters.append(bump)
+    a.daemon.send_message(gid, {"text": "lied about"})
+    await b.adapter.wait_for(lambda: bool(b.adapter.of_type("relay_misbehaviour")))
+    (alert,) = b.adapter.of_type("relay_misbehaviour")
+    assert alert.data["reason"] == "epoch_mismatch"
+    await b.idle()
+    assert b.adapter.texts(gid) == []
+    # The core never processed it: its key is still there, so the bytes
+    # the relay was given still decrypt (as they would under a correct
+    # envelope).
+    (ct,) = originals
+    event = b.daemon.client.process(raw(gid), ct)
+    assert event["type"] == "application"
+    assert b"lied about" in event["plaintext"]
+
+
+async def test_an_application_for_another_group_is_dropped_before_processing(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy
+) -> None:
+    (a, b), gid = await group(2)
+    other = a.daemon.create_group("Other", "")
+    await a.idle()
+    await cluster.invite(a, b, other)
+    originals: list[bytes] = []
+
+    def misroute(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        mine = env.get("group_id") == gid and env.get("kind") == "application"
+        if frame.get("t") == "deliver" and mine:
+            originals.append(raw(env["ct"]))
+            env["group_id"] = other
+            env["epoch"] = b.daemon.client.epoch(raw(other))
+        return [frame]
+
+    malicious_relay(b).server_filters.append(misroute)
+    a.daemon.send_message(gid, {"text": "misrouted"})
+    await b.adapter.wait_for(lambda: bool(b.adapter.of_type("relay_misbehaviour")))
+    (alert,) = b.adapter.of_type("relay_misbehaviour")
+    assert (alert.group_id, alert.data["reason"]) == (other, "group_mismatch")
+    (ct,) = originals
+    assert b.daemon.client.process(raw(gid), ct)["type"] == "application"
+
+
+async def test_a_commit_for_another_group_is_flagged_and_rejected(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy
+) -> None:
+    (a, b), gid = await group(2)
+    other = a.daemon.create_group("Other", "")
+    await a.idle()
+    await cluster.invite(a, b, other)
+    before = b.daemon.client.epoch(raw(other))
+
+    def misroute(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        mine = env.get("group_id") == gid and env.get("kind") == "commit"
+        if frame.get("t") == "deliver" and mine:
+            env["group_id"] = other
+        return [frame]
+
+    malicious_relay(b).server_filters.append(misroute)
+    a.daemon.update(gid)
+    await b.adapter.wait_for(lambda: bool(b.adapter.of_type("relay_misbehaviour")))
+    (alert,) = b.adapter.of_type("relay_misbehaviour")
+    assert (alert.group_id, alert.data["reason"]) == (other, "group_mismatch")
+    assert b.daemon.client.epoch(raw(other)) == before
+
+
+async def test_correct_envelopes_still_process(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.send_message(gid, {"text": "fine"})
+    assert await b.wait_texts(gid, 1) == ["fine"]
+    assert not b.adapter.of_type("relay_misbehaviour")
 
 
 async def test_control_close_prompts_the_human_and_never_leaves(group: GroupFixture) -> None:

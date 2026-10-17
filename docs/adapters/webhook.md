@@ -137,6 +137,9 @@ one can arrive again, so a receiver must do its work once per id.
   takes longer to answer than that, the daemon sends the message again while
   the first call is still running. The SDK answers `503` to such a repeat and
   runs your handler once.
+- **Shutdown.** Stopping the daemon cancels a request in flight. The
+  message stays unacknowledged and is sent again after the restart, and the
+  daemon stops even if it is interrupted again while the adapters close.
 
 ## Send
 

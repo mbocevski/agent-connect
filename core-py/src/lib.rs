@@ -1157,6 +1157,23 @@ fn unwrap_welcome<'py>(
     })
 }
 
+/// The unprotected `PrivateMessage` header of an MLS message:
+/// `{"group_id": bytes, "epoch": int, "content_type": "application" |
+/// "proposal" | "commit"}` (SPEC §7.1). Validates the input as
+/// `Client.process` does; uses no keys and no storage, so it consumes
+/// nothing. The header is unauthenticated until the message is processed.
+#[pyfunction]
+fn peek_header<'py>(py: Python<'py>, message: &[u8]) -> PyResult<Bound<'py, PyDict>> {
+    guarded(|| {
+        let head = core::group::peek_header(message).map_err(err)?;
+        let d = PyDict::new(py);
+        d.set_item("group_id", PyBytes::new(py, &head.group_id))?;
+        d.set_item("epoch", head.epoch)?;
+        d.set_item("content_type", head.content_type.as_str())?;
+        Ok(d)
+    })
+}
+
 /// The SAS for given epoch authenticator, group id and epoch (SPEC §3.5).
 #[pyfunction]
 fn derive_sas(epoch_authenticator: &[u8], group_id: &[u8], epoch: u64) -> PyResult<Sas> {
@@ -1359,6 +1376,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(join_request_mac, m)?,
         wrap_pyfunction!(unwrap_welcome, m)?,
         wrap_pyfunction!(derive_sas, m)?,
+        wrap_pyfunction!(peek_header, m)?,
         wrap_pyfunction!(padding_bucket, m)?,
         wrap_pyfunction!(rekey_store, m)?,
         wrap_pyfunction!(verify_instance_cert, m)?,

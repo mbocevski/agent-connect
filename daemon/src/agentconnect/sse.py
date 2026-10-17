@@ -28,7 +28,6 @@ encrypted at rest (ADR-003).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -44,6 +43,7 @@ from agentconnect.adapter import (
 )
 from agentconnect.clock import Clock, SystemClock, unix_seconds
 from agentconnect.payloads import event_payload, message_payload
+from agentconnect.tasks import cancel_and_wait
 
 FEED_KEEP = 10_000
 RETENTION_SECS = 3600
@@ -147,9 +147,7 @@ class SseAdapter:
 
     async def close(self) -> None:
         if self._purger is not None:
-            self._purger.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._purger
+            await cancel_and_wait(self._purger)
             self._purger = None
 
     def _publish(self, key: str, group_id: str | None, payload: dict[str, Any]) -> None:

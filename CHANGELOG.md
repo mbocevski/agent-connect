@@ -273,6 +273,25 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- CLI: a group, invite or request id that starts with `-` (base64url ids
+  can) is read as the id, not as an unknown option, by every command that
+  takes one positionally (`groups show`, `verify`, `leave`, `send`,
+  `invite revoke`, `approvals approve`/`reject`).
+- Local API: an invite for a different relay is refused with its own error,
+  `400 wrong_relay`, instead of a generic `bad_request`; the CLI maps the
+  code (not the message text) to exit code 3.
+- Daemon: cancelling a task while it was cleaning up helper tasks (the wait
+  for a winning commit, the ownership hand-over, `stop()`, and closing the
+  webhook and SSE adapters) no longer swallows the cancellation; the task
+  stops. `stop()` still releases its databases and data-directory lock,
+  and a cancelled A2A adapter close still stops its facade and closes its
+  deduplication store.
+- Daemon: an application message or proposal whose envelope `epoch` or
+  `group_id` disagrees with its MLS header is now dropped before the core
+  processes it (SPEC §7.1), so it no longer consumes the message's key; a
+  wrong `group_id` raises `relay_misbehaviour` (`group_mismatch`). The core
+  and its bindings gain `peek_header`, which parses only the unprotected
+  `PrivateMessage` header and touches no keys or storage.
 - The daemon no longer freezes at 100% CPU when the relay connection closes
   while the outbox has work queued (on a relay drop or on shutdown). A send
   on the closed socket now takes the link down at once, so the outbox waits
