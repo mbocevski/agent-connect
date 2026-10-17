@@ -53,6 +53,7 @@ from agentconnect.cli_support import (
     unverified_hint,
 )
 from agentconnect.config import Config
+from agentconnect.isolation import IsolationError, PeerGate
 
 # Pretty tracebacks with locals would print envelopes, plaintext and secrets.
 app = typer.Typer(
@@ -162,9 +163,11 @@ async def _run(cfg: Config, ready: asyncio.Event | None = None) -> None:
     from agentconnect.clock import SystemClock  # noqa: PLC0415
     from agentconnect.daemon import Daemon  # noqa: PLC0415
 
+    # Separate-OS-user mode: refuse a loose setup before any key is opened.
+    gate = PeerGate.from_config(cfg)
     clock = SystemClock()
     daemon = Daemon(cfg, build_adapters(cfg, clock), clock=clock)
-    api = ApiServer(daemon)
+    api = ApiServer(daemon, gate)
     await daemon.start()
     await api.start()
     stop = asyncio.Event()
@@ -201,7 +204,11 @@ def daemon_run(
     if tcp_port:
         cfg = cfg.with_overrides(api_tcp_port=tcp_port)
     log.configure()
-    asyncio.run(_run(cfg))
+    with guard(False):
+        try:
+            asyncio.run(_run(cfg))
+        except IsolationError as e:
+            raise CliError("isolation", f"refusing to start: {e}", EXIT_USAGE) from None
 
 
 # -- groups and invites ------------------------------------------------------------

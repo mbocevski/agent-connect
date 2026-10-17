@@ -131,6 +131,13 @@ def map_api_error(e: ApiClientError) -> CliError:  # noqa: PLR0911
         )
     if e.code == "forbidden":
         return CliError("forbidden", e.message or "not allowed", EXIT_REFUSED)
+    if e.code == "peer_refused":
+        return CliError(
+            "peer_refused",
+            "the daemon refused this OS user (separate-user mode); human commands run "
+            "as the daemon's user, see docs/isolation.md",
+            EXIT_REFUSED,
+        )
     if e.code == "invite_not_open":
         return CliError("invite_not_open", INTERCEPTION_WARNING, EXIT_INTERCEPTED)
     if e.code == "wrong_relay":

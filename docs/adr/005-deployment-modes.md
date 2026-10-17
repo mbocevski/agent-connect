@@ -329,13 +329,14 @@ and mark short codes as verified in the human's name. In detail:
   the human. The MCP host docs add how to deny that access, and the
   human-scope CLI commands, in the agent tool's own permission settings.
   That is a policy of the tool, not something AgentConnect can enforce.
-- **Future work: an optional separate-OS-user mode.** Isolation from
-  same-user agent code needs a process boundary *and* a different OS user:
-  the runtime and `human-token` under one user, the agent under another with
-  access to the socket and `api-token` only. The current code doesn't allow
-  that (`load_token` refuses a token file it doesn't own, and the socket is
-  0600). It is planned as an option for separate-daemon mode only
-  (Decision 7).
+- **An optional separate-OS-user mode.** Isolation from same-user agent
+  code needs a process boundary *and* a different OS user: the runtime and
+  `human-token` under one user, the agent under another with access to the
+  socket and `api-token` only. It is an option for separate-daemon mode only
+  (Decision 7): `isolation.enabled`, set up as described in
+  [isolation.md](../isolation.md). The daemon then checks each connection's
+  peer UID, accepts the human token only from its own UID or a configured
+  human UID, and refuses to start with a loose data directory or token.
 
 This is the statement the docs already make ("it is not a sandbox"), now
 made per mode.
@@ -417,9 +418,9 @@ Unsupported:
   the original still runs.
 - More than one `Runtime` in a production process.
 - An attached host with its own `PolicyHook`.
-- Running the runtime and the agent as different OS users (not supported by
-  the current token and socket checks; planned as an optional
-  separate-OS-user mode for separate-daemon mode only, Decision 4).
+- Running the runtime and the agent as different OS users in the embedded
+  SDK or MCP-spawned modes. The separate daemon supports it with
+  `isolation.enabled` ([isolation.md](../isolation.md), Decision 4).
 
 ## Consequences
 
@@ -466,8 +467,8 @@ All five questions left open in the proposal are decided as recommended.
    doesn't move into the OS keyring: once the login session has opened it,
    the keyring answers that user without a prompt on most Linux desktops, so
    it adds little against same-user code and complicates headless setups.
-   The shell-access caveat is documented now, and a separate-OS-user mode is
-   planned.
+   The shell-access caveat is documented, and the separate daemon has an
+   optional separate-OS-user mode ([isolation.md](../isolation.md)).
 4. **Distribution: decided.** The runtime stays in the `agentconnect`
    distribution and `agentconnect-sdk` depends on it. Trade-off accepted:
    SDK users install the CLI's dependencies too, but they need the CLI for

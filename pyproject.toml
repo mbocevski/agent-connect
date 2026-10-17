@@ -62,7 +62,10 @@ testpaths = ["core-py/tests", "daemon/tests", "harness/tests", "sdk/python/tests
 addopts = ["-ra", "--strict-markers", "--strict-config", "--import-mode=importlib"]
 asyncio_mode = "auto"
 timeout = 10
-markers = ["quarantine: known-flaky test; excluded from gating runs (see TESTING.md)"]
+markers = [
+    "quarantine: known-flaky test; excluded from gating runs (see TESTING.md)",
+    "multiuser: needs root and a second OS user; integration tier only (AC_RUN_MULTIUSER=1)",
+]
 
 [tool.coverage.run]
 branch = true

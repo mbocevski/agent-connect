@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  agentconnectd as its own OS user on macOS (docs/isolation.md).
+  Install to /Library/LaunchDaemons/ after creating the _agentconnect user,
+  group and directories, then:
+  sudo launchctl bootstrap system /Library/LaunchDaemons/network.yggdrasill.agentconnectd.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>network.yggdrasill.agentconnectd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/agentconnect</string>
+    <string>daemon</string>
+    <string>run</string>
+  </array>
+  <key>UserName</key>
+  <string>_agentconnect</string>
+  <key>GroupName</key>
+  <string>_agentconnect</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AC_CONFIG</key>
+    <string>/usr/local/etc/agentconnect/config.toml</string>
+  </dict>
+  <!-- 0077 -->
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/agentconnect/agentconnectd.log</string>
+</dict>
+</plist>

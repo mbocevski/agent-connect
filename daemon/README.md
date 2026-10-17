@@ -17,9 +17,9 @@ human.**
 
 Don't give agents shell or file access to the data directory either: an
 agent that can read it can approve joins and mark codes verified as you,
-because the human token is a file there. A mode that runs the daemon as a
-separate OS user is planned
-([ADR-005](../docs/adr/005-deployment-modes.md)).
+because the human token is a file there. Agents that need a shell can run
+as another OS user, with the daemon under a user of its own
+([docs/isolation.md](../docs/isolation.md)).
 
 ## What the daemon holds
 
