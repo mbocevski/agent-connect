@@ -15,6 +15,12 @@ The invite lifecycle (`group`, `invite`, `accept`, `groups`, `approvals`,
 **never give an agent the human token or let it run those commands for the
 human.**
 
+Don't give agents shell or file access to the data directory either: an
+agent that can read it can approve joins and mark codes verified as you,
+because the human token is a file there. A mode that runs the daemon as a
+separate OS user is planned
+([ADR-005](../docs/adr/005-deployment-modes.md)).
+
 ## What the daemon holds
 
 - One identity and one instance, created on first start, in the OS keyring

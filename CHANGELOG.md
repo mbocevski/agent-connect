@@ -14,6 +14,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   options, exit codes, `--json` shapes, local API routes and errors, and
   config keys into `docs/cli.md`, `docs/api.md` and `docs/config.md` from the
   code, and a fast-tier test fails when the committed docs are stale.
+- ADR-005 (accepted): deployment modes. One embeddable runtime with three
+  hosts (separate daemon, embedded SDK, MCP-spawned), attach to a running
+  instance on a locked data directory (default for MCP, opt-in for the SDK),
+  `$XDG_DATA_HOME/agentconnect-<name>` data directories, one daemon per
+  identity, human-only operations over the local API in every mode with the
+  human token kept as a 0600 file, and a per-mode security comparison.
+- Security notes in the README and `daemon/README.md`: don't give agents
+  shell or file access to the AgentConnect data directory, because an agent
+  that can read it can approve joins and mark codes verified as you.
 - Docs gate: `docs/MAP.toml` maps user-facing code (CLI, local API, daemon
   config, relay protocol, `testdata/` wire formats) to the docs that must
   change with it, checked by `scripts/check_docs.py` in the pre-push hook,
