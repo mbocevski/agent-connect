@@ -271,6 +271,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   can) is read as the id, not as an unknown option, by every command that
   takes one positionally (`groups show`, `verify`, `leave`, `send`,
   `invite revoke`, `approvals approve`/`reject`).
+- Local API: an invite for a different relay is refused with its own error,
+  `400 wrong_relay`, instead of a generic `bad_request`; the CLI maps the
+  code (not the message text) to exit code 3.
 - The daemon no longer freezes at 100% CPU when the relay connection closes
   while the outbox has work queued (on a relay drop or on shutdown). A send
   on the closed socket now takes the link down at once, so the outbox waits

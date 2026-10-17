@@ -2109,7 +2109,7 @@ class Daemon:
         except ac.AgentConnectError as e:
             raise DaemonError("bad_request", str(e)) from None
         if not _same_relay(link.relay_host, self.config.relay_host):
-            raise DaemonError("bad_request", "the invite is for a different relay")
+            raise DaemonError("wrong_relay", "the invite is for a different relay")
         return link
 
     async def inspect_invite(self, url: str) -> dict[str, Any]:

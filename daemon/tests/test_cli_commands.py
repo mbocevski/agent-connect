@@ -308,12 +308,21 @@ def test_accept_expired_invite(fake: Fake) -> None:
 
 
 def test_accept_other_relay_is_a_clear_refusal(fake: Fake) -> None:
-    msg = "the invite is for a different relay"
-    fake.routes["POST /v0/invites/inspect"] = ApiClientError(400, "bad_request", msg)
+    fake.routes["POST /v0/invites/inspect"] = ApiClientError(400, "wrong_relay", "elsewhere")
     result = fake.run("accept", URL, "--yes")
     assert result.exit_code == 3
     assert "different relay" in result.output
     assert "nothing was sent" in result.output
+    code, out = fake.json("accept", URL, "--yes")
+    assert (code, out["error"]["code"]) == (3, "wrong_relay")
+    assert not fake.posts("/accept")
+
+
+def test_wrong_relay_comes_from_the_error_code_not_its_message(fake: Fake) -> None:
+    msg = "the invite is for a different relay"
+    fake.routes["POST /v0/invites/inspect"] = ApiClientError(400, "bad_request", msg)
+    code, out = fake.json("accept", URL, "--yes")
+    assert (code, out["error"]["code"]) == (2, "bad_request")
 
 
 def test_accept_bad_url_is_usage(fake: Fake) -> None:

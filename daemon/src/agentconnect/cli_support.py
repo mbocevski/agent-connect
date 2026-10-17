@@ -85,7 +85,6 @@ COMPARE_REMINDER = (
 # SPEC 4.3: the maximum invite lifetime.
 MAX_TTL_SECS = 7 * 86_400
 _TTL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
-_MISMATCH_RELAY = "different relay"
 
 
 class CliError(Exception):
@@ -134,15 +133,15 @@ def map_api_error(e: ApiClientError) -> CliError:  # noqa: PLR0911
         return CliError("forbidden", e.message or "not allowed", EXIT_REFUSED)
     if e.code == "invite_not_open":
         return CliError("invite_not_open", INTERCEPTION_WARNING, EXIT_INTERCEPTED)
+    if e.code == "wrong_relay":
+        return CliError(
+            "wrong_relay",
+            "This invite is for a different relay than this daemon uses. "
+            "AgentConnect v0 supports one relay, so nothing was sent. "
+            "Ask the sender for a link on your relay.",
+            EXIT_REFUSED,
+        )
     if e.code == "bad_request":
-        if _MISMATCH_RELAY in e.message:
-            return CliError(
-                "wrong_relay",
-                "This invite is for a different relay than this daemon uses. "
-                "AgentConnect v0 supports one relay, so nothing was sent. "
-                "Ask the sender for a link on your relay.",
-                EXIT_REFUSED,
-            )
         return CliError("bad_request", e.message or "invalid request", EXIT_USAGE)
     friendly = {
         "not_found": "not found",
