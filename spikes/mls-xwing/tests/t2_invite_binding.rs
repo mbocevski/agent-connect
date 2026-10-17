@@ -15,8 +15,20 @@ use openmls_traits::{
     crypto::OpenMlsCrypto, random::OpenMlsRand, signatures::Signer, types::AeadType,
 };
 
-const INVITE_ID: &[u8; 16] = b"invite-id-16byte";
-const INVITE_SECRET: &[u8; 32] = b"invite-secret-32-bytes-long!!!!!";
+use std::sync::LazyLock;
+
+// Random per run: the tests only compare derived values, and fixed bytes
+// would be a hard-coded secret.
+static INVITE_ID: LazyLock<[u8; 16]> = LazyLock::new(random_array);
+static INVITE_SECRET: LazyLock<[u8; 32]> = LazyLock::new(random_array);
+
+fn random_array<const N: usize>() -> [u8; N] {
+    Provider::new()
+        .expect("provider")
+        .rand()
+        .random_array()
+        .expect("os rng")
+}
 
 fn kp(id: &Identity, p: &Provider) -> KeyPackage {
     id.key_package(p, ac_capabilities(), instance_cert_ext(b"{}"))
@@ -25,8 +37,8 @@ fn kp(id: &Identity, p: &Provider) -> KeyPackage {
 /// Joiner side: store `invite_psk` under `"ac:v0:invite:" ‖ invite_id`.
 /// The nonce is not part of the storage key, so any nonce works here.
 fn store_invite_psk(p: &Provider, secret: &[u8]) {
-    PreSharedKeyId::external(invite_psk_id(INVITE_ID), vec![])
-        .store(p, &invite_psk(secret, INVITE_ID))
+    PreSharedKeyId::external(invite_psk_id(&*INVITE_ID), vec![])
+        .store(p, &invite_psk(secret, &*INVITE_ID))
         .unwrap();
 }
 
@@ -40,11 +52,11 @@ fn commit_add_with_psk(
     let psk_id = PreSharedKeyId::new(
         CS,
         p.rand(),
-        Psk::External(ExternalPsk::new(invite_psk_id(INVITE_ID))),
+        Psk::External(ExternalPsk::new(invite_psk_id(&*INVITE_ID))),
     )
     .unwrap();
     psk_id
-        .store(p, &invite_psk(INVITE_SECRET, INVITE_ID))
+        .store(p, &invite_psk(&*INVITE_SECRET, &*INVITE_ID))
         .unwrap();
     let bundle = group
         .commit_builder()
@@ -81,7 +93,7 @@ fn psk_in_welcome_binds_join_to_invite_secret() {
     // Gotcha: the failed attempt already deleted the KeyPackage private key,
     // so storing the PSK afterwards and retrying does not work. The joiner
     // MUST store the PSK before processing (SPEC §6.1 already says so).
-    store_invite_psk(&p_nopsk, INVITE_SECRET);
+    store_invite_psk(&p_nopsk, &*INVITE_SECRET);
     let err = join(&p_nopsk, &w).unwrap_err();
     assert!(matches!(err, WelcomeError::NoMatchingKeyPackage), "{err:?}");
 
@@ -95,7 +107,7 @@ fn psk_in_welcome_binds_join_to_invite_secret() {
     // Joiner with the right PSK: joins.
     let pb = Provider::new().unwrap();
     let b = Identity::new("ac:v0:bob", &pb);
-    store_invite_psk(&pb, INVITE_SECRET);
+    store_invite_psk(&pb, &*INVITE_SECRET);
     let (_, w) = commit_add_with_psk(&mut ga, &pa, &a.signer, kp(&b, &pb));
     let gb = join(&pb, &w).unwrap();
     assert_eq!(sas_bytes(&gb), sas_bytes(&ga));
@@ -121,8 +133,8 @@ fn psk_commit_requires_psk_at_every_existing_member() {
     // band beforehand (e.g. by A in an application message); B was not.
     let pc = Provider::new().unwrap();
     let c = Identity::new("ac:v0:carol", &pc);
-    store_invite_psk(&pc, INVITE_SECRET);
-    store_invite_psk(&pd, INVITE_SECRET);
+    store_invite_psk(&pc, &*INVITE_SECRET);
+    store_invite_psk(&pd, &*INVITE_SECRET);
     let (commit, w) = commit_add_with_psk(&mut ga, &pa, &a.signer, kp(&c, &pc));
     let gc = join(&pc, &w).unwrap();
 
@@ -132,7 +144,7 @@ fn psk_commit_requires_psk_at_every_existing_member() {
 
     // Gotcha: the failed attempt consumed the commit's decryption key, so
     // learning the PSK afterwards does not help. B is permanently forked off.
-    store_invite_psk(&pb, INVITE_SECRET);
+    store_invite_psk(&pb, &*INVITE_SECRET);
     let err = apply_commit(&mut gb, &pb, &commit).unwrap_err();
     assert!(format!("{err:?}").contains("SecretReuseError"), "{err:?}");
 
@@ -144,9 +156,9 @@ fn psk_commit_requires_psk_at_every_existing_member() {
 
 /// SPEC §6.4: `nonce(12) ‖ ChaCha20-Poly1305(welcome_key, nonce, aad, welcome)`.
 fn wrap_welcome(p: &Provider, secret: &[u8], welcome: &[u8]) -> Vec<u8> {
-    let key = welcome_key(secret, INVITE_ID);
+    let key = welcome_key(secret, &*INVITE_ID);
     let nonce: [u8; 12] = p.rand().random_array().unwrap();
-    let aad = [b"agentconnect/v0/welcome".as_slice(), INVITE_ID].concat();
+    let aad = [b"agentconnect/v0/welcome".as_slice(), &*INVITE_ID].concat();
     let ct = p
         .crypto()
         .aead_encrypt(AeadType::ChaCha20Poly1305, &key, welcome, &nonce, &aad)
@@ -155,9 +167,9 @@ fn wrap_welcome(p: &Provider, secret: &[u8], welcome: &[u8]) -> Vec<u8> {
 }
 
 fn unwrap_welcome(p: &Provider, secret: &[u8], wrapped: &[u8]) -> Option<Vec<u8>> {
-    let key = welcome_key(secret, INVITE_ID);
+    let key = welcome_key(secret, &*INVITE_ID);
     let (nonce, ct) = wrapped.split_at(12);
-    let aad = [b"agentconnect/v0/welcome".as_slice(), INVITE_ID].concat();
+    let aad = [b"agentconnect/v0/welcome".as_slice(), &*INVITE_ID].concat();
     p.crypto()
         .aead_decrypt(AeadType::ChaCha20Poly1305, &key, ct, nonce, &aad)
         .ok()
@@ -179,7 +191,7 @@ fn aead_wrapped_welcome_binds_join_without_touching_existing_members() {
     let c = Identity::new("ac:v0:carol", &pc);
     let (commit, w, _) = ga.add_members(&pa, &a.signer, &[kp(&c, &pc)]).unwrap();
     ga.merge_pending_commit(&pa).unwrap();
-    let wrapped = wrap_welcome(&pa, INVITE_SECRET, &wire(&w));
+    let wrapped = wrap_welcome(&pa, &*INVITE_SECRET, &wire(&w));
 
     // B processes the commit with no invite material.
     apply_commit(&mut gb, &pb, &wire(&commit)).unwrap();
@@ -189,8 +201,12 @@ fn aead_wrapped_welcome_binds_join_without_touching_existing_members() {
     assert!(unwrap_welcome(&pc, b"not-the-invite-secret-0123456789", &wrapped).is_none());
     let mut tampered = wrapped.clone();
     *tampered.last_mut().unwrap() ^= 1;
-    assert!(unwrap_welcome(&pc, INVITE_SECRET, &tampered).is_none());
+    assert!(unwrap_welcome(&pc, &*INVITE_SECRET, &tampered).is_none());
 
-    let gc = join(&pc, &unwrap_welcome(&pc, INVITE_SECRET, &wrapped).unwrap()).unwrap();
+    let gc = join(
+        &pc,
+        &unwrap_welcome(&pc, &*INVITE_SECRET, &wrapped).unwrap(),
+    )
+    .unwrap();
     assert_eq!(sas_bytes(&gc), sas_bytes(&gb));
 }
