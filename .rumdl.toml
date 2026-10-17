@@ -1,0 +1,21 @@
+# Markdown lint (rumdl, https://rumdl.dev). Runs in the pre-commit hook and CI.
+
+[global]
+flavor = "gfm"
+# Wide tables and URLs are fine; prose is wrapped by hand at about 80.
+line-length = 0
+
+[MD013]
+enabled = false
+
+[MD024]
+# The same subsection heading under different parents is fine (CHANGELOG).
+siblings-only = true
+
+[MD033]
+# Comments mark runnable README blocks.
+allowed-elements = []
+
+[per-file-ignores]
+# GitHub prefills the PR body with it; it has no title of its own.
+".github/pull_request_template.md" = ["MD041"]

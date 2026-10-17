@@ -131,7 +131,7 @@ out_of_sync}]}`
 
 `groups show` (also embedded in `accept`):
 
-```
+```text
 {group_id, name, purpose, status, epoch, out_of_sync, out_of_sync_reason,
  require_verified,
  trust_state: {self: "verified"|"unverified", verified_members, members},

@@ -54,6 +54,33 @@ repos:
     hooks:
       - id: gitleaks
 
+  # Docs: Markdown lint, offline link check, prose rules (CONTRIBUTING.md).
+  - repo: https://github.com/rvben/rumdl-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: rumdl-check
+
+  # lychee's own hook script finds its install directory with git, which breaks
+  # when git exports GIT_DIR to hooks (worktrees). Build the pinned release
+  # from crates.io instead.
+  - repo: local
+    hooks:
+      - id: lychee
+        name: lychee (offline)
+        language: rust
+        additional_dependencies: ["cli:lychee:0.24.2"]
+        # Relative links and anchors only; the nightly workflow checks the web.
+        entry: lychee --no-progress --offline
+        types_or: [markdown, html]
+        exclude: ^testdata/
+        require_serial: true
+
+  - repo: https://github.com/vale-cli/vale
+    rev: v3.24.0
+    hooks:
+      - id: vale
+        types: [markdown]
+
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.4.0
     hooks:

@@ -1,0 +1,20 @@
+# Absolute security claims. Use the canonical claim in SPEC.md section 1 and
+# point at the threat model (section 12) for what it does not cover.
+extends: existence
+message: "Don't claim '%s'. Use the canonical claim from SPEC.md section 1."
+level: error
+ignorecase: true
+tokens:
+  - fully secure
+  - completely secure
+  - totally secure
+  - perfectly secure
+  - 100 ?% secure
+  - MITM[- ]proof
+  - MITM[- ]resistant
+  - man[- ]in[- ]the[- ]middle[- ]proof
+  - unbreakable
+  - unhackable
+  - impossible to (break|hack|intercept|decrypt)
+  - can'?t be (broken|hacked|intercepted)
+  - military[- ]grade encryption

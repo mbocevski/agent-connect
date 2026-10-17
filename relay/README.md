@@ -7,7 +7,7 @@ it does not parse MLS messages: it routes on the outer envelope (SPEC 7.1).
 
 ## Run
 
-```
+```sh
 just relay                      # cargo run -p agentconnect-relay
 docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
 ```
@@ -40,7 +40,7 @@ group and invite ids) appear only as a short SHA-256 tag.
 `POST` and `DELETE /v0/invites` use the same Ed25519 instance key as the
 WebSocket:
 
-```
+```text
 Authorization: AgentConnect-Ed25519 <SK.pub b64url>.<unix seconds>.<signature b64url>
 signature = Ed25519(SK, "agentconnect/v0/relay-rest"
                         || METHOD "\n" || PATH "\n" || TS "\n"
@@ -87,6 +87,6 @@ window, and answers a repeat with `auth_failed`. The cache holds at most
 sleeps. `relay/fuzz/` holds a `cargo-fuzz` target for the frame parser (nightly
 toolchain, not part of `just test`):
 
-```
+```sh
 cd relay && cargo +nightly fuzz run frame_parser
 ```

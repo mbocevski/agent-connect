@@ -1,0 +1,42 @@
+# Hype adjectives and empty intensifiers. State the property or the number.
+extends: existence
+message: "'%s' is hype or an empty intensifier; state the property or the number instead."
+level: error
+ignorecase: true
+tokens:
+  - very
+  - really
+  - extremely
+  - incredibly
+  - truly
+  - highly
+  - super
+  - totally
+  - absolutely
+  - literally
+  - basically
+  - obviously
+  - clearly
+  - of course
+  - powerful
+  - revolutionary
+  - groundbreaking
+  - world[- ]class
+  - best[- ]in[- ]class
+  - state[- ]of[- ]the[- ]art
+  - next[- ]gen(eration)?
+  - blazing(ly)?[- ]fast
+  - lightning[- ]fast
+  - effortless(ly)?
+  - amazing
+  - awesome
+  - magic(al|ally)?
+  - battle[- ]tested
+  - enterprise[- ]grade
+  - military[- ]grade
+  - bank[- ]grade
+  - bulletproof
+  - beautiful(ly)?
+  - stunning
+  - delightful
+  - painless(ly)?

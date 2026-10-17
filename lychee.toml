@@ -1,0 +1,18 @@
+# Link check (lychee, https://lychee.cli.rs).
+# The pre-commit hook and PR CI add --offline: relative links and anchors only.
+# The nightly workflow runs the same config with network access.
+
+include_fragments = "anchor-only"
+no_progress = true
+max_retries = 3
+timeout = 20
+accept = ["200..=299", "429"]
+
+exclude_path = ["target", "\\.venv", "testdata", "spikes/.*/target"]
+
+exclude = [
+    # Placeholders in prose and examples.
+    "^https?://(127\\.0\\.0\\.1|localhost)",
+    "relay\\.example\\.org",
+    "relay\\.agentconnect\\.dev",
+]
