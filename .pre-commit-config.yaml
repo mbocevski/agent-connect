@@ -162,6 +162,13 @@ repos:
         stages: [pre-push]
         always_run: true
         pass_filenames: false
+      - id: docs-check
+        name: docs changed with mapped code (docs/MAP.toml)
+        language: system
+        entry: uv run --no-project python scripts/check_docs.py
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
       - id: fast-tests
         name: just test (fast tier)
         language: system

@@ -1,0 +1,34 @@
+# User-facing code and the docs that must change with it.
+#
+# scripts/check_docs.py fails a branch when a commit that isn't
+# docs/test/ci/chore/build/style changes a `code` path and none of the rule's
+# `docs` changed anywhere on the branch. Globs use fnmatch syntax (`*` also
+# matches `/`). Add a rule only for code whose behaviour users read about;
+# keep this list small and honest. Escape hatch: the `skip-docs` PR label.
+
+[[rule]]
+name = "cli"
+code = ["daemon/src/agentconnect/cli.py"]
+docs = ["docs/cli.md"]
+
+[[rule]]
+name = "local-api"
+code = ["daemon/src/agentconnect/api.py"]
+docs = ["docs/api.md"]
+
+[[rule]]
+name = "daemon-config"
+code = ["daemon/src/agentconnect/config.py"]
+docs = ["docs/config.md"]
+
+[[rule]]
+name = "relay-protocol"
+code = ["relay/src/proto.rs", "relay/src/rest.rs", "relay/src/ws.rs"]
+docs = ["SPEC.md", "relay/README.md"]
+
+[[rule]]
+name = "wire-formats"
+code = ["testdata/*.json"]
+# The manifest lists files; it isn't a wire format.
+exclude = ["testdata/MANIFEST.json"]
+docs = ["SPEC.md"]
