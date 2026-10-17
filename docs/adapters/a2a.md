@@ -154,8 +154,9 @@ another group, starts a new task instead.
 body is an A2A `CancelTaskRequest` (`{"id": "<taskId>"}`), sent to this
 member (SPEC §7.2). The adapter calls `CancelTask` on the agent, and the
 agent's own `canceled` status goes back to the group. An `a2a.task_cancel`
-from any other member is ignored, and an `a2a.task_status` with a canceled
-state is never treated as a cancel.
+from any other member is ignored, and so is one delivered as context (past
+the loop guard, or addressed to another member); an `a2a.task_status` with a
+canceled state is never treated as a cancel.
 
 ### Agent Cards and signatures
 
@@ -238,6 +239,11 @@ and rate limits apply to them.
   `CancelTask` also sends an `a2a.task_cancel` to the member running the
   peer task.
 - Facade tasks are kept in memory and are lost on restart.
+- When the group's safety policy holds your client's message for the human
+  (`require_approval` outbound), the facade answers at once with a task in
+  `input-required` state saying so, instead of waiting out `reply_timeout`
+  ([safety.md](../safety.md#approvals)). The message goes to the group if the
+  human approves it.
 
 ## Delivery guarantees
 

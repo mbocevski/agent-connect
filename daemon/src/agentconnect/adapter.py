@@ -169,7 +169,19 @@ class Capabilities:
     agent_card: dict[str, Any] | None = None
 
 
-# group_id, body, to, kind, reply_to, addressee -> msg_id
+class SendReceipt(str):
+    """What an adapter's send returns: the ``msg_id``, with ``held`` set when
+    the group's safety policy holds the message for the human's approval."""
+
+    held: bool
+
+    def __new__(cls, msg_id: str, *, held: bool = False) -> SendReceipt:
+        receipt = super().__new__(cls, msg_id)
+        receipt.held = held
+        return receipt
+
+
+# group_id, body, to, kind, reply_to, addressee -> msg_id (a SendReceipt)
 OutboundSend = Callable[..., Awaitable[str]]
 
 

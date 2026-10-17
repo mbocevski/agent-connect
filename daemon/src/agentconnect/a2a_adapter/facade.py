@@ -156,6 +156,18 @@ class BridgeExecutor(AgentExecutor):
                 event_queue, context, TaskState.TASK_STATE_FAILED, f"not sent: {code}"
             )
             return
+        if getattr(msg_id, "held", False):
+            # The group holds the agent's messages for the human: say so
+            # instead of waiting out reply_timeout for a reply that can't
+            # come before the human approves.
+            await self._start_task(context, event_queue)
+            await self._status(
+                event_queue,
+                context,
+                TaskState.TASK_STATE_INPUT_REQUIRED,
+                "held for the human's approval: the group gets it once they approve it",
+            )
+            return
         self._facade.waiters[msg_id] = replies
         task_mode = context.current_task is not None
         try:

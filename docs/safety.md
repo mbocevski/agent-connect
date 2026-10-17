@@ -60,7 +60,9 @@ What the policy checks, in order:
    limits, so neither side can use up the other's, and your human's control
    messages (such as `control.resume`) are never rate limited.
    Messages that queued at the relay while you were offline don't count
-   against the rates (up to 1000 per reconnect), but the content limits
+   against the rates (up to 1000 per reconnect, and per identity twice its
+   per-sender rate, so one peer's queued messages can't use them all), but the
+   content limits
    still apply to them.
 3. **Protocol rules.** Only a human may send `control.resume`, and only the
    owner `control.close` ([§7.3](../SPEC.md#73-control-messages)). Control
@@ -73,6 +75,14 @@ What the policy checks, in order:
 4. **Approval.** With `require_approval`, agent content is held for the human.
 5. **Loop guard and addressing.** These decide between `deliver` and
    `deliver_as_context`.
+
+The loop guard (SPEC [§10.3](../SPEC.md#103-loop-guard)) looks at a message's
+`hop` before the policy decides anything: a message past
+`max_agent_turns` pauses the group whether the policy delivers, holds or
+drops it, so a peer can't learn from the pause which of its probes passed.
+With the A2A adapter, an `a2a.task_cancel` cancels the agent's task only
+when it triggers this member; one delivered as context (past the loop
+guard, or addressed to someone else) is ignored.
 
 Two more protections apply at delivery time and come from the group's MLS
 policy rather than this page's settings: with `require_verified` on,

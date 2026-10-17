@@ -136,6 +136,33 @@ def content_problem(inner: dict[str, Any], size: int, limits: Limits = SPEC_LIMI
     return None
 
 
+MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain, all senders
+DRAIN_RATE_MULTIPLE = 2  # ...and per identity: 2 x its sender_per_minute
+
+
+class DrainBudget:
+    """How many messages of a reconnect drain (SPEC 8.2/10.2) skip the rates:
+    at most ``total`` per connection, and per sender at most what
+    :meth:`take` is given, so one peer's queued messages can't use up the
+    exemption."""
+
+    def __init__(self, total: int = MAX_DRAIN_EXEMPT) -> None:
+        self._total = total
+        self._used: dict[str, int] = {}
+
+    def reset(self) -> None:
+        """A new connection: a new drain."""
+        self._used.clear()
+
+    def take(self, sender: str, cap: int) -> bool:
+        """Count one exempt message from ``sender``; False when it is over
+        ``cap`` for that sender or the connection's total is spent."""
+        if sum(self._used.values()) >= self._total or self._used.get(sender, 0) >= cap:
+            return False
+        self._used[sender] = self._used.get(sender, 0) + 1
+        return True
+
+
 class RateLimiter:
     """Sliding-window counts per sender instance, identity, group and task.
 

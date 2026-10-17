@@ -49,6 +49,7 @@ from agentconnect.adapter import (
     Event,
     GroupView,
     Sender,
+    SendReceipt,
 )
 from agentconnect.backoff import Backoff
 from agentconnect.clock import Clock, SystemClock, unix_seconds
@@ -62,7 +63,7 @@ from agentconnect.identity import (
     open_core_client,
 )
 from agentconnect.keystore import DataDirLock, Keystore, open_keystore
-from agentconnect.limits import KNOWN_KINDS
+from agentconnect.limits import DRAIN_RATE_MULTIPLE, KNOWN_KINDS, DrainBudget
 from agentconnect.policy import (
     HUMAN_ONLY_KINDS,
     Decision,
@@ -98,7 +99,6 @@ MAX_PARKED_PER_GROUP = 256
 MAX_REPLY_TO = 16  # SPEC 7.2
 MAX_ADDRESSEE = 50  # SPEC 7.2: at most the group size
 HOP_MEMORY_SECS = 7 * 24 * 3600
-MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain
 TRANSFER_TIMEOUT_SECS = 10.0  # owner hand-over before a SAS-mismatch exit
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
@@ -391,7 +391,7 @@ class Daemon:
         self._held_wake = asyncio.Event()
         self._fail_codes: dict[int, str] = {}
         self._drain_frame = False
-        self._drain_exempted = 0
+        self._drain = DrainBudget()
         self.running = False
 
     # -- lifecycle ------------------------------------------------------------
@@ -518,16 +518,17 @@ class Daemon:
 
         await asyncio.wait_for(loop(), within)
 
-    def _drain_exempt(self) -> bool:
+    def _drain_exempt(self, group_id: str, identity: str) -> bool:
         """Whether the frame being handled is part of the reconnect drain and
-        still within :data:`MAX_DRAIN_EXEMPT` for this connection."""
-        if not self._drain_frame or self._drain_exempted >= MAX_DRAIN_EXEMPT:
+        still within the drain's budget: :data:`MAX_DRAIN_EXEMPT` for this
+        connection, and twice the per-sender rate for each identity."""
+        if not self._drain_frame:
             return False
-        self._drain_exempted += 1
-        return True
+        limit = self.safety.settings(group_id).limits(identity).sender_per_minute
+        return self._drain.take(f"{group_id}/{identity}", DRAIN_RATE_MULTIPLE * limit)
 
     async def _on_connected(self) -> None:
-        self._drain_exempted = 0
+        self._drain.reset()
         # Anything a failure in this run left unfinished in the journal.
         self._frames.put_nowait({"t": REPLAY_JOURNAL})
         self._outbox_wake.set()
@@ -1196,7 +1197,9 @@ class Daemon:
                 return "dropped"
             self.store.bump_messages(group_id)
             replayed = bool(event.get("replayed"))
-            delivery, decision, kind = self._make_delivery(group, msg_id, event, replayed=replayed)
+            delivery, decision, kind, hop = self._make_delivery(
+                group, msg_id, event, replayed=replayed
+            )
             identity, size = str(event["sender"]["identity"]), len(event["plaintext"])
             self.safety.audit(
                 group_id,
@@ -1208,6 +1211,11 @@ class Daemon:
                 decision=decision.verdict,
                 reason=decision.reason,
             )
+            # SPEC 10.3 on the hop alone, before and whatever the policy
+            # decided: a pause only for what passed would tell a peer which of
+            # its probes passed (SPEC 10.2).
+            if hop is not None and hop > _max_turns(group.policy):
+                await self._loop_guard(group, msg_id, identity, hop)
             if delivery is None:
                 self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
                 alert = (
@@ -1231,8 +1239,6 @@ class Daemon:
             else:
                 self.safety.transcribe(group_id, "in", identity, msg_id, delivery.inner)
                 self._defer(self._delivery_wake.set)
-            if delivery.hop > _max_turns(group.policy) and delivery.origin != "human":
-                await self._loop_guard(group, delivery)
             if delivery.kind == "control.close":
                 # SPEC 7.3: the owner asks everyone to leave. Leaving is the
                 # human's decision; the daemon never leaves on its own.
@@ -1306,22 +1312,24 @@ class Daemon:
 
     def _make_delivery(
         self, group: GroupRow, msg_id: str, event: dict[str, Any], *, replayed: bool = False
-    ) -> tuple[Delivery | None, Decision, str]:
+    ) -> tuple[Delivery | None, Decision, str, int | None]:
         """Apply the safety policy to a received application message. Returns
         the delivery to record (``None`` if dropped), the decision and the
         message kind."""
         try:
             inner = json.loads(event["plaintext"])
         except ValueError:
-            return None, drop("malformed"), ""
+            return None, drop("malformed"), "", None
         if not isinstance(inner, dict) or not isinstance(inner.get("kind"), str):
-            return None, drop("malformed"), ""
+            return None, drop("malformed"), "", None
         # The kind is peer text: record only the ones the protocol defines.
         kind = str(inner["kind"]) if inner["kind"] in KNOWN_KINDS else "unknown"
         sender = event["sender"]
         identity = sender["identity"]
         policy = group.policy
         hop = self._received_hop(group.group_id, inner)
+        # The hop the loop guard acts on (None: a human's message, SPEC 10.3).
+        guard_hop = None if inner.get("origin") == "human" else hop
         addressed = addressed_to_me(
             str(policy.get("floor", "free")),
             inner,
@@ -1344,12 +1352,12 @@ class Daemon:
                 _max_turns(policy),
                 addressed,
                 replayed=replayed,
-                drain_exempt=self._drain_exempt,
+                drain_exempt=lambda: self._drain_exempt(group.group_id, identity),
             )
         )
         if decision.verdict is Verdict.DROP:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=decision.reason)
-            return None, decision, kind
+            return None, decision, kind, guard_hop
         self.store.record_hop(group.group_id, msg_id, hop, self.now())
         if inner["kind"] in HUMAN_ONLY_KINDS:
             self._reset_loop_guard(group.group_id)
@@ -1386,7 +1394,7 @@ class Daemon:
             inner=inner,
             frame_text=self.safety.settings(group.group_id).frame_text,
         )
-        return delivery, decision, kind
+        return delivery, decision, kind, guard_hop
 
     # -- loop guard (SPEC 10.3) ---------------------------------------------
 
@@ -1417,7 +1425,7 @@ class Daemon:
         self.store.kv_set(f"trigger_msg/{group_id}", "")
         self.store.kv_set(f"loop_paused/{group_id}", "0")
 
-    async def _loop_guard(self, group: GroupRow, delivery: Delivery) -> None:
+    async def _loop_guard(self, group: GroupRow, msg_id: str, sender: str, hop: int) -> None:
         """SPEC 10.3: the agent was not triggered; pause the group once and
         tell the human (until a ``control.resume``)."""
         key = f"loop_paused/{group.group_id}"
@@ -1427,9 +1435,9 @@ class Daemon:
         await self.emit(
             group.group_id,
             "loop_guard",
-            msg_id=delivery.msg_id,
-            sender=delivery.sender.identity,
-            hop=delivery.hop,
+            msg_id=msg_id,
+            sender=sender,
+            hop=hop,
             max_agent_turns=_max_turns(group.policy),
         )
         try:
@@ -1437,7 +1445,7 @@ class Daemon:
                 group.group_id,
                 {"reason": "loop_guard"},
                 kind="control.pause",
-                reply_to=[delivery.msg_id],
+                reply_to=[msg_id],
                 internal=True,
             )
         except DaemonError as e:
@@ -2774,8 +2782,10 @@ class Daemon:
     ) -> str:
         """What adapters get through ``on_outbound``: agent-originated only.
         ``reply_to`` names the ``msg_id``s of the deliveries this answers;
-        ``addressee`` names who is triggered (SPEC 9.3)."""
-        return self.send_message(
+        ``addressee`` names who is triggered (SPEC 9.3). The answer is the
+        ``msg_id``, a :class:`SendReceipt` whose ``held`` says the group's
+        ``require_approval`` holds the message for the human."""
+        msg_id, status = self.queue_message(
             group_id,
             body,
             to=to,
@@ -2784,6 +2794,7 @@ class Daemon:
             reply_to=reply_to,
             addressee=addressee,
         )
+        return SendReceipt(msg_id, held=status == "held")
 
     def update(self, group_id: str) -> None:
         group = self._group_or_raise(group_id)

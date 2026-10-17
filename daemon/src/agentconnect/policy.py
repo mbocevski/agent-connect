@@ -537,7 +537,9 @@ class SafetyPolicy:
         only the limits. Raises :class:`PolicyError`."""
         checked = check_changes(changes, sender=sender is not None)
         merged = apply_changes(self.overrides(group_id), checked, sender)
-        settings = self.defaults.merged(merged)  # every combination stays valid
+        # Each value was checked on its own (check_changes); merging doesn't
+        # check again.
+        settings = self.defaults.merged(merged)
         self.store.set_safety_overrides(group_id, merged)
         return settings
 

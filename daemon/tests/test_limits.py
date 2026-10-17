@@ -13,6 +13,7 @@ from agentconnect.limits import (
     MAX_TASK_ID,
     SENDER_PER_MINUTE,
     TASK_PER_MINUTE,
+    DrainBudget,
     RateLimiter,
     content_problem,
     part_kind,
@@ -105,3 +106,13 @@ def test_task_updates_have_their_own_budget(fake_clock: FakeClock) -> None:
     assert rl.allow_inner("g", "b", "a2a.task_status", update)
     fake_clock.advance(61)
     assert rl.allow_inner("g", "a", "a2a.task_status", update)
+
+
+def test_the_drain_exemption_is_bounded_per_sender_and_in_all() -> None:
+    budget = DrainBudget(total=5)
+    assert [budget.take("a", 2) for _ in range(3)] == [True, True, False]
+    assert [budget.take("b", 2) for _ in range(2)] == [True, True]
+    assert budget.take("c", 2)
+    assert not budget.take("c", 2), "the connection total is spent"
+    budget.reset()
+    assert budget.take("a", 2), "a new connection starts afresh"

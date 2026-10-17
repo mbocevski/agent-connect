@@ -955,7 +955,9 @@ per-sender rate, and the identity cap keeps replicas from multiplying an
 identity's budget. Messages received in the reconnect
 drain (§8.2) are exempt from the per-minute rates, since they queued while
 the member was away (an implementation SHOULD still bound the exemption;
-the reference daemon allows 1000 per connection); the size, kind and part
+the reference daemon allows 1000 per connection, and per identity twice its
+per-sender rate, so one peer's queued messages can't use up the exemption); the
+size, kind and part
 limits always apply. Allowed A2A part kinds are `text` and
 `data`. `file` parts are disabled by default; a receiver MAY accept them,
 with a size cap of its own choosing (§10.6).
@@ -1000,7 +1002,9 @@ reference daemon raises `send_failed`).
   episode, until a `control.resume`.
 - If a member receives `hop > loop_guard.max_agent_turns`, it MUST NOT trigger
   its agent. It SHOULD send `control.pause{reason: "loop_guard"}` and notify
-  its human.
+  its human. It MUST decide this on the hop alone, whether or not its
+  policy (§10.2) accepts the message, so that the pause tells the sender
+  nothing about that policy.
 - A `control.resume` resets the counter.
 
 ### 10.4 Verification gating

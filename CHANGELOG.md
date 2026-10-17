@@ -45,6 +45,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `hold_for_approval` or `drop` with a reason), and every message the agent
   sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
   the loop guard moved into it unchanged. See `docs/safety.md`.
+- The loop guard decides on the hop alone, so its pause no longer tells a
+  peer whether the policy accepted a probe. The reconnect drain's rate
+  exemption is bounded per identity (twice its per-sender rate). An
+  `a2a.task_cancel` delivered as context no longer cancels the A2A agent's
+  task, and the A2A facade answers a held send with an `input-required`
+  task instead of timing out. Adapters' sends return a `SendReceipt` (the
+  `msg_id`, with `held`).
 - The transcript is capped per group (`policy.transcript_max_rows`, 10000)
   and for the whole daemon (`policy.transcript_max_bytes`, 64 MiB), oldest
   first, and the audit log's 100000-row cap holds on every row.

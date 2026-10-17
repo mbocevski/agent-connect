@@ -517,3 +517,27 @@ def test_signatures_with_unpinned_or_garbled_headers() -> None:
     garbled = _signed(k1, "k1")
     garbled.signatures[0].protected = "%%%"
     assert cards.signature_status(garbled, {"k1": public}) == "unverified"
+
+
+async def test_a_cancel_delivered_as_context_does_not_cancel(tmp_path: Path) -> None:
+    executor = ScriptedExecutor()
+    agent = AgentServer(executor, "tasks")
+    await agent.start()
+    try:
+        adapter, sent = await started(A2AOptions(local_agent_url=agent.url, data_dir=tmp_path))
+        d = delivery("m0", text("wait here"))
+        await adapter.deliver(view(), d.sender, d.to, d)
+        (*_, working) = await sent.wait_for(2)
+        task = working["body"]["taskId"]
+        # Past the loop guard, or for someone else: context, never a command.
+        context = delivery("c0", convert.cancel_body(task), kind="a2a.task_cancel", addressed=False)
+        assert await adapter.deliver(view(), context.sender, context.to, context) is (
+            DeliveryResult.ACK
+        )
+        assert executor.canceled == []
+        cancel = delivery("c1", convert.cancel_body(task), kind="a2a.task_cancel")
+        await adapter.deliver(view(), cancel.sender, cancel.to, cancel)
+        await executor.wait_canceled(1)
+        await adapter.aclose()
+    finally:
+        await agent.stop()

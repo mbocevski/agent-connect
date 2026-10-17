@@ -426,11 +426,13 @@ class A2AAdapter:
     async def _maybe_cancel(self, d: Delivery) -> None:
         """SPEC 7.2: ``a2a.task_cancel`` (an A2A ``CancelTaskRequest``) from
         the task's requester cancels the agent's task; from anyone else it is
-        ignored."""
+        ignored, and so is one delivered as context (past the loop guard, or
+        addressed to another member): it has no command's standing."""
         request = convert.parse_cancel(d.body)
         ref = None if request is None else self._tasks.get(request.id)
         if (
-            request is None
+            not d.addressed_to_me
+            or request is None
             or ref is None
             or ref.group_id != d.group_id
             or ref.requester != d.sender.identity

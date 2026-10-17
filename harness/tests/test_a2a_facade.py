@@ -316,3 +316,20 @@ async def test_facade_auth_and_loopback(cluster: Cluster) -> None:
     # The facade listens on loopback only.
     server = adapter.facade.listening()
     assert server == [("127.0.0.1", adapter.facade.port)]
+
+
+async def test_a_held_send_is_reported_not_timed_out(
+    cluster: Cluster, scripted: AgentServer
+) -> None:
+    a, _b, gid = await pair(cluster, scripted)
+    a.daemon.update_safety(gid, {"require_approval": "outbound"})
+    f = await open_facade(a, gid)
+    try:
+        events = await collect(f.client.send_message(user("echo hello")))
+        assert states(events)[-1] == "TASK_STATE_INPUT_REQUIRED"
+        note = events[-1].status_update.status.message.parts[0].text
+        assert "approval" in note
+        (held,) = a.daemon.held_messages()
+        assert held["direction"] == "out"
+    finally:
+        await f.http.aclose()

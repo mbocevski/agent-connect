@@ -629,3 +629,18 @@ async def test_an_unknown_kind_is_audited_as_unknown(group: GroupFixture) -> Non
     assert await settled(a, b, sent) == "dropped"
     (row,) = [r for r in a.daemon.store.audit(gid) if r["msg_id"] == sent]
     assert (row["kind"], row["reason"]) == ("unknown", "unknown_kind")
+
+
+async def test_the_loop_guard_answers_whether_or_not_the_policy_dropped_the_message(
+    group: GroupFixture,
+) -> None:
+    (a, b), gid = await group(2)
+    # A probe past the loop guard that the policy drops (a file part) still
+    # gets the pause: the pause says nothing about the policy (SPEC 10.2).
+    inner = b.daemon.inner("a2a.message", {"parts": [{"raw": "QUJD"}]}, ["*"], hop=99)
+    probe = new_msg_id()
+    b.daemon._enqueue("app", gid, {"inner": inner, "msg_id": probe})
+    assert await settled(a, b, probe) == "dropped"
+    (guard,) = events(a, "loop_guard")
+    assert guard["msg_id"] == probe
+    await b.adapter.wait_for(lambda: any(d.kind == "control.pause" for d in b.adapter.deliveries))
