@@ -86,6 +86,7 @@ JOIN_CLOSED_GRACE_SECS = 60
 MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
 MAX_REPLY_TO = 16  # SPEC 7.2
+MAX_ADDRESSEE = 50  # SPEC 7.2: at most the group size
 HOP_MEMORY_SECS = 7 * 24 * 3600
 MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain
 TRANSFER_TIMEOUT_SECS = 10.0  # owner hand-over before a SAS-mismatch exit
@@ -249,7 +250,12 @@ def addressed_to_me(
 ) -> bool:
     """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?"""
     to = inner.get("to") or ["*"]
-    if floor == "free":
+    addressee = inner.get("addressee")
+    if addressee is not None and floor in ("free", "mention"):
+        # SPEC 9.3: `addressee` names exactly who is triggered; a malformed
+        # one triggers nobody.
+        hit = _str_list(addressee) and me in addressee
+    elif floor == "free":
         hit = True
     elif floor == "mention":
         hit = me in to or (to == ["*"] and inner.get("origin") == "human")
@@ -1178,7 +1184,9 @@ class Daemon:
             problem is None
             and not replayed
             and not self._drain_exempt()
-            and not self.limits.allow(group.group_id, identity)
+            and not self.limits.allow_inner(
+                group.group_id, identity, inner.get("kind"), inner.get("body")
+            )
         ):
             problem = "rate_limited"
         if problem is not None:
@@ -2211,6 +2219,7 @@ class Daemon:
         origin: str = "agent",
         hop: int = 0,
         reply_to: list[str] | None = None,
+        addressee: list[str] | None = None,
     ) -> dict[str, Any]:
         out: dict[str, Any] = {
             "v": 0,
@@ -2225,6 +2234,8 @@ class Daemon:
         }
         if reply_to is not None and len(reply_to) > 0:
             out["reply_to"] = reply_to
+        if addressee is not None:
+            out["addressee"] = addressee
         return out
 
     def send_message(  # noqa: PLR0913
@@ -2237,6 +2248,7 @@ class Daemon:
         origin: str = "agent",
         reply_to: list[str] | None = None,
         internal: bool = False,
+        addressee: list[str] | None = None,
     ) -> str:
         """Queue an application message. ``hop`` is computed here (SPEC 10.3):
         0 for the human's own messages, otherwise see :meth:`_reply_hop`.
@@ -2244,8 +2256,16 @@ class Daemon:
         SPEC 10.2 applies: at most 256 KiB, ``text``/``data`` parts only, and
         30 messages a minute from this sender (120 in the group). The
         daemon's own messages (``internal``: Agent Cards, loop-guard pauses)
-        don't count against the rate."""
+        don't count against the rate. Task updates have their own budget
+        (300 a minute per task).
+
+        ``addressee`` (SPEC 9.3): with ``to: ["*"]`` every member sees the
+        message, and only the members listed are triggered."""
         group = self._group_or_raise(group_id)
+        if addressee is not None and not (
+            _str_list(addressee) and 0 < len(addressee) <= MAX_ADDRESSEE
+        ):
+            raise DaemonError("bad_request", f"addressee must list 1 to {MAX_ADDRESSEE} members")
         if kind not in KNOWN_KINDS:
             raise DaemonError("bad_request", "unknown message kind")
         if origin not in ("agent", "human"):
@@ -2256,7 +2276,9 @@ class Daemon:
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
             hop, refs = self._reply_hop(group.group_id, reply_to)
-        inner = self.inner(kind, body, to or ["*"], origin=origin, hop=hop, reply_to=refs)
+        inner = self.inner(
+            kind, body, to or ["*"], origin=origin, hop=hop, reply_to=refs, addressee=addressee
+        )
         view = self._view(group_id)
         if view is not None and self.policy.outbound(view, inner) is PolicyDecision.DROP:
             raise DaemonError("forbidden", "blocked by policy")
@@ -2264,7 +2286,7 @@ class Daemon:
         if problem is not None:
             code, text = OUTBOUND_PROBLEMS.get(problem, ("bad_request", "malformed message"))
             raise DaemonError(code, text)
-        if not internal and not self.limits.allow(group.group_id, self.me):
+        if not internal and not self.limits.allow_inner(group.group_id, self.me, kind, body):
             raise DaemonError("rate_limited", "over the SPEC 10.2 message rate")
         msg_id = new_msg_id()
         self._enqueue("app", group.group_id, {"inner": inner, "msg_id": msg_id})
@@ -2273,18 +2295,27 @@ class Daemon:
             self._reset_loop_guard(group.group_id)
         return msg_id
 
-    async def adapter_send(
+    async def adapter_send(  # noqa: PLR0913
         self,
         group_id: str,
         body: dict[str, Any],
         to: list[str] | None = None,
         kind: str = "a2a.message",
         reply_to: list[str] | None = None,
+        *,
+        addressee: list[str] | None = None,
     ) -> str:
         """What adapters get through ``on_outbound``: agent-originated only.
-        ``reply_to`` names the ``msg_id``s of the deliveries this answers."""
+        ``reply_to`` names the ``msg_id``s of the deliveries this answers;
+        ``addressee`` names who is triggered (SPEC 9.3)."""
         return self.send_message(
-            group_id, body, to=to, kind=kind, origin="agent", reply_to=reply_to
+            group_id,
+            body,
+            to=to,
+            kind=kind,
+            origin="agent",
+            reply_to=reply_to,
+            addressee=addressee,
         )
 
     def update(self, group_id: str) -> None:

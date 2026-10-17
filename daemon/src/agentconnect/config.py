@@ -34,6 +34,14 @@ Example file::
     callback_url = "http://127.0.0.1:8808/"   # where the webhook adapter POSTs
     allow_remote = false            # opt in to a callback that isn't loopback
     timeout_secs = 120              # per request; an agent turn may be slow
+    [a2a]                           # optional: the A2A adapter (docs/adapters/a2a.md)
+    local_agent_url = "http://127.0.0.1:9999/"
+    local_agent_token_file = "~/.config/agentconnect/agent-token"
+    card_keys_file = "~/.config/agentconnect/card-keys.json"
+    facade_port = 8765              # 0: no facade
+    context_messages = 20
+    frame_text = true
+    reply_timeout = 600
 """
 
 from __future__ import annotations
@@ -91,6 +99,18 @@ class Config:
     webhook_allow_remote: bool = False
     webhook_timeout: int = 120
     sse_retention: int = 3600
+    a2a_local_agent_url: str | None = None
+    a2a_local_agent_token_file: Path | None = None
+    a2a_card_keys_file: Path | None = None
+    a2a_facade_port: int = 0
+    a2a_context_messages: int = 20
+    a2a_frame_text: bool = True
+    a2a_reply_timeout: int = 600
+
+    @property
+    def a2a_enabled(self) -> bool:
+        """Whether the daemon runs the A2A adapter: a local agent, a facade or both."""
+        return self.a2a_local_agent_url is not None or self.a2a_facade_port > 0
 
     @property
     def relay_http(self) -> str:
@@ -221,6 +241,49 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "resuming from before the window gets an `sse_gap` event. Used only with "
         '`default_adapter = "sse"`.',
     ),
+    ConfigKey(
+        "a2a.local_agent_url",
+        "a2a_local_agent_url",
+        "none",
+        "Base URL of the local A2A agent (`http://` or `https://`) that the A2A adapter "
+        "hands group messages to ([adapters/a2a.md](adapters/a2a.md)).",
+    ),
+    ConfigKey(
+        "a2a.local_agent_token_file",
+        "a2a_local_agent_token_file",
+        "none",
+        "A file holding a bearer token the adapter sends to the local agent.",
+    ),
+    ConfigKey(
+        "a2a.card_keys_file",
+        "a2a_card_keys_file",
+        "none",
+        "A JWKS file with the public keys you trust to sign Agent Cards.",
+    ),
+    ConfigKey(
+        "a2a.facade_port",
+        "a2a_facade_port",
+        "`0`",
+        "The A2A facade's port on `127.0.0.1` (0 to 65535); `0` turns it off.",
+    ),
+    ConfigKey(
+        "a2a.context_messages",
+        "a2a_context_messages",
+        "`20`",
+        "Messages that didn't trigger the agent kept for its next call (0 to 100).",
+    ),
+    ConfigKey(
+        "a2a.frame_text",
+        "a2a_frame_text",
+        "`true`",
+        "Put the SPEC section 10.1 notice in front of each message as its first text part.",
+    ),
+    ConfigKey(
+        "a2a.reply_timeout",
+        "a2a_reply_timeout",
+        "`600`",
+        "Seconds a facade request waits for the first reply from the group.",
+    ),
 )
 
 # Environment variables that don't override a single key.
@@ -288,6 +351,45 @@ def _typed[T](table: Mapping[str, Any], key: str, kind: type[T], default: T) -> 
     return value
 
 
+MAX_CONTEXT_MESSAGES = 100
+
+
+def _path(table: Mapping[str, Any], key: str) -> Path | None:
+    raw = _typed(table, key, str, "")
+    return Path(raw).expanduser() if raw else None
+
+
+def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
+    table = _section(data, "a2a")
+    url = _typed(table, "local_agent_url", str, "") or None
+    if url is not None:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            msg = f"a2a.local_agent_url must be http:// or https://, got {url!r}"
+            raise ConfigError(msg)
+    port = _typed(table, "facade_port", int, 0)
+    if not 0 <= port <= 65535:  # noqa: PLR2004
+        msg = "a2a.facade_port must be 0..65535"
+        raise ConfigError(msg)
+    context = _typed(table, "context_messages", int, 20)
+    if not 0 <= context <= MAX_CONTEXT_MESSAGES:
+        msg = f"a2a.context_messages must be 0..{MAX_CONTEXT_MESSAGES}"
+        raise ConfigError(msg)
+    timeout = _typed(table, "reply_timeout", int, 600)
+    if timeout <= 0:
+        msg = "a2a.reply_timeout must be a positive number of seconds"
+        raise ConfigError(msg)
+    return {
+        "a2a_local_agent_url": url,
+        "a2a_local_agent_token_file": _path(table, "local_agent_token_file"),
+        "a2a_card_keys_file": _path(table, "card_keys_file"),
+        "a2a_facade_port": port,
+        "a2a_context_messages": context,
+        "a2a_frame_text": _typed(table, "frame_text", bool, True),
+        "a2a_reply_timeout": timeout,
+    }
+
+
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
@@ -337,6 +439,7 @@ def load_config(
         "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
         "sse_retention": _typed(sse, "retention_secs", int, 3600),
     }
+    values.update(_a2a(data))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"

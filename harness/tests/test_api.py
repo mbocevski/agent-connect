@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 from agentconnect.api import ApiServer
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import _run, app
+from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 from agentconnect_harness.cluster import Cluster, Node
 
 
@@ -290,6 +291,34 @@ async def test_daemon_run_serves_until_signalled(cluster: Cluster, sockdir: Path
     os.kill(os.getpid(), signal.SIGTERM)
     await asyncio.wait_for(task, 10)
     assert not sock.exists()
+
+
+async def test_daemon_run_starts_the_a2a_adapter(cluster: Cluster, sockdir: Path) -> None:
+    agent = AgentServer(HelloWorldExecutor(), "local")
+    await agent.start()
+    port = _free()
+    cfg = (await cluster.node("seed")).config.with_overrides(
+        data_dir=cluster.tmp / "run-a2a",
+        api_socket=sockdir / "a2a.sock",
+        keystore="file",
+        a2a_local_agent_url=agent.url,
+        a2a_facade_port=port,
+    )
+    ready = asyncio.Event()
+    task = asyncio.ensure_future(_run(cfg, ready))
+    try:
+        await asyncio.wait_for(ready.wait(), 10)
+        token_file = cfg.data_dir / "a2a-facade-token"
+        assert token_file.stat().st_mode & 0o077 == 0
+        token = token_file.read_text(encoding="ascii").strip()
+        url = f"http://127.0.0.1:{port}/g/abc/.well-known/agent-card.json"
+        async with httpx.AsyncClient() as http:
+            card = await http.get(url, headers={"Authorization": f"Bearer {token}"})
+        assert card.status_code == 200
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(task, 10)
+        await agent.stop()
 
 
 async def test_api_hardening(

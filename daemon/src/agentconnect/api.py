@@ -310,7 +310,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "Send a message. Give `text` (sent as an A2A v1.0 `Message` with a `messageId`, "
         "`contextId`, `role` and one text part), or a full `body` object. `to` defaults to "
         '`["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the '
-        "`msg_id`s answered (SPEC 10.3). The agent token sends as the agent and "
+        "`msg_id`s answered (SPEC 10.3). `addressee` names exactly who is triggered "
+        '(SPEC 9.3); task replies go to `["*"]` with the requester as `addressee`. '
+        "The agent token sends as the agent and "
         "the human token as the human; kinds reserved to humans (such as "
         "`control.resume`) need the human token (SPEC 7.3).",
         request={
@@ -319,6 +321,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
             "to?": ["str"],
             "kind?": "str",
             "reply_to?": ["str"],
+            "addressee?": ["str"],
         },
         response={"msg_id": "str"},
     ),
@@ -554,6 +557,11 @@ class ApiServer:
             not isinstance(reply_to, list) or not all(isinstance(x, str) for x in reply_to)
         ):
             raise ApiError(400, "bad_request", "reply_to must be a list of msg_ids")
+        addressee = b.get("addressee")
+        if addressee is not None and (
+            not isinstance(addressee, list) or not all(isinstance(x, str) for x in addressee)
+        ):
+            raise ApiError(400, "bad_request", "addressee must be a list of identities")
         # SPEC 7.2/10.3: only the human's own requests are human-originated.
         # The agent token always sends as the agent, and can't send the
         # controls SPEC 7.3 reserves to humans.
@@ -566,6 +574,7 @@ class ApiServer:
             kind=kind,
             origin="human" if human else "agent",
             reply_to=reply_to,
+            addressee=addressee,
         )
         return {"msg_id": msg_id}
 
