@@ -31,6 +31,7 @@ LOG = log.get("agentconnect.relay")
 MAX_FRAME = 4 << 20
 REQUEST_TIMEOUT = 30.0
 NONCE_LEN = 32  # SPEC 8.2
+DRAIN_KEY = "_drain"  # set on every frame handed to the daemon
 
 
 def b64(raw: bytes) -> str:
@@ -86,6 +87,7 @@ class RelayLink:
         self._connected = asyncio.Event()
         self._stop = asyncio.Event()
         self.connections = 0
+        self.draining = False
 
     @property
     def connected(self) -> bool:
@@ -103,6 +105,8 @@ class RelayLink:
                 ) as ws:
                     await self._authenticate(ws)
                     self._ws = ws
+                    # Until the relay's ``drained`` frame: the reconnect drain.
+                    self.draining = True
                     self.connections += 1
                     self.backoff.reset()
                     self._connected.set()
@@ -177,6 +181,11 @@ class RelayLink:
         if not isinstance(frame, dict):
             return
         t = frame.get("t")
+        if t == "drained":
+            self.draining = False
+            return
+        # Ours, never the relay's: was this frame queued before we connected?
+        frame[DRAIN_KEY] = self.draining
         if t in ("accepted", "error"):
             fut = self._pending.pop(str(frame.get("msg_id")), None)
             if fut is not None and not fut.done():

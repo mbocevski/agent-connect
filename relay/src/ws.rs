@@ -133,6 +133,10 @@ async fn session<S: Store>(relay: Arc<Relay<S>>, mut socket: WebSocket) {
     if !flush(&relay, &mut socket, &mailbox, &mut last_seq).await {
         return;
     }
+    // SPEC §8.2: what follows is live traffic, not the reconnect drain.
+    if !send_frame(&mut socket, &ServerFrame::Drained).await {
+        return;
+    }
     loop {
         tokio::select! {
             () = registration.notify.notified() => {

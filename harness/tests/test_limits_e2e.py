@@ -68,3 +68,30 @@ async def test_senders_refuse_to_break_the_limits(group: GroupFixture, advance: 
     assert err.value.code == "rate_limited"
     await advance(60)
     d.send_message(gid, {"text": "fine again"})
+
+
+async def test_messages_queued_during_an_outage_are_exempt_but_a_live_flood_is_not(
+    group: GroupFixture,
+    partition: Callable[[Node], Awaitable[None]],
+    heal: Callable[[Node], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A lower per-sender rate keeps the test under the relay's own 50/s.
+    limit = 5
+    monkeypatch.setattr("agentconnect.limits.SENDER_PER_MINUTE", limit)
+    (a, b), gid = await group(2)
+    await partition(b)
+    # Twice the limit queues at the relay while b is away.
+    queued = [raw_send(a, gid, "a2a.message", {"text": f"q{i}"}) for i in range(2 * limit)]
+    await a.idle()
+    await heal(b)
+    await b.wait(lambda: b.daemon.store.inbox_state(a.daemon.mailbox, queued[-1]) is not None)
+    await b.wait(lambda: b.daemon.status()["inbox_pending"] == 0)
+    assert len(b.adapter.texts(gid)) == 2 * limit, "the reconnect drain is not rate limited"
+    # Live traffic after the relay's "drained" is.
+    live = [raw_send(a, gid, "a2a.message", {"text": f"l{i}"}) for i in range(2 * limit)]
+    await a.idle()
+    await b.wait(lambda: b.daemon.store.inbox_state(a.daemon.mailbox, live[-1]) is not None)
+    await b.wait(lambda: b.daemon.status()["inbox_pending"] == 0)
+    assert len(b.adapter.texts(gid)) == 3 * limit
+    assert b.daemon.store.inbox_state(a.daemon.mailbox, live[-1]) == "dropped"

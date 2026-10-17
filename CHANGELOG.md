@@ -88,6 +88,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Relay and daemon: after `ready` and the flush of everything queued for
+  the mailbox, the relay sends `{"t": "drained"}` (SPEC §8.2). Messages
+  delivered before it, the reconnect drain, are exempt from the §10.2
+  per-minute rates (at most 1000 per connection; size, kind and part
+  limits still apply), so messages queued during an outage are no longer dropped
+  while live floods still are.
 - Protocol (`SPEC.md`): now normative, as decided by the maintainer:
   pending leaves are committed by the lowest-index leaf that isn't leaving
   (§9.2); `trust_state.self` is `verified` only when every other current

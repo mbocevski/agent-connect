@@ -52,7 +52,15 @@ from agentconnect.identity import (
 )
 from agentconnect.keystore import DataDirLock, Keystore, open_keystore
 from agentconnect.limits import KNOWN_KINDS, RateLimiter, content_problem
-from agentconnect.relay import NotConnectedError, RelayError, RelayLink, RelayRest, b64, unb64
+from agentconnect.relay import (
+    DRAIN_KEY,
+    NotConnectedError,
+    RelayError,
+    RelayLink,
+    RelayRest,
+    b64,
+    unb64,
+)
 from agentconnect.store import GroupRow, OutboxRow, Store
 
 LOG = log.get("agentconnect.daemon")
@@ -65,6 +73,7 @@ MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
 MAX_REPLY_TO = 16  # SPEC 7.2
 HOP_MEMORY_SECS = 7 * 24 * 3600
+MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
 # SPEC 7.3: controls only a human-originated message may carry.
@@ -286,6 +295,8 @@ class Daemon:
         self._delivery_backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         self.limits = RateLimiter(self.clock)
         self._fail_codes: dict[int, str] = {}
+        self._drain_frame = False
+        self._drain_exempted = 0
         self.running = False
 
     # -- lifecycle ------------------------------------------------------------
@@ -393,7 +404,16 @@ class Daemon:
 
         await asyncio.wait_for(loop(), within)
 
+    def _drain_exempt(self) -> bool:
+        """Whether the frame being handled is part of the reconnect drain and
+        still within :data:`MAX_DRAIN_EXEMPT` for this connection."""
+        if not self._drain_frame or self._drain_exempted >= MAX_DRAIN_EXEMPT:
+            return False
+        self._drain_exempted += 1
+        return True
+
     async def _on_connected(self) -> None:
+        self._drain_exempted = 0
         self._outbox_wake.set()
         self._delivery_wake.set()
         self._pulse()
@@ -562,6 +582,9 @@ class Daemon:
         backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         while True:
             frame = await self._frames.get()
+            # SPEC 8.2/10.2: messages queued while we were away are exempt
+            # from the per-minute rates (bounded per connection).
+            self._drain_frame = bool(frame.pop(DRAIN_KEY, False))
             for attempt in range(1, MAX_TRANSIENT_RETRIES + 1):
                 try:
                     await self._handle_frame(frame)
@@ -784,7 +807,11 @@ class Daemon:
         identity = sender["identity"]
         # SPEC 7.2 (unknown kinds are ignored) and 10.2 (size, parts, rate).
         problem = content_problem(inner, len(event["plaintext"]))
-        if problem is None and not self.limits.allow(group.group_id, identity):
+        if (
+            problem is None
+            and not self._drain_exempt()
+            and not self.limits.allow(group.group_id, identity)
+        ):
             problem = "rate_limited"
         if problem is not None:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=problem)

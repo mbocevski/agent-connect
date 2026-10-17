@@ -71,7 +71,7 @@ class Watch:
         await asyncio.wait_for(loop(), 5)
 
 
-async def test_link_authenticates_routes_replies_and_reconnects(
+async def test_link_authenticates_routes_replies_and_reconnects(  # noqa: PLR0915
     fake_relay: FakeRelay, rng: random.Random, fake_clock: FakeClock
 ) -> None:
     inst = instance(rng)
@@ -84,7 +84,9 @@ async def test_link_authenticates_routes_replies_and_reconnects(
         sessions += 1
         assert await handshake(ws, inst, rng.randbytes(32), "relay.test")
         req = json.loads(await ws.recv())
-        await ws.send(json.dumps({"t": "deliver", "env": {"n": sessions}}))
+        await ws.send(json.dumps({"t": "deliver", "env": {"n": sessions}, "_drain": False}))
+        await ws.send(json.dumps({"t": "drained"}))
+        await ws.send(json.dumps({"t": "deliver", "env": {"live": sessions}}))
         await ws.send("not json")
         await ws.send("[1]")
         await ws.send(json.dumps({"t": "accepted", "msg_id": "unrelated"}))
@@ -125,8 +127,12 @@ async def test_link_authenticates_routes_replies_and_reconnects(
     await asyncio.wait_for(link.wait_connected(), 5)
     reply = await link.request({"t": "send", "msg_id": "ok"}, "ok")
     assert reply["t"] == "accepted"
-    assert {"t": "deliver", "env": {"n": 1}} in frames
-    assert {"t": "accepted", "msg_id": "unrelated"} in frames  # unmatched reply
+    # Frames before the relay's "drained" are the reconnect drain (the
+    # relay can't set the flag itself); "drained" itself isn't handed on.
+    await watch.until(lambda: {"t": "deliver", "env": {"live": 1}, "_drain": False} in frames)
+    assert {"t": "deliver", "env": {"n": 1}, "_drain": True} in frames
+    assert not [f for f in frames if f.get("t") == "drained"]
+    assert {"t": "accepted", "msg_id": "unrelated", "_drain": False} in frames  # unmatched
     # Drop the connection: pending requests fail, and the link reconnects
     # once the fake clock passes the backoff delay.
     await link.kick()
