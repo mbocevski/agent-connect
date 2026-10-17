@@ -656,3 +656,24 @@ async def test_the_loop_guard_answers_whether_or_not_the_policy_dropped_the_mess
     (guard,) = events(a, "loop_guard")
     assert guard["msg_id"] == probe
     await b.adapter.wait_for(lambda: any(d.kind == "control.pause" for d in b.adapter.deliveries))
+
+
+async def test_a_changed_card_waits_and_unknown_fields_never_reach_the_agent(
+    group: GroupFixture,
+) -> None:
+    (a, b), gid = await group(2)
+    pause = raw_send(b, gid, {"reason": "human", "since": 3}, "control.pause")
+    assert await settled(a, b, pause) == "done"
+    (seen,) = [d for d in a.adapter.deliveries if d.msg_id == pause]
+    assert seen.body == {"reason": "human"}
+    assert seen.inner["body"] == {"reason": "human"}
+    a.daemon.update_safety(gid, {"require_approval": "inbound"})
+    card = raw_send(b, gid, {"name": "renamed", "future": 1}, "a2a.agent_card")
+    assert await settled(a, b, card) == "held"
+    (item,) = a.daemon.held_messages()
+    assert item["kind"] == "a2a.agent_card"
+    a.daemon.approve_message(item["hold_id"])
+    await a.wait(lambda: a.daemon.store.cards(gid).get(b.me) == {"name": "renamed"})
+    again = raw_send(b, gid, {"name": "renamed"}, "a2a.agent_card")
+    assert await settled(a, b, again) == "done", "an unchanged card is not held"
+    assert events(a, "repeated_violations") == []

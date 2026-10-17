@@ -470,6 +470,7 @@ class Inbound:
     addressed: bool  # the floor rules trigger this instance (SPEC 9.3)
     replayed: bool = False  # a journal replay: counted when first received
     drain_exempt: Callable[[], bool] = lambda: False  # SPEC 8.2/10.2
+    card_changed: bool = False  # an Agent Card that differs from the one kept
 
     @property
     def kind(self) -> str:
@@ -565,9 +566,23 @@ class SafetyPolicy:
             return drop("not_human")  # SPEC 7.3: an agent can't resume
         if m.kind == "control.close" and m.sender != m.owner:
             return drop("not_owner")  # SPEC 7.3: only the owner may close
+        if m.kind == "a2a.agent_card" and m.card_changed and settings.approve_inbound:
+            # A changed card's text reaches the agent: held like content.
+            decision = self._hold(
+                m.group_id,
+                sender=m.sender,
+                instance=m.instance,
+                inner=m.inner,
+                size=m.size,
+                settings=settings,
+            )
+            if decision is not None and decision.verdict is not Verdict.HOLD_FOR_APPROVAL:
+                return decision
+            if decision is not None:
+                return Decision(Verdict.HOLD_FOR_APPROVAL, "card_changed")
         if m.kind in NON_CONTENT_KINDS:
             # Controls and cards carry no content (agentconnect.schemas) and
-            # never trigger the agent, so there is nothing to hold.
+            # never trigger the agent; they are context only.
             return as_context("not_content")
         if settings.approve_inbound and m.kind in HOLDABLE_KINDS:
             decision = self._hold(

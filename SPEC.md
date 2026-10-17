@@ -530,7 +530,13 @@ Inner = {
   message. `to` controls who is *triggered* (§9.3). Conversations that need
   privacy from some members belong in a separate group.
 - Unknown `kind` values MUST be ignored. Unknown fields MUST be preserved
-  when a message is relayed to adapters and otherwise ignored.
+  when a message is relayed to adapters and otherwise ignored, except in
+  the bodies of control messages (§7.3), Agent Cards (§10.5) and
+  `a2a.task_cancel`: those carry no content, so a receiver strips their
+  unknown fields before adapters see them (and doesn't hold an unknown
+  field against the sender), and MUST treat such a body that carries
+  content (`parts` anywhere, or a top-level `text`, `data`, `file` or
+  `raw`) as malformed.
 
 ### 7.3 Control messages
 
@@ -1043,10 +1049,11 @@ daemon offers:
   `a2a.task_status`, `a2a.task_artifact`, `a2a.task_cancel`) in either
   direction until the member's human approves it, with an expiry. Controls
   and Agent Cards are never held, so membership, the loop guard and SAS
-  verification keep working. They carry no content: the daemon checks each
-  control, card and cancellation against a strict schema (no fields beyond
-  §7.3 and the A2A object, no `parts` anywhere), drops anything else, and
-  delivers controls and cards as context only. Approval is a human action, like SAS
+  verification keep working. They carry no content: the daemon keeps only
+  the fields each control, card and cancellation defines (§7.2), drops one
+  that carries content, caps a card's text at the listing limits of ADR-006
+  and delivers controls and cards as context only. With inbound approval
+  on, a card that changed is held, since its text reaches the agent. Approval is a human action, like SAS
   verification (§11): it is not offered to the agent.
 - **Framing.** Besides the §10.1 fields, every delivery says whether the
   group wants the §10.1 notice shown in front of the text (`frame_text`, on

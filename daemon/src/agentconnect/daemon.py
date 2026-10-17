@@ -85,6 +85,7 @@ from agentconnect.relay import (
     b64,
     unb64,
 )
+from agentconnect.schemas import normalize
 from agentconnect.store import GroupRow, OutboxRow, Store
 from agentconnect.tasks import cancel_and_wait
 
@@ -1304,6 +1305,14 @@ class Daemon:
                 hop = max(hop, max(known) + 1)
         return hop
 
+    def _card_changed(self, group_id: str, identity: str, inner: dict[str, Any]) -> bool:
+        """Whether an Agent Card says something new: with inbound approval, a
+        changed card is held like any content (its text reaches the agent)."""
+        if inner.get("kind") != "a2a.agent_card" or not isinstance(inner.get("body"), dict):
+            return False
+        shaped = normalize("a2a.agent_card", inner["body"])
+        return shaped is not None and self.store.cards(group_id).get(identity) != shaped
+
     def _triggered(self, group_id: str, hop: int, msg_id: str) -> None:
         """The default "message replied to" for this instance's next agent
         message in the group (see _reply_hop)."""
@@ -1353,6 +1362,7 @@ class Daemon:
                 addressed,
                 replayed=replayed,
                 drain_exempt=lambda: self._drain_exempt(group.group_id, identity),
+                card_changed=self._card_changed(group.group_id, identity, inner),
             )
         )
         if decision.verdict is Verdict.DROP:
@@ -1370,10 +1380,18 @@ class Daemon:
             and hop <= _max_turns(policy)
         )
         body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
+        # Controls, cards and cancels reach adapters in their schema's shape
+        # only: unknown fields stripped, card text capped (agentconnect.schemas).
+        shaped = normalize(inner["kind"], body)
+        if shaped is not None and shaped is not body:
+            body = shaped
+            inner = dict(inner)
+            inner["body"] = shaped
         verified = any(
             m.identity == identity and m.verified for m in self.store.members(group.group_id)
         )
-        to = inner.get("to") if isinstance(inner.get("to"), list) else ["*"]
+        raw_to = inner.get("to")
+        to: list[Any] = raw_to if isinstance(raw_to, list) else ["*"]
         delivery = Delivery(
             group_id=group.group_id,
             msg_id=msg_id,
@@ -2712,6 +2730,9 @@ class Daemon:
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
             hop, refs = self._reply_hop(group.group_id, reply_to)
+        # A control, card or cancel goes out in its schema's shape only.
+        shaped = normalize(kind, body)
+        body = body if shaped is None else shaped
         inner = self.inner(
             kind, body, to or ["*"], origin=origin, hop=hop, reply_to=refs, addressee=addressee
         )

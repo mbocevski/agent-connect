@@ -49,9 +49,17 @@ What the policy checks, in order:
    against). Parts must be `text` or `data`; `file` parts pass only when the group sets `allow_files`, and
    then only up to `max_file_bytes`. Only A2A messages, task status and
    artifact updates carry parts. Every other kind (the `control.*`
-   messages, Agent Cards, task cancellations) must fit a strict schema of
-   its own: a body with any other field, or with a `parts` list anywhere
-   in it, is `malformed` and dropped, and counts as a violation.
+   messages, Agent Cards, task cancellations) keeps only the fields its
+   schema defines: unknown fields are stripped before an adapter sees them
+   (a newer peer's extra field is no violation), and a body that carries
+   content (`parts` anywhere, or a top-level `text`, `data`, `file` or
+   `raw`) or a known field of the wrong type is `malformed`, dropped, and
+   counts as a violation. An Agent Card's text is capped at the listing
+   limits of ADR-006: name 80 characters, description 500, version 32, at
+   most 16 skills (name 80, description 500, 8 tags of 32, 4 examples of
+   200), 8 media types per list, 8 extensions with `params` of at most
+   4 KiB, 32 KiB in all; control characters become spaces. A card cut to
+   fit no longer matches a signature on it.
 2. **Rates.** Each sender instance may send `sender_per_minute` messages
    (30), all instances of one identity together `identity_rate_multiple`
    times that (3, so 90), and the whole group `group_per_minute` (120).
@@ -231,8 +239,11 @@ With `require_approval` set to `inbound`, `outbound` or `both`, the agent
 content of the group waits for a human: A2A messages, task status and
 artifact updates, and task cancellations. Control messages and Agent Cards
 pass, so membership, the loop guard and the short code keep working; they
-can't carry content past the hold, because their strict schemas leave no
-room for it. Your human's own messages and
+can't carry content past the hold, because their schemas leave no room for
+it. The exception is an Agent Card that changed: its name, description and
+skills reach the agent as context, so with inbound approval a card that
+differs from the one you have is held (reason `card_changed`) until you
+approve it. Your human's own messages and
 the daemon's own (loop-guard pauses, Agent Cards) are never held.
 
 When a message is held, the daemon records a `message_held` event with its

@@ -82,9 +82,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (3 times the task budget) and a group cap (`policy.group_task_per_minute`,
   1200). The limiter and the violation counters are bounded and forget a
   group once it ends.
-- Control messages, Agent Cards and task cancellations must fit strict
-  per-kind schemas (no extra fields, no `parts` anywhere), so they can't
-  carry text, data or files past `require_approval` or the file-part ban.
+- Control messages, Agent Cards and task cancellations keep only the fields
+  their schemas define: unknown fields are stripped (SPEC 7.2), and a body
+  that carries content (`parts` anywhere, or a top-level `text`, `data`,
+  `file` or `raw`) is malformed, so they can't carry text, data or files
+  past `require_approval` or the file-part ban. Agent Card text is capped
+  at the ADR-006 listing limits, and with inbound approval a changed card
+  is held.
   Controls and cards are delivered as context only, the SDK shows no text
   for them (a card is in `msg.card`), and the agent token can't send them.
 - Per-group safety settings with per-sender overrides of the limits: message
