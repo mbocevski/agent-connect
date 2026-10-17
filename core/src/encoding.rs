@@ -120,6 +120,20 @@ pub fn hex_decode(s: &str, what: &'static str) -> Result<Vec<u8>> {
         .collect()
 }
 
+/// `#[serde(with = ...)]` for bytes as unpadded base64url strings.
+pub(crate) mod b64_serde {
+    use serde::{Deserialize as _, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&super::b64(bytes))
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        super::b64_decode(&s, "bytes").map_err(serde::de::Error::custom)
+    }
+}
+
 /// Serialises `value` as JCS (RFC 8785).
 ///
 /// # Errors

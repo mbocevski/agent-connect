@@ -34,6 +34,18 @@ only `api-token`. Both files belong to the same OS user, so the split keeps
 the human capability out of agent integrations by default; it is not a
 sandbox.
 
+## Events
+
+`GET /v0/events?after=N` returns `{"events": [...]}`, oldest first, up to
+200 events after sequence number `N`. Each event has `seq` (use the last one
+as the next `after`), `group_id` (or `null`), `type`, `data`, `at` (Unix
+seconds) and `event_id`.
+
+`event_id` is stable: an event that the daemon regenerates after a crash
+has the same id, and is recorded once. Adapters see the same events through
+`on_event`, at least once; deduplicate by `event_id` there, as by `msg_id`
+for messages (ADR-004).
+
 ## Errors
 
 A failed request returns a non-200 status and a JSON body

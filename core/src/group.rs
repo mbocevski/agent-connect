@@ -19,9 +19,11 @@ use serde::{Deserialize, Serialize};
 use crate::clock::Clock;
 use crate::encoding::{b64, hex};
 use crate::error::{Error, Result, mls, storage};
+use crate::failpoint::Failpoints;
 use crate::identity::Instance;
 use crate::invite::{Invite, InviteMeta, InviteSecret};
 use crate::join::{JoinRequest, check_display_name, join_request_mac};
+use crate::journal::{self, JournalEntry, Journaled, Stored, Tx, WELCOME_SCOPE, keeps_state};
 use crate::mls::{
     CS, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities, check_group_context,
     check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
@@ -43,6 +45,7 @@ pub struct Client<S: Store> {
     provider: Provider<S>,
     instance: Instance,
     clock: Arc<dyn Clock>,
+    failpoints: Failpoints,
 }
 
 impl<S: Store> fmt::Debug for Client<S> {
@@ -116,7 +119,7 @@ pub struct CommitOut {
 }
 
 /// What a merged commit changed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitSummary {
     /// The new epoch.
     pub epoch: u64,
@@ -147,13 +150,14 @@ impl CommitSummary {
 }
 
 /// A decrypted application message.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationMessage {
     /// The sending instance, authenticated by MLS.
     pub sender: MemberInfo,
     /// The epoch it was sent in.
     pub epoch: u64,
     /// The inner message (SPEC §7.2), UTF-8 JSON.
+    #[serde(with = "crate::encoding::b64_serde")]
     pub plaintext: Vec<u8>,
 }
 
@@ -169,7 +173,8 @@ impl fmt::Debug for ApplicationMessage {
 }
 
 /// The outcome of processing one message from the relay.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Event {
     /// An application message.
@@ -261,7 +266,72 @@ impl<S: Store> Client<S> {
             provider: Provider::new(store, rng)?,
             instance,
             clock,
+            failpoints: Failpoints::default(),
         })
+    }
+
+    /// This client's failpoints. **Tests only** (see [`crate::failpoint`]).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn failpoints(&self) -> &Failpoints {
+        &self.failpoints
+    }
+
+    fn fail(&self, point: &'static str) -> Result<()> {
+        self.failpoints.hit(point)
+    }
+
+    fn store(&self) -> &S {
+        self.provider.records()
+    }
+
+    /// Every journal entry not consumed yet, oldest first (ADR-004): the
+    /// results a caller may not have recorded before a crash. Each must be
+    /// finished and then consumed with [`Client::journal_consume`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`].
+    pub fn journal_pending(&self) -> Result<Vec<JournalEntry>> {
+        self.store()
+            .journal_pending()?
+            .into_iter()
+            .map(journal::entry)
+            .collect()
+    }
+
+    /// Consumes a journal entry once the caller has durably recorded its
+    /// result: the result (plaintext) and context are deleted, the key and
+    /// hash stay so a redelivery fails with [`Error::Duplicate`]. `group_id`
+    /// is `None` for a Welcome entry. Returns whether the entry exists.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`].
+    pub fn journal_consume(&self, group_id: Option<&[u8]>, key: &str) -> Result<bool> {
+        let scope = group_id.unwrap_or(WELCOME_SCOPE);
+        let tx = Tx::begin(self.store())?;
+        let Some(mut row) = self.store().journal_get(scope, key)? else {
+            return Ok(false);
+        };
+        if row.result.is_some() {
+            row.result = None;
+            row.context = None;
+            self.store().journal_put(&row)?;
+        }
+        self.fail("consume.before_commit")?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Deletes consumed entries older than `before` (Unix seconds), e.g.
+    /// the relay's message TTL ago, after which no redelivery can come.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`].
+    pub fn journal_purge(&self, before: u64) -> Result<u64> {
+        self.store().journal_purge(before)
     }
 
     /// This client's instance.
@@ -315,6 +385,7 @@ impl<S: Store> Client<S> {
         let policy = GroupPolicy::default_for(self.instance.identity());
         let extensions = group_context_extensions(&meta.to_json()?, &policy.to_json()?)?;
         let group_id: [u8; 16] = self.rng().array()?;
+        let tx = Tx::begin(self.store())?;
         let mls = MlsGroup::builder()
             .with_group_id(GroupId::from_slice(&group_id))
             .ciphersuite(CS)
@@ -327,6 +398,7 @@ impl<S: Store> Client<S> {
             .with_group_context_extensions(extensions)
             .build(&self.provider, &self.signer(), self.credential())
             .map_err(mls)?;
+        tx.commit()?;
         Ok(Group { mls })
     }
 
@@ -356,11 +428,13 @@ impl<S: Store> Client<S> {
         display_name: &str,
     ) -> Result<JoinRequest> {
         check_display_name(display_name)?;
+        let tx = Tx::begin(self.store())?;
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(capabilities())
             .leaf_node_extensions(leaf_extensions(self.instance.cert())?)
             .build(CS, &self.provider, &self.signer(), self.credential())
             .map_err(mls)?;
+        tx.commit()?;
         let key_package = bundle.key_package().tls_serialize_detached().map_err(mls)?;
         let mailbox_id = self.instance.mailbox_id();
         let mut request = JoinRequest {
@@ -444,6 +518,90 @@ impl<S: Store> Client<S> {
         expected: &InviteMeta,
         wrapped: &[u8],
     ) -> Result<Group> {
+        self.join_tx(invite, expected, wrapped, None)
+            .map(|j| j.value)
+    }
+
+    /// [`Client::join_from_wrapped_welcome`], journalled under `key` (e.g.
+    /// the invite id) with the caller's `context` (ADR-004). Joining again
+    /// with the same key and Welcome before the entry is consumed returns
+    /// the joined group with `replayed` set instead of failing on the spent
+    /// KeyPackage.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::join_from_wrapped_welcome`]; [`Error::Duplicate`] if
+    /// the entry was consumed, [`Error::JournalConflict`] for another
+    /// Welcome under the same key.
+    pub fn join_journaled(
+        &self,
+        invite: &InviteSecret,
+        expected: &InviteMeta,
+        wrapped: &[u8],
+        key: &str,
+        context: &[u8],
+    ) -> Result<Journaled<Group>> {
+        self.join_tx(invite, expected, wrapped, Some((key, context)))
+    }
+
+    fn join_tx(
+        &self,
+        invite: &InviteSecret,
+        expected: &InviteMeta,
+        wrapped: &[u8],
+        journal_as: Option<(&str, &[u8])>,
+    ) -> Result<Journaled<Group>> {
+        let hash = wire_hash(wrapped);
+        if let Some((key, _)) = journal_as
+            && let Some((row, _)) = journal::lookup(self.store(), WELCOME_SCOPE, key, Some(&hash))?
+        {
+            let group = self
+                .load_group(&row.group_id)?
+                .ok_or(Error::Internal("journalled group missing"))?;
+            return Ok(Journaled {
+                value: group,
+                replayed: true,
+            });
+        }
+        let tx = Tx::begin(self.store())?;
+        match self.join_inner(invite, expected, wrapped) {
+            Ok(group) => {
+                if let Some((key, context)) = journal_as {
+                    journal::record(
+                        self.store(),
+                        WELCOME_SCOPE,
+                        group.group_id(),
+                        key,
+                        &hash,
+                        context,
+                        &Stored::Joined,
+                        self.now(),
+                    )?;
+                }
+                self.fail("join.before_commit")?;
+                tx.commit()?;
+                Ok(Journaled {
+                    value: group,
+                    replayed: false,
+                })
+            }
+            Err(e) => {
+                // SPEC §6.3: a failed Welcome consumes the KeyPackage, so
+                // keep what OpenMLS did (unless the store itself failed).
+                if keeps_state(&e) {
+                    tx.commit()?;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn join_inner(
+        &self,
+        invite: &InviteSecret,
+        expected: &InviteMeta,
+        wrapped: &[u8],
+    ) -> Result<Group> {
         if expected.invite_id != invite.id_b64() {
             return Err(Error::InviteMismatch);
         }
@@ -497,6 +655,7 @@ impl<S: Store> Client<S> {
             let mut group = Group {
                 mls: staged.into_group(&self.provider).map_err(mls)?,
             };
+            self.fail("join.after_stage")?;
             let checked = group.check_all_leaves(&ctx.policy);
             if let Err(e) = checked {
                 group.mls.delete(self.provider.storage()).map_err(storage)?;
@@ -610,6 +769,325 @@ macro_rules! commit {
 }
 
 impl Group {
+    /// Commits `Add` for a verified joiner and wraps the Welcome
+    /// (SPEC §6.2 steps 4–6). With `switch_floor`, a group growing past two
+    /// members also moves from `free` to `mention` in the same commit
+    /// (SPEC §9.1); pass `false` if the owner set the floor explicitly.
+    ///
+    /// The request is only borrowed: after a failure (e.g. another commit
+    /// pending, or an `epoch_conflict` that discarded this one) the inviter
+    /// can retry with the same verified request.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InviteMismatch`], [`Error::InviteExpired`],
+    /// [`Error::KeyPackageReused`], [`Error::NotPermitted`],
+    /// [`Error::CommitPending`], or an MLS error.
+    pub fn add_member<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        request: &VerifiedJoinRequest,
+        invite: &Invite,
+        switch_floor: bool,
+    ) -> Result<CommitOut> {
+        self.atomically(client, |g| {
+            g.add_member_inner(client, request, invite, switch_floor)
+        })
+    }
+
+    /// Commits the removal of every instance of `identity` (SPEC §9.2:
+    /// removing an identity removes all its instances). Removing one's own
+    /// identity removes this identity's *other* instances.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownMember`], [`Error::NotPermitted`],
+    /// [`Error::CommitPending`], or an MLS error.
+    pub fn remove<S: Store>(&mut self, client: &Client<S>, identity: &str) -> Result<CommitOut> {
+        self.atomically(client, |g| g.remove_inner(client, identity))
+    }
+
+    /// Commits an Update of this instance's leaf (fresh HPKE keys; SPEC §3.1
+    /// update cadence).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::CommitPending`] or an MLS error.
+    pub fn update<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
+        self.atomically(client, |g| g.update_inner(client))
+    }
+
+    /// Commits a policy change. The GroupContextExtensions proposal carries
+    /// the full set: the unchanged `ac_group_meta` and
+    /// `RequiredCapabilities` plus the new policy (SPEC §9.2).
+    ///
+    /// # Errors
+    ///
+    /// Policy validation errors, [`Error::Unauthorized`] if this instance's
+    /// role doesn't allow the change, [`Error::CommitPending`], or an MLS
+    /// error.
+    pub fn set_policy<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        policy: &GroupPolicy,
+    ) -> Result<CommitOut> {
+        self.atomically(client, |g| g.set_policy_inner(client, policy))
+    }
+
+    /// Commits pending proposals (other members' leaves).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotPermitted`] if none are pending, [`Error::CommitPending`],
+    /// or an MLS error.
+    pub fn commit_pending_proposals<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
+        self.atomically(client, |g| g.commit_pending_proposals_inner(client))
+    }
+
+    /// Proposes this instance's own removal, as a `PrivateMessage` Remove
+    /// proposal (`kind: proposal`, SPEC §9.2). Another member commits it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotPermitted`] for a sole member (it should just delete its
+    /// state) or for the owner's last instance (it must transfer ownership
+    /// first, SPEC §9.2), [`Error::CommitPending`], or an MLS error.
+    pub fn propose_leave<S: Store>(&mut self, client: &Client<S>) -> Result<Vec<u8>> {
+        self.atomically(client, |g| g.propose_leave_inner(client))
+    }
+
+    /// Merges the pending commit after the relay confirmed it: `msg_id` is
+    /// the id in the relay's `accepted` frame and must be the pending
+    /// commit's [`CommitOut::msg_id`] (SPEC §8.3).
+    ///
+    /// A late `accepted` for a commit that the fan-out already confirmed
+    /// returns [`Error::NoPendingCommit`]; the daemon ignores it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoPendingCommit`], [`Error::PendingCommitMismatch`] (nothing
+    /// is merged), or an MLS error.
+    pub fn confirm_pending_commit<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        msg_id: &str,
+    ) -> Result<CommitSummary> {
+        self.atomically(client, |g| g.confirm_pending_commit_inner(client, msg_id))
+    }
+
+    /// Drops the pending commit after the relay rejected it
+    /// (`epoch_conflict`, or another error for its `msg_id`; SPEC §8.3).
+    /// Process the winning commit next, then rebuild if still needed.
+    ///
+    /// Don't discard on a timeout: resend the same commit under the same
+    /// `msg_id` (the relay deduplicates it). If a discarded commit is later
+    /// delivered back, [`Group::process`] reports [`Error::OwnCommitLost`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoPendingCommit`] or a storage error.
+    pub fn discard_pending_commit<S: Store>(&mut self, client: &Client<S>) -> Result<()> {
+        self.atomically(client, |g| g.discard_pending_commit_inner(client))
+    }
+
+    /// Encrypts an inner message (SPEC §7.2) as an application message,
+    /// padded to its bucket (SPEC §7.1). The inner `v`, `sender` and
+    /// `instance_id` must be this instance's.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`]/[`Error::CredentialMismatch`] for a bad inner
+    /// header, [`Error::TooLarge`], [`Error::CommitPending`], or an MLS error.
+    pub fn seal<S: Store>(&mut self, client: &Client<S>, inner: &[u8]) -> Result<Vec<u8>> {
+        self.atomically(client, |g| g.seal_inner(client, inner))
+    }
+
+    /// Processes one MLS message from the relay. Commits are checked against
+    /// the policy in force (SPEC §9.2) and the key/certificate rules
+    /// (§3.1, §3.3) **before** they are merged; a rejected commit is not
+    /// merged and returns [`Error::Unauthorized`] (raise
+    /// `unauthorized_commit`) or a validation error.
+    ///
+    /// Processing is atomic: on success the whole state change is stored,
+    /// on failure none of it is (the group is reloaded from the store), so
+    /// a failed message can be retried and fails the same way. Success is
+    /// one-shot, though: it consumes the message's key. A caller that must
+    /// survive a crash before it has recorded the event uses
+    /// [`Group::process_journaled`].
+    ///
+    /// # Errors
+    ///
+    /// See above; also [`Error::WrongGroup`], [`Error::WrongEpoch`],
+    /// [`Error::NotMember`], [`Error::Malformed`], [`Error::OwnCommitLost`]
+    /// (the pending commit was discarded, and that is stored), and MLS
+    /// errors (e.g. for tampered or replayed messages).
+    pub fn process<S: Store>(&mut self, client: &Client<S>, bytes: &[u8]) -> Result<Event> {
+        self.atomically_keeping(client, Self::lost, |g| {
+            let event = g.process_inner(client, bytes)?;
+            client.fail("process.before_commit")?;
+            Ok(event)
+        })
+    }
+
+    /// [`Group::process`], with the event journalled under `key` (the
+    /// caller's id for the message, e.g. `sender/msg_id`) in the same
+    /// transaction as the state change (ADR-004). Processing the same bytes
+    /// under the same key again, before the entry is consumed with
+    /// [`Client::journal_consume`], returns the journalled event with
+    /// `replayed` set and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Group::process`]; [`Error::Duplicate`] once the entry was
+    /// consumed, [`Error::JournalConflict`] for other bytes under the same
+    /// key.
+    pub fn process_journaled<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        key: &str,
+        context: &[u8],
+        bytes: &[u8],
+    ) -> Result<Journaled<Event>> {
+        let hash = wire_hash(bytes);
+        if let Some((_, stored)) =
+            journal::lookup(client.store(), self.group_id(), key, Some(&hash))?
+        {
+            let Stored::Event { event } = stored else {
+                return Err(Error::JournalConflict);
+            };
+            return Ok(Journaled {
+                value: event,
+                replayed: true,
+            });
+        }
+        self.atomically_keeping(client, Self::lost, |g| {
+            let event = g.process_inner(client, bytes)?;
+            journal::record(
+                client.store(),
+                g.group_id(),
+                g.group_id(),
+                key,
+                &hash,
+                context,
+                &Stored::Event {
+                    event: event.clone(),
+                },
+                client.now(),
+            )?;
+            client.fail("process.before_commit")?;
+            Ok(Journaled {
+                value: event,
+                replayed: false,
+            })
+        })
+    }
+
+    /// [`Group::confirm_pending_commit`], journalled under `key` with the
+    /// caller's `context` (ADR-004), as an `OwnCommitConfirmed` event. Use
+    /// the key the commit's fan-out copy is processed under
+    /// (`own mailbox/msg_id`): whichever of the two confirms the commit
+    /// first journals it, and the other gets the same result back.
+    ///
+    /// # Errors
+    ///
+    /// As [`Group::confirm_pending_commit`]; [`Error::Duplicate`] once the
+    /// entry was consumed.
+    pub fn confirm_pending_commit_journaled<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        msg_id: &str,
+        key: &str,
+        context: &[u8],
+    ) -> Result<Journaled<CommitSummary>> {
+        if let Some((_, stored)) = journal::lookup(client.store(), self.group_id(), key, None)? {
+            return match stored {
+                Stored::Event {
+                    event: Event::OwnCommitConfirmed(summary),
+                } => Ok(Journaled {
+                    value: summary,
+                    replayed: true,
+                }),
+                _ => Err(Error::JournalConflict),
+            };
+        }
+        self.atomically(client, |g| {
+            let hash = OwnCommits::load(client.store(), g.group_id(), g.epoch())?
+                .pending
+                .map(|p| p.hash)
+                .unwrap_or_default();
+            let summary = g.confirm_pending_commit_inner(client, msg_id)?;
+            journal::record(
+                client.store(),
+                g.group_id(),
+                g.group_id(),
+                key,
+                &hash,
+                context,
+                &Stored::Event {
+                    event: Event::OwnCommitConfirmed(summary.clone()),
+                },
+                client.now(),
+            )?;
+            client.fail("confirm.before_commit")?;
+            Ok(Journaled {
+                value: summary,
+                replayed: false,
+            })
+        })
+    }
+
+    fn lost(e: &Error) -> bool {
+        matches!(e, Error::OwnCommitLost)
+    }
+
+    /// Runs `f` in one store transaction: committed if it succeeds, rolled
+    /// back (and the in-memory group reloaded from the store) if it fails.
+    fn atomically<S: Store, T>(
+        &mut self,
+        client: &Client<S>,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.atomically_keeping(client, |_| false, f)
+    }
+
+    /// [`Group::atomically`], but errors for which `keep` holds commit the
+    /// work done so far (a state change made on purpose before failing).
+    fn atomically_keeping<S: Store, T>(
+        &mut self,
+        client: &Client<S>,
+        keep: fn(&Error) -> bool,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let tx = Tx::begin(client.store())?;
+        let out = f(self);
+        let commit = match &out {
+            Ok(_) => true,
+            Err(e) => keep(e),
+        };
+        if commit {
+            match tx.commit() {
+                Ok(()) => return out,
+                Err(e) => {
+                    self.reload(client)?;
+                    return Err(e);
+                }
+            }
+        }
+        drop(tx);
+        // OpenMLS may have moved the in-memory group ahead of the store.
+        self.reload(client)?;
+        out
+    }
+
+    fn reload<S: Store>(&mut self, client: &Client<S>) -> Result<()> {
+        if let Some(mls) =
+            MlsGroup::load(client.provider.storage(), self.mls.group_id()).map_err(storage)?
+        {
+            self.mls = mls;
+        }
+        Ok(())
+    }
+
     /// The 16-byte group id.
     #[must_use]
     pub fn group_id(&self) -> &[u8] {
@@ -936,21 +1414,7 @@ impl Group {
         })
     }
 
-    /// Commits `Add` for a verified joiner and wraps the Welcome
-    /// (SPEC §6.2 steps 4–6). With `switch_floor`, a group growing past two
-    /// members also moves from `free` to `mention` in the same commit
-    /// (SPEC §9.1); pass `false` if the owner set the floor explicitly.
-    ///
-    /// The request is only borrowed: after a failure (e.g. another commit
-    /// pending, or an `epoch_conflict` that discarded this one) the inviter
-    /// can retry with the same verified request.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InviteMismatch`], [`Error::InviteExpired`],
-    /// [`Error::KeyPackageReused`], [`Error::NotPermitted`],
-    /// [`Error::CommitPending`], or an MLS error.
-    pub fn add_member<S: Store>(
+    fn add_member_inner<S: Store>(
         &mut self,
         client: &Client<S>,
         request: &VerifiedJoinRequest,
@@ -999,15 +1463,7 @@ impl Group {
         })
     }
 
-    /// Commits the removal of every instance of `identity` (SPEC §9.2:
-    /// removing an identity removes all its instances). Removing one's own
-    /// identity removes this identity's *other* instances.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownMember`], [`Error::NotPermitted`],
-    /// [`Error::CommitPending`], or an MLS error.
-    pub fn remove<S: Store>(&mut self, client: &Client<S>, identity: &str) -> Result<CommitOut> {
+    fn remove_inner<S: Store>(&mut self, client: &Client<S>, identity: &str) -> Result<CommitOut> {
         let own = self.mls.own_leaf_index();
         let leaves: Vec<LeafNodeIndex> = self
             .members()?
@@ -1026,26 +1482,11 @@ impl Group {
         commit!(self, client, None, |b| b.propose_removals(leaves))
     }
 
-    /// Commits an Update of this instance's leaf (fresh HPKE keys; SPEC §3.1
-    /// update cadence).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::CommitPending`] or an MLS error.
-    pub fn update<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
+    fn update_inner<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
         commit!(self, client, None, |b| b.force_self_update(true))
     }
 
-    /// Commits a policy change. The GroupContextExtensions proposal carries
-    /// the full set: the unchanged `ac_group_meta` and
-    /// `RequiredCapabilities` plus the new policy (SPEC §9.2).
-    ///
-    /// # Errors
-    ///
-    /// Policy validation errors, [`Error::Unauthorized`] if this instance's
-    /// role doesn't allow the change, [`Error::CommitPending`], or an MLS
-    /// error.
-    pub fn set_policy<S: Store>(
+    fn set_policy_inner<S: Store>(
         &mut self,
         client: &Client<S>,
         policy: &GroupPolicy,
@@ -1058,28 +1499,17 @@ impl Group {
             .map_err(mls)?)
     }
 
-    /// Commits pending proposals (other members' leaves).
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NotPermitted`] if none are pending, [`Error::CommitPending`],
-    /// or an MLS error.
-    pub fn commit_pending_proposals<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
+    fn commit_pending_proposals_inner<S: Store>(
+        &mut self,
+        client: &Client<S>,
+    ) -> Result<CommitOut> {
         if self.mls.pending_proposals().next().is_none() {
             return Err(Error::NotPermitted("no pending proposals"));
         }
         commit!(self, client, None, |b| b)
     }
 
-    /// Proposes this instance's own removal, as a `PrivateMessage` Remove
-    /// proposal (`kind: proposal`, SPEC §9.2). Another member commits it.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NotPermitted`] for a sole member (it should just delete its
-    /// state) or for the owner's last instance (it must transfer ownership
-    /// first, SPEC §9.2), [`Error::CommitPending`], or an MLS error.
-    pub fn propose_leave<S: Store>(&mut self, client: &Client<S>) -> Result<Vec<u8>> {
+    fn propose_leave_inner<S: Store>(&mut self, client: &Client<S>) -> Result<Vec<u8>> {
         self.ready()?;
         if self.mls.members().count() < 2 {
             return Err(Error::NotPermitted(
@@ -1097,18 +1527,7 @@ impl Group {
         wire(&msg)
     }
 
-    /// Merges the pending commit after the relay confirmed it: `msg_id` is
-    /// the id in the relay's `accepted` frame and must be the pending
-    /// commit's [`CommitOut::msg_id`] (SPEC §8.3).
-    ///
-    /// A late `accepted` for a commit that the fan-out already confirmed
-    /// returns [`Error::NoPendingCommit`]; the daemon ignores it.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NoPendingCommit`], [`Error::PendingCommitMismatch`] (nothing
-    /// is merged), or an MLS error.
-    pub fn confirm_pending_commit<S: Store>(
+    fn confirm_pending_commit_inner<S: Store>(
         &mut self,
         client: &Client<S>,
         msg_id: &str,
@@ -1118,7 +1537,11 @@ impl Group {
         }
         let own = OwnCommits::load(client.provider.records(), self.group_id(), self.epoch())?;
         match own.pending {
-            Some(p) if p.msg_id == msg_id => self.merge_own(client),
+            Some(p) if p.msg_id == msg_id => {
+                let summary = self.merge_own(client)?;
+                client.fail("confirm.after_merge")?;
+                Ok(summary)
+            }
             _ => Err(Error::PendingCommitMismatch),
         }
     }
@@ -1181,18 +1604,7 @@ impl Group {
         self.summary(inspection, false)
     }
 
-    /// Drops the pending commit after the relay rejected it
-    /// (`epoch_conflict`, or another error for its `msg_id`; SPEC §8.3).
-    /// Process the winning commit next, then rebuild if still needed.
-    ///
-    /// Don't discard on a timeout: resend the same commit under the same
-    /// `msg_id` (the relay deduplicates it). If a discarded commit is later
-    /// delivered back, [`Group::process`] reports [`Error::OwnCommitLost`].
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NoPendingCommit`] or a storage error.
-    pub fn discard_pending_commit<S: Store>(&mut self, client: &Client<S>) -> Result<()> {
+    fn discard_pending_commit_inner<S: Store>(&mut self, client: &Client<S>) -> Result<()> {
         if !self.has_pending_commit() {
             return Err(Error::NoPendingCommit);
         }
@@ -1234,15 +1646,7 @@ impl Group {
         ))
     }
 
-    /// Encrypts an inner message (SPEC §7.2) as an application message,
-    /// padded to its bucket (SPEC §7.1). The inner `v`, `sender` and
-    /// `instance_id` must be this instance's.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Malformed`]/[`Error::CredentialMismatch`] for a bad inner
-    /// header, [`Error::TooLarge`], [`Error::CommitPending`], or an MLS error.
-    pub fn seal<S: Store>(&mut self, client: &Client<S>, inner: &[u8]) -> Result<Vec<u8>> {
+    fn seal_inner<S: Store>(&mut self, client: &Client<S>, inner: &[u8]) -> Result<Vec<u8>> {
         self.ready()?;
         let bucket = bucket_for(inner.len()).ok_or(Error::TooLarge)?;
         let me = self.member_info(self.mls.own_leaf_index())?;
@@ -1272,21 +1676,9 @@ impl Group {
         }
     }
 
-    /// Processes one MLS message from the relay. Commits are checked against
-    /// the policy in force (SPEC §9.2) and the key/certificate rules
-    /// (§3.1, §3.3) **before** they are merged; a rejected commit is not
-    /// merged and returns [`Error::Unauthorized`] (raise
-    /// `unauthorized_commit`) or a validation error.
-    ///
-    /// Processing is one-shot: a failed message has consumed its key and
-    /// can't be retried.
-    ///
-    /// # Errors
-    ///
-    /// See above; also [`Error::WrongGroup`], [`Error::WrongEpoch`],
-    /// [`Error::NotMember`], [`Error::Malformed`], and MLS errors (e.g. for
-    /// tampered or replayed messages).
-    pub fn process<S: Store>(&mut self, client: &Client<S>, bytes: &[u8]) -> Result<Event> {
+    /// The body of [`Group::process`], inside its transaction.
+    fn process_inner<S: Store>(&mut self, client: &Client<S>, bytes: &[u8]) -> Result<Event> {
+        client.fail("process.before_mls")?;
         if !self.mls.is_active() {
             return Err(Error::NotMember);
         }
@@ -1312,6 +1704,7 @@ impl Group {
                 .process_message(&client.provider, msg)
                 .map_err(process_error)
         })?;
+        client.fail("process.after_mls")?;
         let sender = processed.sender().clone();
         let msg_epoch = processed.epoch().as_u64();
         let credential = processed.credential().clone();
@@ -1366,6 +1759,7 @@ impl Group {
                 self.mls
                     .merge_staged_commit(&client.provider, *staged)
                     .map_err(mls)?;
+                client.fail("process.after_merge")?;
                 self.after_merge(client, &previous, &inspection)?;
                 let summary = self.summary(inspection, had_pending)?;
                 Ok(if self_removed {
@@ -1395,8 +1789,13 @@ impl Group {
     ///
     /// [`Error::Storage`].
     pub fn delete<S: Store>(mut self, client: &Client<S>) -> Result<()> {
-        records::delete_group(client.provider.records(), self.group_id())?;
-        self.mls.delete(client.provider.storage()).map_err(storage)
+        let tx = Tx::begin(client.store())?;
+        records::delete_group(client.store(), self.group_id())?;
+        client.store().journal_delete_group(self.group_id())?;
+        self.mls
+            .delete(client.provider.storage())
+            .map_err(storage)?;
+        tx.commit()
     }
 }
 

@@ -11,9 +11,17 @@
 //!
 //! Besides the OpenMLS state, a store keeps a few records of `core`'s own
 //! (pending-commit confirmation data, consumed KeyPackage refs, the previous
-//! epoch's members) in a small key-value table.
+//! epoch's members) in a small key-value table, and the processing journal
+//! (ADR-004).
+//!
+//! # Transactions
+//!
+//! OpenMLS, `core`'s records and the journal share **one** SQLite
+//! connection, so one transaction covers all of them: processing a message
+//! changes the MLS state and writes its journal entry atomically, or not at
+//! all. Transactions are SQLite savepoints, so they nest.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Mutex;
@@ -23,7 +31,8 @@ use openmls_libcrux_crypto::CryptoProvider;
 use openmls_memory_storage::MemoryStorage;
 use openmls_sqlite_storage::{Codec, Connection, SqliteStorageProvider};
 use openmls_traits::OpenMlsProvider;
-use rusqlite::{ErrorCode, OpenFlags};
+use openmls_traits::storage::{CURRENT_VERSION, StorageProvider, traits};
+use rusqlite::{ErrorCode, OpenFlags, OptionalExtension as _};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -111,8 +120,35 @@ impl std::fmt::Debug for DbKey {
 }
 
 pub(crate) mod sealed {
+    /// One processing-journal entry (ADR-004). `result` and `context` are
+    /// `None` once the entry is consumed: only the ids and the hash stay, to
+    /// recognise a redelivery.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct JournalRow {
+        /// The group for a group message; empty for a Welcome.
+        pub scope: Vec<u8>,
+        /// The caller's key (e.g. `sender/msg_id`).
+        pub key: String,
+        /// The group the entry belongs to (for a Welcome, the joined group).
+        pub group_id: Vec<u8>,
+        /// SHA-256 (hex) of the processed bytes.
+        pub hash: String,
+        /// When it was written (Unix seconds).
+        pub at: u64,
+        /// The processing result (JSON), until consumed.
+        pub result: Option<Vec<u8>>,
+        /// The caller's context bytes, until consumed.
+        pub context: Option<Vec<u8>>,
+    }
+
+    /// OpenMLS over a connection we own, so that `core`'s records and the
+    /// journal share it (and its transactions).
+    pub struct SqliteMls {
+        pub(crate) conn: rusqlite::Connection,
+    }
+
     /// The OpenMLS storage behind a [`super::Store`], plus `core`'s own
-    /// key-value records.
+    /// key-value records, the journal and transactions.
     pub trait Backend {
         /// The OpenMLS storage provider.
         type Inner: openmls::storage::StorageProvider;
@@ -122,18 +158,51 @@ pub(crate) mod sealed {
         fn get_record(&self, key: &[u8]) -> crate::Result<Option<Vec<u8>>>;
         /// Writes (`Some`) or deletes (`None`) one of `core`'s records.
         fn put_record(&self, key: &[u8], value: Option<&[u8]>) -> crate::Result<()>;
+        /// Opens a (nested) transaction over everything in the store.
+        fn begin(&self) -> crate::Result<()>;
+        /// Commits the innermost open transaction.
+        fn commit(&self) -> crate::Result<()>;
+        /// Rolls back the innermost open transaction.
+        fn rollback(&self) -> crate::Result<()>;
+        /// One journal entry.
+        fn journal_get(&self, scope: &[u8], key: &str) -> crate::Result<Option<JournalRow>>;
+        /// Inserts or replaces a journal entry.
+        fn journal_put(&self, row: &JournalRow) -> crate::Result<()>;
+        /// Every entry not yet consumed, oldest first.
+        fn journal_pending(&self) -> crate::Result<Vec<JournalRow>>;
+        /// Deletes every entry of a group (with the group).
+        fn journal_delete_group(&self, group_id: &[u8]) -> crate::Result<()>;
+        /// Deletes consumed entries written before `before`; returns how many.
+        fn journal_purge(&self, before: u64) -> crate::Result<u64>;
     }
 }
+
+pub(crate) use sealed::JournalRow;
+use sealed::SqliteMls;
 
 /// A storage backend for MLS state. Implemented by [`MemoryStore`] (tests)
 /// and [`SqliteStore`] (daemons).
 pub trait Store: sealed::Backend + Send {}
 
-/// In-memory storage, for tests.
+/// In-memory storage, for tests. A transaction snapshots the whole store
+/// and a rollback restores it.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     mls: MemoryStorage,
     records: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+    journal: Mutex<BTreeMap<(Vec<u8>, String), JournalRow>>,
+    snapshots: Mutex<Vec<Snapshot>>,
+}
+
+type Snapshot = (
+    HashMap<Vec<u8>, Vec<u8>>,
+    HashMap<Vec<u8>, Vec<u8>>,
+    BTreeMap<(Vec<u8>, String), JournalRow>,
+);
+
+fn locked<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
+    m.lock()
+        .map_err(|_| Error::Storage("memory store lock poisoned".into()))
 }
 
 impl MemoryStore {
@@ -141,6 +210,13 @@ impl MemoryStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn mls_values(&self) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<Vec<u8>, Vec<u8>>>> {
+        self.mls
+            .values
+            .write()
+            .map_err(|_| Error::Storage("memory store lock poisoned".into()))
     }
 }
 
@@ -151,23 +227,76 @@ impl sealed::Backend for MemoryStore {
     }
 
     fn get_record(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let records = self
-            .records
-            .lock()
-            .map_err(|_| Error::Storage("record lock poisoned".into()))?;
-        Ok(records.get(key).cloned())
+        Ok(locked(&self.records)?.get(key).cloned())
     }
 
     fn put_record(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
-        let mut records = self
-            .records
-            .lock()
-            .map_err(|_| Error::Storage("record lock poisoned".into()))?;
+        let mut records = locked(&self.records)?;
         match value {
             Some(v) => records.insert(key.to_vec(), v.to_vec()),
             None => records.remove(key),
         };
         Ok(())
+    }
+
+    fn begin(&self) -> Result<()> {
+        let snap = (
+            self.mls_values()?.clone(),
+            locked(&self.records)?.clone(),
+            locked(&self.journal)?.clone(),
+        );
+        locked(&self.snapshots)?.push(snap);
+        Ok(())
+    }
+
+    fn commit(&self) -> Result<()> {
+        locked(&self.snapshots)?
+            .pop()
+            .map(drop)
+            .ok_or(Error::Internal("commit without a transaction"))
+    }
+
+    fn rollback(&self) -> Result<()> {
+        let (mls, records, journal) = locked(&self.snapshots)?
+            .pop()
+            .ok_or(Error::Internal("rollback without a transaction"))?;
+        *self.mls_values()? = mls;
+        *locked(&self.records)? = records;
+        *locked(&self.journal)? = journal;
+        Ok(())
+    }
+
+    fn journal_get(&self, scope: &[u8], key: &str) -> Result<Option<JournalRow>> {
+        Ok(locked(&self.journal)?
+            .get(&(scope.to_vec(), key.to_owned()))
+            .cloned())
+    }
+
+    fn journal_put(&self, row: &JournalRow) -> Result<()> {
+        locked(&self.journal)?.insert((row.scope.clone(), row.key.clone()), row.clone());
+        Ok(())
+    }
+
+    fn journal_pending(&self) -> Result<Vec<JournalRow>> {
+        let mut rows: Vec<JournalRow> = locked(&self.journal)?
+            .values()
+            .filter(|r| r.result.is_some())
+            .cloned()
+            .collect();
+        rows.sort_by_key(|r| r.at);
+        Ok(rows)
+    }
+
+    fn journal_delete_group(&self, group_id: &[u8]) -> Result<()> {
+        locked(&self.journal)?.retain(|_, r| r.group_id != group_id);
+        Ok(())
+    }
+
+    fn journal_purge(&self, before: u64) -> Result<u64> {
+        let mut journal = locked(&self.journal)?;
+        let n = journal.len();
+        journal.retain(|_, r| r.result.is_some() || r.at >= before);
+        Ok((n - journal.len()) as u64)
     }
 }
 
@@ -192,16 +321,573 @@ impl Codec for JsonCodec {
 /// Encrypted SQLite storage: a SQLCipher database with OpenMLS's schema, run
 /// through its migrations.
 ///
-/// OpenMLS's provider owns its connection, so `core`'s records go through a
-/// second connection to the same database file (table `agentconnect_records`).
-/// Both connections are keyed before any other statement runs.
+/// OpenMLS, `core`'s records (table `agentconnect_records`) and the journal
+/// (`agentconnect_journal`) share one connection, keyed before any other
+/// statement runs, so one transaction covers all three.
 pub struct SqliteStore {
-    mls: SqliteStorageProvider<JsonCodec, Connection>,
-    records: Connection,
+    mls: SqliteMls,
 }
 
 const RECORDS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agentconnect_records \
-     (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL)";
+     (key BLOB PRIMARY KEY NOT NULL, value BLOB NOT NULL); \
+     CREATE TABLE IF NOT EXISTS agentconnect_journal \
+     (scope BLOB NOT NULL, key TEXT NOT NULL, group_id BLOB NOT NULL, \
+      hash TEXT NOT NULL, at INTEGER NOT NULL, result BLOB, context BLOB, \
+      PRIMARY KEY (scope, key)); \
+     CREATE INDEX IF NOT EXISTS agentconnect_journal_group \
+     ON agentconnect_journal (group_id);";
+
+const JOURNAL_COLUMNS: &str = "scope, key, group_id, hash, at, result, context";
+
+fn journal_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JournalRow> {
+    Ok(JournalRow {
+        scope: r.get(0)?,
+        key: r.get(1)?,
+        group_id: r.get(2)?,
+        hash: r.get(3)?,
+        at: r.get::<_, i64>(4)?.try_into().unwrap_or(0),
+        result: r.get(5)?,
+        context: r.get(6)?,
+    })
+}
+
+/// The savepoint every [`sealed::Backend::begin`] opens.
+const SAVEPOINT: &str = "agentconnect_tx";
+
+/// OpenMLS's SQLite provider over our connection, borrowed for one call.
+impl SqliteMls {
+    fn provider(&self) -> SqliteStorageProvider<JsonCodec, &Connection> {
+        SqliteStorageProvider::new(&self.conn)
+    }
+}
+
+const V: u16 = CURRENT_VERSION;
+
+/// Every method delegates to `openmls_sqlite_storage`'s provider over the
+/// shared connection.
+impl StorageProvider<V> for SqliteMls {
+    type Error = rusqlite::Error;
+
+    fn write_mls_join_config<
+        GroupId: traits::GroupId<V>,
+        MlsGroupJoinConfig: traits::MlsGroupJoinConfig<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        config: &MlsGroupJoinConfig,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_mls_join_config::<GroupId, MlsGroupJoinConfig>(group_id, config)
+    }
+
+    fn append_own_leaf_node<GroupId: traits::GroupId<V>, LeafNode: traits::LeafNode<V>>(
+        &self,
+        group_id: &GroupId,
+        leaf_node: &LeafNode,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .append_own_leaf_node::<GroupId, LeafNode>(group_id, leaf_node)
+    }
+
+    fn queue_proposal<
+        GroupId: traits::GroupId<V>,
+        ProposalRef: traits::ProposalRef<V>,
+        QueuedProposal: traits::QueuedProposal<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        proposal_ref: &ProposalRef,
+        proposal: &QueuedProposal,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .queue_proposal::<GroupId, ProposalRef, QueuedProposal>(
+                group_id,
+                proposal_ref,
+                proposal,
+            )
+    }
+
+    fn write_tree<GroupId: traits::GroupId<V>, TreeSync: traits::TreeSync<V>>(
+        &self,
+        group_id: &GroupId,
+        tree: &TreeSync,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_tree::<GroupId, TreeSync>(group_id, tree)
+    }
+
+    fn write_interim_transcript_hash<
+        GroupId: traits::GroupId<V>,
+        InterimTranscriptHash: traits::InterimTranscriptHash<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        interim_transcript_hash: &InterimTranscriptHash,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_interim_transcript_hash::<GroupId, InterimTranscriptHash>(
+                group_id,
+                interim_transcript_hash,
+            )
+    }
+
+    fn write_context<GroupId: traits::GroupId<V>, GroupContext: traits::GroupContext<V>>(
+        &self,
+        group_id: &GroupId,
+        group_context: &GroupContext,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_context::<GroupId, GroupContext>(group_id, group_context)
+    }
+
+    fn write_confirmation_tag<
+        GroupId: traits::GroupId<V>,
+        ConfirmationTag: traits::ConfirmationTag<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        confirmation_tag: &ConfirmationTag,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_confirmation_tag::<GroupId, ConfirmationTag>(group_id, confirmation_tag)
+    }
+
+    fn write_group_state<GroupState: traits::GroupState<V>, GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+        group_state: &GroupState,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_group_state::<GroupState, GroupId>(group_id, group_state)
+    }
+
+    fn write_message_secrets<
+        GroupId: traits::GroupId<V>,
+        MessageSecrets: traits::MessageSecrets<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        message_secrets: &MessageSecrets,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_message_secrets::<GroupId, MessageSecrets>(group_id, message_secrets)
+    }
+
+    fn write_resumption_psk_store<
+        GroupId: traits::GroupId<V>,
+        ResumptionPskStore: traits::ResumptionPskStore<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        resumption_psk_store: &ResumptionPskStore,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_resumption_psk_store::<GroupId, ResumptionPskStore>(
+                group_id,
+                resumption_psk_store,
+            )
+    }
+
+    fn write_own_leaf_index<
+        GroupId: traits::GroupId<V>,
+        LeafNodeIndex: traits::LeafNodeIndex<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        own_leaf_index: &LeafNodeIndex,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_own_leaf_index::<GroupId, LeafNodeIndex>(group_id, own_leaf_index)
+    }
+
+    fn write_group_epoch_secrets<
+        GroupId: traits::GroupId<V>,
+        GroupEpochSecrets: traits::GroupEpochSecrets<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        group_epoch_secrets: &GroupEpochSecrets,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_group_epoch_secrets::<GroupId, GroupEpochSecrets>(group_id, group_epoch_secrets)
+    }
+
+    fn write_signature_key_pair<
+        SignaturePublicKey: traits::SignaturePublicKey<V>,
+        SignatureKeyPair: traits::SignatureKeyPair<V>,
+    >(
+        &self,
+        public_key: &SignaturePublicKey,
+        signature_key_pair: &SignatureKeyPair,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_signature_key_pair::<SignaturePublicKey, SignatureKeyPair>(
+                public_key,
+                signature_key_pair,
+            )
+    }
+
+    fn write_encryption_key_pair<
+        EncryptionKey: traits::EncryptionKey<V>,
+        HpkeKeyPair: traits::HpkeKeyPair<V>,
+    >(
+        &self,
+        public_key: &EncryptionKey,
+        key_pair: &HpkeKeyPair,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_encryption_key_pair::<EncryptionKey, HpkeKeyPair>(public_key, key_pair)
+    }
+
+    fn write_encryption_epoch_key_pairs<
+        GroupId: traits::GroupId<V>,
+        EpochKey: traits::EpochKey<V>,
+        HpkeKeyPair: traits::HpkeKeyPair<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        epoch: &EpochKey,
+        leaf_index: u32,
+        key_pairs: &[HpkeKeyPair],
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_encryption_epoch_key_pairs::<GroupId, EpochKey, HpkeKeyPair>(
+                group_id, epoch, leaf_index, key_pairs,
+            )
+    }
+
+    fn write_key_package<
+        HashReference: traits::HashReference<V>,
+        KeyPackage: traits::KeyPackage<V>,
+    >(
+        &self,
+        hash_ref: &HashReference,
+        key_package: &KeyPackage,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .write_key_package::<HashReference, KeyPackage>(hash_ref, key_package)
+    }
+
+    fn write_psk<PskId: traits::PskId<V>, PskBundle: traits::PskBundle<V>>(
+        &self,
+        psk_id: &PskId,
+        psk: &PskBundle,
+    ) -> Result<(), Self::Error> {
+        self.provider().write_psk::<PskId, PskBundle>(psk_id, psk)
+    }
+
+    fn mls_group_join_config<
+        GroupId: traits::GroupId<V>,
+        MlsGroupJoinConfig: traits::MlsGroupJoinConfig<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<MlsGroupJoinConfig>, Self::Error> {
+        self.provider()
+            .mls_group_join_config::<GroupId, MlsGroupJoinConfig>(group_id)
+    }
+
+    fn own_leaf_nodes<GroupId: traits::GroupId<V>, LeafNode: traits::LeafNode<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Vec<LeafNode>, Self::Error> {
+        self.provider()
+            .own_leaf_nodes::<GroupId, LeafNode>(group_id)
+    }
+
+    fn queued_proposal_refs<GroupId: traits::GroupId<V>, ProposalRef: traits::ProposalRef<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Vec<ProposalRef>, Self::Error> {
+        self.provider()
+            .queued_proposal_refs::<GroupId, ProposalRef>(group_id)
+    }
+
+    fn queued_proposals<
+        GroupId: traits::GroupId<V>,
+        ProposalRef: traits::ProposalRef<V>,
+        QueuedProposal: traits::QueuedProposal<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Vec<(ProposalRef, QueuedProposal)>, Self::Error> {
+        self.provider()
+            .queued_proposals::<GroupId, ProposalRef, QueuedProposal>(group_id)
+    }
+
+    fn tree<GroupId: traits::GroupId<V>, TreeSync: traits::TreeSync<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<TreeSync>, Self::Error> {
+        self.provider().tree::<GroupId, TreeSync>(group_id)
+    }
+
+    fn group_context<GroupId: traits::GroupId<V>, GroupContext: traits::GroupContext<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<GroupContext>, Self::Error> {
+        self.provider()
+            .group_context::<GroupId, GroupContext>(group_id)
+    }
+
+    fn interim_transcript_hash<
+        GroupId: traits::GroupId<V>,
+        InterimTranscriptHash: traits::InterimTranscriptHash<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<InterimTranscriptHash>, Self::Error> {
+        self.provider()
+            .interim_transcript_hash::<GroupId, InterimTranscriptHash>(group_id)
+    }
+
+    fn confirmation_tag<
+        GroupId: traits::GroupId<V>,
+        ConfirmationTag: traits::ConfirmationTag<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<ConfirmationTag>, Self::Error> {
+        self.provider()
+            .confirmation_tag::<GroupId, ConfirmationTag>(group_id)
+    }
+
+    fn group_state<GroupState: traits::GroupState<V>, GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<GroupState>, Self::Error> {
+        self.provider().group_state::<GroupState, GroupId>(group_id)
+    }
+
+    fn message_secrets<GroupId: traits::GroupId<V>, MessageSecrets: traits::MessageSecrets<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<MessageSecrets>, Self::Error> {
+        self.provider()
+            .message_secrets::<GroupId, MessageSecrets>(group_id)
+    }
+
+    fn resumption_psk_store<
+        GroupId: traits::GroupId<V>,
+        ResumptionPskStore: traits::ResumptionPskStore<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<ResumptionPskStore>, Self::Error> {
+        self.provider()
+            .resumption_psk_store::<GroupId, ResumptionPskStore>(group_id)
+    }
+
+    fn own_leaf_index<GroupId: traits::GroupId<V>, LeafNodeIndex: traits::LeafNodeIndex<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<LeafNodeIndex>, Self::Error> {
+        self.provider()
+            .own_leaf_index::<GroupId, LeafNodeIndex>(group_id)
+    }
+
+    fn group_epoch_secrets<
+        GroupId: traits::GroupId<V>,
+        GroupEpochSecrets: traits::GroupEpochSecrets<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Option<GroupEpochSecrets>, Self::Error> {
+        self.provider()
+            .group_epoch_secrets::<GroupId, GroupEpochSecrets>(group_id)
+    }
+
+    fn signature_key_pair<
+        SignaturePublicKey: traits::SignaturePublicKey<V>,
+        SignatureKeyPair: traits::SignatureKeyPair<V>,
+    >(
+        &self,
+        public_key: &SignaturePublicKey,
+    ) -> Result<Option<SignatureKeyPair>, Self::Error> {
+        self.provider()
+            .signature_key_pair::<SignaturePublicKey, SignatureKeyPair>(public_key)
+    }
+
+    fn encryption_key_pair<
+        HpkeKeyPair: traits::HpkeKeyPair<V>,
+        EncryptionKey: traits::EncryptionKey<V>,
+    >(
+        &self,
+        public_key: &EncryptionKey,
+    ) -> Result<Option<HpkeKeyPair>, Self::Error> {
+        self.provider()
+            .encryption_key_pair::<HpkeKeyPair, EncryptionKey>(public_key)
+    }
+
+    fn encryption_epoch_key_pairs<
+        GroupId: traits::GroupId<V>,
+        EpochKey: traits::EpochKey<V>,
+        HpkeKeyPair: traits::HpkeKeyPair<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        epoch: &EpochKey,
+        leaf_index: u32,
+    ) -> Result<Vec<HpkeKeyPair>, Self::Error> {
+        self.provider()
+            .encryption_epoch_key_pairs::<GroupId, EpochKey, HpkeKeyPair>(
+                group_id, epoch, leaf_index,
+            )
+    }
+
+    fn key_package<KeyPackageRef: traits::HashReference<V>, KeyPackage: traits::KeyPackage<V>>(
+        &self,
+        hash_ref: &KeyPackageRef,
+    ) -> Result<Option<KeyPackage>, Self::Error> {
+        self.provider()
+            .key_package::<KeyPackageRef, KeyPackage>(hash_ref)
+    }
+
+    fn psk<PskBundle: traits::PskBundle<V>, PskId: traits::PskId<V>>(
+        &self,
+        psk_id: &PskId,
+    ) -> Result<Option<PskBundle>, Self::Error> {
+        self.provider().psk::<PskBundle, PskId>(psk_id)
+    }
+
+    fn remove_proposal<GroupId: traits::GroupId<V>, ProposalRef: traits::ProposalRef<V>>(
+        &self,
+        group_id: &GroupId,
+        proposal_ref: &ProposalRef,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .remove_proposal::<GroupId, ProposalRef>(group_id, proposal_ref)
+    }
+
+    fn delete_own_leaf_nodes<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_own_leaf_nodes::<GroupId>(group_id)
+    }
+
+    fn delete_group_config<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_group_config::<GroupId>(group_id)
+    }
+
+    fn delete_tree<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_tree::<GroupId>(group_id)
+    }
+
+    fn delete_confirmation_tag<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_confirmation_tag::<GroupId>(group_id)
+    }
+
+    fn delete_group_state<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_group_state::<GroupId>(group_id)
+    }
+
+    fn delete_context<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_context::<GroupId>(group_id)
+    }
+
+    fn delete_interim_transcript_hash<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .delete_interim_transcript_hash::<GroupId>(group_id)
+    }
+
+    fn delete_message_secrets<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_message_secrets::<GroupId>(group_id)
+    }
+
+    fn delete_all_resumption_psk_secrets<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .delete_all_resumption_psk_secrets::<GroupId>(group_id)
+    }
+
+    fn delete_own_leaf_index<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider().delete_own_leaf_index::<GroupId>(group_id)
+    }
+
+    fn delete_group_epoch_secrets<GroupId: traits::GroupId<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .delete_group_epoch_secrets::<GroupId>(group_id)
+    }
+
+    fn clear_proposal_queue<GroupId: traits::GroupId<V>, ProposalRef: traits::ProposalRef<V>>(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .clear_proposal_queue::<GroupId, ProposalRef>(group_id)
+    }
+
+    fn delete_signature_key_pair<SignaturePublicKey: traits::SignaturePublicKey<V>>(
+        &self,
+        public_key: &SignaturePublicKey,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .delete_signature_key_pair::<SignaturePublicKey>(public_key)
+    }
+
+    fn delete_encryption_key_pair<EncryptionKey: traits::EncryptionKey<V>>(
+        &self,
+        public_key: &EncryptionKey,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .delete_encryption_key_pair::<EncryptionKey>(public_key)
+    }
+
+    fn delete_encryption_epoch_key_pairs<
+        GroupId: traits::GroupId<V>,
+        EpochKey: traits::EpochKey<V>,
+    >(
+        &self,
+        group_id: &GroupId,
+        epoch: &EpochKey,
+        leaf_index: u32,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .delete_encryption_epoch_key_pairs::<GroupId, EpochKey>(group_id, epoch, leaf_index)
+    }
+
+    fn delete_key_package<KeyPackageRef: traits::HashReference<V>>(
+        &self,
+        hash_ref: &KeyPackageRef,
+    ) -> Result<(), Self::Error> {
+        self.provider()
+            .delete_key_package::<KeyPackageRef>(hash_ref)
+    }
+
+    fn delete_psk<PskKey: traits::PskId<V>>(&self, psk_id: &PskKey) -> Result<(), Self::Error> {
+        self.provider().delete_psk::<PskKey>(psk_id)
+    }
+}
 
 /// Maps "file is not a database", which is what SQLCipher reports for a
 /// wrong key (or a file that isn't an encrypted database), to
@@ -247,8 +933,7 @@ impl SqliteStore {
     ///   key, or a file that isn't an encrypted store).
     /// - [`Error::Storage`] on any other SQLite or migration error.
     pub fn open(path: &Path, key: &DbKey) -> Result<Self> {
-        let flags = OpenFlags::default();
-        Self::from_connections(open_keyed(path, key, flags)?, open_keyed(path, key, flags)?)
+        Self::from_connection(open_keyed(path, key, OpenFlags::default())?)
     }
 
     /// Re-encrypts the existing database at `path` from `old` to `new`
@@ -276,20 +961,25 @@ impl SqliteStore {
     ///
     /// [`Error::Storage`] on any SQLite or migration error.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connections(
-            Connection::open_in_memory().map_err(storage)?,
-            Connection::open_in_memory().map_err(storage)?,
-        )
+        Self::from_connection(Connection::open_in_memory().map_err(storage)?)
     }
 
-    fn from_connections(mls: Connection, records: Connection) -> Result<Self> {
-        let mut provider = SqliteStorageProvider::new(mls);
-        provider.run_migrations().map_err(storage)?;
-        records.execute(RECORDS_SCHEMA, ()).map_err(storage)?;
+    fn from_connection(mut conn: Connection) -> Result<Self> {
+        // Durable commits (a crash never loses a committed journal entry)
+        // and removed rows (consumed plaintext) overwritten in the file.
+        conn.execute_batch("PRAGMA synchronous = FULL; PRAGMA secure_delete = ON;")
+            .map_err(storage)?;
+        SqliteStorageProvider::<JsonCodec, &mut Connection>::new(&mut conn)
+            .run_migrations()
+            .map_err(storage)?;
+        conn.execute_batch(RECORDS_SCHEMA).map_err(storage)?;
         Ok(Self {
-            mls: provider,
-            records,
+            mls: SqliteMls { conn },
         })
+    }
+
+    fn conn(&self) -> &Connection {
+        &self.mls.conn
     }
 }
 
@@ -300,14 +990,101 @@ impl std::fmt::Debug for SqliteStore {
 }
 
 impl sealed::Backend for SqliteStore {
-    type Inner = SqliteStorageProvider<JsonCodec, Connection>;
+    type Inner = SqliteMls;
     fn inner(&self) -> &Self::Inner {
         &self.mls
     }
 
+    fn begin(&self) -> Result<()> {
+        self.conn()
+            .execute_batch(&format!("SAVEPOINT {SAVEPOINT}"))
+            .map_err(storage)
+    }
+
+    fn commit(&self) -> Result<()> {
+        self.conn()
+            .execute_batch(&format!("RELEASE {SAVEPOINT}"))
+            .map_err(storage)
+    }
+
+    fn rollback(&self) -> Result<()> {
+        self.conn()
+            .execute_batch(&format!("ROLLBACK TO {SAVEPOINT}; RELEASE {SAVEPOINT}"))
+            .map_err(storage)
+    }
+
+    fn journal_get(&self, scope: &[u8], key: &str) -> Result<Option<JournalRow>> {
+        self.conn()
+            .query_row(
+                &format!(
+                    "SELECT {JOURNAL_COLUMNS} FROM agentconnect_journal \
+                     WHERE scope = ?1 AND key = ?2"
+                ),
+                (scope, key),
+                journal_row,
+            )
+            .optional()
+            .map_err(storage)
+    }
+
+    fn journal_put(&self, row: &JournalRow) -> Result<()> {
+        self.conn()
+            .execute(
+                &format!(
+                    "INSERT OR REPLACE INTO agentconnect_journal ({JOURNAL_COLUMNS}) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                ),
+                (
+                    &row.scope,
+                    &row.key,
+                    &row.group_id,
+                    &row.hash,
+                    i64::try_from(row.at).unwrap_or(i64::MAX),
+                    &row.result,
+                    &row.context,
+                ),
+            )
+            .map(drop)
+            .map_err(storage)
+    }
+
+    fn journal_pending(&self) -> Result<Vec<JournalRow>> {
+        let mut stmt = self
+            .conn()
+            .prepare(&format!(
+                "SELECT {JOURNAL_COLUMNS} FROM agentconnect_journal \
+                 WHERE result IS NOT NULL ORDER BY at, rowid"
+            ))
+            .map_err(storage)?;
+        stmt.query_map((), journal_row)
+            .map_err(storage)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage)
+    }
+
+    fn journal_delete_group(&self, group_id: &[u8]) -> Result<()> {
+        self.conn()
+            .execute(
+                "DELETE FROM agentconnect_journal WHERE group_id = ?1",
+                (group_id,),
+            )
+            .map(drop)
+            .map_err(storage)
+    }
+
+    fn journal_purge(&self, before: u64) -> Result<u64> {
+        self.conn()
+            .execute(
+                "DELETE FROM agentconnect_journal WHERE result IS NULL AND at < ?1",
+                (i64::try_from(before).unwrap_or(i64::MAX),),
+            )
+            .map(|n| n as u64)
+            .map_err(storage)
+    }
+
     fn get_record(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let mut stmt = self
-            .records
+            .conn()
             .prepare_cached("SELECT value FROM agentconnect_records WHERE key = ?1")
             .map_err(storage)?;
         let mut rows = stmt.query((key,)).map_err(storage)?;
@@ -319,13 +1096,13 @@ impl sealed::Backend for SqliteStore {
 
     fn put_record(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
         match value {
-            Some(v) => self.records.execute(
+            Some(v) => self.conn().execute(
                 "INSERT INTO agentconnect_records (key, value) VALUES (?1, ?2) \
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, v),
             ),
             None => self
-                .records
+                .conn()
                 .execute("DELETE FROM agentconnect_records WHERE key = ?1", (key,)),
         }
         .map(|_| ())
@@ -485,8 +1262,7 @@ mod tests {
     }
 
     fn unencrypted(dir: &tempfile::TempDir) -> SqliteStore {
-        let open = || Connection::open(db(dir)).unwrap();
-        SqliteStore::from_connections(open(), open()).unwrap()
+        SqliteStore::from_connection(Connection::open(db(dir)).unwrap()).unwrap()
     }
 
     #[test]
@@ -602,6 +1378,140 @@ mod tests {
             SqliteStore::open(&db(&dir), &key("a")),
             Err(Error::Storage(_))
         ));
+    }
+
+    /// One test type that stands in for every OpenMLS storage key and entity.
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct T(Vec<u8>);
+
+    impl openmls_traits::storage::Key<V> for T {}
+    impl openmls_traits::storage::Entity<V> for T {}
+    macro_rules! storable {
+        ($($t:ident),*) => { $(impl traits::$t<V> for T {})* };
+    }
+    storable!(
+        GroupId,
+        SignaturePublicKey,
+        HashReference,
+        PskId,
+        EncryptionKey,
+        EpochKey,
+        QueuedProposal,
+        TreeSync,
+        GroupContext,
+        InterimTranscriptHash,
+        ConfirmationTag,
+        SignatureKeyPair,
+        PskBundle,
+        HpkeKeyPair,
+        GroupState,
+        GroupEpochSecrets,
+        LeafNodeIndex,
+        MessageSecrets,
+        ResumptionPskStore,
+        KeyPackage,
+        MlsGroupJoinConfig,
+        LeafNode,
+        ProposalRef
+    );
+
+    #[test]
+    fn every_storage_call_reaches_the_shared_connection() {
+        // The delegating provider writes through to OpenMLS's own SQLite
+        // provider over the one connection: what one writes, the other
+        // reads, and a rolled-back transaction undoes it.
+        use sealed::Backend as _;
+        let store = SqliteStore::open_in_memory().unwrap();
+        let s = store.inner();
+        let t = T(b"value".to_vec());
+        store.begin().unwrap();
+        s.write_tree(&t, &t).unwrap();
+        store.rollback().unwrap();
+        assert_eq!(s.tree::<T, T>(&t).unwrap(), None);
+        s.write_tree(&t, &t).unwrap();
+        assert_eq!(
+            SqliteStorageProvider::<JsonCodec, &Connection>::new(&store.mls.conn)
+                .tree::<T, T>(&t)
+                .unwrap(),
+            Some(t.clone())
+        );
+        s.write_mls_join_config::<T, T>(&t, &t).unwrap();
+        s.append_own_leaf_node::<T, T>(&t, &t).unwrap();
+        s.queue_proposal::<T, T, T>(&t, &t, &t).unwrap();
+        s.write_tree::<T, T>(&t, &t).unwrap();
+        s.write_interim_transcript_hash::<T, T>(&t, &t).unwrap();
+        s.write_context::<T, T>(&t, &t).unwrap();
+        s.write_confirmation_tag::<T, T>(&t, &t).unwrap();
+        s.write_group_state::<T, T>(&t, &t).unwrap();
+        s.write_message_secrets::<T, T>(&t, &t).unwrap();
+        s.write_resumption_psk_store::<T, T>(&t, &t).unwrap();
+        s.write_own_leaf_index::<T, T>(&t, &t).unwrap();
+        s.write_group_epoch_secrets::<T, T>(&t, &t).unwrap();
+        s.write_signature_key_pair::<T, T>(&t, &t).unwrap();
+        s.write_encryption_key_pair::<T, T>(&t, &t).unwrap();
+        s.write_encryption_epoch_key_pairs::<T, T, T>(&t, &t, 0, std::slice::from_ref(&t))
+            .unwrap();
+        s.write_key_package::<T, T>(&t, &t).unwrap();
+        s.write_psk::<T, T>(&t, &t).unwrap();
+        s.queued_proposal_refs::<T, T>(&t).unwrap();
+        s.queued_proposals::<T, T, T>(&t).unwrap();
+        assert!(
+            s.mls_group_join_config::<T, T>(&t).is_ok(),
+            "mls_group_join_config"
+        );
+        assert!(s.own_leaf_nodes::<T, T>(&t).is_ok(), "own_leaf_nodes");
+        assert!(s.tree::<T, T>(&t).is_ok(), "tree");
+        assert!(s.group_context::<T, T>(&t).is_ok(), "group_context");
+        assert!(
+            s.interim_transcript_hash::<T, T>(&t).is_ok(),
+            "interim_transcript_hash"
+        );
+        assert!(s.confirmation_tag::<T, T>(&t).is_ok(), "confirmation_tag");
+        assert!(s.group_state::<T, T>(&t).is_ok(), "group_state");
+        assert!(s.message_secrets::<T, T>(&t).is_ok(), "message_secrets");
+        assert!(
+            s.resumption_psk_store::<T, T>(&t).is_ok(),
+            "resumption_psk_store"
+        );
+        assert!(s.own_leaf_index::<T, T>(&t).is_ok(), "own_leaf_index");
+        assert!(
+            s.group_epoch_secrets::<T, T>(&t).is_ok(),
+            "group_epoch_secrets"
+        );
+        assert!(
+            s.signature_key_pair::<T, T>(&t).is_ok(),
+            "signature_key_pair"
+        );
+        assert!(
+            s.encryption_key_pair::<T, T>(&t).is_ok(),
+            "encryption_key_pair"
+        );
+        assert!(
+            s.encryption_epoch_key_pairs::<T, T, T>(&t, &t, 0).is_ok(),
+            "encryption_epoch_key_pairs"
+        );
+        assert!(s.key_package::<T, T>(&t).is_ok(), "key_package");
+        assert!(s.psk::<T, T>(&t).is_ok(), "psk");
+        s.remove_proposal::<T, T>(&t, &t).unwrap();
+        s.delete_own_leaf_nodes::<T>(&t).unwrap();
+        s.delete_group_config::<T>(&t).unwrap();
+        s.delete_tree::<T>(&t).unwrap();
+        s.delete_confirmation_tag::<T>(&t).unwrap();
+        s.delete_group_state::<T>(&t).unwrap();
+        s.delete_context::<T>(&t).unwrap();
+        s.delete_interim_transcript_hash::<T>(&t).unwrap();
+        s.delete_message_secrets::<T>(&t).unwrap();
+        s.delete_all_resumption_psk_secrets::<T>(&t).unwrap();
+        s.delete_own_leaf_index::<T>(&t).unwrap();
+        s.delete_group_epoch_secrets::<T>(&t).unwrap();
+        s.clear_proposal_queue::<T, T>(&t).unwrap();
+        s.delete_signature_key_pair::<T>(&t).unwrap();
+        s.delete_encryption_key_pair::<T>(&t).unwrap();
+        s.delete_encryption_epoch_key_pairs::<T, T>(&t, &t, 0)
+            .unwrap();
+        s.delete_key_package::<T>(&t).unwrap();
+        s.delete_psk::<T>(&t).unwrap();
+        assert_eq!(s.tree::<T, T>(&t).unwrap(), None);
     }
 
     #[test]

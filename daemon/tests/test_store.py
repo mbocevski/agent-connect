@@ -157,10 +157,19 @@ def test_invites_approvals_joins_events_kv(tmp_path: Path, opened: Opener) -> No
     assert s.join_status("nope") is None
     assert s.pending_joins() == []
 
-    first = s.add_event("g1", "joined", {"a": 1}, 7)
-    s.add_event(None, "x", {}, 8)
-    assert [e["type"] for e in s.events()] == ["joined", "x"]
+    assert s.add_event("g1", "joined", {"a": 1}, 7, "e1")
+    assert s.add_event(None, "x", {}, 8, "e2")
+    # The same event id again (regenerated after a crash) is recorded once.
+    assert not s.add_event(None, "x", {}, 9, "e2")
+    first = s.events()[0]["seq"]
+    assert [(e["type"], e["event_id"]) for e in s.events()] == [("joined", "e1"), ("x", "e2")]
     assert [e["type"] for e in s.events(after=first)] == ["x"]
+    assert [e["event_id"] for e in s.unnotified_events()] == ["e1", "e2"]
+    assert not s.event_notified("e1")
+    s.mark_notified("e1")
+    assert s.event_notified("e1")
+    assert not s.event_notified("nope")
+    assert [e["event_id"] for e in s.unnotified_events()] == ["e2"]
 
     assert s.kv_get("k") is None
     s.kv_set("k", "v")
@@ -180,3 +189,44 @@ def test_transactions_roll_back(tmp_path: Path, opened: Opener) -> None:
     with pytest.raises(RuntimeError):
         boom()
     assert s.kv_get("k") is None
+
+
+def test_transactions_nest_as_savepoints(tmp_path: Path, opened: Opener) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+
+    def inner_fails() -> None:
+        with s.tx():
+            s.kv_set("inner", "1")
+            raise RuntimeError
+
+    def outer_fails() -> None:
+        with s.tx():
+            with s.tx():
+                s.kv_set("gone", "1")
+            raise RuntimeError
+
+    with s.tx():
+        s.kv_set("outer", "1")
+        with pytest.raises(RuntimeError):
+            inner_fails()
+        with s.tx():
+            s.kv_set("kept", "1")
+    assert (s.kv_get("outer"), s.kv_get("inner"), s.kv_get("kept")) == ("1", None, "1")
+    # A failure in the outer transaction undoes the committed inner one too.
+    with pytest.raises(RuntimeError):
+        outer_fails()
+    assert s.kv_get("gone") is None
+
+
+def test_invites_and_joins_bookkeeping(tmp_path: Path, opened: Opener) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+    s.add_invite("i1", "g1", 100, 1, 10, status="registering")
+    assert [i["invite_id"] for i in s.invites("registering")] == ["i1"]
+    s.delete_invite("i1")
+    assert s.invite("i1") is None
+    s.add_join("j1", {}, "me", 10)
+    assert s.join_name("j1") == "me"
+    assert s.join_name("j2") is None
+    assert s.joined_invites() == []
+    s.finish_join("j1", "joined", "g1")
+    assert s.joined_invites() == ["j1"]

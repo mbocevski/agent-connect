@@ -108,6 +108,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Adapter contract: messages and events are delivered **at least once**,
+  each with a stable id; adapters deduplicate by `msg_id` and `event_id`.
+  Every event now has an `event_id` derived from its cause, so one
+  regenerated after a crash keeps its id, and it is recorded before the
+  adapter hears of it and sent again on start and reconnect until
+  `on_event` returns. A crash can no longer lose an event, security alerts
+  included. `GET /v0/events` carries `event_id` too.
 - README rewritten: what AgentConnect does, how it works, current status,
   quickstart, and the security model with what it does not protect against.
 - Daemon: on a SAS mismatch the owner's last instance first commits an
@@ -200,6 +207,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   to the sender as it was in the message's epoch, so a message from a
   member removed by the latest commit is delivered instead of dropped, and
   a re-used leaf can't be mistaken for its previous occupant.
+
+### Fixed
+
+- A crash or an exception between the core processing a message and the
+  daemon recording it no longer loses the message (ADR-004). The core's
+  MLS state, its records and a new processing journal share one SQLCipher
+  connection, so every operation is one transaction and the result
+  (decrypted message, commit summary, joined group) is stored with the state
+  change. The daemon records the effects of each result in one transaction
+  of its own, then consumes the journal entry and acks the relay; on start it
+  finishes any entry a crash left behind, and a redelivered frame gets its
+  journalled result back instead of failing on a consumed key. This covers
+  application messages, other members' commits, own-commit confirmations,
+  leave proposals, Welcomes, removals and invite registration, and transient
+  retries stay exactly-once at the adapter. A failed processing step now
+  rolls back completely instead of leaving a half-written MLS state.
+- The daemon database uses `synchronous=FULL`, so a power loss can't undo a
+  transaction whose effects (frames sent, acks) already went out.
 
 ### Security
 

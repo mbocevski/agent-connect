@@ -100,6 +100,14 @@ pub enum Error {
     /// No member with that identity.
     #[error("unknown member")]
     UnknownMember,
+    /// The message was already processed under this journal key and its
+    /// entry consumed (a redelivery; ADR-004). Nothing changed.
+    #[error("message already processed")]
+    Duplicate,
+    /// The journal key was already used for different bytes. Nothing
+    /// changed.
+    #[error("journal key reused for a different message")]
+    JournalConflict,
     /// An error reported by OpenMLS.
     #[error("MLS error: {0}")]
     Mls(String),

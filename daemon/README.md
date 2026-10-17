@@ -75,5 +75,11 @@ the relay only receives the public invite metadata.
 `on_outbound(send)` and `capabilities()`. Every delivery carries the SPEC
 §10.1 untrusted framing. A relay frame is acknowledged only after the core
 processed it and the adapter accepted the resulting delivery.
+
+Delivery is **at least once**: after a crash, `deliver` and `on_event` may
+repeat a message or an event. Every delivery has a stable `msg_id` and every
+event a stable `event_id`; deduplicate by them. Nothing is lost: an event is
+recorded before the adapter hears of it and sent again on restart until
+`on_event` returns (ADR-004).
 `RecordingAdapter` is the in-memory adapter used by tests; the policy layer
 plugs in through `PolicyHook` (pass-through by default).
