@@ -10,6 +10,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Relay (`relay/`): MLS Delivery Service with commit ordering and fan-out,
+  per-instance mailboxes with store-and-forward, invite registry and join
+  forwarding, signed-request REST auth, Prometheus counters, SQLite storage
+  behind a `Store` trait, and a container image (`relay/Dockerfile`).
 - Spike validating OpenMLS 0.9 with post-quantum hybrid ciphersuites
   (`spikes/mls-xwing`), with findings and decisions in
   `docs/spikes/mls-xwing.md`.

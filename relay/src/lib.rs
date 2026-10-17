@@ -1,49 +1,30 @@
-//! AgentConnect relay (SPEC §8). Forwards ciphertext only and never sees
-//! plaintext or invite secrets.
+//! AgentConnect relay (SPEC §8): the MLS Delivery Service, mailbox store and
+//! invite registry. It handles ciphertext and public metadata only, routes on
+//! the outer envelope (SPEC §7.1) and never sees plaintext or invite secrets.
 #![warn(clippy::pedantic, missing_docs)]
 
-use axum::{Json, Router, routing::get};
-use serde::Serialize;
+use std::sync::Arc;
 
-/// Build the relay's HTTP router.
-pub fn app() -> Router {
-    Router::new().route("/healthz", get(healthz))
-}
+use axum::Router;
+use axum::routing::get;
 
-#[derive(Serialize)]
-struct Health {
-    status: &'static str,
-    protocol: u32,
-}
+pub mod auth;
+pub mod config;
+pub mod proto;
+pub mod relay;
+pub mod rest;
+pub mod sqlite;
+pub mod store;
+pub mod ws;
 
-async fn healthz() -> Json<Health> {
-    Json(Health {
-        status: "ok",
-        protocol: agentconnect_core::PROTOCOL_VERSION,
-    })
-}
+pub use relay::Relay;
+pub use sqlite::SqliteStore;
+pub use store::{Limits, Store};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{body::Body, http::Request, http::StatusCode};
-    use tower::ServiceExt;
-
-    #[tokio::test]
-    async fn healthz_reports_ok() {
-        let response = app()
-            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn unknown_route_is_404() {
-        let response = app()
-            .oneshot(Request::get("/nope").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
+/// Build the relay's HTTP router: REST, landing page and WebSocket.
+pub fn app<S: Store>(relay: Arc<Relay<S>>) -> Router {
+    Router::new()
+        .merge(rest::routes::<S>())
+        .route("/v0/ws", get(ws::ws_handler::<S>))
+        .with_state(relay)
 }
