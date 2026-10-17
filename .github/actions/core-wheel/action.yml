@@ -15,8 +15,9 @@ runs:
   using: composite
   steps:
     # The container does not see the host's env. RUSTFLAGS is passed as one
-    # token (docker-options splits on spaces): Cargo's home moves under the
-    # workspace so a single prefix remap covers every path.
+    # token (docker-options splits on spaces): HOME, and with it Cargo and
+    # rustup, moves under the workspace so a single prefix remap covers
+    # every path.
     - uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1.51.0
       with:
         command: build
@@ -25,5 +26,5 @@ runs:
         args: --release --locked --out ../${{ inputs.out-dir }}
         docker-options: >-
           -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-          -e CARGO_HOME=${{ github.workspace }}/.cargo-home
+          -e HOME=${{ github.workspace }}/.container-home
           -e RUSTFLAGS=--remap-path-prefix=${{ github.workspace }}=/src

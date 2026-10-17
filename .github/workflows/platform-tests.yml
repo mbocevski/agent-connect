@@ -41,12 +41,12 @@ jobs:
       - name: Linkage (macOS)
         if: runner.os == 'macOS'
         run: |
-          native="$(find .venv -name '_native*.so' | head -n 1)"
+          native="$(uv run --all-packages python -c 'import agentconnect_core._native as m; print(m.__file__)')"
           scripts/check-macos-linkage.sh target/debug/agentconnect-relay "$native"
       - name: Linkage (Linux)
         if: runner.os == 'Linux'
         run: |
-          native="$(find .venv -name '_native*.so' | head -n 1)"
+          native="$(uv run --all-packages python -c 'import agentconnect_core._native as m; print(m.__file__)')"
           ldd target/debug/agentconnect-relay "$native"
       # Informational: is the login Keychain usable on a hosted runner?
       - name: Keychain probe (macOS)
