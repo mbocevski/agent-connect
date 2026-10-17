@@ -67,7 +67,8 @@ jobs:
         if: matrix.pure
         run: |
           uv build --all-packages --sdist --out-dir dist
-          uv build --package agentconnect --package agentconnect-sdk --wheel --out-dir dist
+          uv build --package agentconnect --wheel --out-dir dist
+          uv build --package agentconnect-sdk --wheel --out-dir dist
       - name: Checksums
         run: |
           (cd dist && shasum -a 256 -- * > ../sums.tmp)
