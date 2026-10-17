@@ -1,2 +1,2 @@
 [files]
-extend-exclude = ["Cargo.lock", "uv.lock", "LICENSE"]
+extend-exclude = ["Cargo.lock", "uv.lock", "LICENSE", "testdata/sas-emoji.json"]

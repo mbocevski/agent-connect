@@ -6,7 +6,9 @@ repos:
   - repo: builtin
     hooks:
       - id: trailing-whitespace
+      # Vendored vectors stay byte-for-byte as published (testdata/MANIFEST.json).
       - id: end-of-file-fixer
+        exclude: ^testdata/sas-emoji\.json$
       - id: check-yaml
       - id: check-toml
       - id: check-json
@@ -110,6 +112,8 @@ repos:
         language: system
         entry: uv run --frozen python scripts/hygiene.py files
         types: [text]
+        # Upstream data (it contains a robot emoji entry), kept byte-for-byte.
+        exclude: ^testdata/sas-emoji\.json$
       - id: no-tool-refs-msg
         name: commit message has no AI-tool attribution
         language: system

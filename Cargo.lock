@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "agentconnect-core"
 version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "agentconnect-core-py"
