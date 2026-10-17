@@ -43,14 +43,17 @@ just lint       # every static check: all prek hooks + cargo deny
 just lint-py    # ruff check, ruff format --check, ty check
 just lint-rust  # rustfmt, clippy, rustdoc, cargo shear, taplo, cargo deny
 just test       # fast tier, < 60 s: unit, property, contract, in-process multi-node
+just contract   # testdata/MANIFEST.json vs. the Rust and Python suites
 just test-int   # docker compose integration + demos
+just test-nightly # mutants, long property runs, quarantined tests
+just cov        # coverage gates + ratchet against coverage-baseline.json
+just cov-baseline # refresh the baseline (in the PR that raises coverage)
 just ci         # exactly what PR CI runs, including coverage gates
 just pr         # push branch, open/refresh PR
 just merge <n>  # the ONLY way to merge: refuses unless every required check is green
 ```
 
-Testing rules, tiers, coverage thresholds and the harness are in `TESTING.md`
-(once the test-strategy task lands; until then see `CONTRIBUTING.md`).
+Testing rules, tiers, coverage thresholds and the harness are in `TESTING.md`.
 
 Tooling: Rust stable (pinned in `rust-toolchain.toml`) and **uv** for all
 Python. Don't use `pip install` or global venvs.
@@ -86,11 +89,14 @@ Python. Don't use `pip install` or global venvs.
 **Code & tests**
 - Write tests first for `core/` and protocol code. Every bug fix comes with a
   regression test.
-- Tests must be deterministic: use the fake `Clock` and the seeded test RNG.
+- Tests must be deterministic: use the fake `Clock` (`agentconnect_core::clock`,
+  `agentconnect.clock`) and the seeded RNG (`AC_TEST_SEED`, `rng` fixture).
   No `sleep` and no network in the `just test` tier.
 - Wire formats live in `testdata/` (vectors and JSON schemas). Rust and Python
-  must both pass them, so change both sides together.
-- Coverage may not drop below the gates in `TESTING.md` (`core/` ≥ 90%).
+  must both pass them, so change both sides together. Every file is listed in
+  `testdata/MANIFEST.json` (`just contract` checks it).
+- Coverage may not drop below the gates in `TESTING.md` (`core/` ≥ 90%) or
+  more than 0.5 pp below `coverage-baseline.json`.
 - Rust: `rustfmt`, `clippy -D warnings` (pedantic in `core`/`relay`),
   `cargo doc -D warnings`, `cargo shear` (no unused deps), `taplo` for TOML.
 - Python: `ruff` (lint and format) and `ty check` with every rule set to

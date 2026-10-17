@@ -47,7 +47,7 @@ deny:
     cargo deny check
 
 # Fast test tier (< 60 s): unit, property, contract
-test: test-rust test-py
+test: test-rust test-py contract
 
 test-rust:
     cargo nextest run --workspace --exclude agentconnect-core-py --locked
@@ -55,23 +55,51 @@ test-rust:
 test-py:
     uv run --all-packages --frozen pytest -q
 
+# Contract data: every testdata/ file is in MANIFEST.json and used by its suites
+contract:
+    uv run --no-project python scripts/check_manifest.py
+
 # Integration tier (docker compose); populated as components land
 test-int:
     @echo "no integration tests yet (added with the relay and daemon)"
 
-# Nightly tier: mutation testing (fuzzing and benchmarks are added with the core)
-test-nightly:
+# Nightly tier: mutation testing, quarantined tests, long property runs
+# (fuzzing and benchmarks are added with the core)
+test-nightly: nightly-mutants nightly-py
+
+nightly-mutants:
     cargo mutants -p agentconnect-core --no-shuffle
+
+nightly-py:
+    AC_RUN_QUARANTINE=1 HYPOTHESIS_PROFILE=nightly uv run --all-packages --frozen pytest -q
+
+# Rust branch coverage (non-gating, needs a nightly toolchain)
+cov-rust-branch:
+    cargo +nightly llvm-cov nextest --branch -p agentconnect-core --locked --summary-only
 
 # Coverage with gates
 cov: cov-rust cov-py
 
-cov-rust:
-    cargo llvm-cov nextest -p agentconnect-core --locked --fail-under-lines {{ cov_core }}
-    cargo llvm-cov nextest -p agentconnect-relay --locked --fail-under-lines {{ cov_relay }} --ignore-filename-regex 'main\.rs$'
+# Coverage gates plus the ratchet against coverage-baseline.json
+cov-rust: _cov-rust-run
+    uv run --no-project python scripts/cov_ratchet.py check core=target/cov/core.json relay=target/cov/relay.json
 
-cov-py:
-    uv run --all-packages --frozen pytest -q --cov --cov-report=term-missing --cov-fail-under={{ cov_python }}
+cov-py: _cov-py-run
+    uv run --no-project python scripts/cov_ratchet.py check python=target/cov/python.json
+
+# Rewrite coverage-baseline.json from a fresh run. Commit it in the PR that raises coverage.
+cov-baseline: _cov-rust-run _cov-py-run
+    uv run --no-project python scripts/cov_ratchet.py update core=target/cov/core.json relay=target/cov/relay.json python=target/cov/python.json
+
+_cov-rust-run:
+    mkdir -p target/cov
+    cargo llvm-cov nextest -p agentconnect-core --locked --fail-under-lines {{ cov_core }} --json --summary-only --output-path target/cov/core.json
+    cargo llvm-cov nextest -p agentconnect-relay --locked --fail-under-lines {{ cov_relay }} --ignore-filename-regex 'main\.rs$' --json --summary-only --output-path target/cov/relay.json
+
+_cov-py-run:
+    mkdir -p target/cov
+    uv run --all-packages --frozen pytest -q --cov --cov-report=term-missing --cov-report=json:target/cov/python.json --cov-fail-under={{ cov_python }}
+
 
 # CHANGELOG [Unreleased] must change for user-facing commits
 changelog-check base="origin/main":

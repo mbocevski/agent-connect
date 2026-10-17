@@ -4,6 +4,8 @@
 //! with the v0 ciphersuite, invite binding, SAS derivation and envelopes.
 #![warn(clippy::pedantic, missing_docs)]
 
+pub mod clock;
+
 /// Protocol version implemented by this crate (SPEC §13).
 pub const PROTOCOL_VERSION: u32 = 0;
 

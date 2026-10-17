@@ -60,11 +60,15 @@ user-facing, add the `skip-changelog` label to the PR.
 
 | Command | Tier |
 |---|---|
-| `just test` | Fast: unit, property and contract tests. Runs on pre-push. |
-| `just cov` | Coverage with gates (core ≥ 90%, relay ≥ 80%, Python ≥ 85%) |
-| `just test-int` | Integration (docker compose) |
-| `just test-nightly` | Mutation testing (fuzzing and benchmarks to come) |
+| `just test` | Fast (< 60 s): unit, property and contract tests. Runs on pre-push. |
+| `just contract` | `testdata/` manifest check (part of `just test`) |
+| `just cov` | Coverage with gates (core ≥ 90%, relay ≥ 80%, Python ≥ 85%) and the ratchet against `coverage-baseline.json` |
+| `just test-int` | Integration (docker compose, < 10 min) |
+| `just test-nightly` | Mutation testing, long property runs, quarantined tests (fuzzing and benchmarks to come) |
 | `just ci` | Everything PR CI runs |
+
+Rules, determinism helpers, coverage policy and the flaky-test policy are in
+[`TESTING.md`](TESTING.md).
 
 ## Releases
 
