@@ -124,9 +124,10 @@ nothing else: no door key, no listing, no card text.
 ## Testing
 
 `just test` runs everything in-process on loopback with a `FakeClock`; no
-sleeps. `relay/fuzz/` holds a `cargo-fuzz` target for the frame parser (nightly
-toolchain, not part of `just test`):
+sleeps. `relay/fuzz/` holds `cargo-fuzz` targets for the frame parser and the
+`knock` frame (nightly toolchain, not part of `just test`):
 
 ```sh
 cd relay && cargo +nightly fuzz run frame_parser
+cd relay && cargo +nightly fuzz run knock_frame
 ```
