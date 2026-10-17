@@ -14,13 +14,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`spikes/mls-xwing`), with findings and decisions in
   `docs/spikes/mls-xwing.md`.
 
-### Security
-
-- Dependency policy allows MPL-2.0 for the three `hpke-rs` crates only.
-  Advisories RUSTSEC-2026-0329/0330/0331 in the OpenMLS libcrux provider are
-  temporarily ignored, and releases are blocked until a fixed provider ships.
-- Protocol specification v0 draft (`SPEC.md`): MLS groups with the X-Wing
-  post-quantum ciphersuite, invite links, SAS verification, relay Delivery
+- Protocol specification v0 draft (`SPEC.md`): MLS groups with a
+  post-quantum hybrid ciphersuite (ML-KEM-768 + X25519, MLS WG draft),
+  invite links with AEAD-wrapped Welcomes, SAS verification, relay Delivery
   Service, group roles and floor control, threat model.
 - ADR-001 recording the tech stack, crypto and tooling decisions.
 - Repository skeleton: Rust workspace (`core`, `core-py`, `relay`) and uv
@@ -43,3 +39,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   randomness via `AC_TEST_SEED` and Hypothesis profiles, cross-language
   contract data in `testdata/` (with the Matrix SAS emoji table) checked by
   `just contract`, and a coverage ratchet (`coverage-baseline.json`).
+
+### Security
+
+- Dependency policy allows MPL-2.0 for the three `hpke-rs` crates only.
+  Advisories RUSTSEC-2026-0329/0330/0331 in the OpenMLS libcrux provider are
+  temporarily ignored, and releases are blocked until a fixed provider ships.

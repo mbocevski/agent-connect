@@ -24,7 +24,7 @@ are stubs until they're implemented.
 
 | Path | What | Lang |
 |---|---|---|
-| `core/` | OpenMLS groups (X-Wing PQ suite), invite binding, SAS, envelopes | Rust |
+| `core/` | OpenMLS groups (ML-KEM-768 + X25519 PQ hybrid suite), invite binding, SAS, envelopes | Rust |
 | `core-py/` | PyO3 bindings for `core` (maturin) | Rust |
 | `relay/` | MLS Delivery Service: commit ordering, fan-out, invites; serves `web/` | Rust (axum) |
 | `daemon/` | `agentconnectd` + `agentconnect` CLI, adapters, policy, group mode | Python |
@@ -73,7 +73,7 @@ Python. Don't use `pip install` or global venvs.
 - Docs must not claim "fully secure" or "MITM-proof". Use the canonical claim
   in `SPEC.md`.
 - Exactly one MLS ciphersuite per protocol version
-  (`MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519` in v0). Don't add
+  (`MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519` in v0). Don't add
   ciphersuite negotiation or fallbacks; they create downgrade paths.
 - Every daemon enforces the group policy on each commit it receives. Never
   trust the relay to do it.

@@ -19,5 +19,5 @@ def test_version_json_is_stable_contract() -> None:
     assert json.loads(result.stdout) == {
         "version": "0.0.0",
         "protocol": 0,
-        "ciphersuite": "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519",
+        "ciphersuite": "MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519",
     }

@@ -15,3 +15,15 @@ module-name = "agentconnect_core._native"
 python-source = "python"
 manifest-path = "Cargo.toml"
 locked = true
+
+# Rebuild the extension when any Rust input changes, not only pyproject.toml.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "src/**/*.rs" },
+    { file = "../core/Cargo.toml" },
+    { file = "../core/src/**/*.rs" },
+    { file = "../Cargo.toml" },
+    { file = "../Cargo.lock" },
+]

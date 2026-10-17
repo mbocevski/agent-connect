@@ -10,7 +10,7 @@ pub mod clock;
 pub const PROTOCOL_VERSION: u32 = 0;
 
 /// The only MLS ciphersuite permitted in protocol v0 (SPEC §3.1).
-pub const CIPHERSUITE_V0: &str = "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519";
+pub const CIPHERSUITE_V0: &str = "MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519";
 
 /// Returns `true` if `v` is a protocol version this crate can speak.
 #[must_use]

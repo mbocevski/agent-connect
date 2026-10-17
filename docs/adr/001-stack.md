@@ -56,9 +56,14 @@ upstream docs.
   - `openmls_basic_credential` 0.6.0
   - `openmls_traits` 0.6.0
   - `openmls_sqlite_storage` 0.3.0 (alternatively `openmls_sqlx_storage`)
-- **Ciphersuite:** `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`. X-Wing
-  combines X25519 with ML-KEM-768. It is the only ciphersuite, with no
-  negotiation, so there's no way to downgrade.
+- **Ciphersuite:** `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`
+  (TBD1 of `draft-ietf-mls-pq-ciphersuites`, provisional codepoint
+  `0x004F`). Its hybrid KEM combines ML-KEM-768 with X25519. It is the only
+  ciphersuite, with no negotiation, so there's no way to downgrade.
+  - *Revised 2026-10-17 after the spike.* The original choice was the X-Wing
+    suite `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519` (`0x004D`). It
+    comes from an expired individual draft, isn't in the MLS WG draft, and
+    upstream OpenMLS now calls it legacy.
 - A 1:1 conversation is a group of two. Group mode is a first-class v0
   feature.
 - Small helper crates: `hkdf` 0.13, `zeroize` 1.9, `serde` 1.0, `clap` 4.6,
@@ -78,14 +83,16 @@ upstream docs.
   isn't post-quantum. snow's post-quantum support is pre-standard Kyber1024
   only, and its last release was 2025-07.
 - *libsignal.* AGPL-3.0, which we can't accept for a hosted service.
-- *mls-rs.* X-Wing support isn't confirmed. Re-evaluate if OpenMLS stalls.
+- *mls-rs.* Support for the PQ hybrid suites isn't confirmed. Re-evaluate
+  if OpenMLS stalls.
 
 **Risks:**
 
 - OpenMLS is pre-1.0, so its API will change. We pin it and wrap it behind
   the `core` API.
-- The X-Wing codepoint is still in an IETF draft. The ciphersuite is fixed per
-  protocol version.
+- The ciphersuite codepoint is provisional until IANA assigns it. The
+  ciphersuite is fixed per protocol version, so a different final codepoint
+  means a protocol version change.
 - The libcrux provider is newer than the rust-crypto one.
 
 **Spike outcome (2026-10-17): GO** (`docs/spikes/mls-xwing.md`). OpenMLS
