@@ -1,0 +1,29 @@
+name: core-wheel
+description: >-
+  Build the agentconnect-core wheel (abi3, one wheel per platform) with maturin.
+  Linux builds run in a manylinux container on the runner's own architecture;
+  macOS builds run on the host and take RUSTFLAGS and SOURCE_DATE_EPOCH from
+  the calling job's env.
+inputs:
+  out-dir:
+    description: Directory, relative to the workspace root, that receives the wheel.
+    default: dist
+  manylinux:
+    description: manylinux tag for Linux builds, or "off" for macOS.
+    default: "2_28"
+runs:
+  using: composite
+  steps:
+    # The container does not see the host's env. RUSTFLAGS is passed as one
+    # token (docker-options splits on spaces): Cargo's home moves under the
+    # workspace so a single prefix remap covers every path.
+    - uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1.51.0
+      with:
+        command: build
+        working-directory: core-py
+        manylinux: ${{ inputs.manylinux }}
+        args: --release --locked --out ../${{ inputs.out-dir }}
+        docker-options: >-
+          -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+          -e CARGO_HOME=${{ github.workspace }}/.cargo-home
+          -e RUSTFLAGS=--remap-path-prefix=${{ github.workspace }}=/src

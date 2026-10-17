@@ -124,6 +124,30 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | uv run --no-project python scripts/hygiene.py text
 
+  # Linux arm64 and macOS arm64 run the fast tier. Not part of ci-ok until
+  # they have a track record of staying green and fast (see ADR-001); the same
+  # workflow also runs nightly.
+  platforms:
+    uses: ./.github/workflows/platform-tests.yml
+
+  # The relay image must build for both architectures. Each architecture
+  # builds on a native runner (no QEMU emulation); nothing is pushed.
+  image:
+    name: image (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker buildx build --platform linux/${{ matrix.arch }} -f relay/Dockerfile .
+
   # Single required check for merge gating (.github/required-checks.txt).
   ci-ok:
     if: always()
