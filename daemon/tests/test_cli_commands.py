@@ -593,3 +593,65 @@ def test_ttl_units() -> None:
         86400,
         604800,
     ]
+
+
+# -- ids that start with "-" ----------------------------------------------------------------
+
+# Random base64url ids can start with "-" (or "--"); every command that takes
+# one positionally must still read it as the id, not as an option. "-y..."
+# and "--json..." start like options these commands have.
+DASH_IDS = ["-" + "G" * 21, "--" + "G" * 20, "-y" + "G" * 20, "--json" + "G" * 16]
+
+
+def dashed(fake: Fake, gid: str) -> None:
+    """Re-key the fake's group routes to ``gid``."""
+    fake.routes["GET /v0/groups"]["groups"][0]["group_id"] = gid
+    fake.routes[f"GET /v0/groups/{gid}"] = {**group_info(), "group_id": gid}
+    approval = {**APPROVAL, "request_id": gid, "group_id": gid}
+    fake.routes["GET /v0/approvals"] = {"approvals": [approval]}
+
+
+@pytest.mark.parametrize("gid", DASH_IDS)
+def test_every_id_argument_may_start_with_a_dash(fake: Fake, gid: str) -> None:
+    dashed(fake, gid)
+    fake.routes[f"POST /v0/groups/{gid}/leave"] = {"status": "left"}
+    fake.routes[f"POST /v0/groups/{gid}/messages"] = {"msg_id": "m1"}
+    fake.routes[f"POST /v0/groups/{gid}/members/{BOB}/verify"] = {"verified": True}
+    fake.routes[f"POST /v0/groups/{gid}/invites"] = {"url": URL, "invite_id": gid, "expires_at": 5}
+    fake.routes[f"POST /v0/approvals/{gid}/approve"] = {"status": "approving"}
+    fake.routes[f"POST /v0/approvals/{gid}/reject"] = {"status": "rejected"}
+    fake.routes[f"DELETE /v0/invites/{gid}"] = {"revoked": gid}
+
+    code, shown = fake.json("groups", "show", gid)
+    assert (code, shown["group_id"]) == (0, gid)
+    assert fake.json("verify", gid, input="y\n") == (
+        0,
+        {"outcome": "verified", "group_id": gid, "verified": [BOB]},
+    )
+    assert fake.json("leave", gid) == (0, {"group_id": gid, "status": "left"})
+    # Options before, between and after the positionals; a text that starts
+    # with "-" is a positional too.
+    code, sent = fake.json("send", "--to", BOB, gid, "-1 is the answer")
+    assert (code, sent["group_id"]) == (0, gid)
+    assert fake.posts("/messages")[-1][1] == {"text": "-1 is the answer", "to": [BOB]}
+    assert fake.run("send", gid, "--to", BOB, "hi").exit_code == 0
+    code, made = fake.json("invite", "create", "--group", gid)
+    assert (code, made["group_id"]) == (0, gid)
+    assert fake.json("invite", "revoke", gid) == (0, {"revoked": gid})
+    code, approved = fake.json("approvals", "approve", gid, "--yes")
+    assert (code, approved["request_id"]) == (0, gid)
+    assert fake.json("approvals", "approve", "-y", gid)[0] == 0
+    assert fake.run("send", f"--to={BOB}", gid, "hi").exit_code == 0
+    assert fake.posts("/messages")[-1][1] == {"text": "hi", "to": [BOB]}
+    assert fake.json("approvals", "reject", gid)[1] == {"request_id": gid, "status": "rejected"}
+    # An explicit "--" still works, and real options are still options.
+    assert fake.run("leave", "--json", "--", gid).exit_code == 0
+    assert "Show a group" in fake.run("groups", "show", "--help").stdout
+
+
+def test_a_positional_id_parse_keeps_usage_errors(fake: Fake) -> None:
+    assert fake.run("leave").exit_code == 2  # missing argument
+    assert fake.run("leave", GID, "extra").exit_code == 2
+    assert fake.run("send", GID).exit_code == 2
+    # A value-taking option at the end with no value is still a usage error.
+    assert fake.run("send", GID, "hi", "--to").exit_code == 2

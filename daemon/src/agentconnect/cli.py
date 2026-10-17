@@ -39,6 +39,7 @@ from agentconnect.cli_support import (
     INTERCEPTION_WARNING,
     SHARE_REMINDER,
     CliError,
+    IdArgsCommand,
     Sas,
     clean,
     connect,
@@ -290,7 +291,7 @@ def invite_create(  # noqa: PLR0913, PLR0917
         typer.echo(SHARE_REMINDER)
 
 
-@invite_app.command("revoke")
+@invite_app.command("revoke", cls=IdArgsCommand)
 def invite_revoke(invite_id: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """Revoke an invite you created; its link stops working."""
     with guard(as_json):
@@ -415,7 +416,7 @@ def groups_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             )
 
 
-@groups_app.command("show")
+@groups_app.command("show", cls=IdArgsCommand)
 def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """Show a group: members, roles, verified flags, short code, pending approvals."""
     with guard(as_json):
@@ -512,7 +513,9 @@ def _pending(api: ApiClient, request_id: str) -> dict[str, Any]:
     raise CliError("not_found", f"no pending request {request_id!r}", EXIT_FAILED)
 
 
-@approvals_app.command("approve", help=f"Approve a join request. {HUMAN_ONLY_HELP}")
+@approvals_app.command(
+    "approve", cls=IdArgsCommand, help=f"Approve a join request. {HUMAN_ONLY_HELP}"
+)
 def approvals_approve(
     request_id: str, yes: YesOpt = False, config: ConfigOpt = None, as_json: JsonOpt = False
 ) -> None:
@@ -531,7 +534,9 @@ def approvals_approve(
             typer.echo(f"a call or in person, then run `agentconnect verify {v['group_id']}`.")
 
 
-@approvals_app.command("reject", help=f"Reject a join request. {HUMAN_ONLY_HELP}")
+@approvals_app.command(
+    "reject", cls=IdArgsCommand, help=f"Reject a join request. {HUMAN_ONLY_HELP}"
+)
 def approvals_reject(request_id: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     with guard(as_json):
         api = connect(config, human=True)
@@ -546,7 +551,9 @@ def approvals_reject(request_id: str, config: ConfigOpt = None, as_json: JsonOpt
 # -- verification (human) -------------------------------------------------------------
 
 
-@app.command(help=f"Compare the short code with the other members. {HUMAN_ONLY_HELP}")
+@app.command(
+    cls=IdArgsCommand, help=f"Compare the short code with the other members. {HUMAN_ONLY_HELP}"
+)
 def verify(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     # Interactive on purpose: there is no --yes, so a script can't answer for the human.
     with guard(as_json):
@@ -625,7 +632,7 @@ def _mismatch(api: ApiClient, gid: str, info: dict[str, Any], as_json: bool) -> 
 # -- talking ---------------------------------------------------------------------------------
 
 
-@app.command()
+@app.command(cls=IdArgsCommand)
 def leave(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """Leave a group. The owner must hand over ownership first."""
     with guard(as_json):
@@ -640,7 +647,7 @@ def leave(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> Non
             typer.echo("Leaving: the proposal is sent; the other members complete it.")
 
 
-@app.command()
+@app.command(cls=IdArgsCommand)
 def send(
     group: str,
     text: str,

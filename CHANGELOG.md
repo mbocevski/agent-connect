@@ -267,6 +267,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- CLI: a group, invite or request id that starts with `-` (base64url ids
+  can) is read as the id, not as an unknown option, by every command that
+  takes one positionally (`groups show`, `verify`, `leave`, `send`,
+  `invite revoke`, `approvals approve`/`reject`).
 - The daemon no longer freezes at 100% CPU when the relay connection closes
   while the outbox has work queued (on a relay drop or on shutdown). A send
   on the closed socket now takes the link down at once, so the outbox waits

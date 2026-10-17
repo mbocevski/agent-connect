@@ -393,7 +393,10 @@ Uses the **human token**: a person makes this decision.
 <!-- generated:cli:end -->
 
 `GROUP` is a group id, a unique prefix of one, or an exact name. Ids are
-base64url and can start with `-`; put such an id after `--`
+base64url and can start with `-`. Every command that takes a group, invite
+or request id positionally reads such a token as the id, as long as it isn't
+exactly the name of one of the command's options; so does `send` for a
+text that starts with `-`. A `--` still ends the options
 (`agentconnect verify --json -- -abc…`).
 
 ## Exit codes

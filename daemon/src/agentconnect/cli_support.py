@@ -8,13 +8,14 @@ import json
 import re
 import time
 import unicodedata
-from collections.abc import Generator, Iterator
+from collections.abc import Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import typer
+from typer.core import TyperCommand
 
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.config import Config, ConfigError, load_config
@@ -169,6 +170,65 @@ def guard(as_json: bool) -> Generator[None]:
     except typer.Abort:
         emit_error(CliError("aborted", "aborted; nothing was changed", EXIT_REFUSED), as_json)
         raise typer.Exit(EXIT_REFUSED) from None
+
+
+def options_first(params: Iterable[Any], args: list[str]) -> list[str]:
+    """``args`` reordered as the known options (with their values), then
+    ``--``, then every other token in its original order.
+
+    Group, invite and request ids are random base64url, so they can start
+    with ``-``; so can a message text. The parser would take such a token
+    for an option. Only exact names of the command's own options count as
+    options here; anything else is a positional, and ``--`` makes the
+    parser read it as one. Everything after a ``--`` the user typed stays
+    positional."""
+    arity: dict[str, int] = {}
+    for p in params:
+        if getattr(p, "param_type_name", None) != "option":
+            continue
+        n = 0 if getattr(p, "is_flag", False) or getattr(p, "count", False) else p.nargs
+        for name in (*p.opts, *p.secondary_opts):
+            arity[name] = n
+    options: list[str] = []
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            positionals.extend(args[i + 1 :])
+            break
+        name, attached = arg.split("=", 1)[0], "=" in arg
+        if arg.startswith("--") and name in arity:
+            take = 0 if attached else arity[name]
+        elif arg in arity:
+            take = arity[arg]
+        else:
+            positionals.append(arg)
+            i += 1
+            continue
+        if i + take >= len(args) and take:
+            raise MissingValueError(name)
+        options.extend(args[i : i + 1 + take])
+        i += 1 + take
+    return [*options, "--", *positionals] if positionals else options
+
+
+class MissingValueError(ValueError):
+    """An option that takes a value came last, without one."""
+
+
+class IdArgsCommand(TyperCommand):
+    """A command whose positional arguments may start with ``-`` (ids are
+    random base64url). See :func:`options_first`."""
+
+    @override
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        try:
+            ordered = options_first(self.get_params(ctx), args)
+        except MissingValueError as e:
+            msg = f"option {e.args[0]!r} requires an argument"
+            raise typer.BadParameter(msg, ctx=ctx) from None
+        return super().parse_args(ctx, ordered)
 
 
 def load(path: Path | None) -> Config:
