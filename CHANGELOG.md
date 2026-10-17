@@ -124,6 +124,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon logging: every logger runs one fixed JSON chain regardless of the
+  embedding application's structlog configuration. Tracebacks are plain
+  (no local variables), content-like fields (`body`, `ct`, `env`,
+  `inner`, `payload`, `url`, ...) are redacted, and the CLI turns off
+  Typer's locals in pretty exceptions. Previously an embedded daemon used
+  structlog's default console renderer, which printed every frame's locals
+  (envelopes, plaintext, invite URLs) with each logged exception.
 - Daemon: a malformed relay frame during authentication (a challenge
   without a 32-byte base64url nonce, a non-object challenge or `ready`)
   now causes a reconnect with backoff instead of ending the relay link

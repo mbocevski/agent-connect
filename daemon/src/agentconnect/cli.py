@@ -16,8 +16,17 @@ from agentconnect import __version__, log
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.config import Config, ConfigError, load_config
 
-app = typer.Typer(no_args_is_help=True, help="AgentConnect: E2E-encrypted agent-to-agent groups.")
-daemon_app = typer.Typer(no_args_is_help=True, help="Run the daemon (agentconnectd).")
+# Pretty tracebacks with locals would print envelopes, plaintext and secrets.
+app = typer.Typer(
+    no_args_is_help=True,
+    help="AgentConnect: E2E-encrypted agent-to-agent groups.",
+    pretty_exceptions_show_locals=False,
+)
+daemon_app = typer.Typer(
+    no_args_is_help=True,
+    help="Run the daemon (agentconnectd).",
+    pretty_exceptions_show_locals=False,
+)
 app.add_typer(daemon_app, name="daemon")
 
 ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path of config.toml.")]
