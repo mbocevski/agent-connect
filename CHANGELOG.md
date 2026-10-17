@@ -201,6 +201,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   member removed by the latest commit is delivered instead of dropped, and
   a re-used leaf can't be mistaken for its previous occupant.
 
+### Fixed
+
+- A crash or an exception between the core processing a message and the
+  daemon recording it no longer loses the message (ADR-004). The core's
+  MLS state, its records and a new processing journal share one SQLCipher
+  connection, so every operation is one transaction and the result
+  (decrypted message, commit summary, joined group) is stored with the state
+  change. The daemon records the effects of each result in one transaction
+  of its own, then consumes the journal entry and acks the relay; on start it
+  finishes any entry a crash left behind, and a redelivered frame gets its
+  journalled result back instead of failing on a consumed key. This covers
+  application messages, other members' commits, own-commit confirmations,
+  leave proposals, Welcomes, removals and invite registration, and transient
+  retries stay exactly-once at the adapter. A failed processing step now
+  rolls back completely instead of leaving a half-written MLS state.
+- The daemon database uses `synchronous=FULL`, so a power loss can't undo a
+  transaction whose effects (frames sent, acks) already went out.
+
 ### Security
 
 - Daemon: agent messages carry the `msg_id`s they reply to in a new inner

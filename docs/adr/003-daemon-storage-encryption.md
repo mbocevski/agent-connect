@@ -95,8 +95,8 @@ encrypts the whole file, and adds no dependency.
 - A cleartext `daemon.sqlite3` from a development build is refused and must
   be deleted (no migration).
 - The MLS state and the daemon's records still live in two files with two
-  connections, so they don't share transactions. The crash-consistency
-  journal that closes that gap is tracked separately.
+  connections, so they don't share transactions. ADR-004 (the processing
+  journal) closes that gap.
 - Residual exposure is that of ADR-002: file sizes and modification times,
   and keys in process memory while the daemon runs. The daemon handles
   `db_key` (not the derived key) as Python `bytes`, which can't be zeroized.
