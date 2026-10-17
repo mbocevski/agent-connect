@@ -42,6 +42,20 @@ GROUP_VIEW: dict[str, Any] = {
     "hint": Opt("str"),
 }
 
+HELD: dict[str, Any] = {
+    "hold_id": "str",
+    "group_id": "str",
+    "direction": "str",
+    "sender": "str",
+    "msg_id": "str",
+    "kind": "str",
+    "size": "int",
+    "created_at": "int",
+    "expires_at": "int",
+}
+HELD_DECISION: dict[str, Any] = {"hold_id": "str", "group_id": "str", "status": "str"}
+SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}
+
 # Label (the command, plus a qualifier where one command has several
 # outcomes) to the shape of its stdout with ``--json``.
 SCHEMAS: dict[str, Any] = {
@@ -96,10 +110,47 @@ SCHEMAS: dict[str, Any] = {
                 "received_at": "int",
                 "group_sas": Opt(SAS),
             }
-        ]
+        ],
+        "messages": [HELD],
     },
     "approvals approve": {"request_id": "str", "status": "str", "group_id": "str"},
+    "approvals approve (held message)": HELD_DECISION,
     "approvals reject": {"request_id": "str", "status": "str"},
+    "approvals reject (held message)": HELD_DECISION,
+    "safety show": SAFETY,
+    "safety set": SAFETY,
+    "remove": {"group_id": "str", "identity": "str", "status": "str"},
+    "audit": {
+        "audit": [
+            {
+                "seq": "int",
+                "group_id": "str",
+                "at": "int",
+                "direction": "str",
+                "sender": "str",
+                "msg_id": "str",
+                "kind": "str",
+                "size": "int",
+                "decision": "str",
+                "reason": "str",
+            }
+        ]
+    },
+    "transcript": {
+        "transcript": [
+            {
+                "seq": "int",
+                "group_id": "str",
+                "at": "int",
+                "direction": "str",
+                "sender": "str",
+                "msg_id": "str",
+                "kind": "str",
+                "inner": "object",
+            }
+        ],
+        "untrusted": "bool",
+    },
     "verify (verified)": {"outcome": "str", "group_id": "str", "verified": ["str"]},
     "verify (mismatch)": {
         "outcome": "str",
@@ -131,9 +182,24 @@ NOTES: dict[str, str] = {
         "`sas` is `null` once the group is no longer active. `hint` is set "
         "while the group is unverified: relay it to the human, don't act on it."
     ),
-    "approvals list": ("`group_sas` is the group's code now; it changes once the joiner is added."),
+    "approvals list": (
+        "`group_sas` is the group's code now; it changes once the joiner is added. "
+        "`messages` are the messages the safety policy holds: `direction` is `in` "
+        "(from `sender`) or `out` (your agent's)."
+    ),
     "approvals approve": "`status` is `approving`.",
+    "approvals approve (held message)": "`status` is `approved`.",
     "approvals reject": "`status` is `rejected`.",
+    "approvals reject (held message)": "`status` is `rejected`.",
+    "safety show": (
+        "`settings` is what applies (its `senders` holds per-member limits); "
+        "`overrides` is what this group sets over the `[policy]` defaults."
+    ),
+    "remove": "`status` is `removing`: the commit is queued.",
+    "audit": (
+        "`decision` is `deliver`, `deliver_as_context`, `hold_for_approval`, `drop`, "
+        "`approved`, `rejected` or `expired`. There is never a body."
+    ),
     "verify (verified)": "`outcome` is `verified`; `verified` lists the identities marked.",
     "verify (mismatch)": (
         "`outcome` is `mismatch` and `status` is `left`. When `confirmed` is "

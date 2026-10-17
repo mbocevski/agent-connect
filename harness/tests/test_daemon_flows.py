@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from agentconnect.adapter import Delivery, GroupView, PolicyDecision, RecordingAdapter
+from agentconnect.adapter import RecordingAdapter
 from agentconnect.daemon import UPDATE_AFTER_MESSAGES, UPDATE_AFTER_SECS, DaemonError
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
@@ -46,28 +46,6 @@ async def test_adapter_retry_holds_the_relay_ack(group: GroupFixture, advance: A
     await advance(10)
     assert await b.wait_texts(gid, 1) == ["eventually"]
     await b.wait(lambda: b.daemon.status()["inbox_pending"] == 0)
-
-
-class DropAll:
-    def inbound(self, group: GroupView, delivery: Delivery) -> PolicyDecision:
-        return PolicyDecision.DROP
-
-    def outbound(self, group: GroupView, inner: dict[str, Any]) -> PolicyDecision:
-        return PolicyDecision.DROP if inner["body"].get("blocked") else PolicyDecision.ALLOW
-
-
-async def test_policy_hook_can_drop(group: GroupFixture) -> None:
-    (a, b), gid = await group(2)
-    b.daemon.policy = DropAll()
-    a.daemon.send_message(gid, {"text": "dropped"})
-    await b.wait(
-        lambda: b.daemon.store.pending_deliveries() == [] and bool(b.daemon.store.events())
-    )
-    await a.idle()
-    await b.wait(lambda: b.daemon.status()["inbox_pending"] == 0)
-    assert b.adapter.texts(gid) == []
-    with pytest.raises(DaemonError, match="policy"):
-        b.daemon.send_message(gid, {"blocked": True})
 
 
 async def test_require_verified_holds_deliveries(group: GroupFixture) -> None:

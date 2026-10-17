@@ -134,7 +134,15 @@ def test_real_cli_reference_lists_every_command() -> None:
     for name in ("accept", "verify", "daemon run", "invite create", "approvals approve", "groups"):
         assert f"### `agentconnect {name}`" in text
     human = [c.name for c in gen.walk_cli() if c.human]
-    assert human == ["verify", "approvals approve", "approvals reject"]
+    assert human == [
+        "verify",
+        "remove",
+        "audit",
+        "transcript",
+        "approvals approve",
+        "approvals reject",
+        "safety set",
+    ]
 
 
 def test_api_reference_lists_every_route() -> None:

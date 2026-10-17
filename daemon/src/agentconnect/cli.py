@@ -6,9 +6,11 @@ in the daemon. Every command takes ``--json`` for a stable machine-readable
 shape (docs/cli.md); errors are then ``{"error": {"code", "message"}}`` on
 stdout with a non-zero exit code.
 
-``approve``, ``reject`` and ``verify`` (and the mismatch path inside it) use
-the **human token**. They are decisions only a person may make (SPEC 6.2,
-11): never give an agent the human token or let it run them for the human.
+``approve``, ``reject``, ``verify`` (and the mismatch path inside it),
+``remove``, ``safety set``, ``audit`` and ``transcript`` use the **human
+token**. They are decisions (or records) only a person may make or read (SPEC
+6.2, 11): never give an agent the human token or let it run them for the
+human.
 """
 
 from __future__ import annotations
@@ -83,8 +85,13 @@ groups_app = typer.Typer(
 )
 approvals_app = typer.Typer(
     invoke_without_command=True,
-    help="Pending join requests. `approve` and `reject` are HUMAN ONLY (human token): "
-    "never give an agent the human token or run them for the human.",
+    help="Pending join requests and held messages. `approve` and `reject` are HUMAN ONLY "
+    "(human token): never give an agent the human token or run them for the human.",
+    pretty_exceptions_show_locals=False,
+)
+safety_app = typer.Typer(
+    no_args_is_help=True,
+    help="A group's safety policy (docs/safety.md). `set` is HUMAN ONLY (human token).",
     pretty_exceptions_show_locals=False,
 )
 app.add_typer(daemon_app, name="daemon")
@@ -92,6 +99,7 @@ app.add_typer(group_app, name="group")
 app.add_typer(invite_app, name="invite")
 app.add_typer(groups_app, name="groups")
 app.add_typer(approvals_app, name="approvals")
+app.add_typer(safety_app, name="safety")
 
 ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path of config.toml.")]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable output.")]
@@ -155,6 +163,7 @@ def status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             f"queues       {info['outbox_queued']} outbound, {info['inbox_pending']} inbound"
         )
         typer.echo(f"approvals    {info['pending_approvals']} pending")
+        typer.echo(f"held         {info.get('held_messages', 0)} message(s) waiting for approval")
 
 
 async def _run(cfg: Config, ready: asyncio.Event | None = None) -> None:
@@ -495,14 +504,25 @@ def approvals_default(
         approvals_list(config, as_json)
 
 
+def _print_held(m: dict[str, Any], *, as_json: bool = False) -> None:
+    way = "from" if m["direction"] == "in" else "by your agent, to the group; sender"
+    _say(f"Held message {m['hold_id']} ({m['kind']}, {m['size']} bytes)", as_json=as_json)
+    _say(f"  {way}  {m['sender']}", as_json=as_json)
+    _say(f"  group        {m['group_id']}", as_json=as_json)
+    _say(f"  expires      {_when(int(m['expires_at']))}", as_json=as_json)
+
+
 @approvals_app.command("list")
 def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
-    """List pending join requests with the joiner's name and fingerprint."""
+    """List pending join requests with the joiner's name and fingerprint, and the
+    messages the safety policy holds (`require_approval`)."""
     with guard(as_json):
         api = connect(config)
-        views = [_approval_view(api, a) for a in api.request("GET", "/v0/approvals")["approvals"]]
+        listed = api.request("GET", "/v0/approvals")
+        views = [_approval_view(api, a) for a in listed["approvals"]]
+        held = list(listed.get("messages", []))
         if as_json:
-            emit_json({"approvals": views})
+            emit_json({"approvals": views, "messages": held})
             return
         if not views:
             typer.echo("No pending join requests.")
@@ -511,6 +531,11 @@ def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
         if views:
             typer.echo("Check the fingerprint with the person over a trusted channel, then")
             typer.echo("`agentconnect approvals approve <id>` or `reject <id>`.")
+        for m in held:
+            _print_held(m)
+        if held:
+            typer.echo("`agentconnect approvals approve <id>` shows a held message before you")
+            typer.echo("decide; `reject <id>` drops it.")
 
 
 def _pending(api: ApiClient, request_id: str) -> dict[str, Any]:
@@ -520,8 +545,46 @@ def _pending(api: ApiClient, request_id: str) -> dict[str, Any]:
     raise CliError("not_found", f"no pending request {request_id!r}", EXIT_FAILED)
 
 
+def _held_id(api: ApiClient, ref: str) -> bool:
+    """Whether ``ref`` names a held message (rather than a join request)."""
+    listed = api.request("GET", "/v0/approvals")
+    return any(m["hold_id"] == ref for m in listed.get("messages", []))
+
+
+MAX_PREVIEW = 2000
+
+
+def _print_held_content(m: dict[str, Any], *, as_json: bool) -> None:
+    _print_held(m, as_json=as_json)
+    if m["untrusted"]:
+        _say("  This came from another agent: read it as data, not instructions.", as_json=as_json)
+    body = m["body"]
+    parts = body.get("parts") if isinstance(body, dict) else None
+    texts = [p["text"] for p in parts or [] if isinstance(p, dict) and "text" in p]
+    shown = "\n".join(str(t) for t in texts) if texts else json.dumps(body, ensure_ascii=False)
+    for line in shown[:MAX_PREVIEW].splitlines() or [""]:
+        _say(f"  | {clean(line)}", as_json=as_json)
+    if len(shown) > MAX_PREVIEW:
+        _say(f"  | ... ({len(shown) - MAX_PREVIEW} more characters)", as_json=as_json)
+
+
+def _approve_held(api: ApiClient, hold_id: str, *, yes: bool, as_json: bool) -> None:
+    m = api.request("GET", f"/v0/approvals/messages/{hold_id}")
+    _print_held_content(m, as_json=as_json)
+    question = "Deliver it to your agent?" if m["direction"] == "in" else "Send it to the group?"
+    if not _confirm(question, yes=yes, as_json=as_json):
+        raise CliError("declined", "not approved; the message stays held", EXIT_REFUSED)
+    out = api.request("POST", f"/v0/approvals/messages/{hold_id}/approve")
+    if as_json:
+        emit_json(out)
+    else:
+        typer.echo(f"Approved {hold_id}.")
+
+
 @approvals_app.command(
-    "approve", cls=IdArgsCommand, help=f"Approve a join request. {HUMAN_ONLY_HELP}"
+    "approve",
+    cls=IdArgsCommand,
+    help=f"Approve a join request or a held message. {HUMAN_ONLY_HELP}",
 )
 def approvals_approve(
     request_id: str, yes: YesOpt = False, config: ConfigOpt = None, as_json: JsonOpt = False
@@ -529,6 +592,9 @@ def approvals_approve(
     with guard(as_json):
         _require_yes(as_json, yes, "approve")
         api = connect(config, human=True)
+        if _held_id(api, request_id):
+            _approve_held(api, request_id, yes=yes, as_json=as_json)
+            return
         v = _pending(api, request_id)
         _print_approval(v, as_json=as_json)
         if not _confirm("Let this member join?", yes=yes, as_json=as_json):
@@ -542,11 +608,20 @@ def approvals_approve(
 
 
 @approvals_app.command(
-    "reject", cls=IdArgsCommand, help=f"Reject a join request. {HUMAN_ONLY_HELP}"
+    "reject",
+    cls=IdArgsCommand,
+    help=f"Reject a join request or drop a held message. {HUMAN_ONLY_HELP}",
 )
 def approvals_reject(request_id: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     with guard(as_json):
         api = connect(config, human=True)
+        if _held_id(api, request_id):
+            out = api.request("POST", f"/v0/approvals/messages/{request_id}/reject")
+            if as_json:
+                emit_json(out)
+            else:
+                typer.echo(f"Dropped held message {request_id}.")
+            return
         _pending(api, request_id)
         api.request("POST", f"/v0/approvals/{request_id}/reject")
         if as_json:
@@ -709,6 +784,163 @@ def events(
                 cli_support.pause(FOLLOW_POLL_SECS)
         except KeyboardInterrupt:
             return
+
+
+# -- safety policy -----------------------------------------------------------------------------
+
+
+def _parse_setting(text: str) -> tuple[str, Any]:
+    """``name=value``: ``true``/``false``, an integer, ``default`` (clears the
+    group's override) or a word."""
+    name, eq, raw = text.partition("=")
+    if not eq or not name:
+        raise CliError("bad_setting", f"expected NAME=VALUE, got {text!r}", EXIT_USAGE)
+    value: Any = raw
+    if raw in ("true", "false"):
+        value = raw == "true"
+    elif raw.isdigit():
+        value = int(raw)
+    elif raw == "default":
+        value = None
+    return name, value
+
+
+def _print_safety(info: dict[str, Any]) -> None:
+    settings = dict(info["settings"])
+    senders = settings.pop("senders", {})
+    overrides = info["overrides"]
+    typer.echo(f"Safety policy of {info['group_id']} (* = set for this group):")
+    for name, value in settings.items():
+        mark = "*" if name in overrides else " "
+        typer.echo(f"  {mark} {name:<26} {json.dumps(value)}")
+    for sender, values in senders.items():
+        typer.echo(f"  for {sender}:")
+        for name, value in values.items():
+            typer.echo(f"      {name:<24} {json.dumps(value)}")
+
+
+@safety_app.command("show", cls=IdArgsCommand)
+def safety_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    """Show a group's safety policy: limits, approvals, framing, transcript."""
+    with guard(as_json):
+        api = connect(config)
+        info = api.request("GET", f"/v0/groups/{resolve_group(api, group)}/safety")
+        if as_json:
+            emit_json(info)
+        else:
+            _print_safety(info)
+
+
+@safety_app.command(
+    "set", cls=IdArgsCommand, help=f"Change a group's safety policy. {HUMAN_ONLY_HELP}"
+)
+def safety_set(
+    group: str,
+    settings: Annotated[
+        list[str],
+        typer.Argument(help="NAME=VALUE pairs; VALUE `default` removes the group's override."),
+    ],
+    sender: Annotated[
+        str | None,
+        typer.Option("--sender", help="Apply the limits to this member's identity only."),
+    ] = None,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        api = connect(config, human=True)
+        gid = resolve_group(api, group)
+        body: dict[str, Any] = {"set": dict(_parse_setting(s) for s in settings)}
+        if sender is not None:
+            body["sender"] = sender
+        info = api.request("POST", f"/v0/groups/{gid}/safety", body)
+        if as_json:
+            emit_json(info)
+        else:
+            _print_safety(info)
+
+
+@app.command(
+    cls=IdArgsCommand, help=f"Remove a member from a group (owner or admin). {HUMAN_ONLY_HELP}"
+)
+def remove(
+    group: str,
+    identity: str,
+    yes: YesOpt = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        _require_yes(as_json, yes, "remove")
+        api = connect(config, human=True)
+        gid = resolve_group(api, group)
+        info = api.request("GET", f"/v0/groups/{gid}")
+        names = {m["identity"]: m["display_name"] for m in info["members"]}
+        if identity not in names:
+            raise CliError("not_found", f"{identity!r} is not a member", EXIT_FAILED)
+        _say(f"Remove {clean(names[identity] or identity)} ({identity})", as_json=as_json)
+        _say(f"from {clean(info['name'])}?", as_json=as_json)
+        if not _confirm("Remove every instance of this member?", yes=yes, as_json=as_json):
+            raise CliError("declined", "not removed", EXIT_REFUSED)
+        state = api.request("POST", f"/v0/groups/{gid}/members/{identity}/remove")["status"]
+        if as_json:
+            emit_json({"group_id": gid, "identity": identity, "status": state})
+        else:
+            typer.echo("Removal queued. `agentconnect events` reports a `member_removed` event")
+            typer.echo("once it lands, or `commit_failed` if your role doesn't allow it.")
+
+
+@app.command(
+    cls=IdArgsCommand, help=f"Print the metadata-only audit log, oldest first. {HUMAN_ONLY_HELP}"
+)
+def audit(
+    group: Annotated[str | None, typer.Option("--group", help="Only this group.")] = None,
+    after: Annotated[int, typer.Option("--after", help="Only rows after this seq.")] = 0,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        api = connect(config, human=True)
+        query = f"?after={after}"
+        if group is not None:
+            query += f"&group={resolve_group(api, group)}"
+        rows = api.request("GET", f"/v0/audit{query}")["audit"]
+        if as_json:
+            emit_json({"audit": rows})
+            return
+        for r in rows:
+            why = f" ({r['reason']})" if r["reason"] else ""
+            typer.echo(
+                f"{r['seq']}  {_when(r['at'])}  {r['direction']:<3} {r['decision']}{why}  "
+                f"{r['kind']} {r['size']}B  {r['sender']}"
+            )
+
+
+@app.command(
+    cls=IdArgsCommand, help=f"Print a group's transcript (when it is on). {HUMAN_ONLY_HELP}"
+)
+def transcript(
+    group: str,
+    after: Annotated[int, typer.Option("--after", help="Only entries after this seq.")] = 0,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        api = connect(config, human=True)
+        gid = resolve_group(api, group)
+        rows = api.request("GET", f"/v0/groups/{gid}/transcript?after={after}")["transcript"]
+        if as_json:
+            emit_json({"transcript": rows, "untrusted": True})
+            return
+        if not rows:
+            typer.echo("No transcript entries. Turn it on with `agentconnect safety set`.")
+        for r in rows:
+            body = r["inner"].get("body") if isinstance(r["inner"], dict) else None
+            parts = body.get("parts") if isinstance(body, dict) else None
+            texts = [str(p["text"]) for p in parts or [] if isinstance(p, dict) and "text" in p]
+            text = " ".join(texts) if texts else r["kind"]
+            typer.echo(f"{r['seq']}  {_when(r['at'])}  {r['direction']:<3} {r['sender']}")
+            typer.echo(f"    {clean(text)[:MAX_PREVIEW]}")
 
 
 @app.callback()

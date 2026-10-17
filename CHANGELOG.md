@@ -40,6 +40,35 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   aarch64 relay binary and a macOS arm64 `agentconnect-core` wheel, all
   signed and attested. The reproducibility check covers both Linux
   architectures. See ADR-001 for the platform table.
+- Safety policy (`agentconnect.policy`): every decrypted message gets one
+  decision before any adapter sees it (`deliver`, `deliver_as_context`,
+  `hold_for_approval` or `drop` with a reason), and every message the agent
+  sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
+  the loop guard moved into it unchanged. See `docs/safety.md`.
+- Per-group safety settings with per-sender overrides of the limits: message
+  size, messages a minute per sender and per group, a per-task budget for task
+  updates (300 a minute), and `file` parts (off by default, with a size cap
+  when on). Defaults come from new `[policy]` keys in `config.toml`;
+  `agentconnect safety show|set` and `GET|POST /v0/groups/{gid}/safety`
+  (human token to change) override them.
+- `require_approval` (`inbound`, `outbound` or `both`): agent messages wait
+  for the human, who sees them with `agentconnect approvals` and decides with
+  `approvals approve|reject <id>` (human token). Held messages raise
+  `message_held` and expire after `approval_ttl_secs` with `held_expired`,
+  without telling the sender.
+- `repeated_violations` event when one sender breaks the policy
+  `violation_threshold` times (10) within `violation_window_secs` (600). The
+  daemon never removes a member on its own; the new `agentconnect remove`
+  (human token, `POST /v0/groups/{gid}/members/{identity}/remove`) lets the
+  owner or an admin do it.
+- Audit log in the encrypted daemon database: who, when, kind, size and the
+  decision for every message in and out, never a body, kept 30 days
+  (`agentconnect audit`, `GET /v0/audit`, human token). An opt-in
+  per-group transcript keeps full messages, also encrypted, for
+  `transcript_retention_days` (`agentconnect transcript`).
+- Webhook and SSE payloads carry `frame_text` and `notice` (the SPEC 10.1
+  sentence); `POST /v0/groups/{gid}/messages` answers with `status`
+  (`queued` or `held`); `GET /v0/status` counts `held_messages`.
 - Webhook adapter (`daemon.default_adapter = "webhook"`): every message and
   event is POSTed to a loopback `webhook.callback_url` (remote hosts need
   `webhook.allow_remote` and https), signed with HMAC-SHA256 over
@@ -196,6 +225,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   planned A2A extension URI in SPEC §13 is
   `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't
   hold `agentconnect.dev`, so nothing refers to it any more.
+- SDK: `msg.text` puts the SPEC 10.1 notice in front of the text while the
+  group's `frame_text` is on (the default). The text alone is now
+  `msg.raw_text`.
+- `Daemon` no longer takes a `policy=` hook; `PolicyHook`,
+  `PassThroughPolicy` and `PolicyDecision` are replaced by the safety policy.
 - The `text` shorthand of `POST /v0/groups/{id}/messages` (and so `agentconnect
   send`) now sends an A2A v1.0 `Message` (`messageId`, `contextId`, `role`,
   `parts`) instead of a bare `{"text": ...}` body (SPEC 7.2).

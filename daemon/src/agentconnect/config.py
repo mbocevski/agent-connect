@@ -22,6 +22,10 @@ Example file::
 
     [policy]
     auto_approve = false            # approve JoinRequests without a human
+    require_approval = "off"        # off | inbound | outbound | both
+    frame_text = true               # the SPEC 10.1 notice for text consumers
+    sender_per_minute = 30          # and the other limits: docs/safety.md
+    transcript = false              # full transcript (encrypted), per group
 
     [api]
     socket = "~/.local/share/agentconnect/agentconnectd.sock"
@@ -62,6 +66,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import agentconnect_core as ac
+from agentconnect.policy import (
+    DEFAULT_AUDIT_RETENTION_DAYS,
+    KNOB,
+    KNOBS,
+    PolicyError,
+    Settings,
+)
 
 DEFAULT_RELAY_URL = "wss://connect.yggdrasill.network"
 KEYSTORES = ("auto", "keyring", "file")
@@ -123,6 +134,26 @@ class Config:
         """Whether the daemon runs the A2A adapter: a local agent, a facade or both."""
         return self.a2a_local_agent_url is not None or self.a2a_facade_port > 0
 
+    # [policy]: the safety policy's defaults (agentconnect.policy.KNOBS).
+    policy_max_message_bytes: int = KNOB["max_message_bytes"].default
+    policy_sender_per_minute: int = KNOB["sender_per_minute"].default
+    policy_group_per_minute: int = KNOB["group_per_minute"].default
+    policy_task_per_minute: int = KNOB["task_per_minute"].default
+    policy_allow_files: bool = KNOB["allow_files"].default
+    policy_max_file_bytes: int = KNOB["max_file_bytes"].default
+    policy_frame_text: bool = KNOB["frame_text"].default
+    policy_require_approval: str = KNOB["require_approval"].default
+    policy_approval_ttl_secs: int = KNOB["approval_ttl_secs"].default
+    policy_violation_threshold: int = KNOB["violation_threshold"].default
+    policy_violation_window_secs: int = KNOB["violation_window_secs"].default
+    policy_transcript: bool = KNOB["transcript"].default
+    policy_transcript_retention_days: int = KNOB["transcript_retention_days"].default
+    policy_audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
+
+    def safety_defaults(self) -> Settings:
+        """The safety policy every group starts from (docs/safety.md)."""
+        return Settings.of({k.name: getattr(self, f"policy_{k.name}") for k in KNOBS})
+
     @property
     def relay_http(self) -> str:
         """The relay's REST base URL (``http(s)://host[:port]``), derived from
@@ -164,6 +195,29 @@ class ConfigKey:
     doc: str
     env: str = ""  # environment variable that overrides it
 
+
+def shown_default(value: object) -> str:
+    """A default as the docs show it: TOML syntax in backticks."""
+    if isinstance(value, bool):
+        return "`true`" if value else "`false`"
+    if isinstance(value, str):
+        return f'`"{value}"`'
+    return f"`{value}`"
+
+
+_POLICY_KEYS: tuple[ConfigKey, ...] = (
+    *(
+        ConfigKey(f"policy.{k.name}", f"policy_{k.name}", shown_default(k.default), k.doc)
+        for k in KNOBS
+    ),
+    ConfigKey(
+        "policy.audit_retention_days",
+        "policy_audit_retention_days",
+        shown_default(DEFAULT_AUDIT_RETENTION_DAYS),
+        "Days the metadata-only audit log keeps a row (1 to 365). It also keeps at most "
+        "the newest 100000 rows.",
+    ),
+)
 
 CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey(
@@ -213,6 +267,7 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "Approve JoinRequests without asking a human. Leave it off unless every "
         "holder of your invite links is trusted.",
     ),
+    *_POLICY_KEYS,
     ConfigKey(
         "api.socket",
         "api_socket",
@@ -465,6 +520,25 @@ def _isolation(data: Mapping[str, Any]) -> dict[str, Any]:
         "isolation_agent_users": _users(table, "agent_users"),
         "isolation_human_users": _users(table, "human_users"),
     }
+MAX_AUDIT_RETENTION_DAYS = 365
+
+
+def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
+    """The safety policy keys of ``[policy]`` (agentconnect.policy.KNOBS)."""
+    out: dict[str, Any] = {}
+    for knob in KNOBS:
+        if knob.name in table:
+            try:
+                out[f"policy_{knob.name}"] = knob.check(table[knob.name])
+            except PolicyError as e:
+                msg = f"policy.{e}"
+                raise ConfigError(msg) from None
+    days = _typed(table, "audit_retention_days", int, DEFAULT_AUDIT_RETENTION_DAYS)
+    if not 1 <= days <= MAX_AUDIT_RETENTION_DAYS:
+        msg = f"policy.audit_retention_days must be 1..{MAX_AUDIT_RETENTION_DAYS}"
+        raise ConfigError(msg)
+    out["policy_audit_retention_days"] = days
+    return out
 
 
 def load_config(
@@ -516,7 +590,7 @@ def load_config(
         "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
         "sse_retention": _typed(sse, "retention_secs", int, 3600),
     }
-    values.update(_a2a(data) | _isolation(data))
+    values.update(_a2a(data) | _isolation(data) | _policy(policy))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"

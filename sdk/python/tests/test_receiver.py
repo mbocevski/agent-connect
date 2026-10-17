@@ -63,7 +63,7 @@ async def test_a_signed_message_reaches_the_handler_once(
 
     @agent.on_message
     async def handle(msg: Message, group: Group) -> None:
-        got.append((msg.text, group.id))
+        got.append((msg.raw_text, group.id))
 
     body = json.dumps(make_payload(msg_id="m1")).encode()
     assert await http(receiver, body, signed(secret, body)) == (200, {"status": "handled"})

@@ -238,7 +238,7 @@ async def test_reject_leaves_the_joiner_out(
     (req,) = listed["approvals"]
     code, rejected = await alice.json("approvals", "reject", req["request_id"])
     assert (code, rejected["status"]) == (0, "rejected")
-    assert (await alice.json("approvals"))[1] == {"approvals": []}
+    assert (await alice.json("approvals"))[1] == {"approvals": [], "messages": []}
     assert (await bob.json("groups"))[1] == {"groups": []}
 
 

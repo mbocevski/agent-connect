@@ -1,12 +1,17 @@
-"""The adapter interface, the policy hook, and a recording adapter for tests.
+"""The adapter interface and a recording adapter for tests.
 
 An adapter connects the daemon to an agent (A2A server, webhook, SDK). The
-daemon calls :meth:`Adapter.deliver` for every application message and
+daemon calls :meth:`Adapter.deliver` for every application message the
+safety policy (:mod:`agentconnect.policy`) let through and
 :meth:`Adapter.on_event` for membership, epoch, policy and alert events.
+Adapters never see a message the policy dropped or holds, and they send only
+through the daemon, which applies the policy to that too.
 
 Every delivery is **untrusted input** and carries the SPEC §10.1 framing:
 ``untrusted``, ``scope``, ``sender``, ``to``, ``addressed_to_me`` and
 ``trust_state``. Adapters must treat ``body`` as data, not instructions.
+``frame_text`` (the group's policy, on by default) asks text-oriented
+adapters to put :meth:`Delivery.framed_text` in front of the text.
 
 **Delivery contract: at least once.** Both :meth:`Adapter.deliver` and
 :meth:`Adapter.on_event` may repeat the same message or event after a crash
@@ -16,9 +21,9 @@ acked to the relay only after ``deliver`` returned ``ACK``, and an event is
 marked notified only after ``on_event`` returned (an exception makes the
 daemon send it again later).
 
-There is deliberately no way for an adapter to mark a member verified or to
-approve a join: both are human actions (SPEC §11, §6.2) and only exist on the
-local control API's human scope.
+There is deliberately no way for an adapter to mark a member verified, to
+approve a join or to approve a held message: these are human actions (SPEC
+§11, §6.2) and only exist on the local control API's human scope.
 """
 
 from __future__ import annotations
@@ -75,6 +80,7 @@ class Delivery:
     hop: int
     inner: dict[str, Any]
     untrusted: bool = True
+    frame_text: bool = True
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -102,6 +108,7 @@ class Delivery:
             hop=int(d["hop"]),
             inner=dict(d["inner"]),
             untrusted=bool(d.get("untrusted", True)),
+            frame_text=bool(d.get("frame_text", True)),
         )
 
     def framed_text(self) -> str:
@@ -119,7 +126,10 @@ class Event:
     ``epoch_changed`` (with the new SAS), ``policy_changed``, ``out_of_sync``,
     ``relay_misbehaviour``, ``unauthorized_commit``, ``pending_approval``,
     ``joined``, ``removed``, ``loop_guard`` (SPEC 10.3: a message past
-    ``max_agent_turns`` did not trigger the agent and the group was paused).
+    ``max_agent_turns`` did not trigger the agent and the group was paused),
+    and from the safety policy ``message_held`` (a message waits for the
+    human's approval), ``held_expired`` (it waited too long and was dropped)
+    and ``repeated_violations`` (one sender broke the policy too often).
 
     ``event_id`` is stable: the same event sent again after a crash has the
     same id. Deduplicate by it."""
@@ -161,28 +171,6 @@ class Adapter(Protocol):
         """Called once at start with a sender for adapters that originate
         messages (``send(group_id, body, to=["*"], kind="a2a.message")``)."""
         ...
-
-
-class PolicyDecision(enum.Enum):
-    ALLOW = "allow"
-    DROP = "drop"
-
-
-class PolicyHook(Protocol):
-    """The hook the policy layer plugs into (rate limits, part kinds, loop
-    guard, approvals). The default passes everything through."""
-
-    def inbound(self, group: GroupView, delivery: Delivery) -> PolicyDecision: ...
-
-    def outbound(self, group: GroupView, inner: dict[str, Any]) -> PolicyDecision: ...
-
-
-class PassThroughPolicy:
-    def inbound(self, group: GroupView, delivery: Delivery) -> PolicyDecision:
-        return PolicyDecision.ALLOW
-
-    def outbound(self, group: GroupView, inner: dict[str, Any]) -> PolicyDecision:
-        return PolicyDecision.ALLOW
 
 
 def _text_of(body: dict[str, Any]) -> str:

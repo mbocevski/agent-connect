@@ -10,7 +10,8 @@ each in a 0600 file in the data directory:
 
 * ``api-token`` (scope ``agent``): everything an agent integration may do;
 * ``human-token`` (scope ``human``): additionally approving JoinRequests
-  and marking members verified.
+  and held messages, marking members verified, removing members, and
+  changing or reading the group's safety policy, audit log and transcript.
 
 Approval and verification are human decisions (SPEC §6.2, §11). An agent
 that could approve joins or mark the SAS as compared would defeat both
@@ -213,6 +214,20 @@ _GROUP_INFO: dict[str, Any] = {
     "sas?": {"decimal": "str", "emoji_indices": ["int"]},
 }
 
+_HELD: dict[str, Any] = {
+    "hold_id": "str",
+    "group_id": "str",
+    "direction": "str",
+    "sender": "str",
+    "msg_id": "str",
+    "kind": "str",
+    "size": "int",
+    "created_at": "int",
+    "expires_at": "int",
+}
+
+_SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}
+
 ROUTE_SPECS: tuple[RouteSpec, ...] = (
     RouteSpec(
         "GET",
@@ -231,6 +246,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
             "outbox_queued": "int",
             "inbox_pending": "int",
             "pending_approvals": "int",
+            "held_messages": "int",
         },
     ),
     RouteSpec(
@@ -325,7 +341,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         '(SPEC 9.3); task replies go to `["*"]` with the requester as `addressee`. '
         "The agent token sends as the agent and "
         "the human token as the human; kinds reserved to humans (such as "
-        "`control.resume`) need the human token (SPEC 7.3).",
+        "`control.resume`) need the human token (SPEC 7.3). `status` is `queued`, or "
+        "`held` when the group's `require_approval` holds the agent's message for the "
+        "human (see [safety.md](safety.md#approvals)).",
         request={
             "text?": "str",
             "body?": "object",
@@ -334,7 +352,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
             "reply_to?": ["str"],
             "addressee?": ["str"],
         },
-        response={"msg_id": "str"},
+        response={"msg_id": "str", "status": "str"},
     ),
     RouteSpec(
         "POST",
@@ -347,7 +365,8 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "GET",
         "/v0/approvals",
         "_list_approvals",
-        "Pending join requests, with the joiner's fingerprint.",
+        "Pending join requests, with the joiner's fingerprint, and the messages the "
+        "safety policy holds for approval (`messages`, metadata only).",
         response={
             "approvals": [
                 {
@@ -359,8 +378,34 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
                     "display_name_verified": "bool",
                     "fingerprint": "str",
                 }
-            ]
+            ],
+            "messages": [_HELD],
         },
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/approvals/messages/{hid}",
+        "_held_message",
+        "One held message with its content, for the human to decide on. A message "
+        "from a peer is `untrusted`.",
+        response={**_HELD, "untrusted": "bool", "to": Opt(["str"]), "body": "object"},
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/approvals/messages/{hid}/approve",
+        "_approve_message",
+        "Release a held message: to the adapter (inbound) or to the group (outbound).",
+        response={"hold_id": "str", "group_id": "str", "status": "str"},
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/approvals/messages/{hid}/reject",
+        "_reject_message",
+        "Drop a held message. The peer is not told; a rejected send raises `send_failed`.",
+        response={"hold_id": "str", "group_id": "str", "status": "str"},
+        human=True,
     ),
     RouteSpec(
         "POST",
@@ -386,6 +431,85 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "defaults to `true`.",
         request={"verified?": "bool"},
         response={"verified": "bool"},
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/members/{identity}/remove",
+        "_remove",
+        "Remove a member, every instance of it (an MLS commit; the group policy decides "
+        "whether this instance may). For a member the safety policy reported with "
+        "`repeated_violations`; the daemon never removes anyone on its own.",
+        response={"status": "str"},
+        human=True,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/groups/{gid}/safety",
+        "_safety",
+        "The group's safety policy: the effective `settings` (with per-sender "
+        "`senders` overrides) and the group's own `overrides` of the defaults in "
+        "`[policy]`.",
+        response=_SAFETY,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/safety",
+        "_set_safety",
+        "Change the group's safety policy. `set` maps setting names to values; "
+        "`null` clears the group's override. With `sender`, the changes apply to "
+        "that member only (limits only). See [safety.md](safety.md#settings).",
+        request={"set": "object", "sender?": "str"},
+        response=_SAFETY,
+        human=True,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/audit",
+        "_audit",
+        "The audit log, oldest first, at most 200 rows per call: who, when, kind, size "
+        "and the policy's decision for every message in and out. Never a body.",
+        query="`after`: only rows with a greater `seq` (default 0). `group`: only that group.",
+        response={
+            "audit": [
+                {
+                    "seq": "int",
+                    "group_id": "str",
+                    "at": "int",
+                    "direction": "str",
+                    "sender": "str",
+                    "msg_id": "str",
+                    "kind": "str",
+                    "size": "int",
+                    "decision": "str",
+                    "reason": "str",
+                }
+            ]
+        },
+        human=True,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/groups/{gid}/transcript",
+        "_transcript",
+        "The group's transcript, when its `transcript` setting is on: every message "
+        "delivered or sent, in full, at most 200 per call. Peer messages are untrusted.",
+        query="`after`: only entries with a greater `seq` (default 0).",
+        response={
+            "transcript": [
+                {
+                    "seq": "int",
+                    "group_id": "str",
+                    "at": "int",
+                    "direction": "str",
+                    "sender": "str",
+                    "msg_id": "str",
+                    "kind": "str",
+                    "inner": "object",
+                }
+            ],
+            "untrusted": "bool",
+        },
         human=True,
     ),
     RouteSpec(
@@ -493,6 +617,13 @@ def _int(body: dict[str, Any], key: str, default: int) -> int:
     return value
 
 
+def _query_int(p: dict[str, str], key: str) -> int:
+    raw = p.get(key, "0") or "0"
+    if not raw.isdigit():
+        raise ApiError(400, "bad_request", f"{key} must be a non-negative integer")
+    return int(raw)
+
+
 class ApiServer:
     """Serves the control API for one :class:`Daemon`."""
 
@@ -529,7 +660,47 @@ class ApiServer:
         return self.daemon.group_info(p["gid"])
 
     async def _list_approvals(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return {"approvals": self.daemon.approvals()}
+        await self.daemon.expire_held()
+        return {"approvals": self.daemon.approvals(), "messages": self.daemon.held_messages()}
+
+    async def _held_message(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        await self.daemon.expire_held()
+        return self.daemon.held_message(p["hid"])
+
+    async def _approve_message(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        await self.daemon.expire_held()
+        return self.daemon.approve_message(p["hid"])
+
+    async def _reject_message(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        await self.daemon.expire_held()
+        return await self.daemon.reject_message(p["hid"])
+
+    async def _remove(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        members = {m.identity for m in self.daemon.store.members(p["gid"])}
+        if p["identity"] not in members or p["identity"] == self.daemon.me:
+            raise ApiError(404, "not_found", "no such other member")
+        self.daemon.remove_member(p["gid"], p["identity"])
+        return {"status": "removing"}
+
+    async def _safety(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.safety_settings(p["gid"])
+
+    async def _set_safety(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        changes = b.get("set")
+        if not isinstance(changes, dict):
+            raise ApiError(400, "bad_request", "set must be an object")
+        sender = b.get("sender")
+        if sender is not None and not isinstance(sender, str):
+            raise ApiError(400, "bad_request", "sender must be a string")
+        return self.daemon.update_safety(p["gid"], changes, sender)
+
+    async def _audit(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        after = _query_int(p, "after")
+        return {"audit": self.daemon.store.audit(p.get("group") or None, after)}
+
+    async def _transcript(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        rows = self.daemon.transcript(p["gid"], _query_int(p, "after"))
+        return {"transcript": rows, "untrusted": True}
 
     async def _create_group(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
         return {"group_id": self.daemon.create_group(_str(b, "name"), _str(b, "purpose", ""))}
@@ -592,7 +763,7 @@ class ApiServer:
         # controls SPEC 7.3 reserves to humans.
         if kind in HUMAN_ONLY_KINDS and not human:
             raise ApiError(403, "human_only", f"{kind} needs the human token")
-        msg_id = self.daemon.send_message(
+        msg_id, status = self.daemon.queue_message(
             p["gid"],
             body,
             to=to,
@@ -601,7 +772,7 @@ class ApiServer:
             reply_to=reply_to,
             addressee=addressee,
         )
-        return {"msg_id": msg_id}
+        return {"msg_id": msg_id, "status": status}
 
     async def _leave(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return {"status": await self.daemon.leave(p["gid"])}

@@ -32,6 +32,11 @@ code = [
 docs = ["docs/adapters/webhook.md"]
 
 [[rule]]
+name = "safety-policy"
+code = ["daemon/src/agentconnect/policy.py", "daemon/src/agentconnect/limits.py"]
+docs = ["docs/safety.md"]
+
+[[rule]]
 name = "python-sdk"
 code = ["sdk/python/src/agentconnect_sdk/*.py"]
 docs = ["docs/sdk.md"]
