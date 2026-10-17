@@ -3,7 +3,8 @@
 //! Every JSON object this protocol signs or carries inside MLS extensions is
 //! encoded with JCS. Values here are restricted to what the protocol uses:
 //! `null`, booleans, integers, strings, arrays and objects. Floats are
-//! rejected, which sidesteps JCS's number serialisation rules.
+//! rejected, and so are integers outside the I-JSON range (|n| ≤ 2^53 − 1),
+//! which sidesteps JCS's number serialisation rules.
 
 use std::fmt::Write as _;
 
@@ -148,15 +149,26 @@ pub fn from_jcs<T: DeserializeOwned>(bytes: &[u8], what: &'static str) -> Result
     serde_json::from_value(value).map_err(|_| Error::Malformed(what))
 }
 
+/// The largest integer magnitude allowed in protocol JSON: 2^53 − 1, the
+/// I-JSON range (RFC 7493 §2.2), where every integer has the same exact
+/// form in JCS and in ECMAScript (SPEC §3.2).
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+const OUT_OF_RANGE: &str = "json integer outside the I-JSON range";
+
 fn write_value(value: &Value, out: &mut String) -> Result<()> {
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
+                if i.unsigned_abs() > MAX_SAFE_INTEGER {
+                    return Err(Error::Malformed(OUT_OF_RANGE));
+                }
                 out.push_str(&i.to_string());
-            } else if let Some(u) = n.as_u64() {
-                out.push_str(&u.to_string());
+            } else if n.as_u64().is_some() {
+                // Only values above i64::MAX get here, all beyond the cap.
+                return Err(Error::Malformed(OUT_OF_RANGE));
             } else {
                 return Err(Error::Malformed("json number (floats are not allowed)"));
             }
@@ -244,7 +256,35 @@ mod tests {
             jcs(&json!({"x": 1.5})),
             Err(Error::Malformed("json number (floats are not allowed)"))
         );
-        assert!(jcs(&json!(u64::MAX)).is_ok());
+    }
+
+    #[test]
+    fn jcs_caps_integers_at_the_i_json_range() {
+        let max = MAX_SAFE_INTEGER;
+        let min = -i64::try_from(max).unwrap();
+        assert_eq!(jcs(&json!(max)).unwrap(), max.to_string().into_bytes());
+        assert_eq!(jcs(&json!(min)).unwrap(), min.to_string().into_bytes());
+        for bad in [
+            json!(max + 1),
+            json!(min - 1),
+            json!(u64::MAX),
+            json!(i64::MIN),
+        ] {
+            assert_eq!(jcs(&bad), Err(Error::Malformed(OUT_OF_RANGE)), "{bad}");
+        }
+        let ok: u64 = from_jcs(max.to_string().as_bytes(), "x").unwrap();
+        assert_eq!(ok, max);
+        for bad in [
+            (max + 1).to_string(),
+            (min - 1).to_string(),
+            u64::MAX.to_string(),
+        ] {
+            assert_eq!(
+                from_jcs::<Value>(bad.as_bytes(), "x"),
+                Err(Error::Malformed("x")),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

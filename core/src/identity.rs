@@ -537,6 +537,32 @@ mod tests {
         );
     }
 
+    /// SPEC §3.2: integers are capped at the I-JSON range.
+    #[test]
+    fn cert_created_at_beyond_i_json_range_is_rejected() {
+        let (_, inst) = instance();
+        let good = String::from_utf8(inst.cert().to_json().unwrap()).unwrap();
+        let created = inst.cert().created_at.to_string();
+        let max = crate::encoding::MAX_SAFE_INTEGER;
+        let at = |n: u64| good.replace(&created, &n.to_string());
+        // At the cap it parses (the signature no longer matches, but the
+        // encoding is accepted).
+        assert_eq!(
+            InstanceCert::from_json(at(max).as_bytes())
+                .unwrap()
+                .created_at,
+            max
+        );
+        assert_eq!(
+            InstanceCert::from_json(at(max + 1).as_bytes()),
+            Err(Error::InvalidCert("encoding"))
+        );
+        let mut far = inst.cert().clone();
+        far.created_at = max + 1;
+        assert!(far.to_json().is_err());
+        assert!(far.signing_input().is_err());
+    }
+
     #[test]
     fn instance_secret_bytes_round_trip() {
         let (_, inst) = instance();

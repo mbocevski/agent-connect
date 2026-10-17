@@ -37,6 +37,10 @@ pub enum Error {
     /// An HPKE public key whose length isn't 1216 bytes (SPEC §3.1).
     #[error("HPKE public key has the wrong length")]
     HpkeKeyLength,
+    /// A KEM ciphertext (HPKE `kem_output`) whose length isn't 1120 bytes
+    /// (SPEC §3.1).
+    #[error("KEM ciphertext has the wrong length")]
+    KemOutputLength,
     /// A KeyPackage that fails validation (SPEC §6.2 step 3).
     #[error("invalid key package: {0}")]
     InvalidKeyPackage(&'static str),

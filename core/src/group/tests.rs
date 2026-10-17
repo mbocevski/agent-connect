@@ -776,3 +776,155 @@ fn commit_removing_the_owners_last_instance_is_rejected() {
     assert_eq!(gs[0].epoch(), epoch);
     assert!(gs[0].is_active());
 }
+
+/// A solo group "g"/"p" owned by A, an invite from A and E's verified
+/// KeyPackage for it.
+fn solo_and_joiner() -> (C, Group, C, Invite, KeyPackage) {
+    let clock = Arc::new(FakeClock::default());
+    let a = client(10, &clock);
+    let ga = a.create_group("g", "p").unwrap();
+    let e = client(93, &clock);
+    let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
+    let req = e.create_join_request(inv.secret(), "e").unwrap();
+    let kp = a.verify_join_request(&req, &inv).unwrap().key_package;
+    (a, ga, e, inv, kp)
+}
+
+/// The TLS-serialised Welcome of a raw commit built by `$build` (which
+/// must add someone). The sender's state is left untouched.
+macro_rules! raw_welcome {
+    ($g:expr, $c:expr, |$b:ident| $build:expr) => {
+        raw_welcome!($g, $c, |$b| $build, |l| l)
+    };
+    ($g:expr, $c:expr, |$b:ident| $build:expr, |$l:ident| $loaded:expr) => {{
+        let signer = $c.signer();
+        let $b = $g.mls.commit_builder();
+        let $l = $build.load_psks($c.provider.storage()).unwrap();
+        let bundle = $loaded
+            .build($c.provider.rand(), $c.provider.crypto(), &signer, |_| true)
+            .unwrap()
+            .stage_commit(&$c.provider)
+            .unwrap();
+        let welcome = wire(&bundle.to_welcome_msg().unwrap()).unwrap();
+        $g.mls.clear_pending_commit($c.provider.storage()).unwrap();
+        welcome
+    }};
+}
+
+fn join_raw(e: &C, inv: &Invite, welcome: &[u8]) -> Result<Group> {
+    let wrapped = inv.secret().wrap_welcome(e.rng(), welcome).unwrap();
+    let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
+    e.join_from_wrapped_welcome(inv.secret(), &meta, &wrapped)
+}
+
+/// SPEC §6.3: a `GroupInfo` extension other than `ratchet_tree` (here an
+/// unknown one, which OpenMLS itself accepts) makes the Welcome invalid.
+#[test]
+fn welcome_with_an_extra_group_info_extension_is_rejected() {
+    let (a, mut ga, e, inv, kp) = solo_and_joiner();
+    let welcome = raw_welcome!(ga, a, |b| b.propose_adds([kp]), |l| l
+        .create_group_info_with_extensions([Extension::Unknown(
+            0xF0B0,
+            UnknownExtension(Vec::new()),
+        )])
+        .unwrap());
+    assert_eq!(
+        join_raw(&e, &inv, &welcome).unwrap_err(),
+        Error::InvalidGroupContext("unexpected GroupInfo extension")
+    );
+}
+
+/// SPEC §3.1: E's `kem_output` in the Welcome is cut to 1119 bytes (and,
+/// separately, grown to 1121). E refuses it before OpenMLS decapsulates.
+#[test]
+fn welcome_with_a_wrong_length_kem_output_is_rejected() {
+    use openmls::prelude::tls_codec::VLBytes;
+    let (a, mut ga, e, inv, kp) = solo_and_joiner();
+    let welcome = raw_welcome!(ga, a, |b| b.propose_adds([kp]));
+    // MlsMessage = version(2) ‖ wire_format(2) ‖ Welcome, and
+    // Welcome = cipher_suite(2) ‖ secrets<V> ‖ encrypted_group_info<V>.
+    let mut rest = &welcome[6..];
+    let secrets = VLBytes::tls_deserialize(&mut rest).unwrap();
+    let group_info = rest.to_vec();
+    let mut entry = secrets.as_slice();
+    let new_member = VLBytes::tls_deserialize(&mut entry).unwrap();
+    let kem_output = VLBytes::tls_deserialize(&mut entry).unwrap();
+    assert_eq!(kem_output.as_slice().len(), crate::mls::KEM_CIPHERTEXT_LEN);
+    let ciphertext = entry.to_vec();
+    let tampered = |len: usize| {
+        let mut kem = kem_output.as_slice().to_vec();
+        kem.resize(len, kem[0]);
+        let entry = [vl(new_member.as_slice()), vl(&kem), ciphertext.clone()].concat();
+        [welcome[..6].to_vec(), vl(&entry), group_info.clone()].concat()
+    };
+    for len in [1119, 1121] {
+        assert_eq!(
+            join_raw(&e, &inv, &tampered(len)).unwrap_err(),
+            Error::KemOutputLength,
+            "{len}"
+        );
+    }
+}
+
+/// SPEC §6.3: the policy in a Welcome must be well-formed and in range.
+/// A commits, with raw calls, a policy change together with E's Add.
+#[test]
+fn welcome_with_an_out_of_range_policy_is_rejected() {
+    for (edit, err) in [
+        (
+            r#""max_agent_turns":101"#,
+            Error::InvalidGroupContext("policy max_agent_turns"),
+        ),
+        (
+            r#""max_members":0"#,
+            Error::InvalidGroupContext("policy max_members"),
+        ),
+    ] {
+        let (a, mut ga, e, inv, kp) = solo_and_joiner();
+        let ctx = check_group_context(ga.mls.extensions()).unwrap();
+        let key = edit.split(':').next().unwrap();
+        let json = String::from_utf8(ctx.policy.to_json().unwrap()).unwrap();
+        let start = json.find(key).unwrap();
+        let end = start + json[start..].find([',', '}']).unwrap();
+        let policy = format!("{}{edit}{}", &json[..start], &json[end..]);
+        let exts = group_context_extensions(&ctx.meta_bytes, policy.as_bytes()).unwrap();
+        let welcome = raw_welcome!(ga, a, |b| b
+            .propose_adds([kp])
+            .propose_group_context_extensions(exts)
+            .unwrap());
+        assert_eq!(join_raw(&e, &inv, &welcome).unwrap_err(), err, "{edit}");
+    }
+}
+
+/// SPEC §6.3: the policy must name a valid owner, but the owner need not be
+/// a current member.
+#[test]
+fn welcome_policy_must_list_an_owner_who_need_not_be_a_member() {
+    let absent = Identity::generate(&Rng::for_test("seed-absent-owner"))
+        .unwrap()
+        .id();
+    for (owner, expected) in [
+        (
+            "ac:v0:nope".to_owned(),
+            Some(Error::InvalidGroupContext("policy owner")),
+        ),
+        (absent.clone(), None),
+    ] {
+        let (a, mut ga, e, inv, kp) = solo_and_joiner();
+        let ctx = check_group_context(ga.mls.extensions()).unwrap();
+        let policy = GroupPolicy {
+            owner: owner.clone(),
+            ..ctx.policy
+        };
+        let exts = gce(&ctx.meta_bytes, &policy);
+        let welcome = raw_welcome!(ga, a, |b| b
+            .propose_adds([kp])
+            .propose_group_context_extensions(exts)
+            .unwrap());
+        match (join_raw(&e, &inv, &welcome), expected) {
+            (Err(got), Some(err)) => assert_eq!(got, err),
+            (Ok(g), None) => assert_eq!(g.policy().unwrap().owner, absent),
+            (got, want) => panic!("{owner}: got {got:?}, want {want:?}"),
+        }
+    }
+}

@@ -78,6 +78,22 @@ what it does not protect against.
     the commit is staged and before it is merged.
   - Every leaf of a received tree is additionally validated as a whole
     (§3.3) before the group is used.
+- **KEM ciphertext lengths:** every HPKE `kem_output` an instance receives
+  and processes MUST be exactly the suite's KEM ciphertext length
+  (1120 bytes: 1088 for ML-KEM-768 plus 32 for X25519). Anything else MUST
+  be rejected. When the check happens:
+  - The `EncryptedGroupSecrets` of a Welcome: on the TLS bytes, *before*
+    the Welcome is passed to the MLS library. Every entry is checked, not
+    only the joiner's own.
+  - The `encrypted_path_secret` ciphertexts of a commit's UpdatePath exist
+    only inside the encrypted `PrivateMessage`. The MLS library decrypts the
+    commit and decapsulates the joiner's path secret in one step (in OpenMLS,
+    `MlsGroup::process_message`), so the check there is the library's: the
+    v0 provider's decapsulation rejects a `kem_output` of any other length
+    with an error. Implementations whose library can't guarantee that MUST
+    check the length before decapsulating.
+  - `ExternalInit` proposals carry a `kem_output` too, but external
+    commits are never accepted in v0 (§9.2).
 - **Credential:** `BasicCredential` with `identity` = the UTF-8 bytes of the
   identity identifier (`ac:v0:…`).
 - **Leaf signature key:** the instance key `SK.pub`. RFC 9420 requires leaf
@@ -116,7 +132,10 @@ All three values are JSON objects in canonical JCS form (RFC 8785: no
 insignificant whitespace, keys sorted, no duplicate keys). Receivers MUST
 reject a value that is not byte-for-byte canonical, that has a field this
 section doesn't define, or whose `v` they don't support. Integers are
-non-negative and floats are not allowed.
+non-negative and floats are not allowed. Every integer MUST be in the I-JSON
+range (RFC 7493 §2.2), at most 2^53 − 1, where JCS and ECMAScript agree on
+its exact form. Encoders MUST NOT write, and receivers MUST reject, an
+integer outside it.
 
 ### 3.3 Instance certificate
 
@@ -346,6 +365,9 @@ a leaf nobody controls. A KeyPackage is therefore single-use (RFC 9420
   KeyPackage was already used.
 - Every receiver MUST reject (not merge) a commit that Adds a KeyPackage it
   has already seen used, and raise `unauthorized_commit` (§9.2).
+- There is no cap on a KeyPackage's lifetime beyond this reuse tracking.
+  The MLS `lifetime` field is checked by the MLS library as usual (RFC 9420
+  §10.1), and an unused KeyPackage stays acceptable until it expires there.
 
 ### 6.3 Processing the Welcome (joiner)
 
@@ -355,10 +377,17 @@ B unwraps the Welcome with `welcome_key` (§6.4). B MUST:
   knows the invite secret.
 - Abort if the Welcome can't be processed, uses another ciphersuite,
   carries PSKs, or lacks the `ratchet_tree` extension.
+- Check the KEM ciphertext lengths of the Welcome before processing it
+  (§3.1).
+- Abort if the GroupInfo carries any extension other than `ratchet_tree`.
 - Check the HPKE key lengths of the tree before staging it (§3.1).
 - Verify that the GroupContext extensions are exactly the §9.2 set and
   well-formed, and that `ac_group_meta.name` and `.purpose` match the
   `InviteMeta` it showed its human.
+- Sanity-check the `ac_group_policy`: it MUST be well-formed (§3.2),
+  `owner`, every `admins` entry and `floor_moderator` (if set) MUST be
+  valid identity identifiers, and its limits MUST be in the ranges of §9.1.
+  The owner is **not** required to be a current member.
 - Verify the instance certificates of every leaf, and that the group does
   not exceed its `max_members`.
 - Delete `welcome_key` and the invite secret after a successful join.
@@ -694,6 +723,11 @@ GroupPolicy = {
 }
 ```
 
+Limits: `max_members` is 1 to 50 (the relay's group size, §8.3), and
+`loop_guard.max_agent_turns` is 0 to 100. `admins` has no duplicates.
+Receivers MUST reject a policy outside these limits, whether it arrives in a
+Welcome (§6.3) or a commit (§9.2).
+
 Defaults for a new group: `owner` = the creator, `admins: []`,
 `invite: "owner"`, `remove: "owner"`, `max_members: 50`,
 `require_verified: false`, `floor: "free"`, `floor_moderator: null`,
@@ -979,11 +1013,16 @@ A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice
    cadence in §3.1.
 3. Multi-relay federation. Out of scope for v0.
 4. Interop with AGNTCY SLIM (also MLS-based), and an A2A extension (§13).
-5. JCS integers above 2^53 − 1 are written exactly, where RFC 8785 uses the
-   ECMAScript form. Should v0 cap every integer at 2^53 − 1 (I-JSON)?
-6. Constraints on GroupInfo extensions other than `ratchet_tree`, on the
-   Welcome's policy (e.g. the owner being a member), and on lengths of KEM
-   outputs in UpdatePaths and Welcomes, which today rely on the MLS library.
+
+Decided by the maintainer (2026-10-17), now normative:
+
+- The owner transfers ownership before it leaves (§9.2).
+- Integers in protocol JSON are capped at the I-JSON range (§3.2).
+- A Welcome's GroupInfo carries only `ratchet_tree`, and its policy is
+  sanity-checked without requiring the owner to be a member (§6.3).
+- Every KEM ciphertext received is length-checked (§3.1).
+- Removing only some of an identity's instances is allowed (§9.2).
+- KeyPackages have no lifetime cap beyond reuse tracking (§6.2).
 
 Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 
@@ -997,7 +1036,7 @@ Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 ## 16. References
 
 - RFC 9420, *The Messaging Layer Security (MLS) Protocol*
-- RFC 5869 (HKDF), RFC 8785 (JCS), RFC 2119 / RFC 8174
+- RFC 5869 (HKDF), RFC 8785 (JCS), RFC 7493 (I-JSON), RFC 2119 / RFC 8174
 - draft-ietf-mls-pq-ciphersuites (MLS post-quantum ciphersuites) and draft-ietf-hpke-pq (hybrid KEMs for HPKE)
 - A2A Protocol Specification v1.0, https://a2a-protocol.org/v1.0.0/specification/
 - draft-chapman-a2a-mls-03 (MLS carried inside A2A)

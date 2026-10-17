@@ -4,6 +4,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use openmls::messages::group_info::GroupInfo;
 use openmls::prelude::tls_codec::{Deserialize as _, VLBytes};
 use openmls::prelude::{
     BasicCredential, Capabilities, Ciphersuite, CredentialType, Extension, ExtensionType,
@@ -26,6 +27,9 @@ pub(crate) const CS_CODEPOINT: u16 = 0x004F;
 
 /// HPKE public key length of the v0 suite: ML-KEM-768 (1184) + X25519 (32).
 pub const HPKE_PUBLIC_KEY_LEN: usize = 1216;
+/// KEM ciphertext (`kem_output`) length of the v0 suite: ML-KEM-768 (1088)
+/// + X25519 (32).
+pub const KEM_CIPHERTEXT_LEN: usize = 1120;
 /// Ed25519 public key length.
 pub(crate) const SIGNATURE_KEY_LEN: usize = 32;
 
@@ -182,6 +186,36 @@ pub(crate) fn check_tree_keys(
         if first_vl_len(&parent)? != HPKE_PUBLIC_KEY_LEN {
             return Err(Error::HpkeKeyLength);
         }
+    }
+    Ok(())
+}
+
+/// Checks the `kem_output` of every `EncryptedGroupSecrets` of a Welcome,
+/// given in its TLS encoding, before OpenMLS decapsulates any of them
+/// (SPEC §3.1). Entries for other joiners are checked too: an honest
+/// inviter writes them all at the suite's length.
+pub(crate) fn check_welcome_kem_outputs(secrets: impl Iterator<Item = Vec<u8>>) -> Result<()> {
+    for entry in secrets {
+        // EncryptedGroupSecrets = new_member<V> ‖ kem_output<V> ‖ ciphertext<V>
+        let mut rest = entry.as_slice();
+        VLBytes::tls_deserialize(&mut rest).map_err(|_| Error::Malformed("group secrets"))?;
+        let kem_output =
+            VLBytes::tls_deserialize(&mut rest).map_err(|_| Error::Malformed("group secrets"))?;
+        if kem_output.as_slice().len() != KEM_CIPHERTEXT_LEN {
+            return Err(Error::KemOutputLength);
+        }
+    }
+    Ok(())
+}
+
+/// Checks that a Welcome's `GroupInfo` carries no extension but
+/// `ratchet_tree` (SPEC §6.3).
+pub(crate) fn check_group_info_extensions(exts: &Extensions<GroupInfo>) -> Result<()> {
+    if exts
+        .iter()
+        .any(|e| e.extension_type() != ExtensionType::RatchetTree)
+    {
+        return Err(Error::InvalidGroupContext("unexpected GroupInfo extension"));
     }
     Ok(())
 }
@@ -379,6 +413,69 @@ mod tests {
             check_tree_keys(std::iter::empty(), [vec![0xff]].into_iter()),
             Err(Error::Malformed("tls vector"))
         );
+    }
+
+    #[test]
+    fn welcome_kem_output_checks() {
+        let rng = crate::rng::Rng::for_test("kem-output-checks");
+        let vl = |n: usize| {
+            let mut b = vec![0u8; n];
+            rng.fill(&mut b).unwrap();
+            VLBytes::new(b).tls_serialize_detached().unwrap()
+        };
+        let entry = |kem: usize| [vl(32), vl(kem), vl(64)].concat();
+        check_welcome_kem_outputs([entry(1120), entry(1120)].into_iter()).unwrap();
+        check_welcome_kem_outputs(std::iter::empty()).unwrap();
+        for len in [0, 32, 1088, 1119, 1121] {
+            assert_eq!(
+                check_welcome_kem_outputs([entry(1120), entry(len)].into_iter()),
+                Err(Error::KemOutputLength),
+                "{len}"
+            );
+        }
+        for bad in [vec![0xff], vl(32)] {
+            assert_eq!(
+                check_welcome_kem_outputs([bad].into_iter()),
+                Err(Error::Malformed("group secrets"))
+            );
+        }
+    }
+
+    /// KEM ciphertexts inside an encrypted commit (`UpdatePath`) only exist
+    /// after OpenMLS decrypts the commit, inside `process_message`, so the
+    /// core can't check them first (SPEC §3.1). This pins what that path
+    /// relies on: the provider's decapsulation rejects a `kem_output` of any
+    /// other length with an error, not a panic.
+    #[test]
+    fn provider_rejects_wrong_length_kem_outputs_without_panicking() {
+        use openmls_traits::OpenMlsProvider as _;
+        let rng = crate::rng::Rng::for_test("provider-kem-output");
+        let provider = crate::provider::Provider::new(
+            crate::provider::MemoryStore::new(),
+            crate::rng::Rng::for_test("provider-kem-output-provider"),
+        )
+        .unwrap();
+        let crypto = provider.crypto();
+        let config = || CS.hpke_config();
+        let keys = crypto
+            .derive_hpke_keypair(config(), &rng.array::<32>().unwrap())
+            .unwrap();
+        assert_eq!(keys.public.len(), HPKE_PUBLIC_KEY_LEN);
+        let ct = crypto
+            .hpke_seal(config(), &keys.public, b"info", b"aad", b"msg")
+            .unwrap();
+        assert_eq!(ct.kem_output.as_slice().len(), KEM_CIPHERTEXT_LEN);
+        let open = |ct: &openmls_traits::types::HpkeCiphertext| {
+            guard(|| Ok(crypto.hpke_open(config(), ct, &keys.private, b"info", b"aad")))
+        };
+        assert_eq!(open(&ct).unwrap().unwrap(), b"msg");
+        for len in [0, 32, 1088, 1119, 1121] {
+            let mut bad = ct.clone();
+            let mut kem = ct.kem_output.as_slice().to_vec();
+            kem.resize(len, 1);
+            bad.kem_output = kem.into();
+            assert!(open(&bad).unwrap().is_err(), "{len}");
+        }
     }
 
     #[test]

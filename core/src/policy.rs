@@ -10,6 +10,8 @@ use crate::identity::parse_identity;
 
 /// Maximum group size (relay default, SPEC §8.3).
 pub const MAX_GROUP_SIZE: u32 = 50;
+/// Maximum `loop_guard.max_agent_turns` (SPEC §9.1).
+pub const MAX_AGENT_TURNS: u32 = 100;
 /// Maximum `GroupMeta.name` length in characters (SPEC §3.4).
 pub const MAX_NAME_CHARS: usize = 80;
 /// Maximum `GroupMeta.purpose` length in characters (SPEC §3.4).
@@ -195,6 +197,9 @@ impl GroupPolicy {
         }
         if self.max_members == 0 || self.max_members > MAX_GROUP_SIZE {
             return Err(Error::InvalidGroupContext("policy max_members"));
+        }
+        if self.loop_guard.max_agent_turns > MAX_AGENT_TURNS {
+            return Err(Error::InvalidGroupContext("policy max_agent_turns"));
         }
         Ok(())
     }
@@ -416,6 +421,19 @@ mod tests {
         let mut bad = p.clone();
         bad.max_members = 51;
         assert!(bad.validate().is_err());
+        let mut bad = p.clone();
+        bad.max_members = 0;
+        assert!(bad.validate().is_err());
+        let mut edge = p.clone();
+        edge.loop_guard.max_agent_turns = MAX_AGENT_TURNS;
+        edge.validate().unwrap();
+        edge.loop_guard.max_agent_turns = 0;
+        edge.validate().unwrap();
+        edge.loop_guard.max_agent_turns = MAX_AGENT_TURNS + 1;
+        assert_eq!(
+            edge.validate(),
+            Err(Error::InvalidGroupContext("policy max_agent_turns"))
+        );
         let s = String::from_utf8(json)
             .unwrap()
             .replace("\"v\":0", "\"v\":0,\"z\":1");
@@ -456,6 +474,43 @@ mod tests {
             ..meta
         };
         assert!(by.validate().is_err());
+    }
+
+    /// SPEC §3.2: integers are capped at the I-JSON range.
+    #[test]
+    fn integers_beyond_i_json_range_are_rejected() {
+        let id = ids(1);
+        let max = crate::encoding::MAX_SAFE_INTEGER;
+        let meta = GroupMeta {
+            v: 0,
+            name: "n".into(),
+            purpose: "p".into(),
+            created_at: max,
+            created_by: id[0].clone(),
+        };
+        let json = String::from_utf8(meta.to_json().unwrap()).unwrap();
+        assert_eq!(GroupMeta::from_json(json.as_bytes()).unwrap(), meta);
+        let over = json.replace(&max.to_string(), &(max + 1).to_string());
+        assert_eq!(
+            GroupMeta::from_json(over.as_bytes()),
+            Err(Error::Malformed("group meta"))
+        );
+        let far = GroupMeta {
+            created_at: max + 1,
+            ..meta
+        };
+        assert!(far.to_json().is_err());
+
+        let policy = String::from_utf8(GroupPolicy::default_for(&id[0]).to_json().unwrap())
+            .unwrap()
+            .replace(
+                r#""max_agent_turns":20"#,
+                &format!(r#""max_agent_turns":{}"#, max + 1),
+            );
+        assert_eq!(
+            GroupPolicy::from_json(policy.as_bytes()),
+            Err(Error::Malformed("group policy"))
+        );
     }
 
     #[test]

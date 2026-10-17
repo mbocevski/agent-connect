@@ -88,6 +88,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   Python `VerifiedJoinRequest` is no longer used up by a failed
   `add_member`, so an inviter can retry after `CommitPending` or an
   `epoch_conflict`.
+- Protocol: `SPEC.md` states that KeyPackages have no lifetime cap beyond
+  reuse tracking (§6.2) and records the maintainer's decisions on the
+  former open questions (§15).
 - Protocol and core: the owner must transfer ownership before it leaves
   (SPEC §9.2). `propose_leave` refuses the owner's last instance with
   `NotPermitted`, and receivers reject that leave proposal and any commit
@@ -101,6 +104,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core: integers in policy, metadata and instance-certificate JSON are
+  capped at the I-JSON range (|n| ≤ 2^53 − 1, SPEC §3.2); anything outside
+  it is neither written nor accepted.
+- Core: a joiner rejects a Welcome whose GroupInfo carries any extension
+  other than `ratchet_tree`, and checks that every KEM ciphertext in the
+  Welcome is 1120 bytes before OpenMLS decapsulates it (new
+  `Error::KemOutputLength`). UpdatePath ciphertexts are decapsulated
+  inside OpenMLS, whose provider rejects other lengths; a test pins that
+  (SPEC §3.1, §6.3).
+- Core: the policy in a Welcome or a commit must be in range:
+  `loop_guard.max_agent_turns` is now capped at 100, next to the existing
+  `max_members` (1 to 50) and identity checks. The owner need not be a
+  current member (SPEC §6.3, §9.1).
 - Core: an own commit is confirmed only by the relay's `accepted` for its
   `msg_id` (`CommitOut.msg_id`, now required by `confirm_pending_commit`) or
   by the fan-out delivering the exact bytes sent. Previously any commit

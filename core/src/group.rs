@@ -24,8 +24,9 @@ use crate::invite::{Invite, InviteMeta, InviteSecret};
 use crate::join::{JoinRequest, check_display_name, join_request_mac};
 use crate::mls::{
     CS, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities, check_group_context,
-    check_tree_keys, group_context_extensions, guard, join_config, join_config_with_padding,
-    leaf_extensions, leaf_mailbox, validate_key_package, validate_leaf,
+    check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
+    group_context_extensions, guard, join_config, join_config_with_padding, leaf_extensions,
+    leaf_mailbox, validate_key_package, validate_leaf,
 };
 use crate::padding::bucket_for;
 use crate::policy::{
@@ -397,7 +398,10 @@ impl<S: Store> Client<S> {
     }
 
     /// Joiner side, SPEC §6.3: unwrap with `welcome_key`, check the
-    /// ciphersuite and every HPKE key before MLS processes the tree, check
+    /// ciphersuite and the KEM ciphertext lengths before OpenMLS touches the
+    /// Welcome, allow no `GroupInfo` extension but `ratchet_tree`, check
+    /// every HPKE key before MLS processes the tree, check that the policy
+    /// is well-formed and in range, check
     /// that `ac_group_meta` matches the `InviteMeta` shown to the human, and
     /// verify every leaf's instance certificate. On any failure after MLS
     /// has started, the KeyPackage is spent and no group is kept.
@@ -408,8 +412,9 @@ impl<S: Store> Client<S> {
     /// # Errors
     ///
     /// [`Error::WelcomeAuth`], [`Error::WrongCiphersuite`],
-    /// [`Error::HpkeKeyLength`], [`Error::MetaMismatch`], certificate errors,
-    /// or an MLS error.
+    /// [`Error::KemOutputLength`], [`Error::HpkeKeyLength`],
+    /// [`Error::InvalidGroupContext`], [`Error::MetaMismatch`], certificate
+    /// errors, or an MLS error.
     pub fn join_from_wrapped_welcome(
         &self,
         invite: &InviteSecret,
@@ -428,6 +433,14 @@ impl<S: Store> Client<S> {
         if welcome.ciphersuite() != CS {
             return Err(Error::WrongCiphersuite);
         }
+        // The only KEM ciphertexts outside the encryption: check them before
+        // OpenMLS decapsulates ours (SPEC §3.1).
+        check_welcome_kem_outputs(
+            welcome
+                .secrets()
+                .iter()
+                .filter_map(|s| s.tls_serialize_detached().ok()),
+        )?;
         guard(|| {
             let processed =
                 ProcessedWelcome::new_from_welcome(&self.provider, &join_config(), welcome)
@@ -435,9 +448,9 @@ impl<S: Store> Client<S> {
             if !processed.psks().is_empty() {
                 return Err(Error::InvalidGroupContext("PSKs are not used in v0"));
             }
-            let tree = processed
-                .unverified_group_info()
-                .extensions()
+            let group_info_exts = processed.unverified_group_info().extensions();
+            check_group_info_extensions(group_info_exts)?;
+            let tree = group_info_exts
                 .ratchet_tree()
                 .ok_or(Error::InvalidGroupContext("missing ratchet tree"))?
                 .ratchet_tree()
@@ -1267,6 +1280,10 @@ impl Group {
                 return Ok(Event::OwnEcho);
             }
         }
+        // A commit's UpdatePath KEM ciphertexts are only readable once
+        // OpenMLS has decrypted the commit, and it decapsulates ours in the
+        // same call; the provider rejects any `kem_output` that isn't
+        // KEM_CIPHERTEXT_LEN bytes (SPEC §3.1).
         let processed = guard(|| {
             self.mls
                 .process_message(&client.provider, msg)
