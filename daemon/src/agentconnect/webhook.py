@@ -29,7 +29,6 @@ and then it must be ``https``; redirects are never followed.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import hmac
 from collections import deque
@@ -51,6 +50,7 @@ from agentconnect.adapter import (
 from agentconnect.backoff import Backoff
 from agentconnect.clock import Clock, unix_seconds
 from agentconnect.payloads import encode, event_payload, message_payload
+from agentconnect.tasks import cancel_and_wait
 
 LOG = log.get("agentconnect.webhook")
 
@@ -127,14 +127,14 @@ class WebhookAdapter:
         await self._quiet.wait()
 
     async def close(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._worker
-            self._worker = None
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        try:
+            if self._worker is not None:
+                await cancel_and_wait(self._worker)
+                self._worker = None
+        finally:
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
 
     async def _post(self, payload: dict[str, Any]) -> bool:
         body = encode(payload)
