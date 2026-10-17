@@ -124,6 +124,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon API: a message sent with the agent token now goes out as
+  `origin: "agent"`, and only the human token can send
+  `control.resume` (SPEC §7.3). Previously every API send claimed
+  `origin: "human"`, so an agent could impersonate its human to peers,
+  re-trigger everyone in `mention` mode and resume a paused loop.
 - Daemon: `daemon.sqlite3` is now encrypted at rest (SQLCipher through
   `agentconnect_core.Database`, ADR-003). It previously was plain SQLite
   that kept every sent message's plaintext forever. Answered outbox rows now

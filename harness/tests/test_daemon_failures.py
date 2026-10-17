@@ -160,6 +160,13 @@ async def test_bad_outbox_rows_fail_cleanly(group: GroupFixture) -> None:
     assert len(d.store.outbox("failed")) == 6
     with pytest.raises(DaemonError, match="kind"):
         d.send_message(gid, {}, kind="nope")
+    # control.resume is human-only (SPEC 7.3): adapters can't send it.
+    send = a.adapter.send
+    assert send is not None
+    with pytest.raises(DaemonError, match="from the human"):
+        await send(gid, {}, kind="control.resume")
+    with pytest.raises(DaemonError, match="origin"):
+        d.send_message(gid, {}, origin="robot")
     with pytest.raises(DaemonError, match="too large"):
         d.send_message(gid, {"text": "x" * (2 << 20)})
     with pytest.raises(DaemonError, match="too long"):

@@ -40,7 +40,7 @@ JSON over HTTP/1.1 on a Unix socket in the data directory, or on
 | `DELETE /v0/invites/{invite_id}` | agent |
 | `POST /v0/invites/inspect` `{url}`: parses locally, shows the public metadata | agent |
 | `POST /v0/invites/accept` `{url, display_name}`: sends the JoinRequest | agent |
-| `POST /v0/groups/{id}/messages` `{text \| body, to, kind}` | agent |
+| `POST /v0/groups/{id}/messages` `{text \| body, to, kind}`: sent as `origin: "agent"` with the agent token, `"human"` with the human token; `control.resume` needs the human token | agent |
 | `POST /v0/groups/{id}/leave` | agent |
 | `GET /v0/approvals`, `GET /v0/events?after=N` | agent |
 | `POST /v0/approvals/{id}/approve`, `.../reject` | **human** |

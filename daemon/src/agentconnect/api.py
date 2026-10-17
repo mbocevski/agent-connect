@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from agentconnect import log
-from agentconnect.daemon import Daemon, DaemonError
+from agentconnect.daemon import HUMAN_ONLY_KINDS, Daemon, DaemonError
 from agentconnect.keystore import write_private
 from agentconnect.relay import RelayError
 
@@ -43,6 +43,7 @@ MAX_BODY = 1 << 20
 MAX_HEADER = 16 << 10
 API_TOKEN_FILE = "api-token"  # noqa: S105 - a file name
 HUMAN_TOKEN_FILE = "human-token"  # noqa: S105 - a file name
+SCOPE = "_scope"  # handler parameter carrying the request's token scope
 
 STATUS_TEXT = {
     200: "OK",
@@ -179,8 +180,15 @@ class ApiServer:
         to = b.get("to", ["*"])
         if not isinstance(to, list) or not all(isinstance(x, str) for x in to):
             raise ApiError(400, "bad_request", "to must be a list of strings")
+        kind = _str(b, "kind", "a2a.message")
+        # SPEC 7.2/10.3: only the human's own requests are human-originated.
+        # The agent token always sends as the agent, and can't send the
+        # controls SPEC 7.3 reserves to humans.
+        human = p.get(SCOPE) == "human"
+        if kind in HUMAN_ONLY_KINDS and not human:
+            raise ApiError(403, "human_only", f"{kind} needs the human token")
         msg_id = self.daemon.send_message(
-            p["gid"], body, to=to, kind=_str(b, "kind", "a2a.message"), origin="human"
+            p["gid"], body, to=to, kind=kind, origin="human" if human else "agent"
         )
         return {"msg_id": msg_id}
 
@@ -207,7 +215,8 @@ class ApiServer:
 
     # -- HTTP --------------------------------------------------------------
 
-    def _authorize(self, headers: dict[str, str], human: bool) -> None:
+    def _authorize(self, headers: dict[str, str], human: bool) -> str:
+        """Check the bearer token; returns the scope (``agent`` or ``human``)."""
         auth = headers.get("authorization", "")
         scheme, _, token = auth.partition(" ")
         if scheme.lower() != "bearer" or not token:
@@ -218,6 +227,7 @@ class ApiServer:
             raise ApiError(401, "auth_failed", "invalid token")
         if human and not is_human:
             raise ApiError(403, "human_only", "this operation needs the human token")
+        return "human" if is_human else "agent"
 
     async def handle(
         self, method: str, target: str, headers: dict[str, str], body: bytes
@@ -234,14 +244,14 @@ class ApiServer:
             allowed = True
             if route.method != method:
                 continue
-            self._authorize(headers, route.human)
+            scope = self._authorize(headers, route.human)
             try:
                 data = json.loads(body) if body else {}
             except ValueError:
                 raise ApiError(400, "bad_request", "body is not JSON") from None
             if not isinstance(data, dict):
                 raise ApiError(400, "bad_request", "body must be a JSON object")
-            return 200, await route.handler({**params, **m.groupdict()}, data)
+            return 200, await route.handler({**params, **m.groupdict(), SCOPE: scope}, data)
         if allowed:
             raise ApiError(405, "method_not_allowed", "method not allowed")
         raise ApiError(404, "not_found", "no such endpoint")

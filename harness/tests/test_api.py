@@ -113,7 +113,33 @@ async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
     assert status == 200
     assert sent["msg_id"]
     assert await bob.node.wait_texts(gid, 1) == ["hello"]
-    assert bob.node.adapter.deliveries[0].origin == "human"
+    # The agent token sends as the agent (SPEC 7.2, 10.3)...
+    assert bob.node.adapter.deliveries[0].origin == "agent"
+    # ...even if the query string claims otherwise...
+    status, _ = await alice.call("POST", f"/v0/groups/{gid}/messages?_scope=human", {"text": "x"})
+    # ...and can't send the human-only control.resume (SPEC 7.3).
+    status, err = await alice.call(
+        "POST", f"/v0/groups/{gid}/messages", {"kind": "control.resume", "body": {}}
+    )
+    assert (status, err["code"]) == (403, "human_only")
+    status, _ = await alice.call(
+        "POST",
+        f"/v0/groups/{gid}/messages",
+        {"kind": "control.resume", "body": {}},
+        scope="human",
+    )
+    assert status == 200
+    await bob.node.wait_texts(gid, 2)
+    await bob.node.adapter.wait_for(
+        lambda: any(d.kind == "control.resume" for d in bob.node.adapter.deliveries)
+    )
+    resume = next(d for d in bob.node.adapter.deliveries if d.kind == "control.resume")
+    assert (resume.origin, resume.hop) == ("human", 0)
+    assert [d.origin for d in bob.node.adapter.deliveries if d.kind == "a2a.message"] == [
+        "agent",
+        "agent",
+    ]
+    bob.node.adapter.deliveries.clear()
     status, sent = await bob.call(
         "POST", f"/v0/groups/{gid}/messages", {"body": {"data": 1}, "to": [alice.node.me]}
     )

@@ -61,6 +61,8 @@ UPDATE_AFTER_MESSAGES = 1000
 APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
+# SPEC 7.3: controls only a human-originated message may carry.
+HUMAN_ONLY_KINDS = frozenset({"control.resume"})
 INVITE_WARNING = (
     "This invite was already used or revoked. If you didn't expect this, "
     "the link may have been intercepted. Tell the sender."
@@ -1282,6 +1284,10 @@ class Daemon:
         group = self._group_or_raise(group_id)
         if not kind.startswith(("a2a.", "control.")):
             raise DaemonError("bad_request", "unknown message kind")
+        if origin not in ("agent", "human"):
+            raise DaemonError("bad_request", "origin must be agent or human")
+        if kind in HUMAN_ONLY_KINDS and origin != "human":
+            raise DaemonError("forbidden", f"{kind} must come from the human")
         inner = self.inner(kind, body, to or ["*"], origin, hop)
         view = self._view(group_id)
         if view is not None and self.policy.outbound(view, inner) is PolicyDecision.DROP:
