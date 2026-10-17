@@ -14,7 +14,8 @@
 //! - [`policy`]: `ac_group_meta`, `ac_group_policy` (§3.4, §9.1)
 //! - [`sas`]: the short authentication string (§11)
 //! - [`padding`]: application padding buckets (§7.1)
-//! - [`provider`]: storage backends ([`MemoryStore`], [`SqliteStore`])
+//! - [`provider`]: storage backends ([`MemoryStore`], the SQLCipher-encrypted
+//!   [`SqliteStore`] and its [`DbKey`])
 #![warn(clippy::pedantic, missing_docs)]
 
 pub mod clock;
@@ -44,7 +45,7 @@ pub use invite::{Invite, InviteLink, InviteMeta, InviteSecret};
 pub use join::JoinRequest;
 pub use mls::{EXT_GROUP_META, EXT_GROUP_POLICY, EXT_INSTANCE_CERT, HPKE_PUBLIC_KEY_LEN};
 pub use policy::{GroupMeta, GroupPolicy};
-pub use provider::{MemoryStore, SqliteStore, Store};
+pub use provider::{DbKey, MemoryStore, SqliteStore, Store};
 pub use rng::Rng;
 pub use sas::Sas;
 

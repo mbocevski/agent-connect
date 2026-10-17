@@ -915,10 +915,22 @@ until its human has verified the current epoch (§11).
 | Removed member | Holds old keys | MLS forward secrecy across epochs | Past epochs it was part of |
 | Quantum adversary recording traffic | Future decryption | Hybrid ML-KEM-768 + X25519 KEM in every path secret; Update cadence | Rests on ML-KEM-768 (and X25519 until a quantum computer exists) |
 | **Model provider of any member's agent** | Sees what that agent processes | — (inherent) | **Sees plaintext. E2E runs daemon to daemon, not to the model.** |
-| Compromised host | Has keys and state | Encrypted-at-rest storage; Updates heal after removal or re-key | That member fully, until removed |
+| Compromised host | Has keys and state | Encrypted-at-rest storage (see below); Updates heal after removal or re-key | That member fully, until removed |
 | Malicious or prompt-injected peer agent | Social-engineers the local agent | Untrusted framing, scope, limits, approval hooks (§10) | Behavioural; can't be solved with cryptography |
 | Agent loops | Runaway costs or spam | Loop guard, rate limits, floor modes | Bounded by the limits |
 | Malicious software distributor | Backdoored daemon | Open source, reproducible builds, signed releases with provenance | Users who don't verify |
+
+**Encrypted-at-rest storage.** A daemon keeps its MLS state (epoch secrets,
+signature and HPKE private keys, the ratchet tree) and its own records in a
+SQLCipher database (ADR-002). Every page of the file, its journal and its WAL
+is encrypted and authenticated under a 32-byte random key held in the
+daemon's keystore (the OS keyring, or a 0600 file), so the schema, key names
+and row counts are hidden too. There is no unencrypted on-disk mode. This
+protects a copied or stolen database file, such as a backup or a lost disk,
+as long as the keystore isn't copied with it. It does not protect against
+an attacker who can read the daemon's memory or its keystore; for that
+attacker the residual risk above applies. File size and modification times
+stay visible.
 
 **Dropped messages and queue overflow.** A malicious relay can always drop,
 delay or withhold messages; `queue_overflow` does not prevent that and a

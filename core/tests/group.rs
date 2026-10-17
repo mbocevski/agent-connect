@@ -1032,6 +1032,8 @@ fn sqlite_store_persists_across_reopen() {
         .join(format!("core-sqlite-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let a = peer(1, &clock);
+    let db_key =
+        agentconnect_core::DbKey::generate(&agentconnect_core::Rng::for_test("db-key")).unwrap();
     let b_identity =
         agentconnect_core::Identity::generate(&agentconnect_core::Rng::for_test("seed-2")).unwrap();
     let b_instance = b_identity
@@ -1040,7 +1042,7 @@ fn sqlite_store_persists_across_reopen() {
     let saved_instance = b_instance.to_secret_bytes().unwrap();
     let open = |inst| {
         agentconnect_core::Client::new(
-            SqliteStore::open(&path).unwrap(),
+            SqliteStore::open(&path, &db_key).unwrap(),
             agentconnect_core::Rng::os().unwrap(),
             inst,
             clock.clone(),

@@ -10,6 +10,7 @@ settable clock) and must not be used in production.
 
 from agentconnect_core._native import (
     CIPHERSUITE_V0,
+    DB_KEY_LEN,
     PADDING_BUCKETS,
     PROTOCOL_VERSION,
     AgentConnectError,
@@ -28,6 +29,7 @@ from agentconnect_core._native import (
     mailbox_id,
     padding_bucket,
     parse_invite_url,
+    rekey_store,
     supports_protocol,
     unwrap_welcome,
     verify_instance_cert,
@@ -35,6 +37,7 @@ from agentconnect_core._native import (
 
 __all__ = [
     "CIPHERSUITE_V0",
+    "DB_KEY_LEN",
     "PADDING_BUCKETS",
     "PROTOCOL_VERSION",
     "AgentConnectError",
@@ -53,6 +56,7 @@ __all__ = [
     "mailbox_id",
     "padding_bucket",
     "parse_invite_url",
+    "rekey_store",
     "supports_protocol",
     "unwrap_welcome",
     "verify_instance_cert",

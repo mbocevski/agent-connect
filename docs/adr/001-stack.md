@@ -55,7 +55,10 @@ upstream docs.
 - Supporting crates:
   - `openmls_basic_credential` 0.6.0
   - `openmls_traits` 0.6.0
-  - `openmls_sqlite_storage` 0.3.0 (alternatively `openmls_sqlx_storage`)
+  - `openmls_sqlite_storage` 0.3.0 (alternatively `openmls_sqlx_storage`),
+    on SQLCipher through `rusqlite` 0.37's
+    `bundled-sqlcipher-vendored-openssl` feature (OpenSSL 3.6 built from
+    `openssl-src`, no system library). See ADR-002.
 - **Ciphersuite:** `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`
   (TBD1 of `draft-ietf-mls-pq-ciphersuites`, provisional codepoint
   `0x004F`). Its hybrid KEM combines ML-KEM-768 with X25519. It is the only

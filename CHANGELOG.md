@@ -104,6 +104,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- The daemon's MLS state is now encrypted at rest. `SqliteStore` is a
+  SQLCipher database (whole-file encryption with vendored OpenSSL, ADR-002)
+  and `SqliteStore::open` requires a 32-byte `DbKey`; there is no
+  unencrypted on-disk mode. A wrong key, or a cleartext file, fails with
+  `Error::StorageKey`. `SqliteStore::rekey` re-encrypts a store under a new
+  key. In Python, `Client(path, instance, db_key)` requires the key for an
+  on-disk store, and `rekey_store(path, old_key, new_key)` rotates it.
 - Core: integers in policy, metadata and instance-certificate JSON are
   capped at the I-JSON range (|n| ≤ 2^53 − 1, SPEC §3.2); anything outside
   it is neither written nor accepted.

@@ -30,6 +30,8 @@ openmls_memory_storage = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ci
 openmls_sqlite_storage = { version = "=0.3.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_traits = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 proptest = "1.12.0"
+# Same rusqlite as openmls_sqlite_storage, so its `Connection` is SQLCipher.
+rusqlite = { version = "0.37.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 pyo3 = { version = "0.30.1", features = ["abi3-py312"] }
 rand_chacha = "0.10.0"
 serde = { version = "1.0.229", features = ["derive"] }
