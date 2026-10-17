@@ -1691,6 +1691,43 @@ class Daemon:
         self._delivery_wake.set()
         self._pulse()
 
+    async def sas_mismatch(self, group_id: str, epoch: int | None = None) -> str:
+        """**Human-only.** The human compared the SAS of the current epoch and
+        the codes differ (SPEC 11): the group view may be forked. Raise
+        ``sas_mismatch`` and leave at once.
+
+        A leave proposal goes out when one is allowed (so honest members can
+        remove the leaf); either way the local group state is deleted now,
+        since nothing more from this view can be trusted. ``epoch`` guards
+        against answering for a code from an earlier epoch."""
+        group = self._group_or_raise(group_id)
+        gid = unb64(group_id)
+        current = self._core_epoch(gid)
+        if epoch is not None and epoch != current:
+            msg = f"the SAS shown was for epoch {epoch}; the group is at epoch {current}"
+            raise DaemonError("stale_epoch", msg)
+        await self.emit(group_id, "sas_mismatch", epoch=current, sas=self._sas(gid))
+        try:
+            proposal = self.client.propose_leave(gid)
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            # The owner's last instance, or a sole member: no proposal.
+            LOG.info("sas_mismatch_no_proposal", reason=str(e)[:60])
+        else:
+            msg_id = new_msg_id()
+            env = {
+                "v": 0,
+                "kind": "proposal",
+                "group_id": group.group_id,
+                "epoch": current,
+                "msg_id": msg_id,
+                "sender": self.mailbox,
+                "ct": b64(proposal),
+            }
+            self._enqueue("frame", None, {"frame": {"t": "send", "env": env}, "msg_id": msg_id})
+        await self._gone(group_id, "left")
+        self.store.update_group(group_id, out_of_sync=True, out_of_sync_reason="sas_mismatch")
+        return "left"
+
     def group_info(self, group_id: str) -> dict[str, Any]:
         group = self.store.group(group_id)
         if group is None:

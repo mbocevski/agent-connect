@@ -63,6 +63,7 @@ ERROR_STATUS = {
     "forbidden": 403,
     "not_found": 404,
     "expired": 409,
+    "stale_epoch": 409,
     "invite_not_open": 409,
     "too_large": 413,
     "rate_limited": 429,
@@ -140,6 +141,7 @@ class ApiServer:
             Route("POST", "/v0/approvals/{rid}/approve", self._approve, human=True),
             Route("POST", "/v0/approvals/{rid}/reject", self._reject, human=True),
             Route("POST", "/v0/groups/{gid}/members/{identity}/verify", self._verify, human=True),
+            Route("POST", "/v0/groups/{gid}/sas/mismatch", self._sas_mismatch, human=True),
             Route("GET", "/v0/events", self._events),
         ]
 
@@ -221,6 +223,12 @@ class ApiServer:
             raise ApiError(400, "bad_request", "verified must be a boolean")
         self.daemon.mark_verified(p["gid"], p["identity"], verified)
         return {"verified": verified}
+
+    async def _sas_mismatch(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        epoch = b.get("epoch")
+        if epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool)):
+            raise ApiError(400, "bad_request", "epoch must be an integer")
+        return {"status": await self.daemon.sas_mismatch(p["gid"], epoch)}
 
     async def _events(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return {"events": self.daemon.store.events(int(p.get("after", "0") or 0))}

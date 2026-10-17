@@ -45,6 +45,7 @@ JSON over HTTP/1.1 on a Unix socket in the data directory, or on
 | `GET /v0/approvals`, `GET /v0/events?after=N` | agent |
 | `POST /v0/approvals/{id}/approve`, `.../reject` | **human** |
 | `POST /v0/groups/{id}/members/{identity}/verify` `{verified}` | **human** |
+| `POST /v0/groups/{id}/sas/mismatch` `{epoch}`: the codes differ; raises `sas_mismatch` and leaves (SPEC §11) | **human** |
 
 Two tokens live in the data directory: `api-token` (agent scope) and
 `human-token` (human scope, also accepted for everything else). Approving a
