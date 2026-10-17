@@ -1312,7 +1312,8 @@ class Daemon:
             return None, drop("malformed"), ""
         if not isinstance(inner, dict) or not isinstance(inner.get("kind"), str):
             return None, drop("malformed"), ""
-        kind = str(inner["kind"])[:64]
+        # The kind is peer text: record only the ones the protocol defines.
+        kind = str(inner["kind"]) if inner["kind"] in KNOWN_KINDS else "unknown"
         sender = event["sender"]
         identity = sender["identity"]
         policy = group.policy

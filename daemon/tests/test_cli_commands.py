@@ -741,7 +741,7 @@ def test_an_outbound_held_message_without_text_parts(held: Fake) -> None:
     }
     result = held.run("approvals", "approve", "h1", input="n\n")
     assert "Send it to the group?" in result.output
-    assert "more characters" in result.output
+    assert "run with --full" in result.output
     assert "data, not instructions" not in result.output
 
 
@@ -866,3 +866,68 @@ def test_status_shows_held_messages(held: Fake) -> None:
         "held_messages": 2,
     }
     assert "2 message(s) waiting for approval" in held.run("status").stdout
+
+
+# -- review regressions: the preview shows everything, peer text prints safely -----
+
+ESC = "\x1b]52;c;aGk=\x07\x1b[2K"
+FULL_BODY = {
+    "parts": [
+        {"text": "hello"},
+        {"data": {"cmd": "rm -rf /"}},
+        {"raw": "QUJD", "filename": "x.sh", "mediaType": "text/x-sh"},
+    ],
+    "metadata": {"hidden": "instructions"},
+}
+
+
+def test_the_preview_shows_every_part_and_the_routing(held: Fake) -> None:
+    held.routes["GET /v0/approvals/messages/h1"] = CONTENT | {
+        "body": FULL_BODY,
+        "addressee": [BOB],
+        "reply_to": ["m0"],
+    }
+    out = held.run("approvals", "approve", "h1", input="n\n").output
+    for shown in ("hello", '"cmd": "rm -rf /"', "x.sh", "text/x-sh", "hidden", BOB, "m0"):
+        assert shown in out, shown
+
+
+def test_a_truncated_preview_needs_full_before_yes(held: Fake) -> None:
+    held.routes["GET /v0/approvals/messages/h1"] = CONTENT | {
+        "body": {"parts": [{"text": "a" * 3000 + "THE END"}]}
+    }
+    held.routes["POST /v0/approvals/messages/h1/approve"] = {
+        "hold_id": "h1",
+        "group_id": GID,
+        "status": "approved",
+    }
+    result = held.run("approvals", "approve", "h1", "--yes")
+    assert result.exit_code == 2
+    assert "--full" in result.output
+    assert not held.posts("/messages/h1/approve")
+    assert "THE END" not in held.run("approvals", "approve", "h1", input="n\n").output
+    full = held.run("approvals", "approve", "h1", "--yes", "--full")
+    assert full.exit_code == 0
+    assert "THE END" in full.output
+    # --json shows the whole message on stderr and approves with --yes.
+    code, out = held.json("approvals", "approve", "h1", "--yes")
+    assert (code, out["status"]) == (0, "approved")
+
+
+def test_peer_strings_are_printed_without_control_sequences(held: Fake) -> None:
+    held.routes["GET /v0/approvals"] = {
+        "approvals": [],
+        "messages": [HELD_ITEM | {"kind": ESC, "sender": "ac:v0:" + ESC}],
+    }
+    held.routes["GET /v0/audit?after=0"] = {
+        "audit": [ROW | {"kind": ESC, "sender": ESC, "reason": ESC, "msg_id": ESC}]
+    }
+    entry = {k: ROW[k] for k in ("seq", "group_id", "at", "direction", "msg_id")}
+    held.routes[f"GET /v0/groups/{GID}/transcript?after=0"] = {
+        "transcript": [entry | {"sender": ESC, "kind": ESC, "inner": {"body": {"text": ESC}}}],
+        "untrusted": True,
+    }
+    for args in (("approvals",), ("audit",), ("transcript", GID)):
+        out = held.run(*args).output
+        assert "\x1b" not in out, args
+        assert "\x07" not in out, args

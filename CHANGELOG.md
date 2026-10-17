@@ -45,6 +45,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `hold_for_approval` or `drop` with a reason), and every message the agent
   sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
   the loop guard moved into it unchanged. See `docs/safety.md`.
+- The approval preview shows every part (data as JSON, files by name, type
+  and size), the body's other fields and the routing, and
+  `approvals approve --yes` needs `--full` when the preview was cut. The
+  CLI prints every peer-controlled string with control characters
+  replaced, the audit log records unknown kinds as `unknown`, and the
+  SPEC 10.1 notice quotes and cleans the sender's name and the scope.
 - Held messages: the queue is capped per group (100), per sender instance
   (20) and in bytes (8 MiB; `policy.max_held_per_group`,
   `max_held_per_sender`, `max_held_bytes`), and a message over a cap is

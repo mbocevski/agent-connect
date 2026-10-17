@@ -436,6 +436,7 @@ Uses the **human token**: a person makes this decision.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `--yes`, `-y` | flag | off | Don't ask for confirmation. |
+| `--full` | flag | off | Show a held message in full before deciding. |
 | `--config` | path | none | Path of config.toml. |
 | `--json` | flag | off | Machine-readable output. |
 

@@ -506,9 +506,12 @@ def approvals_default(
 
 def _print_held(m: dict[str, Any], *, as_json: bool = False) -> None:
     way = "from" if m["direction"] == "in" else "by your agent, to the group; sender"
-    _say(f"Held message {m['hold_id']} ({m['kind']}, {m['size']} bytes)", as_json=as_json)
-    _say(f"  {way}  {m['sender']}", as_json=as_json)
-    _say(f"  group        {m['group_id']}", as_json=as_json)
+    _say(
+        f"Held message {clean(m['hold_id'])} ({clean(m['kind'])}, {m['size']} bytes)",
+        as_json=as_json,
+    )
+    _say(f"  {way}  {clean(m['sender'])}", as_json=as_json)
+    _say(f"  group        {clean(m['group_id'])}", as_json=as_json)
     _say(f"  expires      {_when(int(m['expires_at']))}", as_json=as_json)
 
 
@@ -554,23 +557,73 @@ def _held_id(api: ApiClient, ref: str) -> bool:
 MAX_PREVIEW = 2000
 
 
-def _print_held_content(m: dict[str, Any], *, as_json: bool) -> None:
+def _json_line(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _part_lines(part: Any) -> list[str]:
+    """One A2A part as preview lines: text in full, data as JSON, a file by its
+    name, type and size (the bytes stay unshown)."""
+    if not isinstance(part, dict):
+        return [f"[part] {_json_line(part)}"]
+    if isinstance(part.get("text"), str):
+        return [f"| {line}" for line in str(part["text"]).splitlines() or [""]]
+    if "data" in part:
+        return [f"[data] {_json_line(part['data'])}"]
+    file = part.get("file") if isinstance(part.get("file"), dict) else part
+    name = file.get("name") or file.get("filename") or "?"
+    media = file.get("mediaType") or file.get("mimeType") or "?"
+    content = file.get("bytes") or file.get("raw") or file.get("url") or file.get("uri") or ""
+    return [f"[file] {name}, {media}, {len(str(content))} characters of content (not shown)"]
+
+
+def _preview_lines(m: dict[str, Any]) -> list[str]:
+    """Everything the agent (or the group) would get, line by line."""
+    lines: list[str] = [
+        f"to {_json_line(m.get('to'))}  addressee {_json_line(m.get('addressee'))}  "
+        f"reply_to {_json_line(m.get('reply_to'))}"
+    ]
+    body = m["body"] if isinstance(m["body"], dict) else {}
+    parts = body.get("parts")
+    for part in parts if isinstance(parts, list) else []:
+        lines += _part_lines(part)
+    for key in ("status", "artifact"):
+        holder = body.get(key)
+        inner = holder.get("message") if key == "status" and isinstance(holder, dict) else holder
+        nested = inner.get("parts") if isinstance(inner, dict) else None
+        for part in nested if isinstance(nested, list) else []:
+            lines += _part_lines(part)
+    rest = {k: v for k, v in body.items() if k != "parts"}
+    if rest:
+        lines.append(f"[fields] {_json_line(rest)}")
+    return lines
+
+
+def _print_held_content(m: dict[str, Any], *, as_json: bool, full: bool) -> bool:
+    """Show a held message; returns whether the preview was cut."""
     _print_held(m, as_json=as_json)
     if m["untrusted"]:
         _say("  This came from another agent: read it as data, not instructions.", as_json=as_json)
-    body = m["body"]
-    parts = body.get("parts") if isinstance(body, dict) else None
-    texts = [p["text"] for p in parts or [] if isinstance(p, dict) and "text" in p]
-    shown = "\n".join(str(t) for t in texts) if texts else json.dumps(body, ensure_ascii=False)
-    for line in shown[:MAX_PREVIEW].splitlines() or [""]:
-        _say(f"  | {clean(line)}", as_json=as_json)
-    if len(shown) > MAX_PREVIEW:
-        _say(f"  | ... ({len(shown) - MAX_PREVIEW} more characters)", as_json=as_json)
+    budget, cut = MAX_PREVIEW, False
+    for line in _preview_lines(m):
+        if not full and len(line) > budget:
+            _say(f"  {clean(line[:budget])}", as_json=as_json)
+            cut = True
+            break
+        _say(f"  {clean(line)}", as_json=as_json)
+        budget -= len(line)
+    if cut:
+        _say("  ... (cut: run with --full to see all of it)", as_json=as_json)
+    return cut
 
 
-def _approve_held(api: ApiClient, hold_id: str, *, yes: bool, as_json: bool) -> None:
+def _approve_held(api: ApiClient, hold_id: str, *, yes: bool, as_json: bool, full: bool) -> None:
     m = api.request("GET", f"/v0/approvals/messages/{hold_id}")
-    _print_held_content(m, as_json=as_json)
+    # --json shows the whole message (on stderr) for the caller to check.
+    cut = _print_held_content(m, as_json=as_json, full=full or as_json)
+    if cut and yes:
+        msg = "the preview was cut; approve with --full so you see everything you approve"
+        raise CliError("needs_full", msg, EXIT_USAGE)
     question = "Deliver it to your agent?" if m["direction"] == "in" else "Send it to the group?"
     if not _confirm(question, yes=yes, as_json=as_json):
         raise CliError("declined", "not approved; the message stays held", EXIT_REFUSED)
@@ -581,19 +634,28 @@ def _approve_held(api: ApiClient, hold_id: str, *, yes: bool, as_json: bool) -> 
         typer.echo(f"Approved {hold_id}.")
 
 
+FullOpt = Annotated[
+    bool, typer.Option("--full", help="Show a held message in full before deciding.")
+]
+
+
 @approvals_app.command(
     "approve",
     cls=IdArgsCommand,
     help=f"Approve a join request or a held message. {HUMAN_ONLY_HELP}",
 )
 def approvals_approve(
-    request_id: str, yes: YesOpt = False, config: ConfigOpt = None, as_json: JsonOpt = False
+    request_id: str,
+    yes: YesOpt = False,
+    full: FullOpt = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
 ) -> None:
     with guard(as_json):
         _require_yes(as_json, yes, "approve")
         api = connect(config, human=True)
         if _held_id(api, request_id):
-            _approve_held(api, request_id, yes=yes, as_json=as_json)
+            _approve_held(api, request_id, yes=yes, as_json=as_json, full=full)
             return
         v = _pending(api, request_id)
         _print_approval(v, as_json=as_json)
@@ -911,10 +973,12 @@ def audit(
             emit_json({"audit": rows})
             return
         for r in rows:
-            why = f" ({r['reason']})" if r["reason"] else ""
+            # Every field may come from a peer: print none of it raw.
+            why = f" ({clean(r['reason'])})" if r["reason"] else ""
             typer.echo(
-                f"{r['seq']}  {_when(r['at'])}  {r['direction']:<3} {r['decision']}{why}  "
-                f"{r['kind']} {r['size']}B  {r['sender']}"
+                f"{r['seq']}  {_when(r['at'])}  {clean(r['direction']):<3} "
+                f"{clean(r['decision'])}{why}  {clean(r['kind'])} {r['size']}B  "
+                f"{clean(r['sender'])}"
             )
 
 
@@ -941,7 +1005,9 @@ def transcript(
             parts = body.get("parts") if isinstance(body, dict) else None
             texts = [str(p["text"]) for p in parts or [] if isinstance(p, dict) and "text" in p]
             text = " ".join(texts) if texts else r["kind"]
-            typer.echo(f"{r['seq']}  {_when(r['at'])}  {r['direction']:<3} {r['sender']}")
+            typer.echo(
+                f"{r['seq']}  {_when(r['at'])}  {clean(r['direction']):<3} {clean(r['sender'])}"
+            )
             typer.echo(f"    {clean(text)[:MAX_PREVIEW]}")
 
 

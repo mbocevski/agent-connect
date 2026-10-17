@@ -309,7 +309,7 @@ async def test_the_group_policy_sets_the_framing_of_the_a2a_call(cluster: Cluste
             "Exercise the A2A adapter",
             True,
         )
-        assert "(scope: Exercise the A2A adapter)" in notice
+        assert '(scope: "Exercise the A2A adapter")' in notice
         assert [p.text for p in first.message.parts] == [notice, "framed"]
         # b's human turns framing off for this group: the scope and the
         # notice stay in metadata, the parts are the peer's alone.
