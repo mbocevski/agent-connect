@@ -133,18 +133,14 @@ fn submit(kp: Vec<u8>, as_instance: &Instance) -> Result<(), Error> {
     let inviter = peer(1, &clock);
     let inv = invite(&inviter);
     let mailbox_id = as_instance.mailbox_id();
-    let req = agentconnect_core::JoinRequest {
+    let mut req = agentconnect_core::JoinRequest {
         invite_id: *inv.secret().id(),
         display_name: "mallory".into(),
-        mac: join_request_mac(
-            &inv.secret().join_key(),
-            inv.secret().id(),
-            &kp,
-            &mailbox_id,
-        ),
+        mac: [0; 32],
         key_package: kp,
         mailbox_id,
     };
+    req.mac = join_request_mac(&inv.secret().join_key(), &req.mac_input());
     inviter.client.verify_join_request(&req, &inv).map(|_| ())
 }
 

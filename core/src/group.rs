@@ -21,7 +21,7 @@ use crate::encoding::{b64, hex};
 use crate::error::{Error, Result, mls, storage};
 use crate::identity::Instance;
 use crate::invite::{Invite, InviteMeta, InviteSecret};
-use crate::join::{JoinRequest, MAX_DISPLAY_NAME_CHARS, join_request_mac};
+use crate::join::{JoinRequest, check_display_name, join_request_mac};
 use crate::mls::{
     CS, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities, check_group_context,
     check_tree_keys, group_context_extensions, guard, join_config, join_config_with_padding,
@@ -321,15 +321,14 @@ impl<S: Store> Client<S> {
     ///
     /// # Errors
     ///
-    /// [`Error::Malformed`] for an over-long display name, or an MLS error.
+    /// [`Error::Malformed`] for a display name that is too long or has control
+    /// characters, or an MLS error.
     pub fn create_join_request(
         &self,
         invite: &InviteSecret,
         display_name: &str,
     ) -> Result<JoinRequest> {
-        if display_name.chars().count() > MAX_DISPLAY_NAME_CHARS {
-            return Err(Error::Malformed("display_name"));
-        }
+        check_display_name(display_name)?;
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(capabilities())
             .leaf_node_extensions(leaf_extensions(self.instance.cert())?)
@@ -337,14 +336,15 @@ impl<S: Store> Client<S> {
             .map_err(mls)?;
         let key_package = bundle.key_package().tls_serialize_detached().map_err(mls)?;
         let mailbox_id = self.instance.mailbox_id();
-        let mac = join_request_mac(&invite.join_key(), invite.id(), &key_package, &mailbox_id);
-        Ok(JoinRequest {
+        let mut request = JoinRequest {
             invite_id: *invite.id(),
             display_name: display_name.to_owned(),
             key_package,
             mailbox_id,
-            mac,
-        })
+            mac: [0; 32],
+        };
+        request.mac = join_request_mac(&invite.join_key(), &request.mac_input());
+        Ok(request)
     }
 
     /// Inviter side, SPEC §6.2 steps 1–3: the invite is ours and not

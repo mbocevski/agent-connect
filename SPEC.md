@@ -242,9 +242,30 @@ JoinRequest = {
   "display_name": "<≤ 80 chars>",
   "key_package": "<b64url MLS KeyPackage, v0 suite, with ac_instance_cert>",
   "mailbox_id": "<B's mailbox>",
-  "mac": "<b64url HMAC-SHA256(join_key, "agentconnect/v0/join-request" || invite_id || key_package_bytes || mailbox_id)>"
+  "mac": "<b64url HMAC-SHA256(join_key, mac_input)>"
 }
 ```
+
+The MAC covers every field the inviter acts on, each length-prefixed so
+that field boundaries are unambiguous:
+
+```
+lp(x)     = u32be(len(x)) ‖ x
+mac_input = "agentconnect/v0/join-request"
+            ‖ lp(invite_id)          # the raw 16 bytes, not base64url
+            ‖ lp(key_package_bytes)  # the TLS-serialised KeyPackage
+            ‖ lp(mailbox_id)         # its 22 ASCII characters
+            ‖ lp(display_name)       # UTF-8
+```
+
+The label is not length-prefixed. `testdata/invite-kdf.json` gives
+`mac_input` and `mac` for sample inputs.
+
+`display_name` is at most 80 characters and MUST NOT contain control
+characters (Unicode category Cc); the inviter MUST reject a request that
+breaks either rule. The MAC stops the relay from renaming the joiner, but
+the name is still chosen by the joiner, so the inviter's UI MUST present
+it as unverified text.
 
 B keeps the invite secret (and so can derive `welcome_key`) until it has
 joined or the invite expires.

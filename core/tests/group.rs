@@ -389,6 +389,39 @@ fn verified_join_request_survives_a_failed_add() {
     assert_converged(&groups);
 }
 
+/// The MAC covers `display_name` (SPEC §6.1): the relay can't rename the
+/// joiner whose request the inviter's human approves.
+#[test]
+fn relay_cannot_rename_the_joiner() {
+    let clock = clock();
+    let a = peer(1, &clock);
+    let b = peer(2, &clock);
+    let inv = invite(&a);
+    let req = b.client.create_join_request(inv.secret(), "bob").unwrap();
+    let json = String::from_utf8(req.to_json().unwrap()).unwrap();
+    let renamed = agentconnect_core::JoinRequest::from_json(
+        json.replace("\"bob\"", "\"your admin\"").as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        a.client.verify_join_request(&renamed, &inv).unwrap_err(),
+        Error::BadMac
+    );
+    assert_eq!(
+        b.client
+            .create_join_request(inv.secret(), "bob\u{1b}[2J")
+            .unwrap_err(),
+        Error::Malformed("display_name")
+    );
+    assert_eq!(
+        a.client
+            .verify_join_request(&req, &inv)
+            .unwrap()
+            .display_name(),
+        "bob"
+    );
+}
+
 #[test]
 fn mailbox_must_match_key_package() {
     let clock = clock();
@@ -397,12 +430,7 @@ fn mailbox_must_match_key_package() {
     let inv = invite(&a);
     let mut req = b.client.create_join_request(inv.secret(), "b").unwrap();
     req.mailbox_id = a.client.instance().mailbox_id();
-    req.mac = agentconnect_core::join::join_request_mac(
-        &inv.secret().join_key(),
-        inv.secret().id(),
-        &req.key_package,
-        &req.mailbox_id,
-    );
+    req.mac = agentconnect_core::join::join_request_mac(&inv.secret().join_key(), &req.mac_input());
     assert_eq!(
         a.client.verify_join_request(&req, &inv).unwrap_err(),
         Error::CredentialMismatch("mailbox_id != key package signature key")

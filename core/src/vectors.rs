@@ -24,10 +24,12 @@ use crate::clock::FakeClock;
 use crate::encoding::{b64, hex, hex_decode};
 use crate::identity::{Identity, fingerprint, mailbox_id};
 use crate::invite::{InviteLink, InviteSecret, derive_join_key, derive_welcome_key};
-use crate::join::join_request_mac;
+use crate::join::{MacInput, join_request_mac};
 use crate::padding::{BUCKETS, bucket_for, max_plaintext_len};
 use crate::rng::Rng;
 use crate::sas::Sas;
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 
 fn path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -86,13 +88,33 @@ fn header(description: &str, seed: &[u8; 32]) -> Value {
 fn invite_kdf_vectors() {
     let (seed, rng) = vector_rng("invite-kdf.json");
     let mut cases = Vec::new();
-    for i in 0..3u8 {
+    for (i, display_name) in (0..3u8).zip(["bob", "", "Zo\u{eb}'s agent \u{1D11E}"]) {
         let id: [u8; 16] = rng.array().unwrap();
         let secret: [u8; 32] = rng.array().unwrap();
         let invite = InviteSecret::from_parts(id, secret);
         let key_package: Vec<u8> = (0..40).map(|b| b ^ i).collect();
         let mailbox = mailbox_id(&rng.array::<32>().unwrap());
-        let mac = join_request_mac(&invite.join_key(), &id, &key_package, &mailbox);
+        let input = MacInput {
+            invite_id: &id,
+            key_package: &key_package,
+            mailbox_id: &mailbox,
+            display_name,
+        };
+        let mac = join_request_mac(&invite.join_key(), &input);
+        // The exact HMAC input, built independently of `join.rs`.
+        let lp = |b: &[u8]| [&u32::try_from(b.len()).unwrap().to_be_bytes()[..], b].concat();
+        let mac_input = [
+            b"agentconnect/v0/join-request".to_vec(),
+            lp(&id),
+            lp(&key_package),
+            lp(mailbox.as_bytes()),
+            lp(display_name.as_bytes()),
+        ]
+        .concat();
+        let mut h =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(invite.join_key().as_slice()).unwrap();
+        h.update(&mac_input);
+        assert_eq!(h.finalize().into_bytes().as_slice(), mac);
         let nonce: [u8; 12] = rng.array().unwrap();
         let welcome = format!("welcome bytes {i}").into_bytes();
         let wrapped = invite.wrap_welcome_with_nonce(&nonce, &welcome).unwrap();
@@ -105,6 +127,8 @@ fn invite_kdf_vectors() {
             "join_request": {
                 "key_package": hex(&key_package),
                 "mailbox_id": mailbox,
+                "display_name": display_name,
+                "mac_input": hex(&mac_input),
                 "mac": hex(&mac),
             },
             "wrapped_welcome": {
@@ -115,7 +139,7 @@ fn invite_kdf_vectors() {
         }));
     }
     let mut v = header(
-        "SPEC 3.5 join_key/welcome_key (HKDF-SHA256), SPEC 6.1 JoinRequest MAC (invite_id raw bytes, mailbox_id ASCII) and SPEC 6.4 WrappedWelcome (nonce || ChaCha20-Poly1305). Hex unless noted.",
+        "SPEC 3.5 join_key/welcome_key (HKDF-SHA256), SPEC 6.1 JoinRequest MAC over label || lp(invite_id raw bytes) || lp(key_package) || lp(mailbox_id ASCII) || lp(display_name UTF-8), lp(x) = u32be(len(x)) || x and SPEC 6.4 WrappedWelcome (nonce || ChaCha20-Poly1305). Hex unless noted.",
         &seed,
     );
     v["cases"] = cases.into();

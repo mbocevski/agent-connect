@@ -67,6 +67,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Protocol and core: the JoinRequest MAC now covers `display_name`, and
+  every MAC field is length-prefixed (`u32be(len) ‖ bytes`, SPEC §6.1), so
+  the relay can't rename the joiner the inviter approves. Display names
+  with control characters are rejected. `testdata/invite-kdf.json` gains
+  `display_name` and the exact `mac_input`.
 - Core: `Group::add_member` borrows the `VerifiedJoinRequest`, and the
   Python `VerifiedJoinRequest` is no longer used up by a failed
   `add_member`, so an inviter can retry after `CommitPending` or an

@@ -886,12 +886,16 @@ fn join_request_mac<'py>(
     invite_id: &[u8],
     key_package: &[u8],
     mailbox_id: &str,
+    display_name: &str,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let mac = core::join::join_request_mac(
         &array(join_key, "join_key")?,
-        &array(invite_id, "invite_id")?,
-        key_package,
-        mailbox_id,
+        &core::join::MacInput {
+            invite_id: &array(invite_id, "invite_id")?,
+            key_package,
+            mailbox_id,
+            display_name,
+        },
     );
     Ok(PyBytes::new(py, &mac))
 }

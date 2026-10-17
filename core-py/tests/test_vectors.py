@@ -5,6 +5,8 @@ The Rust side (core/src/vectors.rs) generates and checks the same files.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,10 @@ def h(s: str) -> bytes:
     return bytes.fromhex(s)
 
 
+def lp(field: bytes) -> bytes:
+    return len(field).to_bytes(4, "big") + field
+
+
 def test_invite_kdf_vectors() -> None:
     for case in load("invite-kdf.json")["cases"]:
         invite_id, secret = h(case["invite_id"]), h(case["invite_secret"])
@@ -31,8 +37,22 @@ def test_invite_kdf_vectors() -> None:
         assert join_key.hex() == case["join_key"]
         assert ac.derive_welcome_key(invite_id, secret).hex() == case["welcome_key"]
         req = case["join_request"]
-        mac = ac.join_request_mac(join_key, invite_id, h(req["key_package"]), req["mailbox_id"])
+        mac = ac.join_request_mac(
+            join_key, invite_id, h(req["key_package"]), req["mailbox_id"], req["display_name"]
+        )
         assert mac.hex() == req["mac"]
+        # The MAC input, rebuilt independently (SPEC 6.1 length-prefixed fields).
+        mac_input = b"agentconnect/v0/join-request" + b"".join(
+            lp(field)
+            for field in (
+                invite_id,
+                h(req["key_package"]),
+                req["mailbox_id"].encode("ascii"),
+                req["display_name"].encode("utf-8"),
+            )
+        )
+        assert mac_input.hex() == req["mac_input"]
+        assert hmac.new(join_key, mac_input, hashlib.sha256).hexdigest() == req["mac"]
         wrapped = case["wrapped_welcome"]
         assert h(wrapped["wrapped"])[:12].hex() == wrapped["nonce"]
         opened = ac.unwrap_welcome(invite_id, secret, h(wrapped["wrapped"]))
