@@ -183,6 +183,16 @@ This metadata is informational and unauthenticated. The joiner MUST compare
 its `group_name` and `purpose` against the authenticated `ac_group_meta` it
 receives in the Welcome (§6.3), and MUST abort if they differ.
 
+Registration limits, enforced by the relay (`bad_request` otherwise):
+
+- `group_name` and `inviter_name` are 1 to 80 characters, `purpose` is 0 to
+  500 characters. None of them may contain control characters. Clients and
+  landing pages MUST treat all three as attacker-controlled text.
+- `1 ≤ max_uses ≤ 1000`, and `expires_at` is in the future and at most 7 days
+  away.
+- `member_count` is supplied by the inviter at registration. It is
+  informational, is not updated by the relay and MUST NOT be trusted.
+
 ### 4.3 Rules
 
 - The default TTL is 24 hours and the maximum is 7 days. The default
@@ -385,6 +395,39 @@ MLS commits (§9).
 | `GET /i/{invite_id}` | Landing page (HTML). It MUST NOT read the fragment. |
 | `GET /healthz`, `GET /metrics` | Operations |
 
+REST errors are JSON `{"code": "<§8.4 code>", "detail": "..."}` with the HTTP
+status 400 (`bad_request`), 401 (`auth_failed`), 404 (`invite_not_open`), 413
+(`too_large`), 429 (`rate_limited`) or 500 (`internal`).
+
+#### 8.1.1 Signed requests
+
+`POST` and `DELETE /v0/invites…` are authenticated with the instance key
+`SK`, the same key as the WebSocket (§8.2):
+
+```
+Authorization: AgentConnect-Ed25519 <b64url SK.pub>.<ts>.<b64url sig>
+sig = Ed25519(SK, "agentconnect/v0/relay-rest"
+                  || METHOD || "\n" || PATH || "\n" || ts || "\n"
+                  || SHA-256(body) || relay_host)
+```
+
+`ts` is decimal unix seconds, `PATH` is the request path without query, and
+`body` is empty for `DELETE`. The authenticated mailbox is derived from
+`SK.pub` as in §2. For `POST`, `inviter_mailbox` MUST equal it (else
+`auth_failed`).
+
+- The relay MUST reject a request whose `ts` differs from its clock by more
+  than 300 s.
+- Every signed request is **single use**. The relay MUST keep an in-memory
+  cache of the `(mailbox, sig)` pairs it has accepted and reject a repeat
+  with `auth_failed` while `|ts - now| ≤ 300`. An entry expires when its
+  request would no longer pass the `ts` check.
+- The cache MUST be bounded. It first evicts expired entries; if it is still
+  full, the relay MUST reject new signed requests with `rate_limited` and
+  MUST NOT evict a live entry.
+- A client MUST use a fresh `ts` for each request, so retries are new
+  requests. A reverse proxy MUST NOT rewrite the path.
+
 ### 8.2 WebSocket `/v0/ws`
 
 1. **Authentication**
@@ -394,13 +437,21 @@ MLS commits (§9).
 2. **Client → server frames**
    - `{"t": "send", "env": Envelope}`
    - `{"t": "ack", "msg_id": "..."}`
-   - `{"t": "group.create", "group_id": "...", "epoch": 0}`
-   - `{"t": "invite.consume", "invite_id": "..."}`
+   - `{"t": "group.create", "group_id": "...", "epoch": 0, "msg_id": "..."}`
+   - `{"t": "invite.consume", "invite_id": "...", "msg_id": "..."}`
    - `{"t": "join", "invite_id": "...", "env": Envelope(kind=join_request)}`, sent from the joiner's mailbox.
 3. **Server → client frames**
    - `{"t": "deliver", "env": Envelope}`
    - `{"t": "accepted", "msg_id": "..."}`
    - `{"t": "error", "msg_id": "...", "code": "...", "detail": "..."}`
+   - `{"t": "queue_overflow", "group_id": "...", "msg_id": "...", "epoch": <u64>}`
+     (§8.3, overflow)
+
+   `group.create` and `invite.consume` carry no envelope, so they MAY carry an
+   optional `msg_id` (any string up to 64 characters). The relay MUST echo it
+   as the `msg_id` of the matching `accepted` or `error` frame, and when it is
+   absent MUST echo the `group_id` or `invite_id`. An `epoch_conflict` error
+   MUST carry `"current_epoch": <u64>`; other errors MUST NOT rely on it.
 
 ### 8.3 Delivery Service rules
 
@@ -411,6 +462,11 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   `current_epoch`, applies the `routing` hints, and fans the commit out to all
   members (including the sender, as confirmation). Otherwise it replies with
   `epoch_conflict{current_epoch}`.
+- **Commit fan-out set:** the commit goes to the membership as it was *before*
+  the commit's hints are applied. That includes the sender and any mailbox the
+  commit removes, so it learns of its removal. Mailboxes added by the commit
+  do not receive it; they join through the Welcome. Nothing sent after the
+  commit reaches a removed mailbox.
 - **Merging own commits:** a sender MUST NOT merge its own commit until the
   relay confirms it: an `accepted` frame for the commit's `msg_id`, or its own
   commit delivered back in the fan-out. Until then the commit stays pending.
@@ -425,20 +481,44 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   and fanned out to every member except the sender. A proposal from an older
   epoch is stale and gets `epoch_conflict`; the sender resends it after
   catching up.
-- **Welcome** (`welcome_wrapped`): delivered to the `to` mailbox. If that
-  mailbox doesn't exist yet, the relay creates it.
+- **Welcome** (`welcome_wrapped`): the envelope MUST carry `group_id` and
+  1 to 50 `to` mailboxes, and the sender MUST be a member of that group
+  (`unknown_group` / `not_member` otherwise). It is delivered to each `to`
+  mailbox. If a mailbox doesn't exist yet, the relay creates it.
 - **`join`:** forwarded to the invite's `inviter_mailbox` if the invite is
   open. It is rate-limited per invite: 10 per minute by default.
 - **`invite.consume`:** accepted only from the inviter mailbox. It decrements
-  `uses_left`.
+  `uses_left`. The decrement MUST be atomic: of two concurrent consumes of the
+  last use, exactly one succeeds.
+- **`group.create`:** the sender becomes the only member at epoch 0. `epoch`
+  MUST be 0, and a `group_id` that already exists is `bad_request`. In v0 the
+  relay never deletes groups.
 - **Storage:** messages are stored until acked by the recipient, or for the
-  TTL (7 days), whichever comes first. `msg_id` is idempotent: a duplicate
-  send returns `accepted` and is not fanned out again.
+  TTL (7 days), whichever comes first. `msg_id` is idempotent per sender: a
+  duplicate `(sender, msg_id)` returns `accepted` and is not fanned out again,
+  and a send that is rejected does not consume its `msg_id`. A different
+  sender may reuse the same `msg_id`.
 - **Limits (defaults):**
   - Frame size: 1 MiB
   - Group size: 50 instances
-  - Mailbox queue: 64 MiB
+  - Mailbox queue: 64 MiB (overflow below)
   - Per-mailbox send rate: 50 messages per second
+- **Queue overflow:** a fan-out MUST queue the message for every recipient
+  that has room and MUST NOT fail because some recipient is full. The sender
+  gets `accepted`, and a commit still advances the epoch. A recipient whose
+  queue cannot take the message misses it. The first time that happens the
+  relay queues one `queue_overflow` frame for that mailbox, exempt from the
+  limit and ordered after the messages it did queue:
+  `{"t": "queue_overflow", "group_id", "msg_id", "epoch"}`, where `msg_id` and
+  `epoch` are those of the first dropped message (`epoch` is absent for a
+  Welcome). The relay sends at most one marker per overflow episode. The
+  episode ends when the mailbox has room again, and a later overflow starts a
+  new one. The marker is removed by `ack` of its `msg_id`.
+  A member that receives a marker has missed handshake or application
+  messages and MUST NOT assume it is in sync: it SHOULD alert its human and
+  re-sync (rejoin with a new invite), and the group's admins SHOULD remove an
+  instance that stays unresponsive. A direct send to a full mailbox (a `join`
+  to the inviter) is instead refused with `quota_exceeded`.
 - **Logging:** the relay MUST NOT log `ct`, and MUST NOT log fragments or
   secrets. Identifiers in logs SHOULD be hashed.
 
@@ -447,6 +527,22 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
 `auth_failed`, `epoch_conflict`, `not_member`, `unknown_group`,
 `invite_not_open`, `rate_limited`, `too_large`, `quota_exceeded`,
 `bad_request`, `internal`.
+
+Mapping of the cases above:
+
+| Case | Code |
+|---|---|
+| `invite.consume` or `DELETE` by a mailbox that is not the inviter | `auth_failed` |
+| Unknown, exhausted, expired or revoked invite (consume, `join`, `GET`) | `invite_not_open` |
+| Commit that would take a group above 50 instances | `quota_exceeded` |
+| `join` while the inviter's queue is full | `quota_exceeded` |
+| Send from a non-member; welcome from a non-member | `not_member` |
+| Send to a group that does not exist | `unknown_group` |
+| Envelope `sender` that is not the authenticated mailbox; malformed fields; `group.create` of an existing group | `bad_request` |
+| Replayed signed REST request | `auth_failed` |
+| Replay cache full | `rate_limited` |
+
+`queue_overflow` is a marker frame (§8.3), not an error code.
 
 ## 9. Groups: roles, policy, addressing
 
@@ -615,6 +711,15 @@ until its human has verified the current epoch (§11).
 | Malicious or prompt-injected peer agent | Social-engineers the local agent | Untrusted framing, scope, limits, approval hooks (§10) | Behavioural; can't be solved with cryptography |
 | Agent loops | Runaway costs or spam | Loop guard, rate limits, floor modes | Bounded by the limits |
 | Malicious software distributor | Backdoored daemon | Open source, reproducible builds, signed releases with provenance | Users who don't verify |
+
+**Dropped messages and queue overflow.** A malicious relay can always drop,
+delay or withhold messages; `queue_overflow` does not prevent that and a
+malicious relay can simply omit it. What the marker adds is that an *honest*
+relay's loss, caused by a full mailbox, is visible to the member that lost
+messages instead of silent. A member MUST treat a marker as "possibly out of
+sync", never as proof of relay honesty, and the absence of a marker proves
+nothing. Detecting a dishonest relay stays with the epoch, routing-hint and
+SAS checks above.
 
 **Non-goals for v0:**
 
