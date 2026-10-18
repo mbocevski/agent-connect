@@ -1,0 +1,526 @@
+{
+  "description": "SPEC 13.2.4 owner files (/.well-known/agentconnect.json) and owner states. `error` is null when the file parses. `vouch` is what a parsed file says (a file that doesn't parse vouches for nothing); `fetch_result` is what the fetch counts as for the owner state, where a file that doesn't parse is a failed fetch. Each state case is a history of fetches in order (result: vouches | does_not_vouch | revoked | failed); a negative result is sticky until a later fetch vouches. `applies` says who runs the case: a directory never skips the fetch and withdraws a revoked listing, so it skips cases without \"directory\". `identities` gives each identity's Ed25519 secret, from this file's seed, for signing test listings.",
+  "files": [
+    {
+      "error": null,
+      "file": "{\n  \"v\": 0,\n  \"team\": \"platform\",\n  \"identities\": [\n    {\"identity\": \"ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY\", \"fingerprint\": \"25c3 521b 7d19 57af 6e76 4980 d620 5610\"},\n    {\"identity\": \"ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k\", \"listings\": [\"agents.example/a/release-planner\"]}\n  ]\n}\n",
+      "name": "hand-edited, with notes",
+      "results": [
+        {
+          "directory": "agents.example",
+          "fetch_result": "vouches",
+          "identity": "ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "vouches"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "vouches",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "vouches"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        }
+      ]
+    },
+    {
+      "error": null,
+      "file": "{\"v\":0,\"identities\":[{\"identity\":\"ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY\",\"fingerprint\":\"b453 ce63 0810 8c84 9caf 6ef9 2924 e4d7\"}]}",
+      "name": "fingerprint mismatch",
+      "results": [
+        {
+          "directory": "agents.example",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        }
+      ]
+    },
+    {
+      "error": null,
+      "file": "{\"v\":0,\"identities\":[{\"identity\":\"ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY\"}],\"revoked\":[{\"identity\":\"ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY\",\"revoked_at\":1792000000,\"reason\":\"superseded\"}]}",
+      "name": "revoked",
+      "results": [
+        {
+          "directory": "agents.example",
+          "fetch_result": "revoked",
+          "identity": "ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY",
+          "name": "release-planner",
+          "reason": "superseded",
+          "revoked_at": 1792000000,
+          "vouch": "revoked"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        }
+      ]
+    },
+    {
+      "error": "invalid owner file: not I-JSON",
+      "file": "{\"v\":0,\"v\":0,\"identities\":[{\"identity\":\"ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY\"}]}",
+      "name": "duplicate key",
+      "results": [
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        }
+      ]
+    },
+    {
+      "error": "invalid owner file: v must be 0",
+      "file": "{\"v\":1,\"identities\":[{\"identity\":\"ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY\"}]}",
+      "name": "wrong version",
+      "results": [
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        }
+      ]
+    },
+    {
+      "error": "invalid owner file: not I-JSON",
+      "file": "<html>moved</html>",
+      "name": "not json",
+      "results": [
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        },
+        {
+          "directory": "agents.example",
+          "fetch_result": "failed",
+          "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+          "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
+          "vouch": "does_not_vouch"
+        }
+      ]
+    }
+  ],
+  "generator": "core/src/vectors.rs (just vectors)",
+  "identities": [
+    {
+      "identity": "ac:v0:5VVzLT9cVzcBcCIVq_VuwtfuXwqUzIRGErSB51BJXlY",
+      "ik_secret": "05628127884d6c64989ec12b12a9e82975b06d8fbe8921d2596eedb0939c9334"
+    },
+    {
+      "identity": "ac:v0:c8rNnZJkttHSQeKi8jq5CXxhXIpAavDaN4rrmXM6K0k",
+      "ik_secret": "a641b9e74be809f4cc5e633e866e1489c336fc16be0221b07c64ee55c8a79980"
+    }
+  ],
+  "seed": "28885aa1aeae4666dcb1c671f650f71dbe1954c75b7cc7af0f91e8adea688167",
+  "states": [
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792497600,
+          "result": "vouches"
+        }
+      ],
+      "name": "no owner domain",
+      "now": 1792497600,
+      "owner_domain": null,
+      "skipped": false,
+      "state": "unclaimed"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [],
+      "name": "nothing fetched yet",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "checking"
+    },
+    {
+      "applies": [
+        "daemon"
+      ],
+      "fetches": [],
+      "name": "the human skipped the fetch",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": true,
+      "state": "unchecked"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792494000,
+          "result": "vouches"
+        }
+      ],
+      "name": "vouched an hour ago",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "verified"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "vouched, then a failed fetch",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "verified"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792324800,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "vouched 2 days ago, failing since",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "stale"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1791806400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "vouched 8 days ago, failing since",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "failed"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "the first fetch failed",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "failed"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "does_not_vouch"
+        }
+      ],
+      "name": "stopped vouching",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "failed"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "revoked"
+        }
+      ],
+      "name": "revoked",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "revoked"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "does_not_vouch"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "stopped vouching, then a failed fetch",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "failed"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "revoked"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "revoked, then a failed fetch",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "revoked"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792152000,
+          "result": "vouches"
+        },
+        {
+          "at": 1792238400,
+          "result": "revoked"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "revoked, then days of failed fetches",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "revoked"
+    },
+    {
+      "applies": [
+        "daemon",
+        "directory"
+      ],
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "does_not_vouch"
+        },
+        {
+          "at": 1792497600,
+          "result": "vouches"
+        }
+      ],
+      "name": "stopped vouching, then vouched again",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "verified"
+    },
+    {
+      "applies": [
+        "daemon"
+      ],
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "revoked"
+        },
+        {
+          "at": 1792497600,
+          "result": "vouches"
+        }
+      ],
+      "name": "revoked, then vouched again",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "verified"
+    }
+  ]
+}

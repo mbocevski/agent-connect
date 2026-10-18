@@ -31,6 +31,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use zeroize::Zeroizing;
 
+mod discovery;
+
 create_exception!(
     _native,
     AgentConnectError,
@@ -47,8 +49,27 @@ create_exception!(
      from storage on next use."
 );
 
+/// The core error as `AgentConnectError(message)` with a `kind` attribute:
+/// the stable `ErrorKind` name, which callers branch on instead of the
+/// message.
 fn err(e: core::Error) -> PyErr {
-    AgentConnectError::new_err(e.to_string())
+    with_kind(e.to_string(), e.kind().as_str())
+}
+
+/// An `AgentConnectError` for a bad argument from Python (`kind`
+/// `"malformed"`).
+fn bad_arg(message: impl Into<String>) -> PyErr {
+    with_kind(message.into(), core::ErrorKind::Malformed.as_str())
+}
+
+fn with_kind(message: String, kind: &'static str) -> PyErr {
+    let py_err = AgentConnectError::new_err(message);
+    Python::attach(|py| {
+        // Setting an attribute on a fresh exception instance can't fail in
+        // practice; if it did, the error is still raised, without `kind`.
+        let _ = py_err.value(py).setattr("kind", kind);
+    });
+    py_err
 }
 
 fn panicked() -> PyErr {
@@ -70,14 +91,14 @@ fn panic_for_testing() -> CoreResult<()> {
 
 fn array<const N: usize>(b: &[u8], what: &'static str) -> PyResult<[u8; N]> {
     b.try_into()
-        .map_err(|_| AgentConnectError::new_err(format!("{what} must be {N} bytes")))
+        .map_err(|_| bad_arg(format!("{what} must be {N} bytes")))
 }
 
 /// A 32-byte secret copied straight into a zeroizing buffer.
 fn secret32(b: &[u8]) -> PyResult<Zeroizing<[u8; 32]>> {
     let mut out = Zeroizing::new([0u8; 32]);
     if b.len() != 32 {
-        return Err(AgentConnectError::new_err("secret must be 32 bytes"));
+        return Err(bad_arg("secret must be 32 bytes"));
     }
     out.copy_from_slice(b);
     Ok(out)
@@ -88,7 +109,7 @@ const MAX_TEST_TIME: u64 = 253_402_300_799;
 
 fn test_time(now: u64) -> PyResult<u64> {
     if now == 0 || now > MAX_TEST_TIME {
-        return Err(AgentConnectError::new_err(
+        return Err(bad_arg(
             "time must be between 1 and 253402300799 (Unix seconds)",
         ));
     }
@@ -791,6 +812,55 @@ impl Client {
         })
     }
 
+    /// Builds a sealed, signed knock on a door (SPEC §6.6.2): returns the
+    /// sealed bytes (the `knock` envelope's `ct`) and the pending knock to
+    /// keep until it joins or lapses.
+    #[pyo3(signature = (door_id, door_key, display_name, note=None))]
+    fn create_knock<'py>(
+        &self,
+        py: Python<'py>,
+        door_id: &[u8],
+        door_key: &[u8],
+        display_name: &str,
+        note: Option<&str>,
+    ) -> PyResult<(Bound<'py, PyBytes>, discovery::PendingKnock)> {
+        let id: [u8; 16] = array(door_id, "door id")?;
+        let (sealed, knock) = py.detach(|| {
+            with_client!(self, |c, _g| c.create_knock(
+                &id,
+                door_key,
+                display_name,
+                note
+            ))
+        })?;
+        Ok((PyBytes::new(py, &sealed), discovery::PendingKnock(knock)))
+    }
+
+    /// Deletes a lapsed (or joined) knock's KeyPackage private keys
+    /// (SPEC §6.6.6). Drop the `PendingKnock` and its stored copy too.
+    fn forget_knock(&self, py: Python<'_>, pending: &discovery::PendingKnock) -> PyResult<()> {
+        let k = pending.0.clone();
+        py.detach(|| with_client!(self, |c, _g| c.forget_knock(&k)))
+    }
+
+    /// Deletes the private keys of a KeyPackage this instance made (TLS
+    /// bytes) that will never be used.
+    fn delete_key_package(&self, py: Python<'_>, key_package: &[u8]) -> PyResult<()> {
+        py.detach(|| with_client!(self, |c, _g| c.delete_key_package(key_package)))
+    }
+
+    /// The owner's checks 4–5 (SPEC §6.6.3) on an opened knock: the
+    /// KeyPackage (including that it is unused) and the signature.
+    fn verify_knock(
+        &self,
+        py: Python<'_>,
+        opened: &discovery::OpenedKnock,
+    ) -> PyResult<discovery::VerifiedKnock> {
+        let o = opened.0.clone();
+        py.detach(|| with_client!(self, |c, _g| c.verify_knock(o.clone())))
+            .map(discovery::VerifiedKnock)
+    }
+
     /// Commits the Add (pending until confirmed) and wraps the Welcome.
     #[pyo3(signature = (group_id, request, invite, switch_floor=true))]
     fn add_member<'py>(
@@ -925,7 +995,7 @@ impl Client {
         let action = match action {
             "error" => core::failpoint::Action::Error,
             "panic" => core::failpoint::Action::Panic,
-            _ => return Err(AgentConnectError::new_err("action must be error or panic")),
+            _ => return Err(bad_arg("action must be error or panic")),
         };
         with_client!(self, |c, _g| c.failpoints().arm(name, action, times))
     }
@@ -1370,6 +1440,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VerifiedJoinRequest>()?;
     m.add_class::<Client>()?;
     m.add_class::<Database>()?;
+    discovery::register(m)?;
     for f in [
         wrap_pyfunction!(supports_protocol, m)?,
         wrap_pyfunction!(parse_invite_url, m)?,

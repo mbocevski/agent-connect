@@ -1,0 +1,56 @@
+{
+  "description": "SPEC 13.2.3 Withdrawal: sig = Ed25519(IK, 'agentconnect/v0/listing-withdraw' || JCS(withdrawal without sig)). It is fresh within 300 s of ts, and applies to `listing` (seq 7) when directory, name and identity match and listing seq <= withdrawal seq.",
+  "directory": "agents.example",
+  "directory_keys": [
+    "2P6kUlZ6rdnRa7GUzQYSKf37bIDScUXhGp2AgKJ9rb8"
+  ],
+  "generator": "core/src/vectors.rs (just vectors)",
+  "identity_secret": "0e4b0b64b29d11499e3dd0b317377434fb68f5acf5acad9d58c7638d2d89b689",
+  "invalid": [
+    {
+      "error": "invalid withdrawal: signature",
+      "kind": "signature",
+      "name": "wrong key",
+      "withdrawal": "{\"directory\":\"agents.example\",\"identity\":\"ac:v0:Jj3fq0HuWSo3J8Zr5D5he-yDp3AiOu9E4NF50Dw4Wr8\",\"name\":\"release-planner\",\"seq\":7,\"sig\":\"3fE9VCssIqENaYOzrCkFRRGPiZx0m8UMgrw5XjaKzVhGseK2tYPzHp8M4HzEbv1cQvpP8Mb9ryMeVtr-RqxlAg\",\"ts\":1792497700,\"v\":0}"
+    },
+    {
+      "error": "invalid withdrawal: signature",
+      "kind": "signature",
+      "name": "tampered seq",
+      "withdrawal": "{\"directory\":\"agents.example\",\"identity\":\"ac:v0:ZOPxdKnc8m4EZpLuUnzQYpQzhJSNlQO_MWXuoTM7gds\",\"name\":\"release-planner\",\"seq\":8,\"sig\":\"3fE9VCssIqENaYOzrCkFRRGPiZx0m8UMgrw5XjaKzVhGseK2tYPzHp8M4HzEbv1cQvpP8Mb9ryMeVtr-RqxlAg\",\"ts\":1792497700,\"v\":0}"
+    },
+    {
+      "error": "invalid withdrawal: encoding",
+      "kind": "malformed",
+      "name": "extra field",
+      "withdrawal": "{\"directory\":\"agents.example\",\"identity\":\"ac:v0:ZOPxdKnc8m4EZpLuUnzQYpQzhJSNlQO_MWXuoTM7gds\",\"name\":\"release-planner\",\"seq\":7,\"sig\":\"3fE9VCssIqENaYOzrCkFRRGPiZx0m8UMgrw5XjaKzVhGseK2tYPzHp8M4HzEbv1cQvpP8Mb9ryMeVtr-RqxlAg\",\"ts\":1792497700,\"v\":0,\"x\":1}"
+    }
+  ],
+  "listing": "{\"capabilities\":{\"extensions\":[{\"description\":\"Reachable end-to-end encrypted through AgentConnect. Knock to connect; a human approves every connection.\",\"params\":{\"directory\":\"agents.example\",\"door\":{\"expires_at\":1793102400,\"id\":\"eSo9B-ob5klpU1Dh8UdkAQ\",\"key\":\"VKItSSmS8hRK8cqQgIY-SXBVrVWz_yumFkUjrXKpVvAp1qeqRRZvLGSDipkjeNNcr6GA4JS4lMNf7uE-JCoC6ERjd9Ev3fe1pdidGwCVzkc-Z2gRF9AHFAWt_oyd3sRkrGOe_SmRXLlo36uoU-uREIK9A4pRtRFX-Re0PKKb4YMilNuT7QuLLGxJmkhhKsRPM8iW4rvI_BUtfhZoGgdaj6I_znV21oJkkntIP5IGxpnJR0SgLawaXAKjI_lirByrEddBcCt0MijLWxglxQm9OUsVlxmNEAQNjwrC8UVsZ1ws9sGiTQlF8yxWypJYoEsFGDSkI8kLrbYz9WA4o4JMI7Ok20S2UbtTHfLBgWqtdwOkVMWFctAifMhxxmsGh8cq2zI4o_pfTNwB1yNJ7RVIzQMBaQF3S7EmKHBnBsqeP8ISwPiwdJyp88OFOZC_RrKXuWuzz4qpCeEAj5jLdyRbiLVZ4veOgFQ-cEKaB1JM-wK2msVuXNZtisIvMFMVfxpnkLhaScpgrzUQG9yKbUJptwU2pMM8Ioaap0d4m4OyDAWHYDdnWVEONOOhlhev7QXAVeqGbThVj3RZEZAyucIqUCOLFCkVNmQmEQgc8hdC9rW6VUIqfXWdMyOBmFA1GoIayhQfizyRaPRu2RNhnZvFxxoiC6exe6earKq7hxrG3_UXlNlglvrLBph3bhiPdOK3WYQ2-Clh7gmosEZ-rFI6RbcVZiGebDpclzAgN-cFcGg0czhyQPmmwut9GhhlaJxXNAAS1rS3fMChNpOYLIiUQAuOn9ogHepVDRNUP2IxK9sAx4Up1GS2KGdbfKLMC0GlQrR4WREwiSLMx3mXo4yLRLUm-vnP0GDMm0AYiCpbWjJod1W7feilmEYTeblkZGKrWtsAfYdIecZl2xuRH2lWAvsawBkhLpeCzkoRedoky_HGTgXK57vLRvSkZcmeWnCIsDqNpzeC6xVYTRRkPixA4TklONenALEnVewZ7fd_w6KmJKObdmUGqVVU5xW-MnKMulM1SDcquCC_XSu2VmoxEnyT1-eTwoWzZMdrJtoXsVkq-BAb_nKAOxg2sCPMchsbMsXDlPJjMFxTEiNTnxiI1NY7fuXJCyfIsCUwJnpzAxNkxzpGUXFqKCAxMCi55YG72gpdGbLMkrBoQEuNFKR_HIAS18wtNugbfMgZLeQ-e3yK4eQK9BK0xZcdczaVSMgVGJHIyZHBNXR7K_hih4WeImbIz8gmMfaI2gi4NXt_TEJ2KeNMSrAV50t-bCIk9pmgmulgQYzDDda7_YOjRveTLvmtIIycV1awYIpJ26OCA5muqLCJXHQNxknJA3Q159pwETJJKufLCTXMOoqCyJo7F-lDpUuUd2gxRGiMGfYW2IsUpFsPjkk7FWtwkPRl1CCmvFmlOjSWt2Vm_8uy9Sm5RThEDJR83gF15Uy5FtFnMVstqWldttlI_xmerheYuTtIy5Ku5VcRrMy6_QgPX_B3e-TB-jRjb5IoTQIzbcOWbuVVoLLOuOB619ZS17AoiNNDTADdPLb4tkGEqAYCX1kjia23ImqAFlifB4DlBwGGYdzu03uBC4gA6r963nu7vdcP1e36S3xq_U913uqBUbdccw\"},\"identity\":\"ac:v0:ZOPxdKnc8m4EZpLuUnzQYpQzhJSNlQO_MWXuoTM7gds\",\"issued_at\":1792497600,\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"relay\":\"relay.example\",\"seq\":7,\"token\":{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:ZOPxdKnc8m4EZpLuUnzQYpQzhJSNlQO_MWXuoTM7gds\",\"issued_at\":1792497600,\"key_id\":\"0FH8dOBuCx3yzmSZiQrZSQ\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"LB9KcC-i1YtZqBtxLcEZYoQHuUtC3mCclaH44sglloFW8b-p_1xsvM3zhw0ybKpGmBE1dQki6umZqkdvd719Cw\",\"token_id\":\"oMXo-q1sCWdUJfQ2U3t3jg\",\"v\":0},\"v\":0},\"required\":true,\"uri\":\"https://yggdrasill.network/ext/agentconnect/e2e/v0\"}]},\"defaultInputModes\":[\"text/plain\"],\"defaultOutputModes\":[\"text/plain\"],\"description\":\"Plans release trains and drafts schedules from a list of changes.\",\"name\":\"Release planner\",\"provider\":{\"organization\":\"Example Ltd\",\"url\":\"https://example.com\"},\"signatures\":[{\"protected\":\"eyJhbGciOiJFZERTQSIsImtpZCI6ImFjOnYwOlpPUHhkS25jOG00RVpwTHVVbnpRWXBRemhKU05sUU9fTVdYdW9UTTdnZHMiLCJ0eXAiOiJKT1NFIn0\",\"signature\":\"M9n9HNUW_8NWEKU-4sbBtJ5iO6Jk5HvUEeljY8QT0abyB38stF_d4hx9WaNpF9gsHKvB462SUHuvFn1zLPRpCw\"}],\"skills\":[{\"description\":\"Turns a change list into a dated release plan.\",\"id\":\"release-planning\",\"name\":\"Release planning\",\"tags\":[\"release planning\",\"scheduling\"]}],\"supportedInterfaces\":[{\"protocolBinding\":\"AGENTCONNECT\",\"protocolVersion\":\"0\",\"url\":\"https://agents.example/a/release-planner.json\"}],\"version\":\"1.4.0\"}",
+  "old_seq": {
+    "applies": false,
+    "withdrawal": "{\"directory\":\"agents.example\",\"identity\":\"ac:v0:ZOPxdKnc8m4EZpLuUnzQYpQzhJSNlQO_MWXuoTM7gds\",\"name\":\"release-planner\",\"seq\":6,\"sig\":\"z4NU1p7LEdOR7KZMnBcIpmyjBa_6kd7iRijGA-Kuimly-yjBvCb3IGUqPwU8SXnpLhltvcJPB61pV22tmiYyAA\",\"ts\":1792497700,\"v\":0}"
+  },
+  "seed": "f5221e2b0b715296bb33fff8263297201102c4caa21ed8b5d0fc0eee3fd3e1bb",
+  "valid": {
+    "applies": true,
+    "fresh_at": [
+      1792497400,
+      1792498000
+    ],
+    "signing_input": "agentconnect/v0/listing-withdraw{\"directory\":\"agents.example\",\"identity\":\"ac:v0:ZOPxdKnc8m4EZpLuUnzQYpQzhJSNlQO_MWXuoTM7gds\",\"name\":\"release-planner\",\"seq\":7,\"ts\":1792497700,\"v\":0}",
+    "stale_at": [
+      1792497399,
+      1792498001
+    ],
+    "stale_error": "invalid withdrawal: ts not within 300 s",
+    "stale_kind": "stale_timestamp",
+    "withdrawal": "{\"directory\":\"agents.example\",\"identity\":\"ac:v0:ZOPxdKnc8m4EZpLuUnzQYpQzhJSNlQO_MWXuoTM7gds\",\"name\":\"release-planner\",\"seq\":7,\"sig\":\"3fE9VCssIqENaYOzrCkFRRGPiZx0m8UMgrw5XjaKzVhGseK2tYPzHp8M4HzEbv1cQvpP8Mb9ryMeVtr-RqxlAg\",\"ts\":1792497700,\"v\":0}"
+  },
+  "wrong_directory": {
+    "directory": "other.example",
+    "error": "invalid withdrawal: for another directory",
+    "kind": "wrong_directory",
+    "now": 1792497700
+  }
+}

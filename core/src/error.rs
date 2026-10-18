@@ -108,6 +108,26 @@ pub enum Error {
     /// changed.
     #[error("journal key reused for a different message")]
     JournalConflict,
+    /// A listing that breaks SPEC §13.1 (format, canonical form, schema,
+    /// limits or its JWS).
+    #[error("invalid listing: {0}")]
+    InvalidListing(&'static str),
+    /// A `ListingToken` or `TokenRevocation` that is malformed, doesn't
+    /// verify under a pinned directory key, doesn't bind the listing, has
+    /// expired or was revoked (SPEC §13.2.1).
+    #[error("invalid listing token: {0}")]
+    InvalidToken(&'static str),
+    /// A `Withdrawal` that is malformed, doesn't verify or is not fresh
+    /// (SPEC §13.2.3).
+    #[error("invalid withdrawal: {0}")]
+    InvalidWithdrawal(&'static str),
+    /// An owner well-known file that breaks SPEC §13.2.4.
+    #[error("invalid owner file: {0}")]
+    InvalidOwnerFile(&'static str),
+    /// A knock that fails one of the owner's checks (SPEC §6.6.3), or a
+    /// door key or sealed knock of the wrong shape.
+    #[error("invalid knock: {0}")]
+    InvalidKnock(&'static str),
     /// An error reported by OpenMLS.
     #[error("MLS error: {0}")]
     Mls(String),
@@ -129,10 +149,228 @@ pub enum Error {
 /// Shorthand for `Result<T, agentconnect_core::Error>`.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// A stable classification of an [`Error`], for callers that act on the
+/// kind of failure (answer codes, retries, badges). Messages are human
+/// text and may change; kinds don't. Python sees [`ErrorKind::as_str`] as
+/// `AgentConnectError.kind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// Bytes that don't parse, aren't canonical or break a format rule.
+    Malformed,
+    /// A `v` (protocol version) other than 0.
+    UnsupportedVersion,
+    /// A signature that doesn't verify (listing JWS, token, revocation,
+    /// withdrawal, knock).
+    Signature,
+    /// A `key_id` that names no pinned directory key.
+    UnknownKey,
+    /// A token past its `expires_at`.
+    Expired,
+    /// A token whose `issued_at` is still in the future.
+    NotYetValid,
+    /// A revoked token.
+    Revoked,
+    /// A token bound to another directory, name, identity or owner domain.
+    TokenMismatch,
+    /// A door that has expired.
+    DoorExpired,
+    /// A knock for another door.
+    WrongDoor,
+    /// An object for another directory.
+    WrongDirectory,
+    /// A timestamp outside its window (stale or in the future).
+    StaleTimestamp,
+    /// A listing a newer one for its name (a later token, a higher `seq` or
+    /// a tombstone) supersedes.
+    Superseded,
+    /// A bounded store that is full; the input is refused, not queued.
+    Busy,
+    /// A knock or KeyPackage already seen (a replay).
+    Replay,
+    /// A KeyPackage already used in an Add.
+    KeyPackageReused,
+    /// Credential, certificate, leaf key or mailbox that don't belong
+    /// together.
+    CredentialMismatch,
+    /// A key or KEM ciphertext of the wrong length.
+    KeyLength,
+    /// An AEAD or HPKE open that failed: wrong key, wrong secret or tampering.
+    Authentication,
+    /// Anything else (storage, MLS, randomness, internal).
+    Other,
+}
+
+impl ErrorKind {
+    /// The kind's stable snake-case name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::Signature => "signature",
+            Self::UnknownKey => "unknown_key",
+            Self::Expired => "expired",
+            Self::NotYetValid => "not_yet_valid",
+            Self::Revoked => "revoked",
+            Self::TokenMismatch => "token_mismatch",
+            Self::DoorExpired => "door_expired",
+            Self::WrongDoor => "wrong_door",
+            Self::WrongDirectory => "wrong_directory",
+            Self::StaleTimestamp => "stale_timestamp",
+            Self::Superseded => "superseded",
+            Self::Busy => "busy",
+            Self::Replay => "replay",
+            Self::KeyPackageReused => "key_package_reused",
+            Self::CredentialMismatch => "credential_mismatch",
+            Self::KeyLength => "key_length",
+            Self::Authentication => "authentication",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// The kind of a discovery failure reason. This is the one place reasons
+/// are classified; nothing else may branch on them.
+fn reason_kind(reason: &str) -> ErrorKind {
+    use ErrorKind as K;
+    match reason {
+        "signature" | "revocation signature" => K::Signature,
+        "unknown key_id" => K::UnknownKey,
+        "expired" => K::Expired,
+        "not yet valid" => K::NotYetValid,
+        "revoked" => K::Revoked,
+        r if r.starts_with("bound to another") => K::TokenMismatch,
+        "door has expired" | "door expired" => K::DoorExpired,
+        "not this door" | "door_id mismatch" => K::WrongDoor,
+        "for another directory" => K::WrongDirectory,
+        "ts not within 300 s" | "ts out of range" | "issued_at is in the future" => {
+            K::StaleTimestamp
+        }
+        "replayed" => K::Replay,
+        "token older than the name's newest"
+        | "does not replace the stored listing"
+        | "tombstoned" => K::Superseded,
+        "ledger full" => K::Busy,
+        "seal does not open" => K::Authentication,
+        _ => K::Malformed,
+    }
+}
+
+impl Error {
+    /// The stable kind of this error.
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        use ErrorKind as K;
+        match self {
+            Self::UnsupportedVersion => K::UnsupportedVersion,
+            Self::InvalidListing(r)
+            | Self::InvalidToken(r)
+            | Self::InvalidWithdrawal(r)
+            | Self::InvalidOwnerFile(r)
+            | Self::InvalidKnock(r) => reason_kind(r),
+            Self::Malformed(_)
+            | Self::InvalidInviteUrl(_)
+            | Self::InvalidKeyPackage(_)
+            | Self::InvalidCert(_)
+            | Self::InvalidGroupContext(_)
+            | Self::WrongCiphersuite => K::Malformed,
+            Self::KeyPackageReused => K::KeyPackageReused,
+            Self::CredentialMismatch(_) => K::CredentialMismatch,
+            Self::HpkeKeyLength | Self::KemOutputLength => K::KeyLength,
+            Self::WelcomeAuth | Self::BadMac => K::Authentication,
+            Self::InviteExpired => K::Expired,
+            _ => K::Other,
+        }
+    }
+}
+
 pub(crate) fn mls<E: Display>(e: E) -> Error {
     Error::Mls(e.to_string())
 }
 
 pub(crate) fn storage<E: Display>(e: E) -> Error {
     Error::Storage(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ErrorKind as K;
+
+    #[test]
+    fn discovery_reasons_have_kinds() {
+        for (e, k) in [
+            (Error::InvalidListing("signature"), K::Signature),
+            (Error::InvalidToken("revocation signature"), K::Signature),
+            (Error::InvalidWithdrawal("signature"), K::Signature),
+            (Error::InvalidKnock("signature"), K::Signature),
+            (Error::InvalidToken("unknown key_id"), K::UnknownKey),
+            (Error::InvalidToken("expired"), K::Expired),
+            (Error::InvalidToken("not yet valid"), K::NotYetValid),
+            (Error::InvalidToken("revoked"), K::Revoked),
+            (
+                Error::InvalidToken("bound to another name"),
+                K::TokenMismatch,
+            ),
+            (Error::InvalidListing("door has expired"), K::DoorExpired),
+            (Error::InvalidKnock("door expired"), K::DoorExpired),
+            (Error::InvalidKnock("door_id mismatch"), K::WrongDoor),
+            (
+                Error::InvalidWithdrawal("for another directory"),
+                K::WrongDirectory,
+            ),
+            (
+                Error::InvalidWithdrawal("ts not within 300 s"),
+                K::StaleTimestamp,
+            ),
+            (Error::InvalidKnock("ts out of range"), K::StaleTimestamp),
+            (
+                Error::InvalidListing("issued_at is in the future"),
+                K::StaleTimestamp,
+            ),
+            (Error::InvalidKnock("replayed"), K::Replay),
+            (Error::InvalidListing("tombstoned"), K::Superseded),
+            (Error::InvalidKnock("ledger full"), K::Busy),
+            (Error::InvalidKnock("seal does not open"), K::Authentication),
+            (Error::InvalidListing("not canonical JCS"), K::Malformed),
+            (Error::InvalidOwnerFile("not I-JSON"), K::Malformed),
+            (Error::UnsupportedVersion, K::UnsupportedVersion),
+            (Error::KeyPackageReused, K::KeyPackageReused),
+            (Error::CredentialMismatch("x"), K::CredentialMismatch),
+            (Error::HpkeKeyLength, K::KeyLength),
+            (Error::WelcomeAuth, K::Authentication),
+            (Error::InviteExpired, K::Expired),
+            (Error::Malformed("x"), K::Malformed),
+            (Error::Storage("x".into()), K::Other),
+        ] {
+            assert_eq!(e.kind(), k, "{e}");
+        }
+        let names: std::collections::BTreeSet<&str> = [
+            K::Malformed,
+            K::UnsupportedVersion,
+            K::Signature,
+            K::UnknownKey,
+            K::Expired,
+            K::NotYetValid,
+            K::Revoked,
+            K::TokenMismatch,
+            K::DoorExpired,
+            K::WrongDoor,
+            K::WrongDirectory,
+            K::StaleTimestamp,
+            K::Superseded,
+            K::Busy,
+            K::Replay,
+            K::KeyPackageReused,
+            K::CredentialMismatch,
+            K::KeyLength,
+            K::Authentication,
+            K::Other,
+        ]
+        .into_iter()
+        .map(ErrorKind::as_str)
+        .collect();
+        assert_eq!(names.len(), 20, "kind names are distinct");
+    }
 }

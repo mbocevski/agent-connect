@@ -216,6 +216,13 @@ impl Identity {
         fingerprint(&self.public_key())
     }
 
+    /// Signs `msg` with `IK`. Every caller passes either a listing JWS
+    /// signing input or a message that starts with an `agentconnect/v0/`
+    /// label (SPEC §3.5), so no signature can stand in for another kind.
+    pub(crate) fn sign(&self, msg: &[u8]) -> [u8; 64] {
+        self.key.sign(msg).to_bytes()
+    }
+
     /// Creates a new instance of this identity: a fresh signing key `SK`, a
     /// random 64-bit `instance_id` and an [`InstanceCert`] signed by `IK`.
     ///

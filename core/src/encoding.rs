@@ -163,6 +163,96 @@ pub fn from_jcs<T: DeserializeOwned>(bytes: &[u8], what: &'static str) -> Result
     serde_json::from_value(value).map_err(|_| Error::Malformed(what))
 }
 
+/// Parses JSON (any formatting) into a [`Value`], rejecting duplicate
+/// object keys at any depth, which `serde_json` would otherwise resolve
+/// silently to the last one. Use it for JSON that isn't required to be JCS
+/// but must still have one meaning (I-JSON, RFC 7493 §2.3).
+///
+/// # Errors
+///
+/// [`Error::Malformed`] naming `what` for invalid JSON (including lone
+/// surrogates), a duplicate key or trailing data.
+pub fn parse_json_unique_keys(bytes: &[u8], what: &'static str) -> Result<Value> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    let value = <UniqueKeys as serde::Deserialize>::deserialize(&mut de)
+        .map_err(|_| Error::Malformed(what))?;
+    de.end().map_err(|_| Error::Malformed(what))?;
+    Ok(value.0)
+}
+
+struct UniqueKeys(Value);
+
+impl<'de> serde::Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        d.deserialize_any(UniqueKeysVisitor)
+    }
+}
+
+struct UniqueKeysVisitor;
+
+impl<'de> serde::de::Visitor<'de> for UniqueKeysVisitor {
+    type Value = UniqueKeys;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> std::result::Result<UniqueKeys, E> {
+        Ok(UniqueKeys(Value::Bool(v)))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> std::result::Result<UniqueKeys, E> {
+        Ok(UniqueKeys(Value::from(v)))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> std::result::Result<UniqueKeys, E> {
+        Ok(UniqueKeys(Value::from(v)))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<UniqueKeys, E> {
+        serde_json::Number::from_f64(v)
+            .map(|n| UniqueKeys(Value::Number(n)))
+            .ok_or_else(|| E::custom("non-finite number"))
+    }
+
+    fn visit_str<E>(self, v: &str) -> std::result::Result<UniqueKeys, E> {
+        Ok(UniqueKeys(Value::String(v.to_owned())))
+    }
+
+    fn visit_string<E>(self, v: String) -> std::result::Result<UniqueKeys, E> {
+        Ok(UniqueKeys(Value::String(v)))
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<UniqueKeys, E> {
+        Ok(UniqueKeys(Value::Null))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<UniqueKeys, A::Error> {
+        let mut out = Vec::new();
+        while let Some(UniqueKeys(v)) = seq.next_element()? {
+            out.push(v);
+        }
+        Ok(UniqueKeys(Value::Array(out)))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<UniqueKeys, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let UniqueKeys(v) = map.next_value()?;
+            if out.insert(key, v).is_some() {
+                return Err(serde::de::Error::custom("duplicate key"));
+            }
+        }
+        Ok(UniqueKeys(Value::Object(out)))
+    }
+}
+
 /// The largest integer magnitude allowed in protocol JSON: 2^53 − 1, the
 /// I-JSON range (RFC 7493 §2.2), where every integer has the same exact
 /// form in JCS and in ECMAScript (SPEC §3.2).
@@ -316,6 +406,36 @@ mod tests {
         }
         // Valid canonical JSON that doesn't fit the target type.
         assert_eq!(from_jcs::<u8>(b"300", "x"), Err(Error::Malformed("x")));
+    }
+
+    #[test]
+    fn unique_keys_parser_rejects_duplicates_at_any_depth() {
+        let ok = parse_json_unique_keys(
+            br#" {"a": [1, -2, 2.5, true, null, "x"], "b": {"c": {}}} "#,
+            "x",
+        )
+        .unwrap();
+        assert_eq!(
+            ok,
+            json!({"a": [1, -2, 2.5, true, null, "x"], "b": {"c": {}}})
+        );
+        for bad in [
+            &br#"{"a":1,"a":2}"#[..],
+            br#"{"a":{"b":1,"b":1}}"#,
+            br#"[{"k":1,"k":1}]"#,
+            br#"{"a":1} x"#,
+            br#""\ud800""#,
+            b"{",
+        ] {
+            assert_eq!(
+                parse_json_unique_keys(bad, "x"),
+                Err(Error::Malformed("x")),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // Escaped and literal spellings of one key are the same key.
+        assert!(parse_json_unique_keys(br#"{"a":1,"a":2}"#, "x").is_err());
     }
 
     #[test]

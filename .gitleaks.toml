@@ -12,5 +12,5 @@ paths = ['''(^|/)Cargo\.lock$''', '''(^|/)uv\.lock$''']
 [[allowlists]]
 description = "generated test vectors"
 paths = [
-    '''^testdata/(instance-cert|invite-kdf|invite-urls|padding-vectors|relay-auth|sas-vectors)\.json$''',
+    '''^testdata/(instance-cert|invite-kdf|invite-urls|padding-vectors|relay-auth|sas-vectors|listings|listing-tokens|withdrawals|owner-files|knocks)\.json$''',
 ]
