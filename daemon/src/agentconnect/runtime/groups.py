@@ -18,8 +18,10 @@ the owner's last one, which may not leave before it hands over ownership.
 It keeps its leave and reports ``leave_blocked`` once; the leave goes on
 once ownership has moved. A leave that no commit completes within
 ``groups.leave_timeout_secs`` ends locally (``left`` with ``confirmed:
-false``), except while the instance is the owner's last one: then it keeps
-its state and reports ``leave_blocked`` with ``timed_out``.
+false``), but only once the runtime has caught up with the relay, and never
+for an instance of the owner, whose view can't tell whether it became the
+owner's last one: it keeps its state and reports ``leave_blocked`` with
+``timed_out``. A group that is out of sync commits and times out no leaves.
 
 **Events** come from the commit's summary, not from a diff of cached state,
 so a replay of the same journal entry (ADR-004) reports the same:
@@ -74,9 +76,15 @@ UPDATE_THRESHOLD_INFO = "agentconnect/update-threshold"
 INSTANCE_ID = re.compile(r"^[0-9a-f]{16}$")
 MAX_INSTANCES = 50  # SPEC 8.3: the group size
 OWNER_MUST_TRANSFER = "owner_must_transfer"
+OWNER_INSTANCE = "owner_instance"
 LEAVE_BLOCKED_WARNING = (
     "This instance is the group owner's last one, so it can't leave yet (SPEC 9.2). "
     "Hand ownership over to another member first; the leave goes on after that."
+)
+OWNER_LEAVE_WARNING = (
+    "No member committed this instance's leave, and an instance of the group's owner "
+    "never times out on its own: it may not have seen that it is the owner's last one. "
+    "Hand ownership over, or remove this instance from another instance of the owner."
 )
 
 
@@ -310,26 +318,37 @@ class GroupService:
             verified=f"{trust['verified_members']} of {trust['members'] - 1} verified",
         )
         if self.leaving(group_id):
-            # The epoch ended this instance's proposal: propose again, unless
-            # it is now the owner's last instance.
-            if self.owner_must_transfer(gid):
-                await self._blocked(group_id)
-            else:
-                if self._kv(f"leave_blocked/{group_id}"):
-                    # Unblocked: the timeout counts from this proposal.
-                    e.store.kv_set(f"leave_blocked/{group_id}", "")
-                    e.store.kv_set(f"leaving_since/{group_id}", str(self._now()))
-                e._enqueue("proposal", group_id, {})
+            await self._propose_again(group_id)
         e._defer(self.wake)
 
-    async def on_removed(self, group_id: str, summary: dict[str, Any]) -> None:
+    async def _propose_again(self, group_id: str) -> None:
+        """After a commit while leaving: the epoch ended this instance's
+        proposal, so it proposes again, unless it is now the owner's last
+        instance."""
+        e = self._engine
+        if self.owner_must_transfer(unb64(group_id)):
+            await self._blocked(group_id)
+            return
+        if self._kv(f"leave_blocked/{group_id}"):
+            # Unblocked: the timeout counts from this proposal.
+            e.store.kv_set(f"leave_blocked/{group_id}", "")
+            e.store.kv_set(f"leaving_since/{group_id}", str(self._now()))
+        if not self._proposal_queued(group_id):
+            # One queued row proposes in whatever epoch it runs in.
+            e._enqueue("proposal", group_id, {})
+
+    async def on_removed(
+        self, group_id: str, summary: dict[str, Any], *, legacy: bool = False
+    ) -> None:
         """A commit removed this instance: a leave if the commit carried its
-        own leave proposal (or it was leaving: a summary journalled before
-        the core reported leaves names none), otherwise a removal."""
+        own leave proposal, otherwise a removal, as every other member reads
+        the same summary. Only a summary replayed from a journal entry an
+        older daemon wrote (``legacy``) may predate the core's ``left``, which
+        then reads back empty: there, a leaving instance reports a leave."""
         mailbox = self._engine.mailbox
         by = str(summary["committer"]["identity"])
         own_leave = any(m["mailbox_id"] == mailbox for m in summary.get("left") or [])
-        if own_leave or self.leaving(group_id):
+        if own_leave or (legacy and self.leaving(group_id)):
             await self.gone(group_id, "left", confirmed=True, by=by)
         else:
             await self.gone(group_id, "removed", by=by)
@@ -392,7 +411,8 @@ class GroupService:
         e._group_or_raise(group_id)
         gid = unb64(group_id)
         if len(self._client.members(gid)) == 1:
-            await self.gone(group_id, "left", confirmed=True)  # sole member: just delete
+            # Sole member: delete, recorded with its event in one transaction.
+            await self._gone_atomically("leave", group_id, "left", confirmed=True)
             return "left"
         if self.owner_must_transfer(gid):
             raise DaemonError("forbidden", "transfer ownership before leaving (SPEC 9.2)")
@@ -408,7 +428,23 @@ class GroupService:
         self.wake()
         return "leaving"
 
-    async def _blocked(self, group_id: str, *, timed_out: bool = False) -> None:
+    async def _gone_atomically(
+        self, path: str, group_id: str, kind: str, *, cause: str | None = None, **data: Any
+    ) -> None:
+        """:meth:`gone` in one daemon transaction (failpoints ``<path>.in_tx``
+        and ``<path>.after_tx``): a crash leaves either the group and its leave
+        as they were, or the group gone and its event recorded, which the
+        adapter is told of after a restart."""
+
+        async def body() -> str:
+            await self.gone(group_id, kind, cause=cause, **data)
+            return kind
+
+        await self._engine._apply(path, body)
+
+    async def _blocked(
+        self, group_id: str, *, timed_out: bool = False, reason: str = OWNER_MUST_TRANSFER
+    ) -> None:
         """Tell the human (once, and once more at the timeout) that this
         leave waits for an ownership transfer."""
         key = f"leave_blocked/{group_id}"
@@ -422,9 +458,9 @@ class GroupService:
             group_id,
             "leave_blocked",
             cause=f"leave_blocked/{since}/{want}",
-            reason=OWNER_MUST_TRANSFER,
+            reason=reason,
             timed_out=timed_out,
-            warning=LEAVE_BLOCKED_WARNING,
+            warning=LEAVE_BLOCKED_WARNING if reason == OWNER_MUST_TRANSFER else OWNER_LEAVE_WARNING,
         )
 
     async def run_proposal(self, row: OutboxRow, group: GroupRow) -> str:
@@ -432,12 +468,18 @@ class GroupService:
         e = self._engine
         gid = unb64(group.group_id)
         payload = dict(row.payload)
+        if "env" in payload and int(payload["env"]["epoch"]) != int(self._client.epoch(gid)):
+            payload.pop("env")  # built in an epoch that ended: propose in this one
         if "env" not in payload:
             if not self.leaving(group.group_id):
                 return "failed"  # the leave ended meanwhile
             if self.owner_must_transfer(gid):
                 await self._blocked(group.group_id)
                 return "failed"
+            members = self._client.members(gid)
+            own = self._own_leaf(members)
+            if any(int(m["leaf_index"]) == own for m in self._client.pending_leaves(gid)):
+                return "done"  # proposed in this epoch already: once is enough
             try:
                 proposal = self._client.propose_leave(gid)
             except ac.AgentConnectError as e_:
@@ -480,6 +522,13 @@ class GroupService:
             await self._blocked(group_id)
         e._defer(self.wake)
 
+    def _proposal_queued(self, group_id: str) -> bool:
+        """Whether this instance's leave proposal waits in the outbox (or is
+        being sent): it proposes in whatever epoch it runs in."""
+        return any(
+            r.kind == "proposal" and r.group_id == group_id for r in self._engine.store.outbox()
+        )
+
     def _proposals_queued(self, group_id: str) -> bool:
         return any(
             r.kind == "commit"
@@ -495,6 +544,9 @@ class GroupService:
         epoch's first leave proposal reached this instance. Returns when to
         check again, or ``None``."""
         e = self._engine
+        group = e.store.group(group_id)
+        if group is None or group.out_of_sync:
+            return None  # its commits can't land: a retry would only fail again
         gid = unb64(group_id)
         key = f"leave_seen/{group_id}"
         pending = self._client.pending_leaves(gid)
@@ -513,6 +565,10 @@ class GroupService:
         own = self._own_leaf(members)
         if own is None or own not in candidates:
             return None
+        if self.leaving(group_id) and not self.owner_must_transfer(gid):
+            # Its own leave is queued or pending: the core refuses its commits.
+            # (The owner's kept instance, whose leave was dropped, commits.)
+            return None
         due = int(seen["at"]) + candidates.index(own) * LEAVE_COMMIT_GRACE_SECS
         tried = seen.get("tried")
         if isinstance(tried, int):
@@ -528,28 +584,44 @@ class GroupService:
 
     async def _leave_timeout(self, group: GroupRow) -> float | None:
         """D10: a leave no commit completes ends locally after
-        ``groups.leave_timeout_secs``, but never while this instance is the
-        owner's last one."""
+        ``groups.leave_timeout_secs``.
+
+        Never for an instance of the owner (in the latest state it knows):
+        a sibling's leave, or the commit that made it the owner's only
+        instance, may not have reached it, so it keeps its state and reports
+        ``leave_blocked`` with ``timed_out``. Anyone else times out only once
+        its view is current (``Engine.caught_up``: connected, the reconnect
+        drain handled, the journal replayed), and only if it is then still a
+        member and still not the owner: a transfer to an instance that slept
+        through its deadline reaches it first."""
+        e = self._engine
         group_id = group.group_id
         if not self.leaving(group_id):
             return None
         since = int(self._kv(f"leaving_since/{group_id}") or str(self._now()))
-        due = since + self._engine.config.groups_leave_timeout_secs
+        due = since + e.config.groups_leave_timeout_secs
         if self._now() < due:
             return float(due)
-        if self.owner_must_transfer(unb64(group_id)):
-            await self._blocked(group_id, timed_out=True)
+        gid = unb64(group_id)
+        current = e.caught_up()
+        if json.loads(self._client.policy(gid)).get("owner") == e.me:
+            reason = OWNER_MUST_TRANSFER if self.owner_must_transfer(gid) else OWNER_INSTANCE
+            await self._blocked(group_id, timed_out=True, reason=reason)
             return None
+        if not current or self._own_leaf(self._client.members(gid)) is None:
+            return None  # catching up wakes the timer
         LOG.info("leave_timed_out", group=log.hid(group_id))
-        await self.gone(group_id, "left", cause=f"left/{group_id}/{since}", confirmed=False)
+        await self._gone_atomically(
+            "leave_timeout", group_id, "left", cause=f"left/{group_id}/{since}", confirmed=False
+        )
         return None
 
     async def step(self) -> float | None:
         """One pass of the timer over the active groups; when the next is due."""
         times: list[float] = []
         for group in self._engine.store.groups():
-            if group.status != "active":
-                continue
+            if group.status != "active" or group.out_of_sync:
+                continue  # an out-of-sync view decides nothing
             try:
                 due = [self.check_leaves(group.group_id), await self._leave_timeout(group)]
             except (ac.AgentConnectError, ac.CoreError) as err:

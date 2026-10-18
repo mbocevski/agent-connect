@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import pytest
 
 from agentconnect.failpoints import FailpointError, SimulatedCrash
+from agentconnect.runtime import engine as engine_mod
 from agentconnect_harness.cluster import WAIT, Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
 
@@ -301,6 +304,72 @@ async def test_designated_committer_restarts_with_a_pending_leave(
         assert [e["identity"] for e in events(n, "member_left")] == [c.me]
         assert events(n, "member_removed") == []
     assert [e["by"] for e in events(c, "left")] == [a.me]
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("step", ["in_tx", "after_tx"])
+async def test_a_timed_out_leave_survives_a_crash_at_the_deletion(
+    cluster: Cluster, advance: Advance, malicious_relay: Proxy, step: str
+) -> None:
+    """A leave nobody commits times out: a crash around deleting the group
+    leaves either the leave as it was (and the timeout runs again) or the
+    group gone with its `left` event, which reaches the adapter once."""
+    a = await cluster.node()
+    gid = a.daemon.create_group("Crash", "A leave that times out")
+    await a.idle()
+    c = await cluster.node(groups_leave_timeout_secs=3600)
+    await cluster.invite(a, c, gid)
+    malicious_relay(a).drop_deliveries(lambda env: env.get("kind") == "proposal")
+    await c.daemon.leave(gid)
+    await c.idle()
+    fired = daemon_point(c, f"leave_timeout.{step}", "crash")
+    await advance(3600)
+    await recover(c, advance, "crash", fired)
+    await until(lambda: status(c, gid) == "left")
+    assert [e["confirmed"] for e in events(c, "left")] == [False]
+    await until(lambda: c.daemon.store.unnotified_events() == [])
+    assert [e.data for e in c.adapter.unique_events() if e.type == "left"] == [{"confirmed": False}]
+    with pytest.raises(Exception, match="unknown group"):
+        c.daemon.client.epoch(raw(gid))
+
+
+@pytest.mark.hosts("daemon")
+async def test_a_removal_replayed_from_an_older_daemons_journal_is_the_leave(
+    group: GroupFixture,
+    advance: Advance,
+    malicious_relay: Proxy,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A journal entry written by a daemon from before the core reported
+    leaves (no marker in its context) may hold a summary whose `left` reads
+    back empty: replayed, a leaving instance reports a leave."""
+    (a, b, c), gid = await group(3)
+    for n in (a, b):
+        malicious_relay(n).drop_deliveries(lambda env: env.get("kind") == "proposal")
+    await c.daemon.leave(gid)
+    await c.idle()
+
+    def older(
+        env: dict[str, Any],
+        *,
+        from_relay: bool,
+        invite_id: str | None = None,
+        knock_id: str | None = None,
+    ) -> bytes:
+        ctx = json.loads(real(env, from_relay=from_relay, invite_id=invite_id, knock_id=knock_id))
+        del ctx[engine_mod.SUMMARY_REPORTS_LEAVES]
+        return engine_mod.canonical(ctx)
+
+    real = engine_mod.journal_context
+    monkeypatch.setattr(engine_mod, "journal_context", older)
+    fired = daemon_point(c, "receive.after_core", "crash")
+    a.daemon.remove_member(gid, c.me)
+    await until(fired)
+    monkeypatch.setattr(engine_mod, "journal_context", real)
+    await c.restart()
+    await until(lambda: status(c, gid) == "left")
+    assert [e["confirmed"] for e in events(c, "left")] == [True]
+    assert events(c, "removed") == []
 
 
 async def test_an_invite_whose_registration_crashed_is_revoked(

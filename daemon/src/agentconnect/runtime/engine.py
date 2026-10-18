@@ -78,6 +78,7 @@ from agentconnect.policy import (
     verification_holds,
 )
 from agentconnect.relay import (
+    CAUGHT_UP,
     DRAIN_KEY,
     NotConnectedError,
     RelayError,
@@ -239,6 +240,7 @@ GROUP_FIELDS = ("group_id", "epoch", "to", "routing")  # never on a knock (SPEC 
 REST_TS_KEY = "relay/rest_ts"
 # An internal frame: finish every pending journal entry (ADR-004).
 REPLAY_JOURNAL = "_replay_journal"
+SUMMARY_REPORTS_LEAVES = "left_reported"
 TransientFailure = (TransientError, FailpointError)
 
 
@@ -259,6 +261,9 @@ def journal_context(
     ctx: dict[str, Any] = {
         "env": {k: v for k, v in env.items() if k != "ct"},
         "from_relay": from_relay,
+        # Written with a core whose summaries report leaves (`left`); an
+        # entry without it may hold an older summary, whose `left` is empty.
+        SUMMARY_REPORTS_LEAVES: True,
     }
     if invite_id is not None:
         ctx["invite_id"] = invite_id
@@ -486,6 +491,9 @@ class Engine:
         self._fail_codes: dict[int, str] = {}
         self._drain_frame = False
         self._drain = DrainBudget()
+        # The relay connection (RelayLink.connections) whose reconnect drain
+        # the inbound worker has handled: until then the view may be stale.
+        self._caught_up = 0
         self.running = False
         self._closed = False
         from agentconnect.runtime.groups import GroupService  # noqa: PLC0415 - import cycle
@@ -655,6 +663,15 @@ class Engine:
                 await self._changed.wait()
 
         await asyncio.wait_for(loop(), within)
+
+    def caught_up(self) -> bool:
+        """Whether this runtime's view is as current as the relay can make
+        it: connected, the reconnect drain handled, the journal replayed."""
+        return (
+            self.link.connected
+            and self._caught_up == self.link.connections
+            and not self.client.journal_pending()
+        )
 
     def _drain_exempt(self, group_id: str, identity: str) -> bool:
         """Whether the frame being handled is part of the reconnect drain and
@@ -1002,6 +1019,9 @@ class Engine:
             await self._renotify()
         elif t == "deliver" and isinstance(frame.get("env"), dict):
             await self._handle_env(frame["env"])
+        elif t == CAUGHT_UP:
+            self._caught_up = int(frame.get("connection") or 0)
+            self.groups.wake()
         elif t == "queue_overflow":
             group_id = str(frame.get("group_id", ""))
             if self.store.group(group_id) is not None:
@@ -1311,7 +1331,7 @@ class Engine:
                 own=etype == "own_commit_confirmed",
             )
         elif etype == "removed":
-            await self.groups.on_removed(group_id, event)
+            await self.groups.on_removed(group_id, event, legacy=bool(event.get("legacy_summary")))
         elif etype == "leave_proposed":
             await self.groups.on_leave_proposed(group_id, event["member"])
         self.store.record_inbox(sender, msg_id, group_id, "done", now)
@@ -1340,6 +1360,8 @@ class Engine:
                 await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
             else:
                 event = {**entry["event"], "replayed": True}
+                if not ctx.get(SUMMARY_REPORTS_LEAVES):
+                    event["legacy_summary"] = True
                 path = "receive" if ctx.get("from_relay", True) else "confirm"
                 await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
 

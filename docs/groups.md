@@ -34,6 +34,14 @@ A new instance of a member that is already in the group is reported as
 `instance_joined`, not as a new member. A verified member stays verified
 when it adds an instance.
 
+Check every `instance_joined` for **your own** identity: you should know
+which hosts run it. A member allowed to invite could add an instance of
+your identity with a KeyPackage it saw (in a join request or a knock) and
+keep the Welcome to itself. Nobody runs that instance, but it counts as one
+of yours: while it is in the group, your last real instance can leave even
+if it is the owner's, and the group is left with an owner nobody runs.
+Remove an instance you don't know with `remove --instance`.
+
 ## Leaving
 
 `agentconnect leave <group>` (either token, `POST /v0/groups/{gid}/leave`)
@@ -47,7 +55,9 @@ works like this (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits)):
    itself. If the leave is still pending 60 seconds after the first leave
    proposal of the epoch arrived, the next member commits it, then the one
    after that, a minute apart. Which leaves are pending comes from the MLS
-   state, so a member that restarts still commits them.
+   state, so a member that restarts still commits them. A member that has
+   asked to leave itself never commits them, and neither does a member
+   whose group is out of sync: its commits can't land.
 4. Every member reports `member_left` (or `instance_left` if the identity
    keeps another instance), and the leaver reports `left` with
    `confirmed: true` and deletes its state.
@@ -55,7 +65,12 @@ works like this (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits)):
 A sole member deletes its state at once (`status` is `left`).
 
 A proposal only lives for its epoch. When another commit lands first, the
-leaver proposes again after it, until a commit carries its leave.
+leaver proposes again after it, until a commit carries its leave. It
+proposes once per epoch, so the other members report `member_leaving` once.
+
+A member that removes the leaver before it has the leave proposal commits a
+removal, not a leave: every member, the leaver included, reports what the
+commit says (`removed` for the leaver, `member_removed` for the others).
 
 ### The owner leaves last
 
@@ -84,9 +99,22 @@ to another member, it proposes again and the leave goes on.
 If no commit carries the leave within `groups.leave_timeout_secs` (7 days by
 default, the relay's message lifetime), the leaver deletes its state and
 reports `left` with `confirmed: false`. The other members still list its
-leaf until one of them removes it. The owner's last instance never times
-out this way: it keeps its state and reports `leave_blocked` again with
-`timed_out: true`.
+leaf until one of them removes it.
+
+The runtime decides this on its own view of the group, so it waits until
+that view is current: connected to the relay, with every message the relay
+held for it handled and its journal replayed. A host that slept through the
+deadline therefore first learns what happened meanwhile, for example that
+the owner handed it the group. Then it checks again: it deletes its state
+only if it is still a member and not the owner.
+
+An instance of the owner's identity never times out. Its view can't tell
+whether a sibling's leave was committed while it was away, which would make
+it the owner's last instance. It keeps its state and reports
+`leave_blocked` with `timed_out: true`: `reason` is
+`owner_must_transfer` when it knows it is the owner's last instance, else
+`owner_instance`. Hand ownership over, or remove the instance from another
+instance of the owner. A group that is out of sync doesn't time out either.
 
 ## Removing
 
@@ -128,7 +156,7 @@ identity of the member that made the commit.
 | `role_changed` | `identity`, `from`, `to`, `by` | An identity's role (`owner`, `admin`, `member`) changed. |
 | `left` | `confirmed`, `by` | This instance left. `confirmed` is false after a timeout or a short-code mismatch. |
 | `removed` | `by` | This instance was removed. |
-| `leave_blocked` | `reason`, `timed_out`, `warning` | This instance's leave waits for an ownership transfer. |
+| `leave_blocked` | `reason`, `timed_out`, `warning` | This instance's leave waits for an ownership transfer, or it is an instance of the owner whose leave timed out ([A leave nobody commits](#a-leave-nobody-commits)). |
 
 A commit that the daemon journalled before it started reporting policies
 reads back without them: its `policy_changed` carries the policy in force

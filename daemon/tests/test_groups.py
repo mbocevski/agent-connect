@@ -16,7 +16,12 @@ from agentconnect.config import (
     ConfigError,
     load_config,
 )
-from agentconnect.runtime.engine import UPDATE_AFTER_MESSAGES, canonical
+from agentconnect.runtime.engine import (
+    SUMMARY_REPORTS_LEAVES,
+    UPDATE_AFTER_MESSAGES,
+    canonical,
+    journal_context,
+)
 from agentconnect.runtime.groups import (
     UPDATE_JITTER_MESSAGES,
     membership_events,
@@ -199,3 +204,12 @@ def test_the_leave_timeout_can_only_be_shortened(tmp_path: Path) -> None:
         _load(tmp_path, "[groups]\nauto_leave = true\n")
     with pytest.raises(ConfigError, match="must be int"):
         _load(tmp_path, '[groups]\nleave_timeout_secs = "soon"\n')
+
+
+def test_journal_entries_say_their_summaries_report_leaves() -> None:
+    """An entry this daemon journals says its summary has a real `left`; one
+    an older daemon wrote doesn't, and may hold a summary from before it."""
+    env = {"kind": "commit", "group_id": "g", "msg_id": "m", "sender": "s", "ct": "x"}
+    ctx = json.loads(journal_context(env, from_relay=True))
+    assert ctx[SUMMARY_REPORTS_LEAVES] is True
+    assert "ct" not in ctx["env"]

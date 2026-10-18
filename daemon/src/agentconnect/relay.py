@@ -35,6 +35,9 @@ NONCE_LEN = 32  # SPEC 8.2
 # in one second, or the last run's); the relay allows 300 s either way.
 REST_TS_LEAD_SECS = 60
 DRAIN_KEY = "_drain"  # set on every frame handed to the daemon
+# Ours, never the relay's: handed to the daemon after the relay's ``drained``,
+# behind every frame of the reconnect drain, with the connection's number.
+CAUGHT_UP = "_caught_up"
 
 
 def b64(raw: bytes) -> str:
@@ -186,7 +189,12 @@ class RelayLink:
         t = frame.get("t")
         if t == "drained":
             self.draining = False
+            # In order after the drain's frames: once the daemon has handled
+            # it, it has seen everything the relay held for this mailbox.
+            await self._on_frame({"t": CAUGHT_UP, "connection": self.connections})
             return
+        if t == CAUGHT_UP:
+            return  # never from the relay
         # Ours, never the relay's: was this frame queued before we connected?
         frame[DRAIN_KEY] = self.draining
         if t in ("accepted", "error"):

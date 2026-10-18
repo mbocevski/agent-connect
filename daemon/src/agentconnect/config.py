@@ -657,9 +657,10 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "groups_leave_timeout_secs",
         shown_default(MAX_LEAVE_TIMEOUT_SECS),
         f"How long a leave waits for another member to commit it ({MIN_LEAVE_TIMEOUT_SECS} "
-        f"to {MAX_LEAVE_TIMEOUT_SECS}). Then the runtime deletes the group's state and reports "
-        "`left` with `confirmed: false`, unless this instance is the owner's last one: it "
-        "keeps the group and reports `leave_blocked` ([groups.md](groups.md#leaving)).",
+        f"to {MAX_LEAVE_TIMEOUT_SECS}). Then, once it has caught up with the relay, the runtime "
+        "deletes the group's state and reports `left` with `confirmed: false`, unless this "
+        "instance is the owner's: it keeps the group and reports `leave_blocked` "
+        "([groups.md](groups.md#a-leave-nobody-commits)).",
     ),
 )
 

@@ -21,8 +21,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   its leave) keeps the leave, reports `leave_blocked` and goes on once
   ownership has moved. A leave nobody commits ends locally after
   `groups.leave_timeout_secs` (new `[groups]` table; 7 days by default,
-  at least an hour) with `left` and `confirmed: false`, except on the
-  owner's last instance. New events `member_leaving`, `instance_joined`,
+  at least an hour) with `left` and `confirmed: false`, in one
+  transaction, and only once the runtime has caught up with the relay
+  (connected, the reconnect drain handled, the journal replayed) and is
+  then still a member and not the owner; an instance of the owner never
+  times out and reports `leave_blocked` with `timed_out` instead. A leaver
+  proposes once per epoch and never commits others' leaves itself, and a
+  group that is out of sync commits and times out no leaves. A removal
+  that races a leave is a removal for the leaver too. New events `member_leaving`, `instance_joined`,
   `instance_left`, `instance_removed`, `role_changed` and `leave_blocked`;
   `member_joined`, `member_left`, `member_removed`, `removed` and
   `left` carry the committer as `by`, and `policy_changed` carries the
