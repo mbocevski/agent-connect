@@ -260,7 +260,8 @@ fn reason_kind(reason: &str) -> ErrorKind {
         "replayed" => K::Replay,
         "token older than the name's newest"
         | "does not replace the stored listing"
-        | "tombstoned" => K::Superseded,
+        | "tombstoned"
+        | "seq does not increase" => K::Superseded,
         "ledger full" => K::Busy,
         "seal does not open" => K::Authentication,
         _ => K::Malformed,
@@ -342,6 +343,10 @@ mod tests {
             ),
             (Error::InvalidKnock("replayed"), K::Replay),
             (Error::InvalidListing("tombstoned"), K::Superseded),
+            (
+                Error::InvalidListing("seq does not increase"),
+                K::Superseded,
+            ),
             (Error::InvalidKnock("ledger full"), K::Busy),
             (Error::InvalidKnock("lapsed"), K::Expired),
             (Error::KnockWelcome("name"), K::WelcomeMismatch),

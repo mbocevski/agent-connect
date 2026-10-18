@@ -1,15 +1,15 @@
 //! Property tests for the listing canonical form (SPEC §13.1.3): JCS is
 //! idempotent, any valid card signs to bytes that parse back to the same
 //! card and to themselves, and no single-byte change of a signed listing is
-//! accepted.
+//! accepted. A renewal never changes the text the human approved.
 //!
 //! Seeded from `AC_TEST_SEED` when set (TESTING.md); `PROPTEST_CASES`
 //! raises the case count (nightly).
 
 use agentconnect_core::encoding::{MAX_SAFE_INTEGER, from_jcs, jcs};
 use agentconnect_core::listing::{
-    DirectoryKey, E2eParams, ListingCard, ListingProvider, ListingSkill, SignedListing, TokenGrant,
-    is_text, is_text_char,
+    DirectoryKey, E2eParams, ListedDoor, ListingCard, ListingContent, ListingProvider,
+    ListingSkill, SignedListing, TokenGrant, is_text, is_text_char,
 };
 use agentconnect_core::{Identity, Rng};
 use proptest::prelude::*;
@@ -221,5 +221,47 @@ proptest! {
         let i = at.index(bytes.len());
         bytes[i] ^= flip;
         prop_assert!(SignedListing::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn content_round_trips_and_rebuilds_the_card(t in card_text()) {
+        let k = keys();
+        let card = build(&k, t);
+        let content = card.content();
+        let json = content.to_json().unwrap();
+        prop_assert_eq!(&ListingContent::from_json(&json).unwrap(), &content);
+        let rebuilt = ListingCard::new(content, card.params.clone(), card.extension_description.clone()).unwrap();
+        prop_assert_eq!(rebuilt, card);
+    }
+
+    #[test]
+    fn renewal_never_changes_the_content(
+        t in card_text(),
+        step in 1u64..1_000_000,
+        later in 0u64..(30 * 24 * 3600),
+        door in prop::option::of((any::<[u8; 16]>(), 1u64..=7 * 24 * 3600)),
+    ) {
+        let k = keys();
+        let card = build(&k, t);
+        prop_assume!(card.params.seq.checked_add(step).is_some_and(|s| s <= MAX_SAFE_INTEGER));
+        let listing = card.sign(&k.ik).unwrap();
+        let issued_at = card.params.issued_at + later;
+        let door = door.map(|(id, life)| {
+            let mut key = vec![0u8; agentconnect_core::HPKE_PUBLIC_KEY_LEN];
+            k.rng.fill(&mut key).unwrap();
+            ListedDoor { id, key, expires_at: issued_at + life }
+        });
+        let renewed = listing
+            .renew(&k.ik, card.params.seq + step, issued_at, door.clone())
+            .unwrap();
+        prop_assert_eq!(renewed.card().content(), card.content());
+        prop_assert_eq!(&renewed.card().extension_description, &card.extension_description);
+        prop_assert_eq!(renewed.token(), listing.token());
+        let (p, q) = (renewed.params(), listing.params());
+        prop_assert_eq!((&p.identity, &p.name, &p.directory, &p.relay, &p.owner_domain),
+            (&q.identity, &q.name, &q.directory, &q.relay, &q.owner_domain));
+        prop_assert_eq!(&p.door, &door);
+        prop_assert!(renewed.replaces(&listing));
+        prop_assert!(listing.renew(&k.ik, q.seq, issued_at, None).is_err());
     }
 }

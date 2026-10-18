@@ -134,7 +134,59 @@ pub struct ListingCard {
     pub params: E2eParams,
 }
 
+/// The text of a listing: the card without its `e2e` params and the
+/// extension's description. This is what a human approves when publishing
+/// (SPEC §13.2.2); a renewal never changes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListingContent {
+    /// At most 80 characters.
+    pub name: String,
+    /// At most 500 characters.
+    pub description: String,
+    /// At most 32 characters.
+    pub version: String,
+    /// Optional provider; the listing then needs an `owner_domain` that its
+    /// `url` sits under.
+    pub provider: Option<ListingProvider>,
+    /// `capabilities.streaming`.
+    pub streaming: bool,
+    /// `capabilities.pushNotifications`.
+    pub push_notifications: bool,
+    /// 1 to 8 media types.
+    pub default_input_modes: Vec<String>,
+    /// 1 to 8 media types.
+    pub default_output_modes: Vec<String>,
+    /// 1 to 16 skills.
+    pub skills: Vec<ListingSkill>,
+}
+
 // ---- JSON layer: the closed schema, field for field ----
+
+/// The content's own closed schema: the card's text fields, and in
+/// `capabilities` only `streaming` and `pushNotifications`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContentJson {
+    name: String,
+    description: String,
+    version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<ProviderJson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<ContentCapabilitiesJson>,
+    default_input_modes: Vec<String>,
+    default_output_modes: Vec<String>,
+    skills: Vec<SkillJson>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContentCapabilitiesJson {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    streaming: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push_notifications: Option<bool>,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -427,6 +479,18 @@ impl E2eParams {
 }
 
 impl ListingSkill {
+    fn from_json(s: SkillJson) -> Self {
+        Self {
+            id: s.id,
+            name: s.name,
+            description: s.description,
+            tags: s.tags,
+            examples: s.examples.unwrap_or_default(),
+            input_modes: s.input_modes.unwrap_or_default(),
+            output_modes: s.output_modes.unwrap_or_default(),
+        }
+    }
+
     fn json(&self) -> SkillJson {
         SkillJson {
             id: self.id.clone(),
@@ -534,15 +598,7 @@ impl ListingCard {
             skills: raw
                 .skills
                 .into_iter()
-                .map(|s| ListingSkill {
-                    id: s.id,
-                    name: s.name,
-                    description: s.description,
-                    tags: s.tags,
-                    examples: s.examples.unwrap_or_default(),
-                    input_modes: s.input_modes.unwrap_or_default(),
-                    output_modes: s.output_modes.unwrap_or_default(),
-                })
+                .map(ListingSkill::from_json)
                 .collect(),
             extension_description: ext.description,
             params,
@@ -573,12 +629,11 @@ impl ListingCard {
         if let Some(d) = &self.extension_description {
             text(d, MAX_DESCRIPTION, "extension description")?;
         }
-        modes(&self.default_input_modes, true, "defaultInputModes")?;
-        modes(&self.default_output_modes, true, "defaultOutputModes")?;
-        if self.skills.is_empty() || self.skills.len() > MAX_SKILLS {
-            return Err(bad("1 to 16 skills"));
-        }
-        self.skills.iter().try_for_each(ListingSkill::validate)?;
+        check_text_fields(
+            &self.default_input_modes,
+            &self.default_output_modes,
+            &self.skills,
+        )?;
         self.params.validate()?;
         if let Some(p) = &self.provider {
             text(&p.organization, MAX_ORGANIZATION, "provider organization")?;
@@ -600,6 +655,52 @@ impl ListingCard {
             }
         }
         Ok(())
+    }
+
+    /// A card from the text its human approved and the params: the
+    /// interface and the extension follow from the params.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidListing`] if the card breaks a rule, for example a
+    /// `provider.url` that isn't under the params' `owner_domain`.
+    pub fn new(
+        content: ListingContent,
+        params: E2eParams,
+        extension_description: Option<String>,
+    ) -> Result<Self> {
+        let card = Self {
+            name: content.name,
+            description: content.description,
+            version: content.version,
+            provider: content.provider,
+            streaming: content.streaming,
+            push_notifications: content.push_notifications,
+            default_input_modes: content.default_input_modes,
+            default_output_modes: content.default_output_modes,
+            skills: content.skills,
+            extension_description,
+            params,
+        };
+        card.validate()?;
+        Ok(card)
+    }
+
+    /// The card's text: everything but the params and the extension's
+    /// description.
+    #[must_use]
+    pub fn content(&self) -> ListingContent {
+        ListingContent {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            version: self.version.clone(),
+            provider: self.provider.clone(),
+            streaming: self.streaming,
+            push_notifications: self.push_notifications,
+            default_input_modes: self.default_input_modes.clone(),
+            default_output_modes: self.default_output_modes.clone(),
+            skills: self.skills.clone(),
+        }
     }
 
     /// Parses a card to sign: JSON in any formatting (but with no duplicate
@@ -654,6 +755,116 @@ impl ListingCard {
             signature: b64(&ik.sign(input.as_bytes())),
         };
         SignedListing::from_bytes(&jcs(&self.json(Some(&signature)))?)
+    }
+}
+
+/// The default modes and the skills (SPEC §13.1.2).
+fn check_text_fields(
+    input_modes: &[String],
+    output_modes: &[String],
+    skills: &[ListingSkill],
+) -> Result<()> {
+    modes(input_modes, true, "defaultInputModes")?;
+    modes(output_modes, true, "defaultOutputModes")?;
+    if skills.is_empty() || skills.len() > MAX_SKILLS {
+        return Err(bad("1 to 16 skills"));
+    }
+    skills.iter().try_for_each(ListingSkill::validate)
+}
+
+impl ListingContent {
+    /// Parses the text of a listing: JSON in any formatting with no
+    /// duplicate keys, in the closed schema of exactly these fields
+    /// (`name`, `description`, `version`, `provider`, `capabilities` with
+    /// only `streaming` and `pushNotifications`, `defaultInputModes`,
+    /// `defaultOutputModes`, `skills`), under the profile and text rules
+    /// of SPEC §13.1. A full Agent Card is refused: its interface,
+    /// extension and signature are the listing's, not the text's.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidListing`] naming the rule broken (`"schema"` for a
+    /// field outside the schema).
+    pub fn from_json(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > 2 * MAX_LISTING_BYTES {
+            return Err(bad("too large"));
+        }
+        let value = parse_json_unique_keys(bytes, "listing content").map_err(|_| bad("json"))?;
+        check_profile(&value, false)?;
+        let raw: ContentJson = serde_json::from_value(value).map_err(|_| bad("schema"))?;
+        let caps = raw.capabilities.unwrap_or(ContentCapabilitiesJson {
+            streaming: None,
+            push_notifications: None,
+        });
+        let content = Self {
+            name: raw.name,
+            description: raw.description,
+            version: raw.version,
+            provider: raw.provider.map(|p| ListingProvider {
+                organization: p.organization,
+                url: p.url,
+            }),
+            streaming: caps.streaming == Some(true),
+            push_notifications: caps.push_notifications == Some(true),
+            default_input_modes: raw.default_input_modes,
+            default_output_modes: raw.default_output_modes,
+            skills: raw
+                .skills
+                .into_iter()
+                .map(ListingSkill::from_json)
+                .collect(),
+        };
+        content.validate()?;
+        Ok(content)
+    }
+
+    /// The canonical form (JCS), what the human is shown and approves.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidListing`] if the text breaks a rule.
+    pub fn to_json(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let capabilities =
+            (self.streaming || self.push_notifications).then(|| ContentCapabilitiesJson {
+                streaming: self.streaming.then_some(true),
+                push_notifications: self.push_notifications.then_some(true),
+            });
+        jcs(&ContentJson {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            version: self.version.clone(),
+            provider: self.provider.as_ref().map(|p| ProviderJson {
+                organization: p.organization.clone(),
+                url: p.url.clone(),
+            }),
+            capabilities,
+            default_input_modes: self.default_input_modes.clone(),
+            default_output_modes: self.default_output_modes.clone(),
+            skills: self.skills.iter().map(ListingSkill::json).collect(),
+        })
+    }
+
+    /// The text rules of SPEC §13.1.2 that need no params. The provider's
+    /// `url` is checked against the `owner_domain` by
+    /// [`ListingCard::new`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidListing`] naming the first rule broken.
+    pub fn validate(&self) -> Result<()> {
+        text(&self.name, MAX_NAME, "name")?;
+        text(&self.description, MAX_DESCRIPTION, "description")?;
+        text(&self.version, MAX_VERSION, "version")?;
+        check_text_fields(
+            &self.default_input_modes,
+            &self.default_output_modes,
+            &self.skills,
+        )?;
+        if let Some(p) = &self.provider {
+            text(&p.organization, MAX_ORGANIZATION, "provider organization")?;
+        }
+        Ok(())
     }
 }
 
@@ -866,6 +1077,36 @@ impl SignedListing {
         self.params().identity == identity && self.params().seq <= seq
     }
 
+    /// The automatic renewal of SPEC §6.6.1 and §13.2.2: the same listing
+    /// re-signed by `ik` with a new `seq` (greater than this one's), a new
+    /// `issued_at` and the new door (or none, to close it). Everything else,
+    /// the text the human approved and the token included, is copied, so a
+    /// renewal can't change it; a change of text is a new publish, which is
+    /// the human's.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidListing`]: `"seq does not increase"` (kind
+    /// `superseded`), `"signing key is not params.identity"`, or a rule the
+    /// new values break (a door more than 7 days after `issued_at`, a `seq`
+    /// past 2^53 − 1).
+    pub fn renew(
+        &self,
+        ik: &Identity,
+        seq: u64,
+        issued_at: u64,
+        door: Option<ListedDoor>,
+    ) -> Result<SignedListing> {
+        if seq <= self.card.params.seq {
+            return Err(bad("seq does not increase"));
+        }
+        let mut card = self.card.clone();
+        card.params.seq = seq;
+        card.params.issued_at = issued_at;
+        card.params.door = door;
+        card.sign(ik)
+    }
+
     /// The time checks of a publish (SPEC §13.2.2): `issued_at` is at most
     /// 300 s in the future, and a door, if present, hasn't expired. The
     /// `seq`, tombstone and relay checks need the directory's state.
@@ -888,6 +1129,7 @@ impl SignedListing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::listing::E2E_EXTENSION_URI;
     use crate::listing::TokenGrant;
     use crate::listing::Withdrawal;
     use crate::listing::testing::{Fixture, T0, card_for, fixture, grant};
@@ -1716,5 +1958,191 @@ mod tests {
         assert!(!elsewhere.applies_to(&l));
         let renamed = Withdrawal::sign(&f.ik, "agents.example", "other-name", 9, T0).unwrap();
         assert!(!renamed.applies_to(&l));
+    }
+
+    /// The text a human approves: the card without its params, in a closed
+    /// schema, in any formatting, with unique keys.
+    #[test]
+    fn listing_content_is_the_card_text_alone() {
+        let f = fixture("content");
+        let content = f.card.content();
+        let json = content.to_json().unwrap();
+        let v: Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(jcs(&v).unwrap(), json, "canonical JCS");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "defaultInputModes",
+                "defaultOutputModes",
+                "description",
+                "name",
+                "provider",
+                "skills",
+                "version"
+            ]
+        );
+        let pretty = serde_json::to_vec_pretty(&v).unwrap();
+        assert_eq!(ListingContent::from_json(&pretty).unwrap(), content);
+        // Rebuilding the card from it and the params is exact.
+        let card = ListingCard::new(
+            content.clone(),
+            f.card.params.clone(),
+            f.card.extension_description.clone(),
+        )
+        .unwrap();
+        assert_eq!(card, f.card);
+        assert_eq!(card.content(), content);
+        // Capabilities round-trip, and stay absent when both are false.
+        let mut c = content.clone();
+        c.streaming = true;
+        let back = ListingContent::from_json(&c.to_json().unwrap()).unwrap();
+        assert!(back.streaming && !back.push_notifications);
+        assert!(
+            String::from_utf8(c.to_json().unwrap())
+                .unwrap()
+                .contains("\"capabilities\":{\"streaming\":true}")
+        );
+    }
+
+    #[test]
+    fn listing_content_refuses_anything_but_the_card_text() {
+        let f = fixture("content-bad");
+        let v: Value = serde_json::from_slice(&f.card.content().to_json().unwrap()).unwrap();
+        let with = |k: &str, x: Value| {
+            let mut m = v.clone();
+            m[k] = x;
+            serde_json::to_vec(&m).unwrap()
+        };
+        let ext = json!({"extensions": [{"uri": E2E_EXTENSION_URI, "required": true}]});
+        let cases: Vec<(&str, Vec<u8>, Error)> = vec![
+            (
+                "a full card's interfaces",
+                with("supportedInterfaces", json!([{"url": "https://x.example"}])),
+                bad("schema"),
+            ),
+            (
+                "signatures",
+                with("signatures", json!([{"protected": "x", "signature": "y"}])),
+                bad("schema"),
+            ),
+            ("the extension", with("capabilities", ext), bad("schema")),
+            (
+                "an icon",
+                with("iconUrl", json!("https://x.example/i.png")),
+                bad("schema"),
+            ),
+            (
+                "a default value",
+                with("capabilities", json!({"streaming": false})),
+                bad("default value (false)"),
+            ),
+            (
+                "an empty value",
+                with("version", json!("")),
+                bad("empty string"),
+            ),
+            (
+                "a control character",
+                with("name", json!("two\nlines")),
+                bad("text character"),
+            ),
+            ("no skills", with("skills", json!([])), bad("empty array")),
+            (
+                "a long name",
+                with("name", json!("n".repeat(81))),
+                bad("name"),
+            ),
+            (
+                "a duplicate key",
+                b"{\"name\":\"a\",\"name\":\"b\"}".to_vec(),
+                bad("json"),
+            ),
+            ("not an object", b"[1]".to_vec(), bad("schema")),
+            (
+                "too large",
+                vec![b' '; 2 * MAX_LISTING_BYTES + 1],
+                bad("too large"),
+            ),
+        ];
+        for (name, bytes, e) in cases {
+            assert_eq!(ListingContent::from_json(&bytes).err(), Some(e), "{name}");
+        }
+        // A provider must sit under the listing's owner domain, which only
+        // the params know.
+        let mut content = f.card.content();
+        content.provider.as_mut().unwrap().url = "https://evil.example".into();
+        ListingContent::from_json(&content.to_json().unwrap()).unwrap();
+        assert_eq!(
+            ListingCard::new(content, f.card.params.clone(), None).err(),
+            Some(bad("provider url is not under owner_domain"))
+        );
+    }
+
+    /// The JSON of a listing without what a renewal may change.
+    fn fixed_part(l: &SignedListing) -> Value {
+        let mut v = value(l);
+        v.as_object_mut().unwrap().remove("signatures");
+        let p = v["capabilities"]["extensions"][0]["params"]
+            .as_object_mut()
+            .unwrap();
+        for k in ["door", "seq", "issued_at"] {
+            p.remove(k);
+        }
+        v
+    }
+
+    /// SPEC 13.2.2: renewal re-signs only `door`, `seq` and `issued_at`.
+    #[test]
+    fn renewal_changes_only_the_door_seq_and_issued_at() {
+        let f = fixture("renew");
+        let l = signed(&f);
+        let rng = Rng::for_test("renew-door");
+        let door = crate::listing::ListedDoor {
+            expires_at: T0 + 3600 + 7 * 24 * 3600,
+            ..crate::listing::testing::random_door(&rng)
+        };
+        let r = l.renew(&f.ik, 8, T0 + 3600, Some(door.clone())).unwrap();
+        assert_eq!(r.params().seq, 8);
+        assert_eq!(r.params().issued_at, T0 + 3600);
+        assert_eq!(r.params().door.as_ref(), Some(&door));
+        assert_eq!(fixed_part(&r), fixed_part(&l));
+        assert_eq!(r.card().content(), l.card().content());
+        assert_eq!(r.token(), l.token());
+        assert!(r.replaces(&l));
+        r.check_token(&f.trusted, T0 + 3600, |_| false).unwrap();
+        // Closing the door is a renewal too.
+        let closed = r.renew(&f.ik, 9, T0 + 7200, None).unwrap();
+        assert!(!closed.door_open(T0 + 7200));
+        assert_eq!(fixed_part(&closed), fixed_part(&l));
+        // What it refuses: an old seq, another signer, a door past 7 days.
+        for seq in [7, 6] {
+            assert_eq!(
+                l.renew(&f.ik, seq, T0 + 3600, None).err(),
+                Some(bad("seq does not increase"))
+            );
+        }
+        let stranger = Identity::generate(&Rng::for_test("renew-stranger")).unwrap();
+        assert_eq!(
+            l.renew(&stranger, 8, T0 + 3600, None).err(),
+            Some(bad("signing key is not params.identity"))
+        );
+        let far = crate::listing::ListedDoor {
+            expires_at: T0 + 3600 + 7 * 24 * 3600 + 1,
+            ..door
+        };
+        assert_eq!(
+            l.renew(&f.ik, 8, T0 + 3600, Some(far)).err(),
+            Some(bad("door expires_at"))
+        );
+        assert_eq!(
+            l.renew(&f.ik, crate::encoding::MAX_SAFE_INTEGER + 1, T0, None)
+                .err(),
+            Some(bad("seq or issued_at"))
+        );
+        assert_eq!(
+            bad("seq does not increase").kind(),
+            crate::ErrorKind::Superseded
+        );
     }
 }
