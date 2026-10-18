@@ -174,7 +174,11 @@ peer's control.
 
 An invalid local card is not sent. Symmetric (`oct`) keys in the JWKS are
 ignored, and only asymmetric algorithms are accepted. Whatever the result,
-a card is as trustworthy as the member that sent it (SPEC §10.5).
+a card is as trustworthy as the member that sent it (SPEC §10.5). A card
+that the A2A types can't parse is dropped as `malformed`, never used
+unchecked. Card text (name, description, skills, examples) is untrusted
+peer content, signed or not: never paste it into your agent's prompt as
+instructions.
 
 ## Facade: local client to group
 
@@ -246,8 +250,8 @@ and rate limits apply to them.
   goes to the group, the task moves to `working`, and the peer's reply
   continues that same task. If the human rejects it, or the hold expires,
   the task ends `rejected` or `failed`. If your client cancels the task (or
-  goes away) while it waits, the held message is withdrawn: the hold is
-  rejected and audited, the send fails with code `cancelled`, and a late
+  goes away) while it waits, the held message is withdrawn: the hold ends,
+  audited as `cancelled`, the send fails with code `cancelled`, and a late
   approval can't send it.
 
 ## Delivery guarantees

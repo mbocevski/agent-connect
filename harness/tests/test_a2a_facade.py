@@ -421,7 +421,7 @@ async def test_cancelling_a_held_facade_request_withdraws_the_send(
         decisions = [
             r["decision"] for r in a.daemon.store.audit(gid) if r["msg_id"] == held["msg_id"]
         ]
-        assert decisions == ["hold_for_approval", "rejected"]
+        assert decisions == ["hold_for_approval", "cancelled"]
         with pytest.raises(DaemonError):
             a.daemon.approve_message(held["hold_id"])
     finally:

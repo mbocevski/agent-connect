@@ -541,7 +541,7 @@ class Inbound:
     replayed: bool = False  # a journal replay: counted when first received
     drain_exempt: Callable[[], bool] = lambda: False  # SPEC 8.2/10.2
     card_changed: bool = False  # an Agent Card that differs from the one kept
-    card_invalid: bool = False  # a card whose signature fails against a pinned key
+    card_problem: str = ""  # an unusable card: malformed (unparsable), bad_signature
 
     @property
     def kind(self) -> str:
@@ -630,8 +630,8 @@ class SafetyPolicy:
         problem = content_problem(m.inner, m.size, limits)
         if problem is not None:
             return drop(problem)
-        if m.card_invalid:
-            return drop("bad_signature")  # SPEC 10.5: not used, and held against it
+        if m.card_problem:
+            return drop(m.card_problem)  # SPEC 10.5: not used, and held against it
         if (
             not m.replayed
             and not m.drain_exempt()

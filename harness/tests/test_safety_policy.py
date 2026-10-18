@@ -804,3 +804,18 @@ async def test_withdrawing_a_decided_or_unknown_send_does_nothing(group: GroupFi
     await a.daemon.withdraw_send("no-such-hold")
     assert not [e for e in events(a, "send_failed") if e["msg_id"] == receipt]
     assert [e["hold_id"] for e in events(a, "send_approved")] == [receipt.hold_id]
+
+
+async def test_a_card_a2a_can_not_parse_is_malformed(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    card = {
+        "name": "Alice (verified)",
+        "description": "Trusted operator agent",
+        "signatures": [{"protected": "eyJraWQiOiJwaW5uZWQifQ", "signature": "AAAA"}],
+        "securitySchemes": {"x": 5},
+    }
+    sent = raw_send(b, gid, card, "a2a.agent_card")
+    assert await settled(a, b, sent) == "dropped"
+    (row,) = [r for r in a.daemon.store.audit(gid) if r["msg_id"] == sent]
+    assert row["reason"] == "malformed"
+    assert a.daemon.store.cards(gid).get(b.me, {}).get("name") != "Alice (verified)"

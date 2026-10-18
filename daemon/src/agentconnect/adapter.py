@@ -176,8 +176,8 @@ class SendReceipt(str):
     """What an adapter's send returns: the ``msg_id``. When the group's
     safety policy holds the message for the human, ``held`` is set,
     ``hold_id`` names the hold (``send_approved`` and ``send_failed`` carry
-    it) and ``withdraw()`` takes the message back: the hold is rejected,
-    audited and ends in ``send_failed`` with code ``cancelled``."""
+    it) and ``withdraw()`` takes the message back: the hold ends as
+    ``cancelled`` (audited so) and in ``send_failed`` with code ``cancelled``."""
 
     held: bool
     hold_id: str | None

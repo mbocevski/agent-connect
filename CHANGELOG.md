@@ -78,7 +78,7 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   of a held send's `send_failed`, and no longer say the policy's own events
   reach the webhook.
 - A facade request cancelled while its send waits for approval withdraws
-  the send (rejected, audited, `send_failed` code `cancelled`), so a late
+  the send (audited as `cancelled`, `send_failed` code `cancelled`), so a late
   approval can't send it. `send_approved` and a held send's `send_failed`
   carry its `hold_id`, and adapters' `SendReceipt` has `hold_id` and
   `withdraw()`.
@@ -124,13 +124,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   their schemas define: unknown fields are stripped (SPEC 7.2), and a body
   that carries content (`parts` anywhere, or a top-level `text`, `data`,
   `file` or `raw`) is malformed, so they can't carry text, data or files
-  past `require_approval` or the file-part ban. An Agent Card's signature
+  past `require_approval` or the file-part ban. An Agent Card the A2A
+  types can't parse is dropped as `malformed`, so its signature check is
+  never skipped. A card's signature
   is verified against the pinned keys first (a failing card is dropped as
   `bad_signature`), its known A2A fields are kept exactly as sent, a card
   over the ADR-006 listing limits is refused rather than cut, our own card
   goes out as built, and with inbound approval a changed card is held.
   Controls and cards are delivered as context only, the SDK shows no text
   for them (a card is in `msg.card`), and the agent token can't send them.
+  The safety and adapter docs say card text is untrusted peer content,
+  never to be pasted into a prompt as instructions.
 - Per-group safety settings with per-sender overrides of the limits: message
   size, messages a minute per sender and per group, a per-task budget for task
   updates (300 a minute), and `file` parts (off by default, with a size cap

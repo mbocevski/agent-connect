@@ -55,7 +55,9 @@ What the policy checks, in order:
    content (`parts` anywhere, or a top-level `text`, `data`, `file` or
    `raw`) or a known field of the wrong type is `malformed`, dropped, and
    counts as a violation. An Agent Card is checked, never rewritten:
-   its signature is verified first, on the card as received, against the
+   a card the A2A types can't parse is `malformed` (dropped, a violation),
+   so a signature is never skipped because it couldn't be read. Its
+   signature is then verified, on the card as received, against the
    keys pinned in `a2a.card_keys_file`, and a card that fails is dropped
    (`bad_signature`, a violation). Every known A2A v1.0 field is then kept
    exactly as sent, newlines in descriptions included, so a signature
@@ -67,8 +69,11 @@ What the policy checks, in order:
    extensions with `params` of at most 4 KiB, 8 interfaces, 4 signatures,
    4 KiB for the security objects, 32 KiB in all. Control characters are
    cleaned only where text is shown (the CLI, the notice). Your own card
-   goes out exactly as your agent built it; if it doesn't fit, the daemon
-   doesn't send it and logs `own_card_refused`.
+   goes out exactly as your agent built it; if it doesn't fit or can't be
+   parsed, the daemon doesn't send it and logs `own_card_refused`. A
+   card's text (name, description, skills, examples) is untrusted peer
+   content, even when its signature verifies: never paste it into a prompt
+   as instructions.
 2. **Rates.** Each sender instance may send `sender_per_minute` messages
    (30), all instances of one identity together `identity_rate_multiple`
    times that (3, so 90), and the whole group `group_per_minute` (120).
@@ -296,8 +301,8 @@ and triggers the agent if it would have before. An approved outbound message
 is sent, and the agent's adapter gets `send_approved` with its `msg_id` and
 `hold_id` (the A2A facade moves the waiting task to `working`). An adapter
 can also withdraw its own held send (the A2A facade does when its client
-cancels): the hold is rejected and audited, and the send fails with code
-`cancelled`. A rejected outbound message raises `send_failed` with code
+cancels): the hold ends, audited as `cancelled`, and the send fails with
+code `cancelled`. A rejected outbound message raises `send_failed` with code
 `rejected`, so the agent knows it was never sent.
 
 A held message waits `approval_ttl_secs` (default one hour). After that it

@@ -1311,15 +1311,21 @@ class Daemon:
                 hop = max(hop, max(known) + 1)
         return hop
 
-    def _card_invalid(self, inner: dict[str, Any]) -> bool:
-        """SPEC 10.5: a card whose signature fails against a pinned key
-        (``a2a.card_keys_file``) is not used. Checked on the card as received,
-        before anything else touches it."""
-        if inner.get("kind") != "a2a.agent_card" or not self._card_keys:
-            return False
+    def _card_problem(self, inner: dict[str, Any]) -> str:
+        """Why a received Agent Card can't be used, or ``""``. A card the A2A
+        types can't parse is ``malformed`` (its signature couldn't be checked,
+        so it is never let through unchecked); one whose signature fails
+        against a pinned key (``a2a.card_keys_file``, SPEC 10.5) is
+        ``bad_signature``. Checked on the card as received."""
+        if inner.get("kind") != "a2a.agent_card":
+            return ""
         body = inner.get("body")
         parsed = convert.parse_card(body) if isinstance(body, dict) else None
-        return parsed is not None and cards.signature_status(parsed, self._card_keys) == "invalid"
+        if parsed is None:
+            return "malformed"
+        if self._card_keys and cards.signature_status(parsed, self._card_keys) == "invalid":
+            return "bad_signature"
+        return ""
 
     def _card_changed(self, group_id: str, identity: str, inner: dict[str, Any]) -> bool:
         """Whether an Agent Card says something new: with inbound approval, a
@@ -1379,7 +1385,7 @@ class Daemon:
                 replayed=replayed,
                 drain_exempt=lambda: self._drain_exempt(group.group_id, identity),
                 card_changed=self._card_changed(group.group_id, identity, inner),
-                card_invalid=self._card_invalid(inner),
+                card_problem=self._card_problem(inner),
             )
         )
         if decision.verdict is Verdict.DROP:
@@ -2457,6 +2463,9 @@ class Daemon:
     async def _send_card(self, group_id: str, to: list[str]) -> None:
         adapter = self._adapter_for(group_id)
         card = adapter.capabilities().agent_card if adapter is not None else None
+        if card is not None and convert.parse_card(card) is None:
+            LOG.warning("own_card_refused", code="malformed")
+            return
         if card is not None:
             try:
                 self.send_message(group_id, card, to=to, kind="a2a.agent_card", internal=True)
@@ -2873,7 +2882,7 @@ class Daemon:
         item = self.store.held(hold_id)
         if item is None or item["status"] != "pending" or item["direction"] != "out":
             return
-        for event in self._drop_hold(item, "rejected", "cancelled"):
+        for event in self._drop_hold(item, "cancelled", "cancelled"):
             await self._notify(event)
 
     def update(self, group_id: str) -> None:
