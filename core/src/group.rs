@@ -481,9 +481,14 @@ impl<S: Store> Client<S> {
         self.store()
     }
 
-    /// Records `kp_ref` as used, as merging an Add of it would.
-    #[cfg(test)]
-    pub(crate) fn mark_key_package_used_for_testing(&self, kp_ref: &[u8]) -> Result<()> {
+    /// Records `kp_ref` as used, as merging an Add of it would. **Tests
+    /// only** (a binding's reused-KeyPackage case); it can only refuse more.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`].
+    #[doc(hidden)]
+    pub fn mark_key_package_used_for_testing(&self, kp_ref: &[u8]) -> Result<()> {
         records::mark_key_packages_used(self.provider.records(), &[kp_ref.to_vec()])
     }
 

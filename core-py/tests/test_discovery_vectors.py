@@ -136,6 +136,56 @@ def test_listing_replacements_and_secrets() -> None:
     assert [b64e(dk.public_key)] == v["directory_keys"]
 
 
+def test_listing_renewal() -> None:
+    """SPEC 6.6.1, 13.2.2: a renewal changes only door, seq and issued_at."""
+    r = load("listings.json")["renewal"]
+    previous = ac.verify_listing(r["previous"].encode())
+    ik = ac.Identity.from_secret_bytes(bytes.fromhex(r["ik_secret"]))
+    d = r["door"]
+    door = ac.Door._derive_for_testing(b64d(d["id"]), bytes.fromhex(d["ikm"]), d["expires_at"])
+    renewed = previous.renew(ik, r["seq"], r["issued_at"], door)
+    assert renewed.bytes == r["renewed"].encode()
+    assert renewed.content == previous.content
+    assert renewed.replaces(previous)
+
+    def fixed(listing: ac.Listing) -> dict[str, Any]:
+        card = json.loads(listing.bytes)
+        del card["signatures"]
+        for k in ("door", "seq", "issued_at"):
+            card["capabilities"]["extensions"][0]["params"].pop(k, None)
+        return card
+
+    assert fixed(renewed) == fixed(previous)
+    refused = r["refused"]
+    with pytest.raises(ac.AgentConnectError) as e:
+        previous.renew(ik, refused["seq"], r["issued_at"], None)
+    assert str(e.value) == refused["error"]
+    assert e.value.kind == refused["kind"]
+
+
+def test_listing_content() -> None:
+    """The card text a human approves: canonical form and refusals."""
+    v = load("listings.json")["content"]
+    assert ac.canonical_listing_content(v["input"].encode()) == v["canonical"].encode()
+    assert ac.verify_listing(load("listings.json")["valid"]["listing"].encode()).content == (
+        v["canonical"].encode()
+    )
+    for case in v["invalid"]:
+        with pytest.raises(ac.AgentConnectError) as e:
+            ac.canonical_listing_content(case["input"].encode())
+        assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case["kind"], case["name"]
+
+
+def test_public_addresses() -> None:
+    """SPEC 13.2.4: the same address rule as the directory's resolver."""
+    v = load("public-addresses.json")
+    for case in v["blocked"]:
+        assert not ac.is_public_address(case["ip"]), case
+    for case in v["allowed"]:
+        assert ac.is_public_address(case["ip"]), case
+
+
 def test_listing_tokens() -> None:
     v = load("listing-tokens.json")
     key = b64d(v["directory_key"])
