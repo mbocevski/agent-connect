@@ -1,127 +1,172 @@
 {
-  "description": "SPEC 13.2.4 owner files (/.well-known/agentconnect.json) and owner states. `error` is null when the file parses; a file that doesn't parse vouches for nothing. latest_result: vouches | does_not_vouch | revoked | failed (no file fetched).",
+  "description": "SPEC 13.2.4 owner files (/.well-known/agentconnect.json) and owner states. `error` is null when the file parses. `vouch` is what a parsed file says (a file that doesn't parse vouches for nothing); `fetch_result` is what the fetch counts as for the owner state, where a file that doesn't parse is a failed fetch. Each state case is a history of fetches in order (result: vouches | does_not_vouch | revoked | failed); a negative result is sticky until a later fetch vouches. `identities` gives each identity's Ed25519 secret, from this file's seed, for signing test listings.",
   "files": [
     {
       "error": null,
-      "file": "{\n  \"v\": 0,\n  \"team\": \"platform\",\n  \"identities\": [\n    {\"identity\": \"ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI\", \"fingerprint\": \"1ec8 b002 70f2 7aa4 0499 ae8b a490 e3b7\"},\n    {\"identity\": \"ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q\", \"listings\": [\"agents.example/a/release-planner\"]}\n  ]\n}\n",
+      "file": "{\n  \"v\": 0,\n  \"team\": \"platform\",\n  \"identities\": [\n    {\"identity\": \"ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw\", \"fingerprint\": \"f2d5 68c7 be89 d4d0 0ec2 f755 ab63 0d91\"},\n    {\"identity\": \"ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE\", \"listings\": [\"agents.example/a/release-planner\"]}\n  ]\n}\n",
       "name": "hand-edited, with notes",
       "results": [
         {
           "directory": "agents.example",
-          "identity": "ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI",
+          "fetch_result": "vouches",
+          "identity": "ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "vouches"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "vouches",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "vouches"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         }
       ]
     },
     {
       "error": null,
-      "file": "{\"v\":0,\"identities\":[{\"identity\":\"ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI\",\"fingerprint\":\"3d8d 66d4 c22a 1402 258a 5a4d 6c79 9980\"}]}",
+      "file": "{\"v\":0,\"identities\":[{\"identity\":\"ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw\",\"fingerprint\":\"94bd 3a25 d402 bc56 425d 6707 7af6 39a7\"}]}",
       "name": "fingerprint mismatch",
       "results": [
         {
           "directory": "agents.example",
-          "identity": "ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         }
       ]
     },
     {
       "error": null,
-      "file": "{\"v\":0,\"identities\":[{\"identity\":\"ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI\"}],\"revoked\":[{\"identity\":\"ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI\",\"revoked_at\":1792000000,\"reason\":\"superseded\"}]}",
+      "file": "{\"v\":0,\"identities\":[{\"identity\":\"ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw\"}],\"revoked\":[{\"identity\":\"ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw\",\"revoked_at\":1792000000,\"reason\":\"superseded\"}]}",
       "name": "revoked",
       "results": [
         {
           "directory": "agents.example",
-          "identity": "ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI",
+          "fetch_result": "revoked",
+          "identity": "ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw",
           "name": "release-planner",
+          "reason": "superseded",
+          "revoked_at": 1792000000,
           "vouch": "revoked"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "does_not_vouch",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         }
       ]
     },
     {
       "error": "invalid owner file: not I-JSON",
-      "file": "{\"v\":0,\"v\":0,\"identities\":[{\"identity\":\"ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI\"}]}",
+      "file": "{\"v\":0,\"v\":0,\"identities\":[{\"identity\":\"ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw\"}]}",
       "name": "duplicate key",
       "results": [
         {
           "directory": "agents.example",
-          "identity": "ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI",
+          "fetch_result": "failed",
+          "identity": "ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "failed",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "failed",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         }
       ]
     },
     {
       "error": "invalid owner file: v must be 0",
-      "file": "{\"v\":1,\"identities\":[{\"identity\":\"ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI\"}]}",
+      "file": "{\"v\":1,\"identities\":[{\"identity\":\"ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw\"}]}",
       "name": "wrong version",
       "results": [
         {
           "directory": "agents.example",
-          "identity": "ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI",
+          "fetch_result": "failed",
+          "identity": "ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "failed",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "failed",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         }
       ]
@@ -133,83 +178,291 @@
       "results": [
         {
           "directory": "agents.example",
-          "identity": "ac:v0:_tvasKJVJ5O9kyRwNDBVUN47yqF2y_uNxNFQvIN72fI",
+          "fetch_result": "failed",
+          "identity": "ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "failed",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "release-planner",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         },
         {
           "directory": "agents.example",
-          "identity": "ac:v0:fWvFSj-N-R5lxoAIGcVG1chkSgU7x2zoZf3-MeJzx4Q",
+          "fetch_result": "failed",
+          "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
           "name": "other-name",
+          "reason": null,
+          "revoked_at": null,
           "vouch": "does_not_vouch"
         }
       ]
     }
   ],
   "generator": "core/src/vectors.rs (just vectors)",
-  "seed": "c043888541bbc597630def0ff735f683b58913b61192de5c627bfee7b5675e7e",
+  "identities": [
+    {
+      "identity": "ac:v0:k7HDbxmmf1uo8jGwPGrDHBM8Lpy7pgx9sZ3qWD4sbEw",
+      "ik_secret": "cdcfd6c6e1f6f8b1dd45ec14ef3679979ed4b2a0f6e345d7fba2da1529a54ba2"
+    },
+    {
+      "identity": "ac:v0:kAVIswsXTojktTibQ8Q0-YzmU6eDMCR_sgelq8t7LqE",
+      "ik_secret": "75fdecd032b4baaef10825a998abc5518d43960c7d127c598257100b45b4f372"
+    }
+  ],
+  "seed": "cc92df898fb73e0b842103f31c7af55780611d423cbd3a432a631d1967a7c4bd",
   "states": [
     {
-      "last_vouched_at": null,
-      "latest_at": null,
-      "latest_result": null,
+      "fetches": [
+        {
+          "at": 1792497600,
+          "result": "vouches"
+        }
+      ],
+      "name": "no owner domain",
       "now": 1792497600,
       "owner_domain": null,
+      "skipped": false,
       "state": "unclaimed"
     },
     {
-      "last_vouched_at": null,
-      "latest_at": null,
-      "latest_result": null,
+      "fetches": [],
+      "name": "nothing fetched yet",
       "now": 1792497600,
       "owner_domain": "example.com",
+      "skipped": false,
+      "state": "checking"
+    },
+    {
+      "fetches": [],
+      "name": "the human skipped the fetch",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": true,
       "state": "unchecked"
     },
     {
-      "last_vouched_at": 1792494000,
-      "latest_at": 1792494000,
-      "latest_result": "vouches",
+      "fetches": [
+        {
+          "at": 1792494000,
+          "result": "vouches"
+        }
+      ],
+      "name": "vouched an hour ago",
       "now": 1792497600,
       "owner_domain": "example.com",
+      "skipped": false,
       "state": "verified"
     },
     {
-      "last_vouched_at": 1792324800,
-      "latest_at": 1792497600,
-      "latest_result": "failed",
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "vouched, then a failed fetch",
       "now": 1792497600,
       "owner_domain": "example.com",
+      "skipped": false,
+      "state": "verified"
+    },
+    {
+      "fetches": [
+        {
+          "at": 1792324800,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "vouched 2 days ago, failing since",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
       "state": "stale"
     },
     {
-      "last_vouched_at": 1791806400,
-      "latest_at": 1792497600,
-      "latest_result": "failed",
+      "fetches": [
+        {
+          "at": 1791806400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "vouched 8 days ago, failing since",
       "now": 1792497600,
       "owner_domain": "example.com",
+      "skipped": false,
       "state": "failed"
     },
     {
-      "last_vouched_at": 1792494000,
-      "latest_at": 1792497600,
-      "latest_result": "does_not_vouch",
+      "fetches": [
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "the first fetch failed",
       "now": 1792497600,
       "owner_domain": "example.com",
+      "skipped": false,
       "state": "failed"
     },
     {
-      "last_vouched_at": 1792494000,
-      "latest_at": 1792497600,
-      "latest_result": "revoked",
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "does_not_vouch"
+        }
+      ],
+      "name": "stopped vouching",
       "now": 1792497600,
       "owner_domain": "example.com",
+      "skipped": false,
+      "state": "failed"
+    },
+    {
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792497600,
+          "result": "revoked"
+        }
+      ],
+      "name": "revoked",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
       "state": "revoked"
+    },
+    {
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "does_not_vouch"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "stopped vouching, then a failed fetch",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "failed"
+    },
+    {
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "revoked"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "revoked, then a failed fetch",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "revoked"
+    },
+    {
+      "fetches": [
+        {
+          "at": 1792152000,
+          "result": "vouches"
+        },
+        {
+          "at": 1792238400,
+          "result": "revoked"
+        },
+        {
+          "at": 1792497600,
+          "result": "failed"
+        }
+      ],
+      "name": "revoked, then days of failed fetches",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "revoked"
+    },
+    {
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "does_not_vouch"
+        },
+        {
+          "at": 1792497600,
+          "result": "vouches"
+        }
+      ],
+      "name": "stopped vouching, then vouched again",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "verified"
+    },
+    {
+      "fetches": [
+        {
+          "at": 1792490400,
+          "result": "vouches"
+        },
+        {
+          "at": 1792494000,
+          "result": "revoked"
+        },
+        {
+          "at": 1792497600,
+          "result": "vouches"
+        }
+      ],
+      "name": "revoked, then vouched again",
+      "now": 1792497600,
+      "owner_domain": "example.com",
+      "skipped": false,
+      "state": "verified"
     }
   ]
 }

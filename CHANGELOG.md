@@ -44,7 +44,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   single `EdDSA` JWS by the identity key, which a2a-sdk's own verifier
   accepts. Operator listing tokens checked against pinned directory keys
   (binding, 90-day lifetime, expiry, revocation), token revocations,
-  withdrawals, and the owner well-known file with its owner states. Doors
+  withdrawals, and the owner well-known file with its owner states (a
+  negative result is sticky until a later fetch vouches, and a file that
+  doesn't parse counts as a failed fetch; `OwnerHistory` in Python). Doors
   (HPKE key pairs in the v0 suite), sealed and signed knocks, the owner's
   checks 1 to 5, and the knock Welcome wrap. Vectors in `testdata/`
   (`listings.json`, `listing-tokens.json`, `withdrawals.json`,

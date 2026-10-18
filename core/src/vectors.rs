@@ -409,7 +409,7 @@ fn invite_url_vectors() {
 use crate::knock::{Door, Knock, KnockSecret};
 use crate::listing::testing::{DIRECTORY, T0, card_for, grant};
 use crate::listing::{
-    DirectoryKey, FetchResult, LatestFetch, ListingCard, ListingToken, OwnerChecks, OwnerFile,
+    DirectoryKey, FetchResult, ListingCard, ListingToken, OwnerChecks, OwnerFile, RevocationReason,
     SignedListing, TokenRevocation, TrustedDirectory, Vouch, Withdrawal, owner_state,
     protected_header,
 };
@@ -823,11 +823,26 @@ fn withdrawal_vectors() {
     check_or_write("withdrawals.json", &out);
 }
 
-fn vouch_name(v: Vouch) -> &'static str {
-    match v {
-        Vouch::Vouches => "vouches",
-        Vouch::DoesNotVouch => "does_not_vouch",
-        Vouch::Revoked => "revoked",
+/// An owner-state vector: name, owner domain, skipped, fetches (seconds
+/// before `now`, result).
+type History<'a> = (&'a str, Option<&'a str>, bool, Vec<(u64, &'a str)>);
+
+fn fetch_name(r: FetchResult) -> &'static str {
+    match r {
+        FetchResult::Fetched(v) => v.as_str(),
+        FetchResult::Failed => "failed",
+    }
+}
+
+fn fetch_from(name: &str) -> FetchResult {
+    match name {
+        "vouches" => FetchResult::Fetched(Vouch::Vouches),
+        "does_not_vouch" => FetchResult::Fetched(Vouch::DoesNotVouch),
+        "revoked" => FetchResult::Fetched(Vouch::Revoked {
+            revoked_at: None,
+            reason: None,
+        }),
+        _ => FetchResult::Failed,
     }
 }
 
@@ -835,8 +850,10 @@ fn vouch_name(v: Vouch) -> &'static str {
 #[allow(clippy::too_many_lines)]
 fn owner_file_vectors() {
     let (seed, rng) = vector_rng("owner-files.json");
-    let a = Identity::from_secret_bytes(&rng.array().unwrap());
-    let b = Identity::from_secret_bytes(&rng.array().unwrap());
+    let a_secret: [u8; 32] = rng.array().unwrap();
+    let b_secret: [u8; 32] = rng.array().unwrap();
+    let a = Identity::from_secret_bytes(&a_secret);
+    let b = Identity::from_secret_bytes(&b_secret);
     let (ai, bi) = (a.id(), b.id());
     let listing = format!("{DIRECTORY}/a/release-planner");
     let files: Vec<(&str, String)> = vec![
@@ -882,8 +899,21 @@ fn owner_file_vectors() {
             let results: Vec<Value> = probes
                 .iter()
                 .map(|(i, dir, n)| {
+                    let vouch = OwnerFile::vouch_bytes(file.as_bytes(), i, dir, n);
+                    let (revoked_at, reason) = match vouch {
+                        Vouch::Revoked { revoked_at, reason } => (
+                            revoked_at,
+                            reason.map(|r| match r {
+                                RevocationReason::Superseded => "superseded",
+                                RevocationReason::Compromised => "compromised",
+                            }),
+                        ),
+                        _ => (None, None),
+                    };
                     json!({"identity": i, "directory": dir, "name": n,
-                           "vouch": vouch_name(OwnerFile::vouch_bytes(file.as_bytes(), i, dir, n))})
+                           "vouch": vouch.as_str(),
+                           "fetch_result": fetch_name(OwnerFile::fetch_result(file.as_bytes(), i, dir, n)),
+                           "revoked_at": revoked_at, "reason": reason})
                 })
                 .collect();
             json!({"name": name, "file": file, "error": parsed.err().map(|e| e.to_string()), "results": results})
@@ -891,63 +921,102 @@ fn owner_file_vectors() {
         .collect();
     let now = T0;
     let h = 3600;
-    let state_cases: Vec<Value> = [
-        (None, None, None, None),
-        (Some("example.com"), None, None, None),
+    let d = Some("example.com");
+    // Each history is the fetches in order: (seconds before `now`, result).
+    let histories: Vec<History<'_>> = vec![
+        ("no owner domain", None, false, vec![(0, "vouches")]),
+        ("nothing fetched yet", d, false, vec![]),
+        ("the human skipped the fetch", d, true, vec![]),
+        ("vouched an hour ago", d, false, vec![(h, "vouches")]),
         (
-            Some("example.com"),
-            Some(now - h),
-            Some("vouches"),
-            Some(now - h),
+            "vouched, then a failed fetch",
+            d,
+            false,
+            vec![(2 * h, "vouches"), (0, "failed")],
         ),
         (
-            Some("example.com"),
-            Some(now),
-            Some("failed"),
-            Some(now - 2 * 24 * h),
+            "vouched 2 days ago, failing since",
+            d,
+            false,
+            vec![(48 * h, "vouches"), (0, "failed")],
         ),
         (
-            Some("example.com"),
-            Some(now),
-            Some("failed"),
-            Some(now - 8 * 24 * h),
+            "vouched 8 days ago, failing since",
+            d,
+            false,
+            vec![(192 * h, "vouches"), (0, "failed")],
+        ),
+        ("the first fetch failed", d, false, vec![(0, "failed")]),
+        (
+            "stopped vouching",
+            d,
+            false,
+            vec![(2 * h, "vouches"), (0, "does_not_vouch")],
         ),
         (
-            Some("example.com"),
-            Some(now),
-            Some("does_not_vouch"),
-            Some(now - h),
+            "revoked",
+            d,
+            false,
+            vec![(2 * h, "vouches"), (0, "revoked")],
         ),
         (
-            Some("example.com"),
-            Some(now),
-            Some("revoked"),
-            Some(now - h),
+            "stopped vouching, then a failed fetch",
+            d,
+            false,
+            vec![(2 * h, "vouches"), (h, "does_not_vouch"), (0, "failed")],
         ),
-    ]
-    .into_iter()
-    .map(|(domain, at, result, last)| {
-        let result_v = result.map(|r| match r {
-            "vouches" => FetchResult::Fetched(Vouch::Vouches),
-            "does_not_vouch" => FetchResult::Fetched(Vouch::DoesNotVouch),
-            "revoked" => FetchResult::Fetched(Vouch::Revoked),
-            _ => FetchResult::Failed,
-        });
-        let checks = OwnerChecks {
-            last_vouched_at: last,
-            latest: at
-                .zip(result_v)
-                .map(|(at, result)| LatestFetch { at, result }),
-        };
-        json!({"owner_domain": domain, "latest_at": at, "latest_result": result,
-               "last_vouched_at": last, "now": now,
-               "state": owner_state(domain, &checks, now).as_str()})
-    })
-    .collect();
+        (
+            "revoked, then a failed fetch",
+            d,
+            false,
+            vec![(2 * h, "vouches"), (h, "revoked"), (0, "failed")],
+        ),
+        (
+            "revoked, then days of failed fetches",
+            d,
+            false,
+            vec![(96 * h, "vouches"), (72 * h, "revoked"), (0, "failed")],
+        ),
+        (
+            "stopped vouching, then vouched again",
+            d,
+            false,
+            vec![(2 * h, "vouches"), (h, "does_not_vouch"), (0, "vouches")],
+        ),
+        (
+            "revoked, then vouched again",
+            d,
+            false,
+            vec![(2 * h, "vouches"), (h, "revoked"), (0, "vouches")],
+        ),
+    ];
+    let state_cases: Vec<Value> = histories
+        .into_iter()
+        .map(|(name, domain, skipped, steps)| {
+            let mut checks = OwnerChecks {
+                skipped,
+                ..OwnerChecks::default()
+            };
+            for (ago, r) in &steps {
+                checks.record(now - ago, fetch_from(r));
+            }
+            let fetches: Vec<Value> = steps
+                .iter()
+                .map(|(ago, r)| json!({"at": now - ago, "result": r}))
+                .collect();
+            json!({"name": name, "owner_domain": domain, "skipped": skipped,
+                   "fetches": fetches, "now": now,
+                   "state": owner_state(domain, &checks, now).as_str()})
+        })
+        .collect();
     let mut out = header(
-        "SPEC 13.2.4 owner files (/.well-known/agentconnect.json) and owner states. `error` is null when the file parses; a file that doesn't parse vouches for nothing. latest_result: vouches | does_not_vouch | revoked | failed (no file fetched).",
+        "SPEC 13.2.4 owner files (/.well-known/agentconnect.json) and owner states. `error` is null when the file parses. `vouch` is what a parsed file says (a file that doesn't parse vouches for nothing); `fetch_result` is what the fetch counts as for the owner state, where a file that doesn't parse is a failed fetch. Each state case is a history of fetches in order (result: vouches | does_not_vouch | revoked | failed); a negative result is sticky until a later fetch vouches. `identities` gives each identity's Ed25519 secret, from this file's seed, for signing test listings.",
         &seed,
     );
+    out["identities"] = json!([
+        {"identity": ai, "ik_secret": hex(&a_secret)},
+        {"identity": bi, "ik_secret": hex(&b_secret)},
+    ]);
     out["files"] = cases.into();
     out["states"] = state_cases.into();
     check_or_write("owner-files.json", &out);

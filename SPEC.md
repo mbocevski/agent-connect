@@ -1732,7 +1732,11 @@ name is registered with IANA before v0 is tagged):
     `reason` is `superseded` or `compromised`. An entry whose `identity` is
     valid counts as a revocation even if its other fields are not.
   - A file that is not I-JSON, is too large, has duplicate keys, or has a
-    `v` other than 0 vouches for nothing.
+    `v` other than 0 vouches for nothing, and for the owner state it counts
+    as a **failed fetch**, not as a file that doesn't vouch. A broken edit
+    therefore neither turns a verified owner into `failed` at once nor
+    clears an earlier revocation: it ages like an unreachable server. Hosts
+    that revoke a key should check that their file still parses.
 - **The fetch.** `https`, port 443, a valid WebPKI certificate, no
   redirects, `Content-Type: application/json`, a 5 s timeout, and only
   public addresses after DNS resolution: loopback, private, link-local and
@@ -1748,16 +1752,24 @@ name is registered with IANA before v0 is tagged):
   `unchecked`.
 - **States.** A fetch *vouches* when the file lists the identity in a valid
   entry (and the listing, if the entry has `listings`) and the identity is
-  not in `revoked`.
+  not in `revoked`. A fetch is *negative* when it gets a file that parses
+  but doesn't vouch, or that lists the identity in `revoked`. A checker
+  MUST keep, per listing, the time of the last fetch that vouched and the
+  time and kind of the last negative fetch. **A negative result is
+  sticky**: failed fetches after it never bring back `verified` or
+  `stale`, and only a later fetch that vouches clears it. In particular
+  `revoked` lasts until a fetch finds the identity vouched for and no
+  longer revoked.
 
   | State | Condition | Shown as |
   |---|---|---|
-  | `verified` | The last fetch that vouched was at most 24 h ago, and no later fetch got a file that doesn't vouch | "owner verified · `<domain>`", plus `provider.organization` |
+  | `verified` | The last fetch that vouched was at most 24 h ago and is later than the last negative fetch | "owner verified · `<domain>`", plus `provider.organization` |
   | `unclaimed` | No `owner_domain` | "no verified owner"; the organization is hidden |
-  | `stale` | The last fetch that vouched was between 24 h and 7 days ago, and later fetches failed | "owner last confirmed `<date>` · `<domain>`", muted; the organization is hidden |
-  | `failed` | The latest fetched file doesn't vouch, or no fetch vouched in the last 7 days | "`<domain>` does not vouch for this key"; badge and organization hidden; left out of search, still served at its URL |
-  | `revoked` | The latest fetched file lists the identity in `revoked` | Withdrawn: 410 at every URL, and a revocation entry in the feed |
-  | `unchecked` | No fetch has completed (a directory shows "checking"; a daemon whose human skipped the fetch records this) | Nothing about the owner |
+  | `stale` | The last fetch that vouched was between 24 h and 7 days ago, is later than the last negative fetch, and later fetches failed | "owner last confirmed `<date>` · `<domain>`", muted; the organization is hidden |
+  | `failed` | The last negative fetch doesn't vouch and no fetch has vouched since, or no fetch vouched in the last 7 days | "`<domain>` does not vouch for this key"; badge and organization hidden; left out of search, still served at its URL |
+  | `revoked` | The last negative fetch revokes the identity and no fetch has vouched since | Withdrawn: 410 at every URL, and a revocation entry in the feed |
+  | `checking` | No fetch has completed yet | "checking"; nothing about the owner |
+  | `unchecked` | The human skipped the fetch (a daemon's choice; see "Who checks") | Nothing about the owner |
 
 - **Rotation.** A new key is a new identity, so it needs a new token. The
   owner adds the new identity to the file, publishes the new listing under

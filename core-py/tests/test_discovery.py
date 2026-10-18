@@ -136,7 +136,7 @@ def test_owner_file_helpers(keys: tuple[ac.DirectoryKey, ac.Identity, bytes]) ->
     assert ac.owner_vouch(data, ik.id, DIRECTORY, "release-planner") == "vouches"
     assert ac.owner_file_url("example.com") == "https://example.com/.well-known/agentconnect.json"
     assert ac.owner_state(None, T0) == "unclaimed"
-    assert ac.owner_state("example.com", T0) == "unchecked"
+    assert ac.owner_state("example.com", T0) == "checking"
     with pytest.raises(ac.AgentConnectError):
         ac.owner_state("example.com", T0, "vouches")
     with pytest.raises(ac.AgentConnectError):
@@ -177,6 +177,40 @@ def test_knock_round_trip(rng: random.Random) -> None:
     # Debug output never carries the secret.
     assert "welcome_secret" not in repr(pending)
     assert "VerifiedKnock" in repr(verified)
+
+
+def test_a_negative_owner_result_is_sticky() -> None:
+    """Review M1: a failed fetch after "does not vouch" or "revoked" went
+    back to verified."""
+    t = T0
+    # vouched at t-3600, then the file stopped vouching at t-1800, then a
+    # fetch failed at t.
+    for negative, state in [("does_not_vouch", "failed"), ("revoked", "revoked")]:
+        got = ac.owner_state(
+            "example.com",
+            t,
+            "failed",
+            t,
+            last_vouched_at=t - 3600,
+            last_negative_result=negative,
+            last_negative_at=t - 1800,
+        )
+        assert got == state, negative
+        # Only a later vouching fetch clears it.
+        assert (
+            ac.owner_state(
+                "example.com",
+                t,
+                "vouches",
+                t,
+                last_vouched_at=t,
+                last_negative_result=negative,
+                last_negative_at=t - 1800,
+            )
+            == "verified"
+        )
+    assert ac.owner_state("example.com", t) == "checking"
+    assert ac.owner_state("example.com", t, skipped=True) == "unchecked"
 
 
 def test_errors_carry_a_stable_kind(rng: random.Random) -> None:

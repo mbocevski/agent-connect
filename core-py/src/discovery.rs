@@ -429,14 +429,6 @@ pub(crate) fn withdrawal_applies(data: &[u8], listing: &Listing) -> PyResult<boo
     })
 }
 
-fn vouch_str(v: Vouch) -> &'static str {
-    match v {
-        Vouch::Vouches => "vouches",
-        Vouch::DoesNotVouch => "does_not_vouch",
-        Vouch::Revoked => "revoked",
-    }
-}
-
 /// Parses an owner file (SPEC §13.2.4):
 /// `{"identities": [{"identity", "listings"}], "revoked": [{"identity",
 /// "revoked_at", "reason"}]}` with invalid entries dropped.
@@ -481,44 +473,178 @@ pub(crate) fn owner_vouch(
     directory: &str,
     name: &str,
 ) -> &'static str {
-    vouch_str(listing::OwnerFile::vouch_bytes(
-        data, identity, directory, name,
-    ))
+    listing::OwnerFile::vouch_bytes(data, identity, directory, name).as_str()
 }
 
-/// The owner state (SPEC §13.2.4) from the latest fetch (`latest_result`:
-/// `"vouches"`, `"does_not_vouch"`, `"revoked"` or `"failed"`, at
-/// `latest_at`) and the time a fetch last vouched.
+fn reason_str(r: listing::RevocationReason) -> &'static str {
+    match r {
+        listing::RevocationReason::Superseded => "superseded",
+        listing::RevocationReason::Compromised => "compromised",
+    }
+}
+
+/// What one fetch of the owner file counts as for the owner state
+/// (SPEC §13.2.4): `{"result": "vouches" | "does_not_vouch" | "revoked" |
+/// "failed", "revoked_at": int | None, "reason": str | None}`. A file that
+/// doesn't parse as a whole is `"failed"`, like an unreachable server.
 #[pyfunction]
-#[pyo3(signature = (owner_domain, now, latest_result=None, latest_at=None, last_vouched_at=None))]
+pub(crate) fn owner_fetch_result<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    identity: &str,
+    directory: &str,
+    name: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    match listing::OwnerFile::fetch_result(data, identity, directory, name) {
+        FetchResult::Failed => d.set_item("result", "failed")?,
+        FetchResult::Fetched(v) => {
+            d.set_item("result", v.as_str())?;
+            if let Vouch::Revoked { revoked_at, reason } = v {
+                d.set_item("revoked_at", revoked_at)?;
+                d.set_item("reason", reason.map(reason_str))?;
+            }
+        }
+    }
+    if !d.contains("revoked_at")? {
+        d.set_item("revoked_at", py.None())?;
+        d.set_item("reason", py.None())?;
+    }
+    Ok(d)
+}
+
+fn fetch_result(name: &str) -> PyResult<FetchResult> {
+    match name {
+        "vouches" => Ok(FetchResult::Fetched(Vouch::Vouches)),
+        "does_not_vouch" => Ok(FetchResult::Fetched(Vouch::DoesNotVouch)),
+        "revoked" => Ok(FetchResult::Fetched(Vouch::Revoked {
+            revoked_at: None,
+            reason: None,
+        })),
+        "failed" => Ok(FetchResult::Failed),
+        _ => Err(bad_arg("unknown fetch result")),
+    }
+}
+
+fn negative_result(name: &str) -> PyResult<Vouch> {
+    match fetch_result(name)? {
+        FetchResult::Fetched(v @ (Vouch::DoesNotVouch | Vouch::Revoked { .. })) => Ok(v),
+        _ => Err(bad_arg("a negative result is does_not_vouch or revoked")),
+    }
+}
+
+/// The owner state (SPEC §13.2.4) from a summary of the fetch history:
+/// the latest fetch (`latest_result`: `"vouches"`, `"does_not_vouch"`,
+/// `"revoked"` or `"failed"`, at `latest_at`), the time a fetch last
+/// vouched, the last negative result (`"does_not_vouch"` or `"revoked"`,
+/// at `last_negative_at`), and whether the human skipped the fetch. A
+/// negative result is sticky until a later fetch vouches. `OwnerChecks`
+/// keeps this summary for you.
+#[pyfunction]
+#[pyo3(signature = (
+    owner_domain,
+    now,
+    latest_result=None,
+    latest_at=None,
+    last_vouched_at=None,
+    last_negative_result=None,
+    last_negative_at=None,
+    skipped=false,
+))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn owner_state(
     owner_domain: Option<&str>,
     now: u64,
     latest_result: Option<&str>,
     latest_at: Option<u64>,
     last_vouched_at: Option<u64>,
+    last_negative_result: Option<&str>,
+    last_negative_at: Option<u64>,
+    skipped: bool,
 ) -> PyResult<&'static str> {
-    let result = latest_result
-        .map(|r| match r {
-            "vouches" => Ok(FetchResult::Fetched(Vouch::Vouches)),
-            "does_not_vouch" => Ok(FetchResult::Fetched(Vouch::DoesNotVouch)),
-            "revoked" => Ok(FetchResult::Fetched(Vouch::Revoked)),
-            "failed" => Ok(FetchResult::Failed),
-            _ => Err(bad_arg("unknown fetch result")),
-        })
-        .transpose()?;
-    let latest = match (result, latest_at) {
-        (Some(result), Some(at)) => Some(LatestFetch { at, result }),
+    let latest = match (latest_result, latest_at) {
+        (Some(r), Some(at)) => Some(LatestFetch {
+            at,
+            result: fetch_result(r)?,
+        }),
+        (None, None) => None,
+        _ => return Err(bad_arg("latest_result and latest_at go together")),
+    };
+    let last_negative = match (last_negative_result, last_negative_at) {
+        (Some(r), Some(at)) => Some((at, negative_result(r)?)),
         (None, None) => None,
         _ => {
-            return Err(bad_arg("latest_result and latest_at go together"));
+            return Err(bad_arg(
+                "last_negative_result and last_negative_at go together",
+            ));
         }
     };
     let checks = OwnerChecks {
         last_vouched_at,
+        last_negative,
         latest,
+        skipped,
     };
     Ok(listing::owner_state(owner_domain, &checks, now).as_str())
+}
+
+/// The fetch history of one listing's owner file. Record every fetch with
+/// `record(at, result)`, persist the summary properties, and ask `state`.
+#[pyclass(module = "agentconnect_core._native")]
+pub(crate) struct OwnerHistory(OwnerChecks);
+
+#[pymethods]
+impl OwnerHistory {
+    #[new]
+    #[pyo3(signature = (skipped=false))]
+    fn new(skipped: bool) -> Self {
+        Self(OwnerChecks {
+            skipped,
+            ..OwnerChecks::default()
+        })
+    }
+
+    /// Folds one fetch (`result` as from `owner_fetch_result`) into the
+    /// history.
+    fn record(&mut self, at: u64, result: &str) -> PyResult<()> {
+        self.0.record(at, fetch_result(result)?);
+        Ok(())
+    }
+
+    /// The owner state at `now` for a listing claiming `owner_domain`.
+    fn state(&self, owner_domain: Option<&str>, now: u64) -> &'static str {
+        listing::owner_state(owner_domain, &self.0, now).as_str()
+    }
+
+    #[getter]
+    fn last_vouched_at(&self) -> Option<u64> {
+        self.0.last_vouched_at
+    }
+
+    /// `(at, "does_not_vouch" | "revoked")` or `None`.
+    #[getter]
+    fn last_negative(&self) -> Option<(u64, &'static str)> {
+        self.0.last_negative.map(|(at, v)| (at, v.as_str()))
+    }
+
+    /// `(at, result)` of the latest fetch, or `None`.
+    #[getter]
+    fn latest(&self) -> Option<(u64, &'static str)> {
+        self.0.latest.map(|l| {
+            (
+                l.at,
+                match l.result {
+                    FetchResult::Fetched(v) => v.as_str(),
+                    FetchResult::Failed => "failed",
+                },
+            )
+        })
+    }
+
+    #[getter]
+    fn skipped(&self) -> bool {
+        self.0.skipped
+    }
 }
 
 /// `https://<domain>/.well-known/agentconnect.json`.
@@ -832,6 +958,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OpenedKnock>()?;
     m.add_class::<PendingKnock>()?;
     m.add_class::<VerifiedKnock>()?;
+    m.add_class::<OwnerHistory>()?;
     for f in [
         wrap_pyfunction!(verify_listing, m)?,
         wrap_pyfunction!(sign_listing, m)?,
@@ -845,6 +972,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(withdrawal_applies, m)?,
         wrap_pyfunction!(parse_owner_file, m)?,
         wrap_pyfunction!(owner_vouch, m)?,
+        wrap_pyfunction!(owner_fetch_result, m)?,
         wrap_pyfunction!(owner_state, m)?,
         wrap_pyfunction!(owner_file_url, m)?,
         wrap_pyfunction!(unwrap_knock_welcome, m)?,

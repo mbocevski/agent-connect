@@ -81,11 +81,27 @@ pub enum Vouch {
     /// The file lists the identity (and the listing, if the entry limits
     /// it) and doesn't revoke it.
     Vouches,
-    /// The file doesn't vouch for this identity in this listing, or it
-    /// isn't a valid owner file.
+    /// The file doesn't vouch for this identity in this listing.
     DoesNotVouch,
-    /// The file lists the identity in `revoked`.
-    Revoked,
+    /// The file lists the identity in `revoked`, with what its entry says.
+    Revoked {
+        /// The entry's `revoked_at`, if it is a valid integer.
+        revoked_at: Option<u64>,
+        /// The entry's `reason`, if it is one of the two defined.
+        reason: Option<RevocationReason>,
+    },
+}
+
+impl Vouch {
+    /// `"vouches"`, `"does_not_vouch"` or `"revoked"`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vouches => "vouches",
+            Self::DoesNotVouch => "does_not_vouch",
+            Self::Revoked { .. } => "revoked",
+        }
+    }
 }
 
 fn listing_ref_ok(s: &str) -> bool {
@@ -193,8 +209,11 @@ impl OwnerFile {
     /// `directory`.
     #[must_use]
     pub fn vouch(&self, identity: &str, directory: &str, name: &str) -> Vouch {
-        if self.revoked.iter().any(|r| r.identity == identity) {
-            return Vouch::Revoked;
+        if let Some(r) = self.revoked.iter().find(|r| r.identity == identity) {
+            return Vouch::Revoked {
+                revoked_at: r.revoked_at,
+                reason: r.reason,
+            };
         }
         let listing = format!("{directory}/a/{name}");
         let listed = self.identities.iter().any(|e| {
@@ -208,10 +227,24 @@ impl OwnerFile {
     }
 
     /// [`OwnerFile::vouch`] on raw fetched bytes: a file that doesn't parse
-    /// vouches for nothing.
+    /// vouches for nothing. For the owner state, use
+    /// [`OwnerFile::fetch_result`], which counts such a file as a failed
+    /// fetch.
     #[must_use]
     pub fn vouch_bytes(bytes: &[u8], identity: &str, directory: &str, name: &str) -> Vouch {
         Self::parse(bytes).map_or(Vouch::DoesNotVouch, |f| f.vouch(identity, directory, name))
+    }
+
+    /// The [`FetchResult`] of fetched bytes, for [`OwnerChecks::record`]: a
+    /// file that doesn't parse as a whole counts as a **failed fetch**, not
+    /// as "doesn't vouch" (SPEC §13.2.4). A broken edit therefore can't
+    /// clear an earlier revocation or turn a verified owner into `failed`
+    /// at once; it ages like an unreachable server.
+    #[must_use]
+    pub fn fetch_result(bytes: &[u8], identity: &str, directory: &str, name: &str) -> FetchResult {
+        Self::parse(bytes).map_or(FetchResult::Failed, |f| {
+            FetchResult::Fetched(f.vouch(identity, directory, name))
+        })
     }
 }
 
@@ -234,13 +267,40 @@ pub struct LatestFetch {
     pub result: FetchResult,
 }
 
-/// The fetch history [`owner_state`] needs.
+/// The fetch history [`owner_state`] needs. Keep it per listing and
+/// update it with [`OwnerChecks::record`] after every fetch.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OwnerChecks {
     /// When a fetch last vouched (Unix seconds), if ever.
     pub last_vouched_at: Option<u64>,
+    /// The latest fetch that got a file which doesn't vouch or revokes the
+    /// identity, with its time. A negative result is sticky: only a later
+    /// fetch that vouches clears it.
+    pub last_negative: Option<(u64, Vouch)>,
     /// The latest completed fetch, if any.
     pub latest: Option<LatestFetch>,
+    /// The human chose not to fetch (a daemon's `--no-domain-check`).
+    pub skipped: bool,
+}
+
+impl OwnerChecks {
+    /// Folds one fetch at `at` into the history.
+    pub fn record(&mut self, at: u64, result: FetchResult) {
+        match result {
+            FetchResult::Fetched(Vouch::Vouches) => {
+                self.last_vouched_at = Some(self.last_vouched_at.map_or(at, |t| t.max(at)));
+            }
+            FetchResult::Fetched(v) => {
+                if self.last_negative.is_none_or(|(t, _)| at >= t) {
+                    self.last_negative = Some((at, v));
+                }
+            }
+            FetchResult::Failed => {}
+        }
+        if self.latest.is_none_or(|l| at >= l.at) {
+            self.latest = Some(LatestFetch { at, result });
+        }
+    }
 }
 
 /// The owner state of a listing (SPEC §13.2.4).
@@ -254,9 +314,12 @@ pub enum OwnerState {
     Stale,
     /// The latest file doesn't vouch, or nothing vouched for 7 days.
     Failed,
-    /// The latest file revokes the identity.
+    /// A fetch revoked the identity, and none has vouched since.
     Revoked,
-    /// No fetch has completed (or the human skipped it).
+    /// No fetch has completed yet (a directory shows "checking").
+    Checking,
+    /// The human skipped the fetch, so nothing is known (a daemon records
+    /// this for a knock made with `--no-domain-check`).
     Unchecked,
 }
 
@@ -270,6 +333,7 @@ impl OwnerState {
             Self::Stale => "stale",
             Self::Failed => "failed",
             Self::Revoked => "revoked",
+            Self::Checking => "checking",
             Self::Unchecked => "unchecked",
         }
     }
@@ -277,25 +341,40 @@ impl OwnerState {
 
 /// The owner state at `now` of a listing that claims `owner_domain`, from
 /// its fetch history (SPEC §13.2.4).
+///
+/// A negative result is sticky. After a fetch that doesn't vouch or that
+/// revokes, the state stays `failed` or `revoked` through any number of
+/// failed fetches, and only a later fetch that vouches clears it. Only
+/// fetches that vouched count towards `verified` and `stale`.
 #[must_use]
 pub fn owner_state(owner_domain: Option<&str>, checks: &OwnerChecks, now: u64) -> OwnerState {
     if owner_domain.is_none() {
         return OwnerState::Unclaimed;
     }
-    let Some(latest) = checks.latest else {
+    if checks.skipped {
         return OwnerState::Unchecked;
+    }
+    // Fold `latest` in too, so a caller that only set `latest` is safe.
+    let mut h = OwnerChecks {
+        latest: None,
+        ..*checks
     };
-    let last_vouched = match latest.result {
-        FetchResult::Fetched(Vouch::Revoked) => return OwnerState::Revoked,
-        FetchResult::Fetched(Vouch::DoesNotVouch) => return OwnerState::Failed,
-        FetchResult::Fetched(Vouch::Vouches) => Some(
-            checks
-                .last_vouched_at
-                .map_or(latest.at, |t| t.max(latest.at)),
-        ),
-        FetchResult::Failed => checks.last_vouched_at,
-    };
-    match last_vouched.map(|t| now.saturating_sub(t)) {
+    match checks.latest {
+        Some(l) => h.record(l.at, l.result),
+        None if h.last_vouched_at.is_none() && h.last_negative.is_none() => {
+            return OwnerState::Checking;
+        }
+        None => {}
+    }
+    if let Some((neg_at, neg)) = h.last_negative
+        && h.last_vouched_at.is_none_or(|v| v <= neg_at)
+    {
+        return match neg {
+            Vouch::Revoked { .. } => OwnerState::Revoked,
+            _ => OwnerState::Failed,
+        };
+    }
+    match h.last_vouched_at.map(|t| now.saturating_sub(t)) {
         Some(age) if age <= VERIFIED_FOR_SECS => OwnerState::Verified,
         Some(age) if age <= STALE_AFTER_SECS => OwnerState::Stale,
         _ => OwnerState::Failed,
@@ -310,6 +389,10 @@ mod tests {
     use serde_json::json;
 
     const DIR: &str = "agents.example";
+    const REV: Vouch = Vouch::Revoked {
+        revoked_at: None,
+        reason: None,
+    };
 
     fn ids() -> (Identity, Identity) {
         let rng = Rng::for_test("owner-file");
@@ -386,8 +469,14 @@ mod tests {
             ],
         }))
         .unwrap();
-        assert_eq!(f.vouch(&a.id(), DIR, "release-planner"), Vouch::Revoked);
-        assert_eq!(f.vouch(&b.id(), DIR, "release-planner"), Vouch::Revoked);
+        assert_eq!(
+            f.vouch(&a.id(), DIR, "release-planner"),
+            Vouch::Revoked {
+                revoked_at: Some(1_792_000_000),
+                reason: Some(RevocationReason::Superseded)
+            }
+        );
+        assert_eq!(f.vouch(&b.id(), DIR, "release-planner"), REV);
         assert_eq!(f.revoked().len(), 2);
         assert_eq!(f.revoked()[0].reason, Some(RevocationReason::Superseded));
         assert_eq!(f.revoked()[0].revoked_at, Some(1_792_000_000));
@@ -447,6 +536,112 @@ mod tests {
         );
     }
 
+    /// Review M1: a failed fetch after a negative one used to bring back
+    /// `verified` (within 24 h of the last vouch) or `stale`.
+    #[test]
+    fn negative_results_are_sticky() {
+        const H: u64 = 3600;
+        let d = Some("example.com");
+        let history = |steps: &[(u64, FetchResult)]| {
+            let mut c = OwnerChecks::default();
+            for (at, r) in steps {
+                c.record(*at, *r);
+            }
+            c
+        };
+        let ok = FetchResult::Fetched(Vouch::Vouches);
+        let no = FetchResult::Fetched(Vouch::DoesNotVouch);
+        let rev = FetchResult::Fetched(REV);
+        let fail = FetchResult::Failed;
+        let t = 100 * 24 * H;
+        for (steps, now, expected) in [
+            (
+                vec![(t - 2 * H, ok), (t - H, no), (t, fail)],
+                t,
+                OwnerState::Failed,
+            ),
+            (
+                vec![(t - 2 * H, ok), (t - H, rev), (t, fail)],
+                t,
+                OwnerState::Revoked,
+            ),
+            // Days of failures don't wear a revocation down to `stale`.
+            (
+                vec![(t - 2 * H, ok), (t - H, rev), (t + 3 * 24 * H, fail)],
+                t + 3 * 24 * H,
+                OwnerState::Revoked,
+            ),
+            // Only a later vouching fetch clears it.
+            (
+                vec![(t - 2 * H, ok), (t - H, no), (t, ok)],
+                t,
+                OwnerState::Verified,
+            ),
+            (
+                vec![(t - 2 * H, ok), (t - H, rev), (t, ok), (t + H, fail)],
+                t + H,
+                OwnerState::Verified,
+            ),
+            (vec![(t - H, rev), (t - H, ok)], t, OwnerState::Revoked),
+            (vec![(t - 2 * H, ok), (t, fail)], t, OwnerState::Verified),
+            (vec![(t - 2 * 24 * H, ok), (t, fail)], t, OwnerState::Stale),
+            (vec![(t, fail)], t, OwnerState::Failed),
+            (vec![], t, OwnerState::Checking),
+        ] {
+            let c = history(&steps);
+            assert_eq!(owner_state(d, &c, now), expected, "{steps:?}");
+        }
+        // Out-of-order records keep the newest of each.
+        let c = history(&[(t, no), (t - H, ok), (t - 2 * H, rev)]);
+        assert_eq!(c.last_negative, Some((t, Vouch::DoesNotVouch)));
+        assert_eq!(c.latest.map(|l| l.at), Some(t));
+        assert_eq!(owner_state(d, &c, t), OwnerState::Failed);
+        // A human who skipped the fetch.
+        let skipped = OwnerChecks {
+            skipped: true,
+            ..OwnerChecks::default()
+        };
+        assert_eq!(owner_state(d, &skipped, t), OwnerState::Unchecked);
+        assert_eq!(owner_state(None, &skipped, t), OwnerState::Unclaimed);
+    }
+
+    /// Review L2: a file broken as a whole is a failed fetch, so it can't
+    /// clear an earlier revocation.
+    #[test]
+    fn a_broken_file_is_a_failed_fetch() {
+        let (a, _) = ids();
+        let broken = format!(
+            "{{\"v\":0,\"v\":0,\"identities\":[{{\"identity\":\"{}\"}}]}}",
+            a.id()
+        );
+        assert_eq!(
+            OwnerFile::fetch_result(broken.as_bytes(), &a.id(), DIR, "release-planner"),
+            FetchResult::Failed
+        );
+        let revoking = format!(
+            "{{\"v\":0,\"revoked\":[{{\"identity\":\"{}\",\"reason\":\"compromised\"}}]}}",
+            a.id()
+        );
+        let r = OwnerFile::fetch_result(revoking.as_bytes(), &a.id(), DIR, "release-planner");
+        assert_eq!(
+            r,
+            FetchResult::Fetched(Vouch::Revoked {
+                revoked_at: None,
+                reason: Some(RevocationReason::Compromised)
+            })
+        );
+        let mut c = OwnerChecks::default();
+        c.record(10, r);
+        c.record(20, FetchResult::Failed);
+        assert_eq!(
+            owner_state(Some("example.com"), &c, 20),
+            OwnerState::Revoked
+        );
+        assert_eq!(Vouch::Vouches.as_str(), "vouches");
+        assert_eq!(REV.as_str(), "revoked");
+        assert_eq!(Vouch::DoesNotVouch.as_str(), "does_not_vouch");
+    }
+
     #[test]
     fn owner_file_urls() {
         assert_eq!(
@@ -464,6 +659,7 @@ mod tests {
         let at = |result, t| OwnerChecks {
             last_vouched_at: None,
             latest: Some(LatestFetch { at: t, result }),
+            ..OwnerChecks::default()
         };
         let vouched = |last: u64, latest: FetchResult| OwnerChecks {
             last_vouched_at: Some(last),
@@ -471,6 +667,7 @@ mod tests {
                 at: now,
                 result: latest,
             }),
+            ..OwnerChecks::default()
         };
         let d = Some("example.com");
         let cases = [
@@ -480,7 +677,7 @@ mod tests {
                 at(FetchResult::Fetched(Vouch::Vouches), now),
                 OwnerState::Unclaimed,
             ),
-            (d, OwnerChecks::default(), OwnerState::Unchecked),
+            (d, OwnerChecks::default(), OwnerState::Checking),
             (
                 d,
                 at(FetchResult::Fetched(Vouch::Vouches), now),
@@ -501,11 +698,7 @@ mod tests {
                 at(FetchResult::Fetched(Vouch::DoesNotVouch), now),
                 OwnerState::Failed,
             ),
-            (
-                d,
-                at(FetchResult::Fetched(Vouch::Revoked), now),
-                OwnerState::Revoked,
-            ),
+            (d, at(FetchResult::Fetched(REV), now), OwnerState::Revoked),
             (d, at(FetchResult::Failed, now), OwnerState::Failed),
             (
                 d,
@@ -535,7 +728,7 @@ mod tests {
             ),
             (
                 d,
-                vouched(now - H, FetchResult::Fetched(Vouch::Revoked)),
+                vouched(now - H, FetchResult::Fetched(REV)),
                 OwnerState::Revoked,
             ),
             (
@@ -553,6 +746,7 @@ mod tests {
             OwnerState::Stale,
             OwnerState::Failed,
             OwnerState::Revoked,
+            OwnerState::Checking,
             OwnerState::Unchecked,
         ]
         .iter()
@@ -566,6 +760,7 @@ mod tests {
                 "stale",
                 "failed",
                 "revoked",
+                "checking",
                 "unchecked"
             ]
         );

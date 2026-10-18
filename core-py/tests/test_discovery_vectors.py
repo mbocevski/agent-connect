@@ -174,11 +174,35 @@ def test_owner_files() -> None:
         for r in case["results"]:
             got = ac.owner_vouch(data, r["identity"], r["directory"], r["name"])
             assert got == r["vouch"], (case["name"], r)
+            fetched = ac.owner_fetch_result(data, r["identity"], r["directory"], r["name"])
+            assert fetched == {
+                "result": r["fetch_result"],
+                "revoked_at": r["revoked_at"],
+                "reason": r["reason"],
+            }, (case["name"], r)
     for s in v["states"]:
+        history = ac.OwnerHistory(skipped=s["skipped"])
+        for f in s["fetches"]:
+            history.record(f["at"], f["result"])
+        assert history.state(s["owner_domain"], s["now"]) == s["state"], s["name"]
+        # The summary properties reproduce the state through owner_state.
+        latest = history.latest
+        negative = history.last_negative
         got = ac.owner_state(
-            s["owner_domain"], s["now"], s["latest_result"], s["latest_at"], s["last_vouched_at"]
+            s["owner_domain"],
+            s["now"],
+            latest[1] if latest else None,
+            latest[0] if latest else None,
+            history.last_vouched_at,
+            negative[1] if negative else None,
+            negative[0] if negative else None,
+            skipped=history.skipped,
         )
-        assert got == s["state"], s
+        assert got == s["state"], s["name"]
+    # The identities' secrets sign as those identities.
+    for entry in v["identities"]:
+        ik = ac.Identity.from_secret_bytes(bytes.fromhex(entry["ik_secret"]))
+        assert ik.id == entry["identity"]
 
 
 def hkdf_sha256(ikm: bytes, salt: bytes, info: bytes) -> bytes:
