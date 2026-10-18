@@ -746,7 +746,8 @@ fn gce_modifying_required_capabilities_is_rejected() {
 
 /// SPEC §9.2: the owner skips its local check and proposes its own leave.
 /// Receivers (C) refuse to store the proposal. A member (B) that bypasses
-/// that is stopped by its own `commit_pending_proposals`, and if it commits
+/// that leaves the leave out of its own commits (the owner keeps its
+/// instance), so it has nothing to commit, and if it commits
 /// the leave with raw OpenMLS calls anyway, a receiver holding the proposal
 /// (A, which stored its own) rejects the commit before merging it.
 #[test]
@@ -773,7 +774,11 @@ fn commit_removing_the_owners_last_instance_is_rejected() {
         .mls
         .store_pending_proposal(cs[1].provider.storage(), *queued)
         .unwrap();
-    assert_eq!(gs[1].commit_pending_proposals(&cs[1]), Err(OWNER));
+    assert_eq!(
+        gs[1].commit_pending_proposals(&cs[1]),
+        Err(Error::NotPermitted("no pending proposals"))
+    );
+    assert_eq!(gs[1].pending_leaves().unwrap(), []);
     assert!(!gs[1].has_pending_commit());
     let bytes = raw_commit!(gs[1], cs[1], |b| b);
     let epoch = gs[0].epoch();

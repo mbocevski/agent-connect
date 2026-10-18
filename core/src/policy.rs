@@ -144,6 +144,11 @@ pub struct GroupPolicy {
     pub require_verified: bool,
     /// Floor mode.
     pub floor: Floor,
+    /// The floor was set on purpose: the switch to `mention` when a third
+    /// identity joins doesn't apply (SPEC §9.1). A policy without the key
+    /// (written before it existed) reads as `false`.
+    #[serde(default)]
+    pub floor_pinned: bool,
     /// Floor moderator.
     pub floor_moderator: Option<String>,
     /// Loop guard.
@@ -174,6 +179,7 @@ impl GroupPolicy {
             max_members: MAX_GROUP_SIZE,
             require_verified: false,
             floor: Floor::Free,
+            floor_pinned: false,
             floor_moderator: None,
             loop_guard: LoopGuard {
                 max_agent_turns: 20,
@@ -281,10 +287,15 @@ pub(crate) struct CommitFacts {
     pub adds: Vec<String>,
     pub removes: Vec<Removal>,
     pub new_policy: Option<GroupPolicy>,
-    pub members_before: usize,
+    /// Identities present before the commit.
+    pub identities_before: BTreeSet<String>,
+    /// Instances (leaves) after the commit.
     pub members_after: usize,
     /// Identities present after the commit.
     pub identities_after: BTreeSet<String>,
+    /// Identities that keep an instance from before the commit, one it
+    /// doesn't remove: the instances its Adds bring are not counted.
+    pub identities_kept: BTreeSet<String>,
 }
 
 /// Why the owner's last instance may not leave (SPEC §9.2).
@@ -297,10 +308,12 @@ pub(crate) const OWNER_MUST_TRANSFER: &str = "the owner must transfer ownership 
 ///   if the added identity is the committer's own (another replica).
 /// - Removing the owner's instances needs the owner, unless it's a leave.
 /// - No commit may remove the owner's last instance: the owner transfers
-///   ownership before it leaves.
+///   ownership before it leaves. The owner must keep an instance that was
+///   in the group before the commit; one the commit adds doesn't count
+///   (its Welcome may never be used). The same holds for a new owner.
 /// - The floor switch (`free` → `mention` in the commit that grows the
-///   group past two instances) is accepted from any committer allowed to
-///   make that Add.
+///   group past two identities, unless `floor_pinned`) is accepted from any
+///   committer allowed to make that Add.
 pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()> {
     let committer = facts.committer.as_str();
     for added in &facts.adds {
@@ -320,7 +333,7 @@ pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()>
         }
     }
     if facts.removes.iter().any(|r| r.identity == policy.owner)
-        && !facts.identities_after.contains(&policy.owner)
+        && !facts.identities_kept.contains(&policy.owner)
     {
         // The committer is never removed by its own commit, so an owner
         // committer always survives it: the owner's last instance can only
@@ -340,6 +353,65 @@ pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()>
     Ok(())
 }
 
+/// [`authorize`] on the facts of a commit as written in
+/// `testdata/group-policy.json`: a JSON object with `committer`, `adds`,
+/// `removes` (`identity`, `self_proposed`), `leaves_after`,
+/// `identities_before`, `identities_after` and `identities_kept`. Its
+/// `new_policy` names a policy of the file; the caller resolves it and
+/// passes it as `new_policy`. **Tests only** (the shared vectors, from
+/// Rust and through the bindings): a member's facts come from the commit
+/// itself. Only with the `test-hooks` feature, which release builds leave
+/// off.
+///
+/// # Errors
+///
+/// [`Error::Malformed`] for facts that don't have this shape, or the error
+/// [`authorize`] returns.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub fn authorize_facts_for_testing(
+    in_force: &GroupPolicy,
+    new_policy: Option<GroupPolicy>,
+    facts: &[u8],
+) -> Result<()> {
+    let bad = || Error::Malformed("commit facts");
+    let f: serde_json::Value = serde_json::from_slice(facts).map_err(|_| bad())?;
+    let text = |v: &serde_json::Value| v.as_str().map(str::to_owned).ok_or_else(bad);
+    let texts = |key: &str| -> Result<Vec<String>> {
+        f[key]
+            .as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(text)
+            .collect()
+    };
+    let removes = f["removes"]
+        .as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|r| {
+            Ok(Removal {
+                identity: text(&r["identity"])?,
+                self_proposed: r["self_proposed"].as_bool().ok_or_else(bad)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let facts = CommitFacts {
+        committer: text(&f["committer"])?,
+        adds: texts("adds")?,
+        removes,
+        new_policy,
+        identities_before: texts("identities_before")?.into_iter().collect(),
+        members_after: f["leaves_after"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(bad)?,
+        identities_after: texts("identities_after")?.into_iter().collect(),
+        identities_kept: texts("identities_kept")?.into_iter().collect(),
+    };
+    authorize(in_force, &facts)
+}
+
 fn authorize_policy_change(
     old: &GroupPolicy,
     new: &GroupPolicy,
@@ -348,7 +420,7 @@ fn authorize_policy_change(
     if new == old {
         return Ok(());
     }
-    if !facts.identities_after.contains(&new.owner) {
+    if !facts.identities_kept.contains(&new.owner) {
         return Err(Error::Unauthorized("new owner is not a member"));
     }
     let committer = facts.committer.as_str();
@@ -357,21 +429,14 @@ fn authorize_policy_change(
         role => {
             let floor_only = GroupPolicy {
                 floor: old.floor,
+                floor_pinned: old.floor_pinned,
                 floor_moderator: old.floor_moderator.clone(),
                 ..new.clone()
             } == *old;
             if role == Role::Admin && floor_only {
                 return Ok(());
             }
-            let floor_switch = GroupPolicy {
-                floor: Floor::Mention,
-                ..old.clone()
-            } == *new
-                && old.floor == Floor::Free
-                && !facts.adds.is_empty()
-                && facts.members_before <= 2
-                && facts.members_after > 2;
-            if floor_switch {
+            if is_floor_switch(old, new, facts) {
                 return Ok(());
             }
             Err(Error::Unauthorized("committer may not change this policy"))
@@ -379,11 +444,28 @@ fn authorize_policy_change(
     }
 }
 
+/// The SPEC §9.1 floor switch: a change of `floor` alone, from `free` to
+/// `mention`, in a commit with an Add that takes the group from at most two
+/// to more than two identities, in a group whose floor isn't pinned.
+fn is_floor_switch(old: &GroupPolicy, new: &GroupPolicy, facts: &CommitFacts) -> bool {
+    !old.floor_pinned
+        && old.floor == Floor::Free
+        && GroupPolicy {
+            floor: Floor::Mention,
+            ..old.clone()
+        } == *new
+        && !facts.adds.is_empty()
+        && facts.identities_before.len() <= 2
+        && facts.identities_after.len() > 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::Identity;
     use crate::rng::Rng;
+
+    const MAY_NOT_CHANGE: &str = "committer may not change this policy";
 
     fn ids(n: u64) -> Vec<String> {
         (0..n)
@@ -401,10 +483,84 @@ mod tests {
             adds: vec![],
             removes: vec![],
             new_policy: None,
-            members_before: 2,
+            identities_before: BTreeSet::new(),
             members_after: 2,
             identities_after: BTreeSet::new(),
+            identities_kept: BTreeSet::new(),
         }
+    }
+
+    /// [`super::authorize`], with `identities_kept` (when a test leaves it
+    /// empty) derived as the identities after the commit that it doesn't
+    /// only add: what the hand-written facts below mean.
+    fn authorize(policy: &GroupPolicy, f: &CommitFacts) -> Result<()> {
+        let mut f = f.clone();
+        if f.identities_kept.is_empty() {
+            f.identities_kept = f
+                .identities_after
+                .iter()
+                .filter(|i| f.identities_before.contains(*i) || !f.adds.contains(*i))
+                .cloned()
+                .collect();
+        }
+        super::authorize(policy, &f)
+    }
+
+    /// Re-review R1: an Add of a new instance of the owner's identity, in
+    /// the commit that removes every instance it had, doesn't keep the
+    /// owner; nor may ownership go to an identity the commit only adds.
+    #[test]
+    fn only_instances_from_before_the_commit_keep_a_role() {
+        let id = ids(3);
+        let p = GroupPolicy {
+            invite: InvitePermission::Members,
+            ..GroupPolicy::default_for(&id[0])
+        };
+        let mut f = facts(&id[1]);
+        f.adds = vec![id[0].clone()];
+        f.removes = vec![
+            Removal {
+                identity: id[0].clone(),
+                self_proposed: true,
+            },
+            Removal {
+                identity: id[0].clone(),
+                self_proposed: true,
+            },
+        ];
+        f.identities_before = set(&[&id[0], &id[1]]);
+        f.identities_after = set(&[&id[0], &id[1]]);
+        f.identities_kept = set(&[&id[1]]);
+        assert_eq!(
+            super::authorize(&p, &f),
+            Err(Error::Unauthorized(OWNER_MUST_TRANSFER))
+        );
+        // One of the owner's earlier instances stays: fine.
+        f.identities_kept = set(&[&id[0], &id[1]]);
+        super::authorize(&p, &f).unwrap();
+
+        let mut f = facts(&id[0]);
+        f.adds = vec![id[2].clone()];
+        f.identities_before = set(&[&id[0], &id[1]]);
+        f.identities_after = id.iter().cloned().collect();
+        f.identities_kept = set(&[&id[0], &id[1]]);
+        f.new_policy = Some(GroupPolicy {
+            owner: id[2].clone(),
+            ..p.clone()
+        });
+        assert_eq!(
+            super::authorize(&p, &f),
+            Err(Error::Unauthorized("new owner is not a member"))
+        );
+        f.new_policy = Some(GroupPolicy {
+            owner: id[1].clone(),
+            ..p
+        });
+        super::authorize(&GroupPolicy::default_for(&id[0]), &f).unwrap();
+    }
+
+    fn set(ids: &[&String]) -> BTreeSet<String> {
+        ids.iter().map(|s| (*s).clone()).collect()
     }
 
     #[test]
@@ -699,7 +855,7 @@ mod tests {
 
     #[test]
     fn floor_switch_on_third_member_is_allowed_for_the_inviter() {
-        let id = ids(3);
+        let id = ids(4);
         let mut old = GroupPolicy::default_for(&id[0]);
         old.invite = InvitePermission::Members;
         let switched = GroupPolicy {
@@ -708,21 +864,339 @@ mod tests {
         };
         let mut f = facts(&id[1]);
         f.adds = vec![id[2].clone()];
+        f.identities_before = set(&[&id[0], &id[1]]);
         f.members_after = 3;
-        f.identities_after = id.iter().cloned().collect();
+        f.identities_after = set(&[&id[0], &id[1], &id[2]]);
         f.new_policy = Some(switched.clone());
         authorize(&old, &f).unwrap();
-        // Not when the group already had three members.
-        f.members_before = 3;
+        // Not when the group already had three identities.
+        f.adds = vec![id[3].clone()];
+        f.identities_before = set(&[&id[0], &id[1], &id[2]]);
         f.members_after = 4;
-        assert!(authorize(&old, &f).is_err());
+        f.identities_after = id.iter().cloned().collect();
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
         // Not combined with other changes.
-        f.members_before = 2;
+        f.adds = vec![id[2].clone()];
+        f.identities_before = set(&[&id[0], &id[1]]);
         f.members_after = 3;
+        f.identities_after = set(&[&id[0], &id[1], &id[2]]);
         f.new_policy = Some(GroupPolicy {
             require_verified: true,
-            ..switched
+            ..switched.clone()
         });
-        assert!(authorize(&old, &f).is_err());
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+        // Not without an Add.
+        f.adds = vec![];
+        f.new_policy = Some(switched);
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+    }
+
+    /// D3: the switch counts identities. A 1:1 whose member adds a replica
+    /// (three instances, two identities) stays `free`; the switch rides on
+    /// the Add of a third identity, however many instances there are.
+    #[test]
+    fn floor_switch_counts_identities_not_instances() {
+        let id = ids(3);
+        let mut old = GroupPolicy::default_for(&id[0]);
+        old.invite = InvitePermission::Members;
+        let switched = GroupPolicy {
+            floor: Floor::Mention,
+            ..old.clone()
+        };
+        // B adds its own replica to a 1:1: instances 2 → 3, identities 2 → 2.
+        let mut f = facts(&id[1]);
+        f.adds = vec![id[1].clone()];
+        f.identities_before = set(&[&id[0], &id[1]]);
+        f.members_after = 3;
+        f.identities_after = set(&[&id[0], &id[1]]);
+        authorize(&old, &f).unwrap();
+        f.new_policy = Some(switched.clone());
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+        // With replicas on both sides (four instances), C is the third
+        // identity: the switch is valid.
+        let mut f = facts(&id[1]);
+        f.adds = vec![id[2].clone()];
+        f.identities_before = set(&[&id[0], &id[1]]);
+        f.members_after = 5;
+        f.identities_after = set(&[&id[0], &id[1], &id[2]]);
+        f.new_policy = Some(switched.clone());
+        authorize(&old, &f).unwrap();
+        // A commit that adds C but also carries B's last leave stays at two
+        // identities: no switch.
+        f.removes = vec![Removal {
+            identity: id[1].clone(),
+            self_proposed: true,
+        }];
+        f.identities_after = set(&[&id[0], &id[2]]);
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+    }
+
+    /// D4: a pinned floor never switches, and only the owner or an admin
+    /// may pin or unpin it.
+    #[test]
+    fn floor_pinned_blocks_the_switch_and_is_a_floor_field() {
+        let id = ids(4);
+        let mut old = GroupPolicy::default_for(&id[0]);
+        old.invite = InvitePermission::Members;
+        old.admins = vec![id[1].clone()];
+        old.floor_pinned = true;
+        let mut f = facts(&id[2]);
+        f.adds = vec![id[3].clone()];
+        f.identities_before = set(&[&id[0], &id[2]]);
+        f.members_after = 3;
+        f.identities_after = set(&[&id[0], &id[2], &id[3]]);
+        f.new_policy = Some(GroupPolicy {
+            floor: Floor::Mention,
+            ..old.clone()
+        });
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+        // The switch that also unpins is not the switch either.
+        f.new_policy = Some(GroupPolicy {
+            floor: Floor::Mention,
+            floor_pinned: false,
+            ..old.clone()
+        });
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+        // The owner may change the floor of a pinned group (a policy change
+        // like any other).
+        f.committer = id[0].clone();
+        authorize(&old, &f).unwrap();
+
+        let all: BTreeSet<String> = id.iter().cloned().collect();
+        let unpinned = GroupPolicy {
+            floor_pinned: false,
+            ..old.clone()
+        };
+        let mut f = facts(&id[1]);
+        f.identities_before = all.clone();
+        f.identities_after = all.clone();
+        // An admin may pin and unpin.
+        f.new_policy = Some(unpinned.clone());
+        authorize(&old, &f).unwrap();
+        f.new_policy = Some(old.clone());
+        authorize(&unpinned, &f).unwrap();
+        // A plain member may do neither.
+        f.committer = id[2].clone();
+        f.new_policy = Some(unpinned.clone());
+        assert_eq!(
+            authorize(&old, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+        f.new_policy = Some(old.clone());
+        assert_eq!(
+            authorize(&unpinned, &f),
+            Err(Error::Unauthorized(MAY_NOT_CHANGE))
+        );
+    }
+
+    /// Admins change the floor fields only: every change that widens who
+    /// may do what is the owner's, and a plain member may change nothing.
+    #[test]
+    fn admins_and_members_may_not_widen_permissions() {
+        let id = ids(4);
+        let mut old = GroupPolicy::default_for(&id[0]);
+        old.admins = vec![id[1].clone()];
+        old.max_members = 10;
+        old.require_verified = true;
+        let all: BTreeSet<String> = id.iter().cloned().collect();
+        let widen: Vec<GroupPolicy> = vec![
+            GroupPolicy {
+                invite: InvitePermission::Members,
+                ..old.clone()
+            },
+            GroupPolicy {
+                invite: InvitePermission::Admins,
+                ..old.clone()
+            },
+            GroupPolicy {
+                remove: RemovePermission::Admins,
+                ..old.clone()
+            },
+            GroupPolicy {
+                max_members: 50,
+                ..old.clone()
+            },
+            GroupPolicy {
+                require_verified: false,
+                ..old.clone()
+            },
+            GroupPolicy {
+                admins: vec![id[1].clone(), id[2].clone()],
+                ..old.clone()
+            },
+            GroupPolicy {
+                owner: id[1].clone(),
+                admins: vec![],
+                ..old.clone()
+            },
+            GroupPolicy {
+                loop_guard: LoopGuard {
+                    max_agent_turns: 100,
+                },
+                ..old.clone()
+            },
+            // A floor change smuggling in another field.
+            GroupPolicy {
+                floor: Floor::Moderated,
+                floor_moderator: Some(id[1].clone()),
+                invite: InvitePermission::Members,
+                ..old.clone()
+            },
+        ];
+        for new in &widen {
+            for committer in [&id[1], &id[2]] {
+                let mut f = facts(committer);
+                f.identities_before = all.clone();
+                f.identities_after = all.clone();
+                f.new_policy = Some(new.clone());
+                assert_eq!(
+                    authorize(&old, &f),
+                    Err(Error::Unauthorized(MAY_NOT_CHANGE)),
+                    "{new:?} by {committer}"
+                );
+            }
+            let mut f = facts(&id[0]);
+            f.identities_before = all.clone();
+            f.identities_after = all.clone();
+            f.new_policy = Some(new.clone());
+            authorize(&old, &f).unwrap();
+        }
+    }
+
+    /// SPEC §9.2: removing some of another identity's instances (a dead
+    /// replica) needs `remove`, as removing all of them does; removing
+    /// one's own other instances needs nothing.
+    #[test]
+    fn partial_removal_follows_the_remove_permission() {
+        let id = ids(3);
+        let mut p = GroupPolicy::default_for(&id[0]);
+        p.admins = vec![id[1].clone()];
+        let all: BTreeSet<String> = id.iter().cloned().collect();
+        let one_of = |identity: &String| Removal {
+            identity: identity.clone(),
+            self_proposed: false,
+        };
+        // C (a member) removes one of B's two instances.
+        let mut f = facts(&id[2]);
+        f.removes = vec![one_of(&id[1])];
+        f.identities_before = all.clone();
+        f.identities_after = all.clone();
+        assert_eq!(
+            authorize(&p, &f),
+            Err(Error::Unauthorized("committer may not remove members"))
+        );
+        // ...and one of its own.
+        f.removes = vec![one_of(&id[2])];
+        authorize(&p, &f).unwrap();
+        // Under remove: admins, the admin removes one of C's instances, but
+        // not one of the owner's.
+        p.remove = RemovePermission::Admins;
+        let mut f = facts(&id[1]);
+        f.removes = vec![one_of(&id[2])];
+        f.identities_before = all.clone();
+        f.identities_after = all.clone();
+        authorize(&p, &f).unwrap();
+        f.removes = vec![one_of(&id[0])];
+        assert_eq!(
+            authorize(&p, &f),
+            Err(Error::Unauthorized("only the owner may remove the owner"))
+        );
+        // The owner removes one of its own other instances.
+        let mut f = facts(&id[0]);
+        f.removes = vec![one_of(&id[0])];
+        f.identities_before = all.clone();
+        f.identities_after = all;
+        authorize(&p, &f).unwrap();
+    }
+
+    /// The vectors' facts format: malformed facts are an error, not a
+    /// verdict.
+    #[test]
+    fn facts_for_testing_must_have_the_vector_shape() {
+        let id = ids(2);
+        let p = GroupPolicy::default_for(&id[0]);
+        let good = serde_json::json!({
+            "committer": id[0], "adds": [id[1]], "removes": [],
+            "leaves_after": 2, "identities_before": [id[0]],
+            "identities_after": [id[0], id[1]], "identities_kept": [id[0]],
+        });
+        authorize_facts_for_testing(&p, None, good.to_string().as_bytes()).unwrap();
+        let mut leave = good.clone();
+        leave["committer"] = id[1].clone().into();
+        leave["adds"] = serde_json::json!([]);
+        leave["removes"] = serde_json::json!([{"identity": id[0], "self_proposed": true}]);
+        leave["identities_after"] = serde_json::json!([id[1]]);
+        leave["identities_kept"] = serde_json::json!([id[1]]);
+        assert_eq!(
+            authorize_facts_for_testing(&p, None, leave.to_string().as_bytes()),
+            Err(Error::Unauthorized(OWNER_MUST_TRANSFER))
+        );
+        let malformed = Err(Error::Malformed("commit facts"));
+        for (key, value) in [
+            ("committer", serde_json::json!(1)),
+            ("adds", serde_json::json!("x")),
+            ("removes", serde_json::json!([{"identity": id[0]}])),
+            ("leaves_after", serde_json::json!(-1)),
+            ("identities_after", serde_json::json!([1])),
+            ("identities_kept", serde_json::json!(null)),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert_eq!(
+                authorize_facts_for_testing(&p, None, bad.to_string().as_bytes()),
+                malformed,
+                "{key}"
+            );
+        }
+        assert_eq!(authorize_facts_for_testing(&p, None, b"{"), malformed);
+    }
+
+    /// D4 compatibility: a policy written before `floor_pinned` existed
+    /// (no such key) reads as unpinned, and is canonical as it is.
+    #[test]
+    fn a_policy_without_floor_pinned_reads_as_unpinned() {
+        let id = ids(1);
+        let p = GroupPolicy::default_for(&id[0]);
+        let json = String::from_utf8(p.to_json().unwrap()).unwrap();
+        assert!(json.contains(r#""floor_pinned":false"#), "{json}");
+        let old = json.replace(r#""floor_pinned":false,"#, "");
+        assert!(!old.contains("floor_pinned"));
+        let read = GroupPolicy::from_json(old.as_bytes()).unwrap();
+        assert!(!read.floor_pinned);
+        assert_eq!(read, p);
+        let pinned = GroupPolicy {
+            floor_pinned: true,
+            ..p
+        };
+        let json = String::from_utf8(pinned.to_json().unwrap()).unwrap();
+        assert!(json.contains(r#""floor_pinned":true"#), "{json}");
+        assert_eq!(GroupPolicy::from_json(json.as_bytes()).unwrap(), pinned);
+        // Not a bool: malformed.
+        let bad = json.replace(r#""floor_pinned":true"#, r#""floor_pinned":1"#);
+        assert_eq!(
+            GroupPolicy::from_json(bad.as_bytes()),
+            Err(Error::Malformed("group policy"))
+        );
     }
 }

@@ -2,9 +2,11 @@
 """Fail if an agentconnect-core wheel contains a test-only hook.
 
 The core's ``test-hooks`` cargo feature adds bindings that only tests may use
-(``Client._add_knock_unchecked_for_testing``). Release and reproducible
-builds leave the feature off; this checks the built extension, which names
-every binding it exports.
+(``Client._add_knock_unchecked_for_testing``,
+``Client._commit_unchecked_for_testing`` and the module function
+``_authorize_for_testing``). Release and reproducible builds leave the
+feature off; this checks the built extension, which names every binding it
+exports.
 
 usage: scripts/check_wheel_hooks.py WHEEL [WHEEL ...]
 """
@@ -16,7 +18,11 @@ import zipfile
 from pathlib import Path
 
 #: Bindings that exist only with the ``test-hooks`` feature.
-TEST_HOOKS = (b"_add_knock_unchecked_for_testing",)
+TEST_HOOKS = (
+    b"_add_knock_unchecked_for_testing",
+    b"_commit_unchecked_for_testing",
+    b"_authorize_for_testing",
+)
 
 
 def hooks_in(wheel: Path) -> list[str]:

@@ -102,7 +102,7 @@ regenerates them with a fresh seed (`AC_TEST_SEED=<n> just vectors` is
 reproducible); review the diff before committing.
 
 A vector case may carry `pending`, naming a SPEC rule that the code doesn't
-implement yet (`group-policy.json` does this). The tests check that a
+implement yet. The tests check that a
 pending case doesn't pass yet, so the change that implements the rule must
 drop the mark.
 
@@ -301,7 +301,10 @@ scenarios are in `harness/tests/`.
     core's clock to its own for each of those calls.
 - **Test-only core hooks.** Bindings that only tests may call (such as
   `Client._add_knock_unchecked_for_testing`, the Welcomes a broken knock
-  owner sends) are behind the `test-hooks` cargo feature of `core` and
+  owner sends, and `Client._commit_unchecked_for_testing`, a commit built
+  and merged without the core's checks, which honest members must reject,
+  and `_authorize_for_testing`, the vectors' commit facts through the core)
+  are behind the `test-hooks` cargo feature of `core` and
   `core-py`. `uv sync` builds the development `agentconnect-core` with it
   (`[tool.uv.config-settings-package]` in `pyproject.toml`); the release
   and reproducible wheels are built with maturin without it, and

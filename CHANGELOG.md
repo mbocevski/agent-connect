@@ -10,6 +10,50 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Core: group mode. `ac_group_policy` gains `floor_pinned` (default
+  false; a policy without the key reads as unpinned): a pinned floor is
+  never switched to `mention`, and admins may change it with the other
+  floor fields. The switch to `mention` now counts identities, so a 1:1
+  whose member adds a replica stays `free`; `max_members` still counts
+  instances. This is a wire change: a member on an earlier build rejects a
+  policy that has the key. Commit summaries gain `left` (the removed
+  instances whose own leave the commit carried), `previous_policy` and
+  `policy` (when the policy changed); journal entries written before them
+  still read. New `Group::pending_leaves`, `Group::remove_instances` (some
+  of an identity's instances, such as a dead replica, under the same
+  permissions as removing them all), `Group::check_policy_change` (what
+  `set_policy` would answer, without a commit) and
+  `Client::create_group_with_policy`. Python: `Client.pending_leaves`,
+  `Client.remove_instances` (by instance id), `Client.check_policy_change`,
+  `create_group(..., policy=)`, and the new summary keys. A knock's group
+  may not have a pinned floor (SPEC 6.6.5). The `floor_pinned` and
+  identity-counting cases of `testdata/group-policy.json` are no longer
+  pending, it gains cases for unpinning, a policy written before
+  `floor_pinned` and removing one of the owner's instances, and its
+  policy-change cases are also checked through `Client.check_policy_change`.
+  A test-only
+  `Client._commit_unchecked_for_testing` (feature `test-hooks`, not in the
+  release wheel; `scripts/check_wheel_hooks.py` checks it) builds commits
+  without the core's checks, for tests that honest members reject them.
+  Two instances of the owner that propose a leave at once no longer split
+  the group: every member stores both, and the next commit leaves out the
+  leave of the owner instance with the lowest leaf, so every member,
+  both leavers included, agrees on `pending_leaves` and processes the
+  commit (SPEC 9.2). Removing a member whose leave is pending carries its
+  leave, reported as `left`. `check_policy_change` reasons about the
+  commit `set_policy` would build, pending leaves included, and refuses
+  while a commit or this instance's own leave is pending; every commit of
+  an instance whose own leave is pending is refused with `not permitted`.
+  A commit's GroupContextExtensions must carry the policy's canonical
+  encoding; a policy written before `floor_pinned` is still read from a
+  stored context or a Welcome. A commit keeps the owner, or makes an
+  identity the new owner, only through an instance that was in the group
+  before it: an Add of a new instance of the owner's identity in the
+  commit that removes all its earlier ones is rejected (SPEC 9.2). The
+  Python suite runs every authorization case of
+  `testdata/group-policy.json` through the test-only
+  `_native._authorize_for_testing` (feature `test-hooks`, which
+  `scripts/check_wheel_hooks.py` checks).
 - Directory: optional operator branding. `AC_DIRECTORY_NAME` names the
   site: it becomes the home page's heading and the header's site name, with
   "AgentConnect directory" above the heading and in every page title.
@@ -634,9 +678,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   that differ when grants are dropped (§12); §14 gains the leave and the
   owner transfer. New vectors in `testdata/group-policy.json`: the default
   and valid and invalid policies, checked in Rust and through the Python
-  bindings, and commit authorisation cases checked in Rust, with the
-  `floor_pinned` and identity-counting cases marked pending until the core
-  implements them. The core doesn't implement the new rules yet.
+  bindings, and commit authorisation cases checked in Rust. The core
+  implements `floor_pinned` and the identity count (see "Core: group mode"
+  under Added); the daemon doesn't implement the other new rules yet.
 - Local API: with the agent token, `GET /v0/events` numbers events with a
   sequence of the agent's own (`seq`, and `after` takes it), with no gap
   where an event the agent doesn't see was recorded. Before, the global

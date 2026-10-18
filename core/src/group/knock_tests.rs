@@ -943,6 +943,13 @@ fn a_knock_welcome_with_a_floor_or_roles_add_knocker_never_builds_is_refused() {
         ),
         (
             GroupPolicy {
+                floor_pinned: true,
+                ..base.clone()
+            },
+            "the floor is pinned",
+        ),
+        (
+            GroupPolicy {
                 admins: vec![absent.id()],
                 ..base.clone()
             },
@@ -974,12 +981,10 @@ fn a_knock_welcome_with_a_floor_or_roles_add_knocker_never_builds_is_refused() {
         // add_knocker refuses to build either, in a group created so.
         let (_, v) = s.knock();
         let mut forged = forged_group_with(&s.owner, &owner, &policy);
-        let want = if policy.floor == Floor::Free {
-            Error::NotPermitted("roles for another identity")
-        } else {
-            Error::NotPermitted("the floor is not free")
-        };
-        assert_eq!(forged.add_knocker(&s.owner, &v).unwrap_err(), want);
+        assert_eq!(
+            forged.add_knocker(&s.owner, &v).unwrap_err(),
+            Error::NotPermitted(err)
+        );
     }
     // The owner as its own admin or moderator is the same group.
     let (k, v) = s.knock();

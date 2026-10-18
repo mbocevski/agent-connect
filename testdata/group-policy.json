@@ -3,19 +3,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -29,19 +34,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -55,19 +65,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -81,19 +96,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -107,19 +127,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -133,19 +158,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -159,18 +189,23 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -184,22 +219,26 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "leaves_after": 2,
         "leaves_before": 3,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+            "identity": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
             "self_proposed": false
           }
         ]
@@ -211,22 +250,26 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "leaves_after": 2,
         "leaves_before": 3,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+            "identity": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
             "self_proposed": false
           }
         ]
@@ -238,22 +281,26 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "leaves_after": 2,
         "leaves_before": 3,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+            "identity": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
             "self_proposed": false
           }
         ]
@@ -265,22 +312,26 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 2,
         "leaves_before": 3,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+            "identity": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
             "self_proposed": false
           }
         ]
@@ -292,23 +343,28 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 4,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+            "identity": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
             "self_proposed": false
           }
         ]
@@ -320,23 +376,28 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 4,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+            "identity": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
             "self_proposed": false
           }
         ]
@@ -348,22 +409,26 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "leaves_after": 2,
         "leaves_before": 3,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+            "identity": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
             "self_proposed": true
           }
         ]
@@ -375,22 +440,26 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 2,
         "leaves_before": 3,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+            "identity": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
             "self_proposed": true
           }
         ]
@@ -402,23 +471,28 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 4,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+            "identity": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
             "self_proposed": true
           }
         ]
@@ -430,22 +504,26 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 2,
         "leaves_before": 3,
         "new_policy": null,
         "removes": [
           {
-            "identity": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+            "identity": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
             "self_proposed": true
           }
         ]
@@ -457,16 +535,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -480,16 +563,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -503,16 +591,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -526,16 +619,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -549,16 +647,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -572,16 +675,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -595,14 +703,18 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
         ],
         "leaves_after": 2,
         "leaves_before": 2,
@@ -616,16 +728,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -639,17 +756,21 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 2,
@@ -663,19 +784,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -689,16 +815,21 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -712,17 +843,21 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 2,
@@ -736,19 +871,24 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 51,
         "leaves_before": 50,
@@ -762,14 +902,18 @@
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 2,
         "leaves_before": 2,
@@ -783,16 +927,20 @@
     {
       "facts": {
         "adds": [
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 2,
@@ -800,24 +948,27 @@
         "removes": []
       },
       "name": "a replica doesn't switch the floor of a one-to-one group",
-      "pending": "core: the floor switch counts identities (SPEC 9.1)",
       "policy": "members invite",
       "result": "unauthorized commit: committer may not change this policy"
     },
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 4,
         "leaves_before": 3,
@@ -825,24 +976,27 @@
         "removes": []
       },
       "name": "the floor switch counts identities, not instances",
-      "pending": "core: the floor switch counts identities (SPEC 9.1)",
       "policy": "members invite",
       "result": "ok"
     },
     {
       "facts": {
         "adds": [
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-          "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 2,
@@ -850,21 +1004,24 @@
         "removes": []
       },
       "name": "no floor switch while the floor is pinned",
-      "pending": "core: floor_pinned (SPEC 9.1)",
       "policy": "members invite, pinned",
       "result": "unauthorized commit: committer may not change this policy"
     },
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 2,
         "leaves_before": 2,
@@ -872,23 +1029,27 @@
         "removes": []
       },
       "name": "the owner changes a pinned floor",
-      "pending": "core: floor_pinned (SPEC 9.1)",
       "policy": "members invite, pinned",
       "result": "ok"
     },
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -896,23 +1057,27 @@
         "removes": []
       },
       "name": "an admin pins the floor",
-      "pending": "core: floor_pinned (SPEC 9.1)",
       "policy": "admin",
       "result": "ok"
     },
     {
       "facts": {
         "adds": [],
-        "committer": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
         "identities_after": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "identities_before": [
-          "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU",
-          "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-          "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU"
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
         ],
         "leaves_after": 3,
         "leaves_before": 3,
@@ -920,174 +1085,382 @@
         "removes": []
       },
       "name": "a member may not pin the floor",
-      "pending": "core: floor_pinned (SPEC 9.1)",
       "policy": "admin",
       "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+        "identities_after": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_before": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin",
+        "removes": []
+      },
+      "name": "an admin unpins the floor",
+      "policy": "admin, pinned",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+        "identities_after": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_before": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin",
+        "removes": []
+      },
+      "name": "a member may not unpin the floor",
+      "policy": "admin, pinned",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
+        ],
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+        "identities_after": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+          "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY"
+        ],
+        "identities_before": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 2,
+        "new_policy": "members invite, mention",
+        "removes": []
+      },
+      "name": "the floor switch may not also unpin the floor",
+      "policy": "members invite, pinned",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+        "identities_after": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_before": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin, written before floor_pinned",
+        "removes": []
+      },
+      "name": "a policy written before floor_pinned is the same policy",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY"
+        ],
+        "committer": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+        "identities_after": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_before": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+            "self_proposed": true
+          },
+          {
+            "identity": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+            "self_proposed": true
+          }
+        ]
+      },
+      "name": "an Add of a new owner instance doesn't keep the owner",
+      "policy": "members invite",
+      "result": "unauthorized commit: the owner must transfer ownership before leaving"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "committer": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+        "identities_after": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_before": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 2,
+        "new_policy": "transferred to the member",
+        "removes": []
+      },
+      "name": "ownership may not go to an identity the commit adds",
+      "policy": "admin",
+      "result": "unauthorized commit: new owner is not a member"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+        "identities_after": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_before": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "identities_kept": [
+          "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+          "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+          "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 4,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "an admin may not remove one of the owner's instances",
+      "policy": "admins invite and remove",
+      "result": "unauthorized commit: only the owner may remove the owner"
     }
   ],
-  "default": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}",
-  "description": "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, and leaves and identities before and after) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies through the bindings.",
+  "default": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}",
+  "description": "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, leaves and identities before and after, and `identities_kept`: those with an instance from before the commit that it doesn't remove) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies, and the policy-change cases through check_policy_change, through the bindings.",
   "generator": "core/src/vectors.rs (just vectors)",
   "identities": {
-    "admin": "ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs",
-    "joiner": "ac:v0:5BXa6sAsqPBiun3uqyevWtPy9CDLzoji-p-7cI8RBUc",
-    "member": "ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU",
-    "owner": "ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU"
+    "admin": "ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs",
+    "joiner": "ac:v0:tpjj9nWQhzyUjFiv_0fXrTMDRNVaLzUGsiHXbpp9DYY",
+    "member": "ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI",
+    "owner": "ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY"
   },
   "invalid": [
     {
       "error": "unsupported protocol version",
       "kind": "unsupported_version",
       "name": "version 1",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":1}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":1}"
     },
     {
       "error": "invalid group context: policy owner",
       "kind": "malformed",
       "name": "owner not an identity",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"owner\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"owner\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "invalid group context: policy admins",
       "kind": "malformed",
       "name": "admin not an identity",
-      "policy": "{\"admins\":[\"ac:v0:x\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:x\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "invalid group context: policy admins",
       "kind": "malformed",
       "name": "duplicate admin",
-      "policy": "{\"admins\":[\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\",\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\",\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "invalid group context: policy floor_moderator",
       "kind": "malformed",
       "name": "moderator not an identity",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":\"ac:v0:x\",\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":\"ac:v0:x\",\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "invalid group context: policy max_members",
       "kind": "malformed",
       "name": "max_members 0",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":0,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":0,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "invalid group context: policy max_members",
       "kind": "malformed",
       "name": "max_members 51",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":51,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":51,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "invalid group context: policy max_agent_turns",
       "kind": "malformed",
       "name": "max_agent_turns 101",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":101},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":101},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "max_agent_turns beyond I-JSON",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":9007199254740992},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":9007199254740992},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "unknown floor",
-      "policy": "{\"admins\":[],\"floor\":\"open\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"open\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "unknown invite",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"anyone\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"anyone\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "members may not remove",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"members\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"members\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "floor_pinned not a boolean",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":1,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":1,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "unknown field",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0,\"z\":1}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0,\"z\":1}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "missing loop_guard",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "error": "malformed group policy",
       "kind": "malformed",
       "name": "not canonical",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\": 0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\": 0}"
     }
   ],
-  "seed": "93ff8e3511290442c6c580ea85baae16434eefd29dccc1b8bda16baf015d378b",
+  "seed": "a7263be88bd3b9df8964fe2f8022df671494326ec39a82dd05e6b9b064c939aa",
   "valid": [
     {
       "name": "default",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "admin",
-      "policy": "{\"admins\":[\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "admins invite and remove",
-      "policy": "{\"admins\":[\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"admins\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"admins\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"admins\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"admins\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "members invite",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "members invite, mention",
-      "policy": "{\"admins\":[],\"floor\":\"mention\",\"floor_moderator\":null,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"mention\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "moderated by the admin",
-      "policy": "{\"admins\":[\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\"],\"floor\":\"moderated\",\"floor_moderator\":\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\",\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"moderated\",\"floor_moderator\":\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\",\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "require verified",
-      "policy": "{\"admins\":[\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":true,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":true,\"v\":0}"
     },
     {
       "name": "transferred to the member",
-      "policy": "{\"admins\":[\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:NBNVuFcQFlX5ln1jDtJTtn2QBT9grnwEKWhMXMupesU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:C8sinOjWdyMn9RGNLokVg5Ui5UWqw_tmyLH9hVgjQkI\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "smallest limits",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":0},\"max_members\":1,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":0},\"max_members\":1,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "largest limits",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":100},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":100},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "members invite, pinned",
-      "pending": "core: floor_pinned (SPEC 9.1)",
-      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "members invite, mention, pinned",
-      "pending": "core: floor_pinned (SPEC 9.1)",
-      "policy": "{\"admins\":[],\"floor\":\"mention\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[],\"floor\":\"mention\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     },
     {
       "name": "admin, pinned",
-      "pending": "core: floor_pinned (SPEC 9.1)",
-      "policy": "{\"admins\":[\"ac:v0:XbVSfr6_TsliJ_0xWQKLfHKt7-HsK74L2TP97XAFzKs\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:-EDHHU4T6E62xRVr0gGxlSyqTHM-NK5Wd8uFP7R2rPU\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "admin, written before floor_pinned",
+      "policy": "{\"admins\":[\"ac:v0:E4txPiH4PtJZOGWrStfgmDEkeaouXFRHzmqDDzTR8vs\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:U5GQ10P8-Gqkt8_aYCR0NKukcg3tXuEkkbzJ_JeXXAY\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
     }
   ]
 }

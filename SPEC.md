@@ -1193,7 +1193,7 @@ and SHOULD leave the group if the honest members can't converge.
 | Remove other member | A committer whose identity satisfies `remove`. Only the owner may remove the owner's instances. |
 | Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. The owner's last instance may not leave until it has transferred ownership. A sole remaining member only deletes its local state. |
 | Policy change (GroupContextExtensions) | Owner. Admins may change `floor`, `floor_pinned` and `floor_moderator` only. Any committer allowed to make the Add may apply the §9.1 floor switch. |
-| Owner transfer | Owner. The new owner must be a member after the commit. |
+| Owner transfer | Owner. The new owner must keep an instance that was in the group before the commit; one the commit adds doesn't count. |
 | Update (own leaf) | The instance itself |
 | Add another instance of an existing identity | Any instance of that identity (multi-replica), whatever `invite` says |
 | Remove other instances of one's own identity | Any instance of that identity |
@@ -1222,10 +1222,26 @@ Notes on the table:
   would be left with no owner, and no policy change could ever pass again.
   An owner instance MUST NOT propose its own removal while it is the
   owner's only instance in the group, counting the leaves already pending
-  in the epoch as gone. Receivers MUST reject such a leave proposal (and not
-  store it), and MUST reject any commit after which the identity named as
-  `owner` by the policy in force has no instance left although it had
-  one before. The owner first commits a policy change that names another
+  in the epoch as gone. Receivers MUST reject a leave proposal from the
+  owner's only instance in the group (and not store it), and MUST reject
+  any commit after which the identity named as `owner` by the policy in
+  force has no instance left although it had one before. Only instances
+  that were in the group before the commit count: one the same commit adds
+  doesn't keep the owner, since nothing makes its holder join.
+- **Owner instances leaving at once.** Two instances of the owner can each
+  propose a leave before they see the other's, and the relay doesn't
+  deliver a proposal to its sender, so members can't agree on which came
+  first. Receivers therefore store every leave proposal that isn't from
+  the owner's only instance, whatever else is pending. When every instance
+  of the owner has a leave stored, a committer leaves out the leave of the
+  owner instance with the lowest leaf index and carries the others; every
+  member that stored the same proposals computes the same set. The
+  instance whose leave was left out stays in the group; its proposal ends
+  with the epoch.
+- **Removing a leaving member.** A commit that removes a member whose
+  leave is pending carries that leave proposal by reference instead of a
+  Remove of its own for the same leaf, so every member reports a leave,
+  and no `remove` permission is needed for it. The owner first commits a policy change that names another
   member as `owner` ("Owner transfer" above), then leaves as a plain
   member. One of several instances of the owner's identity may leave
   freely. An owner leaving after a SAS mismatch (§11) transfers ownership
@@ -1251,6 +1267,12 @@ Notes on the table:
   `RequiredCapabilities` and the new `ac_group_policy`. Receivers MUST reject
   it if `ac_group_meta` or `RequiredCapabilities` differ from the current
   values (they're immutable in v0) or if any required extension is missing.
+  The `ac_group_policy` it carries MUST be the policy's one canonical
+  encoding, every field present (`floor_pinned` included); receivers MUST
+  reject any other encoding, even one that reads as the same policy. A
+  policy without `floor_pinned`, written before the field existed, is
+  still read where it already is (a stored context, a Welcome) and means
+  `floor_pinned: false`.
 
 ### 9.3 Floor control and triggering
 
