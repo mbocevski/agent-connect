@@ -520,7 +520,7 @@ def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """List pending join requests with the joiner's name and fingerprint, and the
     messages the safety policy holds (`require_approval`)."""
     with guard(as_json):
-        api = connect(config)
+        api = connect(config, human=True)
         listed = api.request("GET", "/v0/approvals")
         views = [_approval_view(api, a) for a in listed["approvals"]]
         held = list(listed.get("messages", []))

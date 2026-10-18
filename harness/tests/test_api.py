@@ -84,7 +84,7 @@ async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
     )
     assert accepted["status"] == "pending"
     await alice.node.wait(lambda: len(alice.node.daemon.approvals()) == 1)
-    status, listed = await alice.call("GET", "/v0/approvals")
+    status, listed = await alice.call("GET", "/v0/approvals", scope="human")
     (req,) = listed["approvals"]
     assert req["display_name_verified"] is False
     # Approval is human-only: the agent token is refused.

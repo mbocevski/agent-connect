@@ -1743,13 +1743,14 @@ class Daemon:
         )
         return [] if event is None else [event]
 
-    def held_messages(self) -> list[dict[str, Any]]:
-        """Messages waiting for the human's approval, metadata only."""
+    def held_messages(self, direction: str | None = None) -> list[dict[str, Any]]:
+        """Messages waiting for the human's approval, metadata only; with
+        ``direction`` (``in`` or ``out``) only those."""
         now = self.now()
         return [
             {k: v for k, v in item.items() if k not in HELD_PRIVATE}
             for item in self.store.held_items()
-            if now < int(item["expires_at"])
+            if now < int(item["expires_at"]) and direction in (None, item["direction"])
         ]
 
     def _pending_hold(self, hold_id: str) -> dict[str, Any]:

@@ -80,7 +80,7 @@ async def test_responses_and_requests_match_the_declared_shapes(
     await bob.call("POST", "/v0/invites/inspect", {"url": invite["url"]})
     await bob.call("POST", "/v0/invites/accept", {"url": invite["url"], "display_name": "bob"})
     await alice.node.wait(lambda: len(alice.node.daemon.approvals()) == 1)
-    (req,) = (await alice.call("GET", "/v0/approvals"))["approvals"]
+    (req,) = (await alice.call("GET", "/v0/approvals", scope="human"))["approvals"]
     await alice.call("POST", f"/v0/approvals/{req['request_id']}/approve", scope="human")
     await bob.node.wait(lambda: bob.node.daemon.store.group(gid) is not None)
     await cluster.settle(gid, 1)
@@ -117,7 +117,7 @@ async def test_safety_routes_match_the_declared_shapes(cluster: Cluster, sockdir
     assert sent["status"] == "held"
     bob.node.daemon.send_message(gid, {"text": "in"})
     await alice.node.wait(lambda: len(alice.node.daemon.held_messages()) == 2)
-    held = (await alice.call("GET", "/v0/approvals"))["messages"]
+    held = (await alice.call("GET", "/v0/approvals", scope="human"))["messages"]
     first, second = (item["hold_id"] for item in held)
     for hold_id in (first, second):
         await alice.call("GET", f"/v0/approvals/messages/{hold_id}", scope="human")

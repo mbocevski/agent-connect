@@ -211,10 +211,10 @@ async def test_require_approval_holds_inbound_until_the_human_approves(
     (item,) = listed["messages"]
     hold_id = item["hold_id"]
     assert (item["msg_id"], item["kind"]) == (sent, "a2a.message")
-    # The agent token can list (metadata) but neither read nor decide.
+    # The agent token sees none of it, and can neither read nor decide.
     status, agent_list = await h.agent("GET", "/v0/approvals")
     assert status == 200
-    assert "body" not in agent_list["messages"][0]
+    assert agent_list == {"approvals": [], "messages": []}, "nothing of the peers for the agent"
     for method, path in (
         ("GET", f"/v0/approvals/messages/{hold_id}"),
         ("POST", f"/v0/approvals/messages/{hold_id}/approve"),
@@ -699,3 +699,26 @@ async def test_the_expiry_timer_survives_a_failure(
         await advance(60)
     (expired,) = events(a, "held_expired")
     assert expired["msg_id"] == sent
+
+
+async def test_the_agent_token_sees_only_its_own_held_sends(
+    group: GroupFixture, human: Callable[[Node], Awaitable[Human]]
+) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.update_safety(gid, {"require_approval": "both"})
+    h = await human(a)
+    inbound = b.daemon.send_message(gid, {"text": "from the peer"})
+    assert await settled(a, b, inbound) == "held"
+    status, mine = await h.agent("POST", f"/v0/groups/{gid}/messages", {"text": "mine"})
+    assert (status, mine["status"]) == (200, "held")
+    status, listed = await h.agent("GET", "/v0/approvals")
+    assert status == 200
+    assert listed["approvals"] == [], "no joins for the agent"
+    assert [m["msg_id"] for m in listed["messages"]] == [mine["msg_id"]]
+    assert all(m["direction"] == "out" for m in listed["messages"])
+    status, info = await h.agent("GET", "/v0/status")
+    assert info["held_messages"] == 1, "no inbound hold counts for the agent"
+    status, both = await h.human_call("GET", "/v0/approvals")
+    assert {m["msg_id"] for m in both["messages"]} == {inbound, mine["msg_id"]}
+    status, info = await h.human_call("GET", "/v0/status")
+    assert info["held_messages"] == 2

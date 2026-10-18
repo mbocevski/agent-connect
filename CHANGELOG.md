@@ -66,6 +66,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   CLI prints every peer-controlled string with control characters
   replaced, the audit log records unknown kinds as `unknown`, and the
   SPEC 10.1 notice quotes and cleans the sender's name and the scope.
+- `agentconnect events` and `agentconnect approvals` (list) now need the
+  human token. With the agent token, `GET /v0/approvals` lists only the
+  agent's own held sends (no join requests, no held peer messages) and
+  `GET /v0/status` counts only those.
 - The audit log and the transcript are also capped per group and per sender
   (`policy.audit_max_rows_per_group` 20000, `policy.audit_max_rows_per_sender`
   2000, `transcript_max_rows_per_sender` 1000, `transcript_max_group_bytes`

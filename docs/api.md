@@ -121,7 +121,7 @@ Token: `api` routes accept either token. The routes marked human refuse the api 
 
 ### `GET /v0/status`
 
-Daemon status: identity, relay connection, queue sizes.
+Daemon status: identity, relay connection, queue sizes. With the agent token, `held_messages` counts only the agent's own held sends.
 
 Accepts the api token or the human token.
 
@@ -388,7 +388,7 @@ Response:
 
 ### `GET /v0/approvals`
 
-Pending join requests, with the joiner's fingerprint, and the messages the safety policy holds for approval (`messages`, metadata only).
+Pending join requests, with the joiner's fingerprint, and the messages the safety policy holds for approval (`messages`, metadata only). With the agent token, `approvals` is empty and `messages` lists only the agent's own held sends: what is held of the peers' messages is the human's to know.
 
 Accepts the api token or the human token.
 

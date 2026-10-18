@@ -224,7 +224,8 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "GET",
         "/v0/status",
         "_status",
-        "Daemon status: identity, relay connection, queue sizes.",
+        "Daemon status: identity, relay connection, queue sizes. With the agent token, "
+        "`held_messages` counts only the agent's own held sends.",
         response={
             "identity": "str",
             "fingerprint": "str",
@@ -357,7 +358,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/approvals",
         "_list_approvals",
         "Pending join requests, with the joiner's fingerprint, and the messages the "
-        "safety policy holds for approval (`messages`, metadata only).",
+        "safety policy holds for approval (`messages`, metadata only). With the agent "
+        "token, `approvals` is empty and `messages` lists only the agent's own held "
+        "sends: what is held of the peers' messages is the human's to know.",
         response={
             "approvals": [
                 {
@@ -650,8 +653,13 @@ class ApiServer:
 
     # -- handlers ----------------------------------------------------------
 
-    async def _status(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return self.daemon.status()
+    async def _status(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        info = self.daemon.status()
+        if p.get(SCOPE) != "human":
+            # SPEC 10.2: the agent can't learn (and tell a peer) what is held
+            # of the peers' messages; it sees its own held sends only.
+            info["held_messages"] = len(self.daemon.held_messages(direction="out"))
+        return info
 
     async def _list_groups(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
         return {"groups": self.daemon.list_groups()}
@@ -659,8 +667,13 @@ class ApiServer:
     async def _group_info(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return self.daemon.group_info(p["gid"])
 
-    async def _list_approvals(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+    async def _list_approvals(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         await self.daemon.expire_held()
+        if p.get(SCOPE) != "human":
+            # The agent token sees no join requests and no held peer messages
+            # (their sender, msg_id and task would tell it what the policy
+            # did); only its own held sends.
+            return {"approvals": [], "messages": self.daemon.held_messages(direction="out")}
         return {"approvals": self.daemon.approvals(), "messages": self.daemon.held_messages()}
 
     async def _held_message(self, p: dict[str, str], _b: dict[str, Any]) -> Any:

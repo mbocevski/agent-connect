@@ -272,9 +272,13 @@ characters; then `--yes` is refused until you add `--full`, so you never
 approve what you didn't see. With `--json` the whole message is shown on
 stderr.
 
-`approve` and `reject` need the human token, like approving a join. The
-agent token can list held messages (metadata only), but it can't read their
-content or decide on them: `403 human_only`.
+`approve` and `reject` need the human token, like approving a join, and so
+do the listing (`agentconnect approvals`) and `agentconnect events`. The
+agent token sees none of the peers' held messages and no join requests: `GET
+/v0/approvals` returns only its own held sends, `GET /v0/status` counts only
+those, and it can't read any held content or decide on it (`403
+human_only`). What is held of a peer's messages is the human's to know; an
+agent that knew could tell the peer.
 
 An approved inbound message reaches the adapter as if it had arrived then,
 and triggers the agent if it would have before. An approved outbound message
