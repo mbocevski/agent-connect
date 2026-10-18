@@ -263,7 +263,8 @@ def test_group_policy_vectors(rng: random.Random) -> None:
     """The policies of testdata/group-policy.json (SPEC 9.1) through set_policy.
 
     Its authorization cases (SPEC 9.2) are checked by core/src/vectors.rs;
-    the bindings have no call that evaluates a commit's facts on their own.
+    the policy changes alone are also checked here, through
+    check_policy_change (test_group_policy_authorization_vectors).
     """
     testdata = Path(__file__).resolve().parents[2] / "testdata"
     vectors = json.loads((testdata / "group-policy.json").read_text(encoding="utf-8"))
@@ -288,6 +289,71 @@ def test_group_policy_vectors(rng: random.Random) -> None:
         with pytest.raises(ac.AgentConnectError) as err:
             a.set_policy(gid, case["policy"].encode())
         assert str(err.value) == case["error"], case["name"]
+
+
+def _join_without_switch(owner: ac.Client, gid: bytes, joiner: ac.Client) -> bytes:
+    """``join``, but the Add never switches the floor: the vector's policy
+    stays the one in force."""
+    invite = owner.create_invite("relay.example", 3600)
+    link = ac.parse_invite_url(invite.url)
+    verified = owner.verify_join_request(joiner.create_join_request(link, "j"), invite)
+    out = owner.add_member(gid, verified, invite, switch_floor=False)
+    owner.confirm_pending_commit(gid, out["msg_id"])
+    assert joiner.join(link, invite_meta(invite), out["welcome"]) == gid
+    commit = out["commit"]
+    assert isinstance(commit, bytes)
+    return commit
+
+
+def test_group_policy_authorization_vectors(rng: random.Random) -> None:
+    """The policy-change cases of testdata/group-policy.json (SPEC 9.2): a
+    GroupContextExtensions alone, in a group of owner, admin and member,
+    through the committer's check_policy_change. The vector's identities
+    become these clients'."""
+    testdata = Path(__file__).resolve().parents[2] / "testdata"
+    vectors = json.loads((testdata / "group-policy.json").read_text(encoding="utf-8"))
+    ids = vectors["identities"]
+    clients = {label: make_client(rng) for label in ("owner", "admin", "member", "joiner")}
+
+    def ours(policy: str) -> bytes:
+        for label, identity in ids.items():
+            policy = policy.replace(identity, clients[label].identity)
+        return policy.encode()
+
+    policies = {p["name"]: p["policy"] for p in vectors["valid"]}
+    three = {ids["owner"], ids["admin"], ids["member"]}
+    groups: dict[str, bytes] = {}
+    checked = 0
+    for case in vectors["authorization"]:
+        f = case["facts"]
+        if (
+            f["adds"]
+            or f["removes"]
+            or f["new_policy"] is None
+            or set(f["identities_before"]) != three
+            or set(f["identities_after"]) != three
+            or (f["leaves_before"], f["leaves_after"]) != (3, 3)
+        ):
+            continue
+        old = case["policy"]
+        if old not in groups:
+            owner = clients["owner"]
+            gid = owner.create_group(NAME, PURPOSE, policy=ours(policies[old]))
+            _join_without_switch(owner, gid, clients["admin"])
+            commit = _join_without_switch(owner, gid, clients["member"])
+            clients["admin"].process(gid, commit)
+            assert owner.policy(gid) == ours(policies[old]), old
+            groups[old] = gid
+        label = next(k for k, v in ids.items() if v == f["committer"])
+        new = ours(policies[f["new_policy"]])
+        if case["result"] == "ok":
+            assert clients[label].check_policy_change(groups[old], new) is None, case["name"]
+        else:
+            with pytest.raises(ac.AgentConnectError) as err:
+                clients[label].check_policy_change(groups[old], new)
+            assert str(err.value) == case["result"], case["name"]
+        checked += 1
+    assert checked >= 10
 
 
 def _b64(raw: bytes) -> str:

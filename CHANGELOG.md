@@ -26,8 +26,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `Client::create_group_with_policy`. Python: `Client.pending_leaves`,
   `Client.remove_instances` (by instance id), `Client.check_policy_change`,
   `create_group(..., policy=)`, and the new summary keys. A knock's group
-  may not have a pinned floor (SPEC 6.6.5). New vectors in
-  `testdata/group-policy.json`. A test-only
+  may not have a pinned floor (SPEC 6.6.5). The `floor_pinned` and
+  identity-counting cases of `testdata/group-policy.json` are no longer
+  pending, it gains cases for unpinning, a policy written before
+  `floor_pinned` and removing one of the owner's instances, and its
+  policy-change cases are also checked through `Client.check_policy_change`.
+  A test-only
   `Client._commit_unchecked_for_testing` (feature `test-hooks`, not in the
   release wheel; `scripts/check_wheel_hooks.py` checks it) builds commits
   without the core's checks, for tests that honest members reject them.
@@ -610,9 +614,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   that differ when grants are dropped (§12); §14 gains the leave and the
   owner transfer. New vectors in `testdata/group-policy.json`: the default
   and valid and invalid policies, checked in Rust and through the Python
-  bindings, and commit authorisation cases checked in Rust, with the
-  `floor_pinned` and identity-counting cases marked pending until the core
-  implements them. The core doesn't implement the new rules yet.
+  bindings, and commit authorisation cases checked in Rust. The core
+  implements `floor_pinned` and the identity count (see "Core: group mode"
+  under Added); the daemon doesn't implement the other new rules yet.
 - Local API: with the agent token, `GET /v0/events` numbers events with a
   sequence of the agent's own (`seq`, and `after` takes it), with no gap
   where an event the agent doesn't see was recorded. Before, the global
