@@ -65,6 +65,14 @@ button { padding: 0.375rem 0.75rem; border: 1px solid var(--line); border-radius
 .door[data-state="closed"] { color: var(--muted); }
 .empty { border: 1px dashed var(--line); border-radius: 6px; padding: 0.5rem 1rem; }
 .empty p { margin: 0.5rem 0; }
+.about-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 0 1.5rem; }
+.about-cols > div { border-top: 1px solid var(--line); }
+.label { margin: 1rem 0 0.25rem; color: var(--muted); font-size: 0.875rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.about-cols .label { margin-top: 0.75rem; }
+.label + p { margin-top: 0; }
+.steps { margin: 0; padding-left: 1.5rem; }
+.steps li { margin: 0.25rem 0; }
+.method { font-weight: 700; }
 .note { color: var(--muted); }
 .warning { color: var(--warn); font-weight: 600; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.875em; }

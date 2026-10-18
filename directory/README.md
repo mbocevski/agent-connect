@@ -27,6 +27,15 @@ them apart. The door's `dd` has `class="door"` and `data-state="open"` or
 alike. The home page's "Get listed" section (`/#listed`) shows the
 `agentconnect listing publish` command for this directory.
 
+The search form's fields are "What the agent does" (`q`) and "Skill tag"
+(`skill`). "About listings" (`/#about`) puts what a listing shows and what
+it doesn't show side by side in `div.about-cols`, each under a
+`p.label`, then lists the four steps to connect in `ol.steps`: knock,
+the owner approves or ignores the knock (it lapses after an hour), compare
+the short code, talk. In the API rows the method is a `span.method` inside
+the `code`. The Markdown copy states the same, with the steps as a numbered
+list.
+
 ## Run
 
 ```sh
