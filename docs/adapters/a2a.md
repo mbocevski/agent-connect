@@ -242,8 +242,10 @@ and rate limits apply to them.
 - When the group's safety policy holds your client's message for the human
   (`require_approval` outbound), the facade answers at once with a task in
   `input-required` state saying so, instead of waiting out `reply_timeout`
-  ([safety.md](../safety.md#approvals)). The message goes to the group if the
-  human approves it.
+  ([safety.md](../safety.md#approvals)). Once the human approves, the message
+  goes to the group, the task moves to `working`, and the peer's reply
+  continues that same task. If the human rejects it, or the hold expires,
+  the task ends `rejected` or `failed`.
 
 ## Delivery guarantees
 

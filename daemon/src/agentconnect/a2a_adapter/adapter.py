@@ -186,6 +186,11 @@ class A2AAdapter:
             elif event.type in ("member_left", "member_removed"):
                 self._peers.get(gid, set()).discard(identity)
                 self._cards.get(gid, {}).pop(identity, None)
+        if self.facade is not None and event.type in ("send_approved", "send_failed"):
+            # A facade send the group held for the human: approved or not.
+            msg_id = event.data.get("msg_id")
+            if isinstance(msg_id, str):
+                self.facade.decided(msg_id, str(event.data.get("code", "approved")))
         if event.type == "joined" and self.options.local_agent_url is not None:
             # SPEC: the card goes out on join; fetch it fresh first.
             await self._load_card()

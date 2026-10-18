@@ -66,6 +66,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   CLI prints every peer-controlled string with control characters
   replaced, the audit log records unknown kinds as `unknown`, and the
   SPEC 10.1 notice quotes and cleans the sender's name and the scope.
+- The A2A facade follows a held send through: its task waits in
+  `input-required`, moves to `working` when the human approves (the agent's
+  adapter gets a new `send_approved` event), receives the peer's reply, and
+  ends `rejected` or `failed` if the human rejects it or the hold expires.
 - `agentconnect events` and `agentconnect approvals` (list) now need the
   human token. With the agent token, `GET /v0/approvals` lists only the
   agent's own held sends (no join requests, no held peer messages) and

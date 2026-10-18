@@ -74,6 +74,7 @@ LOG = log.get("a2a.facade")
 CARD_PATH = "/.well-known/agent-card.json"
 MAX_TO = 50
 MAX_GROUPS = 256  # facade apps kept; the oldest is dropped beyond this
+MAX_EARLY = 256  # decisions kept that arrived before their send was waited on
 GROUP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
@@ -134,7 +135,7 @@ class BridgeExecutor(AgentExecutor):
         return to or ["*"]
 
     @override
-    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:  # noqa: PLR0912
         msg = context.message
         task_id = context.task_id or ""
         if msg is None or not task_id:
@@ -156,20 +157,14 @@ class BridgeExecutor(AgentExecutor):
                 event_queue, context, TaskState.TASK_STATE_FAILED, f"not sent: {code}"
             )
             return
-        if getattr(msg_id, "held", False):
-            # The group holds the agent's messages for the human: say so
-            # instead of waiting out reply_timeout for a reply that can't
-            # come before the human approves.
-            await self._start_task(context, event_queue)
-            await self._status(
-                event_queue,
-                context,
-                TaskState.TASK_STATE_INPUT_REQUIRED,
-                "held for the human's approval: the group gets it once they approve it",
-            )
-            return
         self._facade.waiters[msg_id] = replies
         task_mode = context.current_task is not None
+        if getattr(msg_id, "held", False):
+            # The group holds the agent's messages for the human: say so at
+            # once, wait for the human's decision, and only then for a reply.
+            if not await self._wait_for_human(context, event_queue, msg_id):
+                return
+            task_mode = True
         try:
             async with asyncio.timeout(self._facade.adapter.options.reply_timeout):
                 while True:
@@ -196,6 +191,35 @@ class BridgeExecutor(AgentExecutor):
             await self._status(event_queue, context, TaskState.TASK_STATE_FAILED, "no reply")
         finally:
             self._facade.waiters.pop(msg_id, None)
+
+    async def _wait_for_human(
+        self, context: RequestContext, queue: EventQueue, msg_id: str
+    ) -> bool:
+        """A held send: ``input-required`` until the human decides, then
+        ``working`` (approved, sent) or ``rejected``/``failed``. True if it went."""
+        decision = self._facade.hold(msg_id)
+        await self._start_task(context, queue)
+        await self._status(
+            queue,
+            context,
+            TaskState.TASK_STATE_INPUT_REQUIRED,
+            "held for the human's approval: the group gets it once they approve it",
+        )
+        try:
+            outcome = await decision
+        finally:
+            self._facade.held.pop(msg_id, None)
+        if outcome == "approved":
+            await self._status(
+                queue, context, TaskState.TASK_STATE_WORKING, "approved and sent to the group"
+            )
+            return True
+        self._facade.waiters.pop(msg_id, None)
+        state = (
+            TaskState.TASK_STATE_REJECTED if outcome == "rejected" else TaskState.TASK_STATE_FAILED
+        )
+        await self._status(queue, context, state, f"not sent: {outcome}")
+        return False
 
     async def _forward(
         self, context: RequestContext, queue: EventQueue, d: Delivery, bound: Bound | None
@@ -303,6 +327,9 @@ class Facade:
         self.waiters: dict[str, asyncio.Queue[Delivery]] = {}
         # facade task id -> its peer side
         self.bound: dict[str, Bound] = {}
+        # msg_id of a held facade send -> the human's decision, once it comes
+        self.held: dict[str, asyncio.Future[str]] = {}
+        self._decided: dict[str, str] = {}  # decisions that came before the wait
 
     @property
     def port(self) -> int:
@@ -325,6 +352,26 @@ class Facade:
                     await handler.aclose()
         await self._server.stop()
         await self._http.aclose()
+
+    def hold(self, msg_id: str) -> asyncio.Future[str]:
+        """The future of a held send's decision (``approved``, ``rejected``,
+        ``expired`` or another ``send_failed`` code)."""
+        future = asyncio.Future[str](loop=asyncio.get_running_loop())
+        early = self._decided.pop(msg_id, None)
+        if early is not None:
+            future.set_result(early)
+        self.held[msg_id] = future
+        return future
+
+    def decided(self, msg_id: str, outcome: str) -> None:
+        """The daemon's word on a held send (send_approved or send_failed)."""
+        future = self.held.get(msg_id)
+        if future is None:
+            if len(self._decided) < MAX_EARLY:
+                self._decided[msg_id] = outcome
+            return
+        if not future.done():
+            future.set_result(outcome)
 
     def route_reply(self, d: Delivery) -> bool:
         """Hand a reply to the facade request it answers; False if none."""

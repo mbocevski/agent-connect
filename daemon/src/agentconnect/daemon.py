@@ -1796,6 +1796,7 @@ class Daemon:
         group = self.store.group(group_id)
         if group is None or group.status != "active":
             raise DaemonError("not_found", "the group is no longer active")
+        events: list[Event] = []
         with self.store.tx():
             if not self.store.set_held_status(hold_id, "approved"):
                 raise DaemonError("not_found", "no such held message")
@@ -1813,9 +1814,19 @@ class Daemon:
                 payload = item["payload"] or {}
                 self._enqueue("app", group_id, payload)
                 self.safety.transcribe(group_id, "out", self.me, item["msg_id"], payload["inner"])
+                # The agent's own message goes out: tell its adapter (the
+                # A2A facade waits for it), in the same transaction.
+                sent = self._record(
+                    group_id,
+                    "send_approved",
+                    f"hold={hold_id}/approved",
+                    {"msg_id": item["msg_id"]},
+                )
+                events = [] if sent is None else [sent]
             if item["task_id"] is not None and item["direction"] == "in":
                 self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=True)
             self._audit_hold(item, "approved")
+        self._notify_soon(events)
         self._delivery_wake.set()
         self._held_wake.set()
         self._pulse()

@@ -31,7 +31,7 @@ from a2a.types import (
 from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, convert
 from agentconnect.a2a_adapter import facade as facade_module
 from agentconnect.a2a_adapter.serve import LoopbackServer
-from agentconnect.adapter import Delivery, GroupView, Sender
+from agentconnect.adapter import Delivery, Event, GroupView, Sender
 from agentconnect.daemon import DaemonError
 
 GID = "Z3JvdXA"
@@ -259,3 +259,15 @@ async def test_loopback_server_edges() -> None:
     with pytest.raises(OSError, match="in use"):
         await taken.start()
     await server.stop()
+
+
+async def test_a_decision_before_the_wait_is_kept(setup: Any) -> None:
+    adapter, _group, _client = setup
+    facade = adapter.facade
+    assert facade is not None
+    await adapter.on_event(VIEW, Event("send_failed", GID, {"msg_id": "m1", "code": "rejected"}))
+    assert await facade.hold("m1") == "rejected"
+    waiting = facade.hold("m2")
+    facade.decided("m2", "approved")
+    facade.decided("m2", "expired")  # a second word changes nothing
+    assert await waiting == "approved"

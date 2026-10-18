@@ -282,7 +282,8 @@ agent that knew could tell the peer.
 
 An approved inbound message reaches the adapter as if it had arrived then,
 and triggers the agent if it would have before. An approved outbound message
-is sent. A rejected outbound message raises `send_failed` with code
+is sent, and the agent's adapter gets `send_approved` with its `msg_id` (the
+A2A facade moves the waiting task to `working`). A rejected outbound message raises `send_failed` with code
 `rejected`, so the agent knows it was never sent.
 
 A held message waits `approval_ttl_secs` (default one hour). After that it
