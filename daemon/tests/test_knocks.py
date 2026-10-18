@@ -583,9 +583,10 @@ async def test_an_add_that_cant_be_built_fails_the_approval(world: World) -> Non
     request, _ = await held(world, owner)
     gid = owner.engine.approve(request["request_id"])["group_id"]
     owner.knocks.add_failed(request["request_id"], "not_built")
-    group = owner.engine.store.group(gid)
-    assert group is not None
-    assert group.status == "left"
+    # The knocker was never added: the group is gone, here and in the core.
+    assert owner.engine.store.group(gid) is None
+    with pytest.raises(ac.AgentConnectError):
+        owner.engine.client.epoch(unb64(gid))
     (failed,) = owner.events("knock_approval_failed")
     assert failed == {"request_id": request["request_id"], "group_id": gid, "code": "not_built"}
     assert owner.engine.store.knock_request_secret(request["request_id"]) is None
@@ -1061,9 +1062,7 @@ async def test_an_approved_knock_that_never_got_its_welcome_fails_at_the_deadlin
     await owner.knocks.step()
     (failed,) = owner.events("knock_approval_failed")
     assert failed["code"] == "lapsed"
-    group = owner.engine.store.group(gid)
-    assert group is not None
-    assert group.status == "left"
+    assert owner.engine.store.group(gid) is None
     owner.knocks.add_failed(request["request_id"], "again")  # decided already: nothing
     assert len(owner.events("knock_approval_failed")) == 1
     owner.knocks.add_failed("kn-unknown", "x")
@@ -1098,11 +1097,17 @@ async def test_an_add_is_built_only_for_its_own_waiting_group(world: World) -> N
 
 
 async def after_add(
-    owner: Node, request: dict[str, Any], answer: Exception | None, *, added: bool = False
+    owner: Node,
+    request: dict[str, Any],
+    answer: Exception | None,
+    *,
+    added: bool = False,
+    approved: str | None = None,
 ) -> str:
-    """Approve, build the Add and run its follow-ups with ``answer`` from the
-    relay. ``added``: the Add was merged (the knocker is a member)."""
-    gid = owner.engine.approve(request["request_id"])["group_id"]
+    """Approve (unless ``approved`` names the group already), build the Add
+    and run its follow-ups with ``answer`` from the relay. ``added``: the
+    Add was merged (the knocker is a member)."""
+    gid = approved or owner.engine.approve(request["request_id"])["group_id"]
     if added:
         owner.engine.store.set_members(
             gid, {owner.engine.me: ("owner", []), request["identity"]: ("member", [])}
@@ -1595,3 +1600,78 @@ async def test_a_welcome_from_a_broken_owner_is_refused(world: World, how: str) 
     assert [e["reason"] for e in k.events("relay_misbehaviour")] == ["knock_welcome_mismatch"]
     assert k.engine.store.group(b64(gid)) is None
     assert k.engine.store.knock_secret(knock_id) is None
+
+
+# -- the hidden window, finished (N1, N2) ----------------------------------------------
+
+
+async def test_events_of_the_hidden_window_reach_the_agent_once_the_knocker_is_in(
+    world: World,
+) -> None:
+    """N1: what the group records while it is hidden is the agent's to read
+    once it is visible, in order, and gap-free."""
+    owner = world.node("owner")
+    await owner.engine.emit(None, "listing_renewed", cause="before", seq=1)
+    request, _ = await held(world, owner)
+    gid = owner.engine.approve(request["request_id"])["group_id"]
+    await owner.engine.emit(gid, "member_joined", cause="add", identity=request["identity"])
+    await owner.engine.emit(gid, "epoch_changed", cause="epoch", epoch=1)
+    assert [e["type"] for e in (await owner.rt.agent.events())["events"]] == ["listing_renewed"]
+    assert owner.engine._gated(gid)  # inbound deliveries wait in the inbox
+    await after_add(owner, request, None, added=True, approved=gid)
+    seen = (await owner.rt.agent.events())["events"]
+    assert [(e["seq"], e["type"]) for e in seen] == [
+        (1, "listing_renewed"),
+        (2, "member_joined"),
+        (3, "epoch_changed"),
+    ]
+    assert not owner.engine._gated(gid)
+    assert [e["seq"] for e in (await owner.rt.agent.events(after=1))["events"]] == [2, 3]
+
+
+async def test_a_failed_approvals_group_stays_gone_past_the_purge(world: World) -> None:
+    """N2: a group whose knocker was never added is deleted, and nothing about
+    it shows up a week later, when the request row is purged."""
+    owner = world.node("owner")
+    request, _ = await held(world, owner)
+    gid = owner.engine.approve(request["request_id"])["group_id"]
+    owner.knocks.add_failed(request["request_id"], "not_built")
+    world.clock.advance(8 * 86_400)
+    await owner.knocks.step()
+    assert owner.engine.store.knock_request(request["request_id"]) is None
+    assert gid not in [g["group_id"] for g in owner.engine.list_groups()]
+    assert (await owner.rt.agent.list_groups())["groups"] == []
+
+
+async def test_a_removed_knockers_group_stays_hidden_and_keeps_its_origin(world: World) -> None:
+    """N2: the hidden state and the origin live on the group, not on the
+    request row the purge deletes."""
+    owner = world.node("owner")
+    request, _ = await held(world, owner)
+    gid = owner.engine.approve(request["request_id"])["group_id"]
+    owner.engine.store.set_members(
+        gid, {owner.engine.me: ("owner", []), request["identity"]: ("member", [])}
+    )
+    owner.knocks.add_failed(request["request_id"], "too_late")
+    world.clock.advance(8 * 86_400)
+    await owner.knocks.step()
+    assert owner.engine.store.knock_request(request["request_id"]) is None
+    assert owner.engine.group_info(gid)["origin"] == {
+        "kind": "knock",
+        "directory": DIR,
+        "name": NAME,
+    }
+    assert (await owner.rt.agent.list_groups())["groups"] == []
+    with pytest.raises(DaemonError):
+        await owner.rt.agent.group_info(gid)
+
+
+async def test_an_approved_knocks_group_keeps_its_origin_past_the_purge(world: World) -> None:
+    owner = world.node("owner")
+    request, _ = await held(world, owner)
+    gid = await after_add(owner, request, None, added=True)
+    world.clock.advance(8 * 86_400)
+    await owner.knocks.step()
+    assert owner.engine.store.knock_request(request["request_id"]) is None
+    info = await owner.rt.agent.group_info(gid)
+    assert info["origin"] == {"kind": "knock", "directory": DIR, "name": NAME}

@@ -549,3 +549,35 @@ async def test_an_approved_knock_finishes_after_a_restart(
     await owner.restart()
     assert await joined(k, sent["knock_id"]) == gid
     assert knock_event(k, "joined", sent["knock_id"]) is not None
+
+
+async def test_a_message_in_the_hidden_window_waits_for_the_agent(
+    cluster: Cluster, directory: DirectoryProcess, rng: random.Random
+) -> None:
+    """N1: the Welcome went out but the approval isn't recorded done yet (the
+    failpoint raises, the outbox waits out its backoff). A message the
+    knocker sends meanwhile waits in the owner's inbox, and reaches the agent
+    once the group is the agent's, after its events."""
+    owner, ref = await listed(cluster, directory, rng)
+    k = await knocker(cluster, directory)
+    sent = await k.runtime.agent.knock(ref)
+    (request,) = await pending(owner)
+    fired = arm(owner, "knock_add.after_welcome", "raise")
+    gid = owner.daemon.approve(request["request_id"])["group_id"]
+    await until(fired)
+    assert await joined(k, sent["knock_id"]) == gid
+    k.daemon.send_message(gid, {"text": "early"})
+    store = owner.daemon.store
+    await owner.wait(lambda: any(r.group_id == gid for r in store.pending_deliveries()))
+    assert owner.daemon.hidden_from_agent(gid)
+    assert owner.adapter.texts(gid) == []
+    assert not [e for e in (await owner.runtime.agent.events())["events"] if e["group_id"] == gid]
+    await until(lambda: owner.clock.sleepers > 0)
+    await cluster.advance(300)
+    assert await owner.wait_texts(gid, 1) == ["early"]
+    assert not owner.daemon.hidden_from_agent(gid)
+    seen = (await owner.runtime.agent.events())["events"]
+    assert [e["seq"] for e in seen] == list(range(1, len(seen) + 1))
+    mine = [e["type"] for e in seen if e["group_id"] == gid]
+    assert mine[0] == "member_joined"
+    assert mine.count("member_joined") == 1

@@ -50,7 +50,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   reaches that agent; `GET /v0/knocks` shows the human what an agent knocked
   on (name, fingerprint, owner state, description); knocks started at once
   can't pass the outgoing limits; a Welcome the relay can't take yet is
-  retried.
+  retried. While the group is hidden, the knocker's messages wait in the
+  owner's inbox and its events reach the agent, in order, once it is
+  visible; the hidden state and the group's `origin` are kept on the group,
+  and a failed approval that never added the knocker deletes its group. The
+  core's test-only knock hook is behind a `test-hooks` cargo feature, off in
+  the release wheel (`scripts/check_wheel_hooks.py` checks it).
 - Daemon and CLI: publishing a listing (docs/discovery.md). `agentconnect
   listing publish --directory <host>` (human token only; the agent token
   gets `403 human_only`) reads the card text and the operator's listing

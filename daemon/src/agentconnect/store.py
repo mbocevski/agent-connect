@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS groups (
     epoch INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     last_own_commit_at INTEGER NOT NULL,
-    msgs_since_commit INTEGER NOT NULL DEFAULT 0
+    msgs_since_commit INTEGER NOT NULL DEFAULT 0,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    origin TEXT
 );
 CREATE TABLE IF NOT EXISTS members (
     group_id TEXT NOT NULL,
@@ -379,6 +381,8 @@ GROUP_COLUMNS = (
     "created_at",
     "last_own_commit_at",
     "msgs_since_commit",
+    "hidden",
+    "origin",
 )
 
 
@@ -495,6 +499,10 @@ class GroupRow:
     created_at: int
     last_own_commit_at: int
     msgs_since_commit: int
+    # Not the agent's to see (an approved knock's group until the knocker is in).
+    hidden: bool = False
+    # Where the group came from, kept with it: {"kind": "knock", "directory", "name"}.
+    origin: dict[str, Any] | None = None
 
 
 @dataclass
@@ -556,6 +564,10 @@ class Store:
         ):
             if column not in columns:
                 self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {decl}")
+        group_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('groups')")}
+        for column, decl in (("hidden", "INTEGER NOT NULL DEFAULT 0"), ("origin", "TEXT")):
+            if column not in group_columns:
+                self._db.execute(f"ALTER TABLE groups ADD COLUMN {column} {decl}")
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
         if "at" not in feed_columns:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
@@ -646,6 +658,8 @@ class Store:
         values = [getattr(row, c) for c in GROUP_COLUMNS]
         values[3] = json.dumps(row.policy)
         values[6] = int(row.out_of_sync)
+        values[12] = int(row.hidden)
+        values[13] = None if row.origin is None else json.dumps(row.origin)
         self._db.execute(
             f"INSERT OR REPLACE INTO groups ({', '.join(GROUP_COLUMNS)}) "  # noqa: S608
             f"VALUES ({', '.join('?' * len(GROUP_COLUMNS))})",
@@ -657,6 +671,8 @@ class Store:
         d = dict(zip(GROUP_COLUMNS, row, strict=True))
         d["policy"] = json.loads(d["policy"])
         d["out_of_sync"] = bool(d["out_of_sync"])
+        d["hidden"] = bool(d["hidden"])
+        d["origin"] = None if d["origin"] is None else json.loads(d["origin"])
         return GroupRow(**d)
 
     def group(self, group_id: str) -> GroupRow | None:
@@ -678,7 +694,11 @@ class Store:
                 msg = f"unknown group column {key}"
                 raise ValueError(msg)
         values = [
-            json.dumps(v) if k == "policy" else int(v) if isinstance(v, bool) else v
+            json.dumps(v)
+            if k == "policy" or (k == "origin" and v is not None)
+            else int(v)
+            if isinstance(v, bool)
+            else v
             for k, v in fields.items()
         ]
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -686,6 +706,13 @@ class Store:
             f"UPDATE groups SET {sets} WHERE group_id = ?",  # noqa: S608
             (*values, group_id),
         )
+
+    def delete_group(self, group_id: str) -> None:
+        """Forget a group entirely: its row and its data (for a group nobody
+        but this instance was ever in, such as a failed knock approval's)."""
+        with self.tx():
+            self.delete_group_data(group_id)
+            self._db.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
 
     def bump_messages(self, group_id: str) -> None:
         self._db.execute(
@@ -1811,6 +1838,30 @@ class Store:
                 n += 1
                 self._db.execute("UPDATE events SET agent_seq = ? WHERE seq = ?", (n, seq))
             self.kv_set("schema/agent_seq", "1")
+
+    def release_agent_events(self, group_id: str, hidden: frozenset[str]) -> list[dict[str, Any]]:
+        """A group became the agent's to see: its events so far that the agent
+        may see (every type but ``hidden``) get the next numbers of the
+        agent's sequence, in order, and are to be told to the adapter again.
+        Returns them."""
+        rows = self._all(
+            "SELECT seq FROM events WHERE group_id = ? AND agent_seq IS NULL "
+            "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq",
+            group_id,
+            json.dumps(sorted(hidden)),
+        )
+        for (seq,) in rows:
+            self._db.execute(
+                "UPDATE events SET notified = 0, agent_seq = "
+                "(SELECT COALESCE(MAX(agent_seq), 0) + 1 FROM events) WHERE seq = ?",
+                (seq,),
+            )
+        out = self._all(
+            "SELECT seq, group_id, type, data, at, event_id FROM events "
+            "WHERE seq IN (SELECT value FROM json_each(?)) ORDER BY seq",
+            json.dumps([int(r[0]) for r in rows]),
+        )
+        return [self._event(r) for r in out]
 
     def agent_visible(self, event_id: str) -> bool:
         """Whether the agent may see this event (it has an agent sequence number)."""

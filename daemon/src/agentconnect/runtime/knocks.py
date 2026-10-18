@@ -514,6 +514,13 @@ class KnockService:
                         now,
                         now,
                         0,
+                        # The agent's once the knocker is in (after_add).
+                        hidden=True,
+                        origin={
+                            "kind": "knock",
+                            "directory": row["directory"],
+                            "name": row["name"],
+                        },
                     )
                 )
                 engine._refresh(group_id)
@@ -662,22 +669,19 @@ class KnockService:
             engine.failpoints.hit("knock_add.after_welcome")
             payload["welcome_sent"] = True
             store.update_outbox(row_seq, payload=payload)
-        event = None
+        released = []
         with store.tx():
             if store.decide_knock_request(
                 request_id, "approved", self._now(), expect=("approving",)
             ):
-                # The group is the agent's from now on: it hears of the knocker
-                # here, once (the member_joined of the Add was the human's).
-                event = engine._record(
-                    group.group_id,
-                    "member_joined",
-                    f"knock={request_id}/member_joined",
-                    {"identity": str(req["identity"])},
-                )
+                # The group is the agent's from now on: what it recorded so
+                # far (the Add's member_joined first) reaches the agent now,
+                # and so do the messages that waited in the inbox.
+                released = engine.reveal_to_agent(group.group_id)
             payload["consume_queued"] = True  # nothing to consume: the follow-ups are done
             store.update_outbox(row_seq, payload=payload)
-        engine._notify_soon([] if event is None else [event])
+        for event in released:
+            await engine._notify(event)
         LOG.info("knock_welcome_sent")
 
     def add_failed(self, request_id: str, code: str) -> None:
@@ -708,8 +712,8 @@ class KnockService:
                         {"intent": {"type": "remove", "identity": str(req["identity"])}},
                     )
                 else:
-                    store.update_group(group.group_id, status="left")
-                    store.delete_group_data(group.group_id)
+                    # Nobody else was ever in it: it goes, here and in the core.
+                    store.delete_group(group.group_id)
                     end = True
             event = engine._record(
                 None,

@@ -13,7 +13,7 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import agentconnect_core as ac
-from agentconnect.store import MAX_LISTINGS_SEEN, Store
+from agentconnect.store import MAX_LISTINGS_SEEN, GroupRow, Store
 
 
 def test_the_tables_appear_in_an_existing_database_and_survive_reopening(
@@ -97,6 +97,36 @@ def test_the_agents_events_get_a_sequence_of_their_own(tmp_path: Path, rng: rand
     assert [(e["seq"], e["type"]) for e in s.agent_events()] == [(1, "a"), (2, "b"), (3, "c")]
     s.number_agent_events(frozenset())  # done already: nothing changes
     assert len(s.agent_events()) == 3
+    s.close()
+
+
+def test_a_group_keeps_its_hidden_state_and_origin(tmp_path: Path, rng: random.Random) -> None:
+    path, key, s = _store(tmp_path, rng)
+    origin = {"kind": "knock", "directory": "directory.example.org", "name": "release-planner"}
+    s.add_group(
+        GroupRow("g", "n", "p", {}, "none", "active", False, None, 0, 1, 1, 0, True, origin)
+    )
+    s.add_event("g", "member_joined", {"identity": "x"}, 1, "e1", agent=False)
+    s.add_event("g", "message_held", {}, 2, "e2", agent=False)
+    s.add_event(None, "listing_renewed", {}, 3, "e3")
+    s.close()
+    s = Store(path, key)
+    group = s.group("g")
+    assert group is not None
+    assert (group.hidden, group.origin) == (True, origin)
+    with s.tx():
+        s.update_group("g", hidden=False)
+        released = s.release_agent_events("g", frozenset({"message_held"}))
+    assert [e["type"] for e in released] == ["member_joined"]
+    assert [(e["seq"], e["type"]) for e in s.agent_events()] == [
+        (1, "listing_renewed"),
+        (2, "member_joined"),
+    ]
+    assert (s.group("g") or group).hidden is False
+    s.update_group("g", origin=None)
+    assert (s.group("g") or group).origin is None
+    s.delete_group("g")
+    assert s.group("g") is None
     s.close()
 
 

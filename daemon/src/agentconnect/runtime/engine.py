@@ -1071,8 +1071,18 @@ class Engine:
         until its Add and Welcome went out (or for good, if they never did)."""
         if group_id is None:
             return False
-        request = self.store.knock_request_for_group(group_id)
-        return request is not None and str(request["status"]) != "approved"
+        group = self.store.group(group_id)
+        return group is not None and group.hidden
+
+    def reveal_to_agent(self, group_id: str) -> list[Event]:
+        """Inside a transaction: the group is the agent's from now on. Its
+        events so far that the agent may see are numbered in the agent's
+        sequence; returns them, for the adapter to be told once it commits.
+        Its held inbound deliveries go out from the inbox, in order."""
+        self.store.update_group(group_id, hidden=False)
+        released = self.store.release_agent_events(group_id, HUMAN_EVENTS)
+        self._defer(self._delivery_wake.set)
+        return [Event(e["type"], e["group_id"], e["data"], str(e["event_id"])) for e in released]
 
     def _may_join(self) -> bool:
         """Whether a Welcome may still come: a join or a knock is pending."""
@@ -2129,9 +2139,13 @@ class Engine:
     # -- delivery -------------------------------------------------------------
 
     def _gated(self, group_id: str | None) -> bool:
-        """SPEC §10.4: hold deliveries until the human verified the epoch."""
+        """SPEC §10.4: hold deliveries until the human verified the epoch. And
+        while the group is hidden from the agent (an approved knock's, until
+        the knocker is in), they wait in the inbox too."""
         if group_id is None:
             return False
+        if self.hidden_from_agent(group_id):
+            return True
         g = self.store.group(group_id)
         if g is None:
             return False
@@ -3329,7 +3343,7 @@ class Engine:
         sides, and on the knocker's side ``listed_as`` on the member the
         listing named (its listing, not a verification: SPEC 6.6.5, 11)."""
         peer = self.store.listed_peer(group_id)
-        request = None if peer is not None else self.store.knock_request_for_group(group_id)
+        group = self.store.group(group_id)
         if peer is not None:
             info["origin"] = {"kind": "knock", "directory": peer["directory"], "name": peer["name"]}
             for m in info["members"]:
@@ -3340,12 +3354,8 @@ class Engine:
                         "owner_domain": peer["owner_domain"],
                         "owner_state": peer["owner_state"],
                     }
-        elif request is not None and request["status"] in ("approving", "approved"):
-            info["origin"] = {
-                "kind": "knock",
-                "directory": request["directory"],
-                "name": request["name"],
-            }
+        elif group is not None and group.origin is not None:
+            info["origin"] = dict(group.origin)
 
     def list_groups(self) -> list[dict[str, Any]]:
         return [
