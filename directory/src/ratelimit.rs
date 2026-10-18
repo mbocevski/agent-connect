@@ -2,15 +2,19 @@
 //!
 //! Windows live in process memory only. Addresses are never logged, never
 //! stored and never exported as metrics; an idle address is forgotten at the
-//! next sweep, and the number of windows is capped (the stalest is evicted).
+//! next sweep, and the number of windows is capped: the key that arrived
+//! first is evicted, in amortised constant time. The windows are sharded,
+//! so a request locks only its own key's shard.
 //! IPv6 clients are limited per /64, since one host usually holds a whole
 //! prefix. Writes are limited per address and, separately, per (address,
 //! listing name), so one busy client (or one proxy) can't use up every
 //! name's budget.
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasher, RandomState};
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 /// What a request costs against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,13 +101,39 @@ pub fn bucket(ip: IpAddr) -> IpAddr {
 }
 
 type Key = (Option<IpAddr>, Class, Option<String>);
-type Windows = HashMap<Key, VecDeque<u64>>;
 
-/// Sliding-window limiter keyed by (address bucket, class, name).
+/// Lock shards; a request locks only its key's shard.
+pub const SHARDS: usize = 16;
+
+/// One shard: the windows, and the order their keys arrived in, for
+/// eviction in amortised constant time.
 #[derive(Debug, Default)]
+struct Shard {
+    windows: HashMap<Key, VecDeque<u64>>,
+    order: VecDeque<Key>,
+}
+
+/// Sliding-window limiter keyed by (address bucket, class, name), sharded
+/// by key. When a shard is full, the key that arrived first is evicted
+/// (amortised O(1): one pop per insert, plus skips of keys a sweep already
+/// dropped).
+#[derive(Debug)]
 pub struct RateLimiter {
     limits: Limits,
-    windows: Mutex<Windows>,
+    hasher: RandomState,
+    per_shard: usize,
+    shards: Vec<Mutex<Shard>>,
+    probes: AtomicU64,
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new(Limits::default())
+    }
+}
+
+fn lock(m: &Mutex<Shard>) -> MutexGuard<'_, Shard> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl RateLimiter {
@@ -112,7 +142,10 @@ impl RateLimiter {
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,
-            windows: Mutex::default(),
+            hasher: RandomState::new(),
+            per_shard: limits.max_windows.div_ceil(SHARDS).max(1),
+            shards: (0..SHARDS).map(|_| Mutex::default()).collect(),
+            probes: AtomicU64::new(0),
         }
     }
 
@@ -140,19 +173,19 @@ impl RateLimiter {
     fn hit(&self, key: Key, now_ms: u64) -> Result<(), u64> {
         let limit = self.limits.of(key.1);
         let window_ms = limit.window_secs * 1000;
-        let mut windows = self
-            .windows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !windows.contains_key(&key) && windows.len() >= self.limits.max_windows.max(1) {
-            // Bounded memory: drop the window that has been idle longest.
-            if let Some(stalest) = windows
-                .iter()
-                .min_by_key(|(_, w)| w.back().copied().unwrap_or(0))
-                .map(|(k, _)| k.clone())
-            {
-                windows.remove(&stalest);
+        let shard = usize::try_from(self.hasher.hash_one(&key)).unwrap_or(0) % SHARDS;
+        let mut guard = lock(&self.shards[shard]);
+        let Shard { windows, order } = &mut *guard;
+        if !windows.contains_key(&key) {
+            // Bounded memory: evict the key that arrived first.
+            while windows.len() >= self.per_shard {
+                let Some(oldest) = order.pop_front() else {
+                    break;
+                };
+                self.probes.fetch_add(1, Ordering::Relaxed);
+                windows.remove(&oldest);
             }
+            order.push_back(key.clone());
         }
         let w = windows.entry(key).or_default();
         while w
@@ -173,23 +206,35 @@ impl RateLimiter {
     /// Forget windows with no request inside them.
     pub fn sweep(&self, now_ms: u64) {
         let limits = self.limits;
-        self.windows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(_, class, _), w| {
+        for shard in &self.shards {
+            let mut guard = lock(shard);
+            let Shard { windows, order } = &mut *guard;
+            windows.retain(|(_, class, _), w| {
                 let window_ms = limits.of(*class).window_secs * 1000;
                 w.back()
                     .is_some_and(|t| now_ms.saturating_sub(*t) < window_ms)
             });
+            order.retain(|k| windows.contains_key(k));
+        }
     }
 
     /// Number of tracked windows (tests).
     #[must_use]
     pub fn tracked(&self) -> usize {
-        self.windows
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.shards.iter().map(|s| lock(s).windows.len()).sum()
+    }
+
+    /// The most windows held at once.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.per_shard * SHARDS
+    }
+
+    /// Keys examined by eviction so far (tests: eviction stays O(1) per
+    /// insert).
+    #[must_use]
+    pub fn eviction_probes(&self) -> u64 {
+        self.probes.load(Ordering::Relaxed)
     }
 }
 
@@ -253,32 +298,60 @@ mod tests {
         );
     }
 
-    #[test]
-    fn memory_is_bounded() {
+    fn addr(i: u32) -> Option<IpAddr> {
+        ip(&std::net::Ipv4Addr::from(0xC000_0200 + i).to_string())
+    }
+
+    fn capped(max_windows: usize) -> RateLimiter {
         let l = Limit {
             max: 5,
             window_secs: 60,
         };
-        let r = RateLimiter::new(Limits {
+        RateLimiter::new(Limits {
             read: l,
             search: l,
             mcp: l,
             write: l,
             write_name: l,
-            max_windows: 3,
-        });
-        for i in 0..50_u64 {
-            let a: IpAddr =
-                std::net::Ipv4Addr::from(0xC000_0200 + u32::try_from(i).unwrap()).into();
-            r.check(Some(a), Class::Read, i).unwrap();
-            assert!(r.tracked() <= 3);
+            max_windows,
+        })
+    }
+
+    #[test]
+    fn memory_is_bounded() {
+        let r = capped(32);
+        for i in 0..500 {
+            r.check(addr(i), Class::Read, u64::from(i)).unwrap();
+            assert!(r.tracked() <= r.capacity());
         }
         // The newest address is still tracked.
-        let last: IpAddr = std::net::Ipv4Addr::from(0xC000_0200 + 49).into();
         for _ in 0..4 {
-            r.check(Some(last), Class::Read, 100).unwrap();
+            r.check(addr(499), Class::Read, 1000).unwrap();
         }
-        assert!(r.check(Some(last), Class::Read, 100).is_err());
+        assert!(r.check(addr(499), Class::Read, 1000).is_err());
+    }
+
+    /// Eviction is O(1) per insert: filling past the cap examines at most
+    /// one queued key per new key, plus keys a sweep already dropped.
+    #[test]
+    fn eviction_is_constant_time_per_insert() {
+        let r = capped(1600);
+        let cap = u64::try_from(r.capacity()).unwrap();
+        for i in 0..20_000_u32 {
+            r.check(addr(i), Class::Read, 0).unwrap();
+        }
+        let inserts_past_cap = 20_000 - cap;
+        let probes = r.eviction_probes();
+        assert!(probes <= 20_000, "{probes} probes for 20000 inserts");
+        assert!(probes + u64::try_from(SHARDS).unwrap() >= inserts_past_cap / 2);
+        // After a sweep drops everything, inserting again costs nothing.
+        r.sweep(61_000);
+        assert_eq!(r.tracked(), 0);
+        let before = r.eviction_probes();
+        for i in 0..100 {
+            r.check(addr(i), Class::Read, 61_000).unwrap();
+        }
+        assert_eq!(r.eviction_probes(), before);
     }
 
     #[test]

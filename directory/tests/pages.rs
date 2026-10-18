@@ -373,7 +373,7 @@ async fn owner_states_and_the_key_changed_banner_show() {
     s.token_issued_at = h.now();
     h.publish(&s).await;
     let today = agentconnect_directory::render::date(h.now());
-    let banner = format!("The key changed on {today}.");
+    let banner = format!("The key or owner domain changed on {today}.");
     assert!(h.get("/a/rotated").await.text().contains(&banner));
     assert!(h.get("/a/rotated.md").await.text().contains(&banner));
     h.advance(30 * DAY);
@@ -381,7 +381,7 @@ async fn owner_states_and_the_key_changed_banner_show() {
         !h.get("/a/rotated")
             .await
             .text()
-            .contains("The key changed on")
+            .contains("The key or owner domain changed on")
     );
 }
 

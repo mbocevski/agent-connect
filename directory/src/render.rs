@@ -123,7 +123,7 @@ pub struct Facts {
     pub owner: String,
     /// `provider.organization`, only next to a verified domain (untrusted).
     pub organization: Option<String>,
-    /// `The key changed on <date>.`, for 30 days.
+    /// `The key or owner domain changed on <date>.`, for 30 days.
     pub key_changed: Option<String>,
     /// The description (untrusted).
     pub description: String,
@@ -184,7 +184,7 @@ impl Facts {
                 .flatten(),
             key_changed: l
                 .key_changed_at
-                .map(|t| format!("The key changed on {}.", date(t))),
+                .map(|t| format!("The key or owner domain changed on {}.", date(t))),
             description: l.card.description.clone(),
             skills: (!words.is_empty()).then(|| words.join(", ")),
             fingerprint: l.fingerprint.clone(),

@@ -98,6 +98,7 @@ fn tombstone(row: &PgRow) -> StoreResult<Tombstone> {
         seq: u64_of(row.try_get("seq")?),
         kind: GoneKind::parse(&kind).ok_or_else(|| StoreError("unknown tombstone".to_owned()))?,
         created_at: u64_of(row.try_get("created_at")?),
+        owner_domain: row.try_get("owner_domain")?,
     })
 }
 
@@ -132,7 +133,7 @@ async fn tombstone_in(
     identity: &str,
 ) -> StoreResult<Option<Tombstone>> {
     sqlx::query(
-        "SELECT name, identity, seq, kind, created_at FROM tombstones \
+        "SELECT name, identity, seq, kind, created_at, owner_domain FROM tombstones \
          WHERE name = $1 AND identity = $2",
     )
     .bind(name)
@@ -181,28 +182,33 @@ async fn name_state_in(tx: &mut Transaction<'_, Postgres>, name: &str) -> StoreR
     })
 }
 
-async fn latest_tombstone_identity(
+/// The identity and claimed owner domain of the name's latest tombstone.
+async fn latest_tombstone_holder(
     tx: &mut Transaction<'_, Postgres>,
     name: &str,
-) -> StoreResult<Option<String>> {
-    Ok(sqlx::query(
-        "SELECT identity FROM tombstones WHERE name = $1 \
+) -> StoreResult<Option<(String, Option<String>)>> {
+    sqlx::query(
+        "SELECT identity, owner_domain FROM tombstones WHERE name = $1 \
          ORDER BY created_at DESC, identity DESC LIMIT 1",
     )
     .bind(name)
     .fetch_optional(&mut **tx)
     .await?
-    .map(|row| row.try_get::<String, _>("identity"))
-    .transpose()?)
+    .map(|row| -> StoreResult<(String, Option<String>)> {
+        Ok((row.try_get("identity")?, row.try_get("owner_domain")?))
+    })
+    .transpose()
 }
 
 /// Delete a listing, raise its tombstone and append to the feed.
+#[allow(clippy::too_many_arguments)]
 async fn bury(
     tx: &mut Transaction<'_, Postgres>,
     name: &str,
     identity: &str,
     seq: u64,
     kind: GoneKind,
+    owner_domain: Option<&str>,
     entry: &str,
     now: u64,
 ) -> StoreResult<()> {
@@ -211,16 +217,17 @@ async fn bury(
         .execute(&mut **tx)
         .await?;
     sqlx::query(
-        "INSERT INTO tombstones (name, identity, seq, kind, created_at) VALUES ($1, $2, $3, $4, $5) \
-         ON CONFLICT (name, identity) DO UPDATE SET \
+        "INSERT INTO tombstones (name, identity, seq, kind, created_at, owner_domain) \
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (name, identity) DO UPDATE SET \
          seq = GREATEST(tombstones.seq, EXCLUDED.seq), kind = EXCLUDED.kind, \
-         created_at = EXCLUDED.created_at",
+         created_at = EXCLUDED.created_at, owner_domain = EXCLUDED.owner_domain",
     )
     .bind(name)
     .bind(identity)
     .bind(i64_of(seq))
     .bind(kind.as_str())
     .bind(i64_of(now))
+    .bind(owner_domain)
     .execute(&mut **tx)
     .await?;
     append(tx, kind, entry, now).await
@@ -241,13 +248,13 @@ async fn append(
     Ok(())
 }
 
-/// Whether `opts` reaches the server only on this machine: a Unix socket,
-/// `localhost` or a loopback address.
+/// Whether `opts` reaches the server only on this machine: a Unix socket
+/// or a loopback address literal (`127.0.0.0/8`, `::1`). The name
+/// `localhost` doesn't count: the resolver decides what it means.
 fn is_local(opts: &PgConnectOptions) -> bool {
     let host = opts.get_host();
     opts.get_socket().is_some()
         || host.starts_with('/')
-        || host.eq_ignore_ascii_case("localhost")
         || host
             .trim_start_matches('[')
             .trim_end_matches(']')
@@ -335,6 +342,25 @@ impl Store for PgStore {
         Ok(state)
     }
 
+    async fn record_owner_revocation(
+        &self,
+        name: &str,
+        identity: &str,
+        at: u64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "INSERT INTO owner_revocations (name, identity, revoked_at) VALUES ($1, $2, $3) \
+             ON CONFLICT (name, identity) DO UPDATE SET \
+             revoked_at = GREATEST(owner_revocations.revoked_at, EXCLUDED.revoked_at)",
+        )
+        .bind(name)
+        .bind(identity)
+        .bind(i64_of(at))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn token_revoked(&self, token_id: &str) -> StoreResult<bool> {
         Ok(
             sqlx::query("SELECT 1 FROM revoked_tokens WHERE token_id = $1")
@@ -347,7 +373,7 @@ impl Store for PgStore {
 
     async fn tombstone(&self, name: &str) -> StoreResult<Option<Tombstone>> {
         sqlx::query(
-            "SELECT name, identity, seq, kind, created_at FROM tombstones WHERE name = $1 \
+            "SELECT name, identity, seq, kind, created_at, owner_domain FROM tombstones WHERE name = $1 \
              ORDER BY created_at DESC, identity DESC LIMIT 1",
         )
         .bind(name)
@@ -360,7 +386,7 @@ impl Store for PgStore {
 
     async fn tombstone_for(&self, name: &str, identity: &str) -> StoreResult<Option<Tombstone>> {
         sqlx::query(
-            "SELECT name, identity, seq, kind, created_at FROM tombstones \
+            "SELECT name, identity, seq, kind, created_at, owner_domain FROM tombstones \
              WHERE name = $1 AND identity = $2",
         )
         .bind(name)
@@ -397,11 +423,12 @@ impl Store for PgStore {
         {
             return Ok(PublishOutcome::Conflict);
         }
-        let prev_identity = match &prev {
-            Some(p) => Some(p.identity.clone()),
-            None => latest_tombstone_identity(&mut tx, &r.name).await?,
+        let before = match &prev {
+            Some(p) => Some((p.identity.clone(), p.owner_domain.clone())),
+            None => latest_tombstone_holder(&mut tx, &r.name).await?,
         };
-        let key_changed = prev_identity.is_some_and(|i| i != r.identity);
+        let key_changed = before
+            .is_some_and(|(identity, domain)| identity != r.identity || domain != r.owner_domain);
         let key_changed_at = if key_changed {
             Some(r.published_at)
         } else {
@@ -489,6 +516,7 @@ impl Store for PgStore {
             w.identity,
             w.tombstone_seq,
             GoneKind::Withdrawal,
+            listing.owner_domain.as_deref(),
             w.entry,
             now,
         )
@@ -534,16 +562,18 @@ impl Store for PgStore {
                     .execute(&mut *tx)
                     .await?;
                 sqlx::query(
-                    "INSERT INTO tombstones (name, identity, seq, kind, created_at) \
-                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (name, identity) DO UPDATE SET \
+                    "INSERT INTO tombstones (name, identity, seq, kind, created_at, owner_domain) \
+                     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (name, identity) DO UPDATE SET \
                      seq = GREATEST(tombstones.seq, EXCLUDED.seq), \
-                     kind = EXCLUDED.kind, created_at = EXCLUDED.created_at",
+                     kind = EXCLUDED.kind, created_at = EXCLUDED.created_at, \
+                     owner_domain = EXCLUDED.owner_domain",
                 )
                 .bind(&name)
                 .bind(&l.identity)
                 .bind(i64_of(l.seq))
                 .bind(GoneKind::TokenRevocation.as_str())
                 .bind(i64_of(now))
+                .bind(&l.owner_domain)
                 .execute(&mut *tx)
                 .await?;
                 withdrawn = Some((name, l.identity));
@@ -572,6 +602,7 @@ impl Store for PgStore {
             &l.identity,
             l.seq,
             GoneKind::OwnerRevocation,
+            l.owner_domain.as_deref(),
             entry,
             now,
         )
@@ -800,12 +831,17 @@ mod tls_tests {
     fn local_servers_may_go_without() {
         for url in [
             "postgres://u@127.0.0.1:5432/d?sslmode=disable",
-            "postgres://u@localhost/d?sslmode=disable",
             "postgres://u@[::1]/d?sslmode=disable",
             "postgres://u@%2Frun%2Fpostgresql/d",
         ] {
             assert!(matches!(mode(url, false), Ok((_, false))), "{url}");
         }
         assert!(connect_options("not a url", false).is_err());
+        // `localhost` is a name, not a loopback literal.
+        assert!(mode("postgres://u@localhost/d?sslmode=disable", false).is_err());
+        assert!(matches!(
+            mode("postgres://u@localhost/d", false),
+            Ok((PgSslMode::VerifyFull, false))
+        ));
     }
 }

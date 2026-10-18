@@ -270,9 +270,11 @@ async fn a_withdrawal_rechecks_the_identitys_other_listings() {
         .post("/v0/withdrawals", h.withdrawal("first-name", &id, 1))
         .await;
     assert_eq!(r.status, StatusCode::OK);
+    // One fetch checks the withdrawn listing's own domain, one rechecks
+    // the identity's other listing.
     assert_eq!(
         h.fetcher.calls.load(std::sync::atomic::Ordering::Relaxed),
-        before + 1
+        before + 2
     );
 }
 

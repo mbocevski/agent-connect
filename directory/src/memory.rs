@@ -82,7 +82,16 @@ impl State {
         });
     }
 
-    fn tombstone(&mut self, name: &str, identity: &str, seq: u64, kind: GoneKind, now: u64) {
+    #[allow(clippy::too_many_arguments)]
+    fn tombstone(
+        &mut self,
+        name: &str,
+        identity: &str,
+        seq: u64,
+        kind: GoneKind,
+        owner_domain: Option<&str>,
+        now: u64,
+    ) {
         let key = (name.to_owned(), identity.to_owned());
         let seq = self.tombstones.get(&key).map_or(seq, |t| t.seq.max(seq));
         self.tombstones.insert(
@@ -93,6 +102,7 @@ impl State {
                 seq,
                 kind,
                 created_at: now,
+                owner_domain: owner_domain.map(str::to_owned),
             },
         );
     }
@@ -172,6 +182,21 @@ impl Store for MemoryStore {
         Ok(self.lock().name_state(name))
     }
 
+    async fn record_owner_revocation(
+        &self,
+        name: &str,
+        identity: &str,
+        at: u64,
+    ) -> StoreResult<()> {
+        let mut st = self.lock();
+        let e = st
+            .owner_revoked
+            .entry((name.to_owned(), identity.to_owned()))
+            .or_insert(at);
+        *e = (*e).max(at);
+        Ok(())
+    }
+
     async fn token_revoked(&self, token_id: &str) -> StoreResult<bool> {
         Ok(self.lock().revoked.contains_key(token_id))
     }
@@ -206,11 +231,16 @@ impl Store for MemoryStore {
         {
             return Ok(PublishOutcome::Conflict);
         }
-        let prev_identity = prev.as_ref().map(|p| p.identity.clone()).or_else(|| {
-            st.latest_tombstone(&record.name)
-                .map(|t| t.identity.clone())
+        let before = prev
+            .as_ref()
+            .map(|p| (p.identity.clone(), p.owner_domain.clone()))
+            .or_else(|| {
+                st.latest_tombstone(&record.name)
+                    .map(|t| (t.identity.clone(), t.owner_domain.clone()))
+            });
+        let key_changed = before.is_some_and(|(identity, domain)| {
+            identity != record.identity || domain != record.owner_domain
         });
-        let key_changed = prev_identity.is_some_and(|i| i != record.identity);
         let mut stored = record.clone();
         stored.key_changed_at = if key_changed {
             Some(record.published_at)
@@ -248,6 +278,7 @@ impl Store for MemoryStore {
             w.identity,
             w.tombstone_seq,
             GoneKind::Withdrawal,
+            listing.owner_domain.as_deref(),
             now,
         );
         st.append(GoneKind::Withdrawal, w.entry, now);
@@ -272,7 +303,14 @@ impl Store for MemoryStore {
             .cloned();
         let withdrawn = hit.map(|l| {
             st.listings.remove(&l.name);
-            st.tombstone(&l.name, &l.identity, l.seq, GoneKind::TokenRevocation, now);
+            st.tombstone(
+                &l.name,
+                &l.identity,
+                l.seq,
+                GoneKind::TokenRevocation,
+                l.owner_domain.as_deref(),
+                now,
+            );
             (l.name, l.identity)
         });
         st.append(GoneKind::TokenRevocation, entry, now);
@@ -296,7 +334,14 @@ impl Store for MemoryStore {
             return Ok(false);
         };
         st.listings.remove(name);
-        st.tombstone(name, &l.identity, l.seq, GoneKind::OwnerRevocation, now);
+        st.tombstone(
+            name,
+            &l.identity,
+            l.seq,
+            GoneKind::OwnerRevocation,
+            l.owner_domain.as_deref(),
+            now,
+        );
         st.owner_revoked
             .insert((name.to_owned(), l.identity.clone()), now);
         st.append(GoneKind::OwnerRevocation, entry, now);

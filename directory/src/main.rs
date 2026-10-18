@@ -102,10 +102,17 @@ async fn main() -> std::io::Result<()> {
     // operator keys.
     let verifier: Arc<dyn Verifier> =
         Arc::new(CoreVerifier::new(&config.host, &config.token_keys).map_err(invalid)?);
-    if config.client_ip_header.is_none() && !config.addr.ip().is_loopback() {
-        tracing::warn!(
-            "listening on a public address with no trusted proxy: rate limits are per TCP peer"
-        );
+    if config.client_ip_header.is_none() {
+        if config.addr.ip().is_loopback() {
+            tracing::warn!(
+                "no trusted proxy configured: if a reverse proxy forwards to this loopback \
+                 address, every client shares the proxy's rate-limit bucket"
+            );
+        } else {
+            tracing::warn!(
+                "listening on a public address with no trusted proxy: rate limits are per TCP peer"
+            );
+        }
     }
     if config.db == MEMORY_DB {
         tracing::warn!(

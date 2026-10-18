@@ -45,7 +45,19 @@ impl Cidr {
         Ok(Self { net, prefix })
     }
 
-    /// Whether `ip` is in the block (IPv4-mapped IPv6 counts as IPv4).
+    /// Whether the block is broader than one operator's proxies plausibly
+    /// need: shorter than /8 for IPv4 or /32 for IPv6 (so `/0` is too).
+    #[must_use]
+    pub fn is_broad(&self) -> bool {
+        match self.net {
+            IpAddr::V4(_) => self.prefix < 8,
+            IpAddr::V6(_) => self.prefix < 32,
+        }
+    }
+
+    /// Whether `ip` is in the block. A peer's IPv4-mapped IPv6 address is
+    /// compared as IPv4, so write IPv4 proxies as IPv4 blocks: an
+    /// `::ffff:a.b.c.d/n` block never matches.
     #[must_use]
     pub fn contains(&self, ip: IpAddr) -> bool {
         let ip = match ip {
@@ -158,10 +170,18 @@ impl Config {
                 "AC_DIRECTORY_CLIENT_IP_HEADER is not a header name: {h}"
             ));
         }
+        let flag = |k: &str| get(k).is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
         let trusted_proxies = list(get("AC_DIRECTORY_TRUSTED_PROXIES"))
             .iter()
             .map(|c| Cidr::parse(c).map_err(|e| format!("AC_DIRECTORY_TRUSTED_PROXIES: {e}")))
             .collect::<Result<Vec<_>, _>>()?;
+        if trusted_proxies.iter().any(Cidr::is_broad) && !flag("AC_DIRECTORY_TRUST_ANY_PROXY") {
+            return Err(
+                "AC_DIRECTORY_TRUSTED_PROXIES has a block broader than /8 (IPv4) or /32 (IPv6); \
+                 set AC_DIRECTORY_TRUST_ANY_PROXY=1 if that is intended"
+                    .to_owned(),
+            );
+        }
         if client_ip_header.is_some() && trusted_proxies.is_empty() {
             return Err(
                 "AC_DIRECTORY_CLIENT_IP_HEADER needs AC_DIRECTORY_TRUSTED_PROXIES".to_owned(),
@@ -174,7 +194,6 @@ impl Config {
                 })?),
                 None => None,
             };
-        let flag = |k: &str| get(k).is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
         Ok(Self {
             addr,
             db,
@@ -293,10 +312,53 @@ mod tests {
             ],
             vec![DB, KEYS, HOST, ("AC_DIRECTORY_TRUSTED_PROXIES", "nope")],
             vec![DB, KEYS, HOST, ("AC_DIRECTORY_METRICS_ADDR", "nope")],
+            vec![
+                DB,
+                KEYS,
+                HOST,
+                ("AC_DIRECTORY_TRUSTED_PROXIES", "0.0.0.0/0"),
+            ],
+            vec![DB, KEYS, HOST, ("AC_DIRECTORY_TRUSTED_PROXIES", "::/0")],
+            vec![
+                DB,
+                KEYS,
+                HOST,
+                ("AC_DIRECTORY_TRUSTED_PROXIES", "10.0.0.0/7"),
+            ],
+            vec![
+                DB,
+                KEYS,
+                HOST,
+                ("AC_DIRECTORY_TRUSTED_PROXIES", "2001:db8::/31"),
+            ],
         ] {
             assert!(Config::from_lookup(lookup(&bad)).is_err(), "{bad:?}");
         }
         let _ = Config::from_env();
+    }
+
+    #[test]
+    fn broad_proxy_blocks_need_an_explicit_flag() {
+        let ok = |v: &str| {
+            Config::from_lookup(lookup(&[
+                DB,
+                KEYS,
+                HOST,
+                ("AC_DIRECTORY_TRUSTED_PROXIES", v),
+            ]))
+            .is_ok()
+        };
+        assert!(ok("10.0.0.0/8"));
+        assert!(ok("2001:db8::/32"));
+        assert!(!ok("0.0.0.0/0"));
+        let any = Config::from_lookup(lookup(&[
+            DB,
+            KEYS,
+            HOST,
+            ("AC_DIRECTORY_TRUSTED_PROXIES", "0.0.0.0/0"),
+            ("AC_DIRECTORY_TRUST_ANY_PROXY", "1"),
+        ]));
+        assert!(any.is_ok());
     }
 
     #[test]

@@ -219,7 +219,11 @@ async fn replacements_follow_seq_per_identity_and_later_tokens() {
             assert_eq!(r.status, StatusCode::CREATED, "{label}: {}", r.text());
             assert_eq!(h.get(&format!("/a/{name}.json")).await.body, new.as_bytes());
             let md = h.get(&format!("/a/{name}.md")).await.text();
-            assert_eq!(md.contains("The key changed on"), !same_identity, "{label}");
+            assert_eq!(
+                md.contains("The key or owner domain changed on"),
+                !same_identity,
+                "{label}"
+            );
         } else {
             assert_eq!(r.status, StatusCode::CONFLICT, "{label}: {}", r.text());
             assert_eq!(r.code(), "name_held", "{label}");

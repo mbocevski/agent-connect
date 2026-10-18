@@ -548,21 +548,34 @@ fn client_ip(req: &Request, config: &HttpConfig) -> Option<IpAddr> {
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
-    let trusted = peer.is_some_and(|ip| config.trusted_proxies.iter().any(|c| c.contains(ip)));
-    if trusted && let Some(name) = &config.client_ip_header {
-        let forwarded = req
-            .headers()
-            .get_all(name)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(','))
-            .next_back()
-            .and_then(|v| v.trim().parse().ok());
-        if forwarded.is_some() {
-            return forwarded;
+    let trusted = |ip: IpAddr| config.trusted_proxies.iter().any(|c| c.contains(ip));
+    let Some(name) = &config.client_ip_header else {
+        return peer;
+    };
+    if !peer.is_some_and(trusted) {
+        return peer;
+    }
+    // Walk the chain from the right (each proxy appends the address it saw),
+    // skipping trusted proxies; the first untrusted hop is the client. An
+    // entry that doesn't parse ends the walk at the last trusted hop.
+    let hops: Vec<&str> = req
+        .headers()
+        .get_all(name)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .collect();
+    let mut key = peer;
+    for hop in hops.iter().rev() {
+        let Ok(ip) = hop.trim().parse::<IpAddr>() else {
+            break;
+        };
+        key = Some(ip);
+        if !trusted(ip) {
+            break;
         }
     }
-    peer
+    key
 }
 
 /// The rate-limit key a request was counted under, for the handlers' own

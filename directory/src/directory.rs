@@ -7,7 +7,7 @@ use std::sync::Arc;
 use agentconnect_core::clock::Clock;
 use agentconnect_core::encoding::{b64, hex};
 use agentconnect_core::identity::{fingerprint, parse_identity};
-use agentconnect_core::listing::{MAX_LISTING_BYTES, NameRecord, SignedListing};
+use agentconnect_core::listing::{MAX_LISTING_BYTES, NameRecord, PUBLISH_SKEW_SECS, SignedListing};
 
 use crate::card::Card;
 use crate::metrics::Metrics;
@@ -577,6 +577,7 @@ impl<S: Store> Directory<S> {
         {
             return Err(revoked);
         }
+        self.check_dropped_domain(listing).await?;
         for _ in 0..3 {
             let stored = self.store.get(&p.name).await.map_err(|e| internal(&e))?;
             let state = self
@@ -585,8 +586,11 @@ impl<S: Store> Directory<S> {
                 .await
                 .map_err(|e| internal(&e))?;
             if let Some((_, at)) = state.owner_revoked.iter().find(|(id, _)| *id == p.identity)
-                && listing.token().grant.issued_at <= *at
+                && listing.token().grant.issued_at <= at.saturating_add(PUBLISH_SKEW_SECS)
             {
+                // A token counts as issued after the revocation only past
+                // the clock skew a token may claim (it can be dated up to
+                // PUBLISH_SKEW_SECS ahead).
                 return Err(OWNER_REVOKED);
             }
             let mut name = name_record(&state);
@@ -622,6 +626,76 @@ impl<S: Store> Directory<S> {
             "conflict",
             "the listing changed while it was published; retry",
         ))
+    }
+
+    /// The owner domain this identity last claimed for the name: on its
+    /// stored listing, or on the tombstone its withdrawal left.
+    async fn previous_domain(
+        &self,
+        name: &str,
+        identity: &str,
+    ) -> Result<Option<String>, DirError> {
+        if let Some(stored) = self.store.get(name).await.map_err(|e| internal(&e))?
+            && stored.identity == identity
+        {
+            return Ok(stored.owner_domain);
+        }
+        Ok(self
+            .store
+            .tombstone_for(name, identity)
+            .await
+            .map_err(|e| internal(&e))?
+            .and_then(|t| t.owner_domain))
+    }
+
+    /// Whether `domain`'s owner file revokes `identity` for `name` now. A
+    /// failed fetch is not a revocation.
+    async fn domain_revokes(&self, domain: &str, identity: &str, name: &str) -> bool {
+        match self.fetcher.fetch(domain).await {
+            Ok(file) => matches!(
+                self.verifier.owner_verdict(&file, identity, name),
+                OwnerVerdict::Revoked { .. }
+            ),
+            Err(_) => false,
+        }
+    }
+
+    /// Record a revocation `domain` publishes for (name, identity).
+    async fn note_revocation(&self, name: &str, identity: &str) -> Result<(), DirError> {
+        self.store
+            .record_owner_revocation(name, identity, self.now())
+            .await
+            .map_err(|e| internal(&e))?;
+        self.metrics.event("owner_check", "revoked");
+        Ok(())
+    }
+
+    /// A listing that drops or changes the owner domain its identity last
+    /// claimed for the name is checked against that domain first, so a key
+    /// the domain revoked can't escape the revocation by leaving the domain.
+    async fn check_dropped_domain(&self, listing: &SignedListing) -> Result<(), DirError> {
+        let p = listing.params();
+        let Some(previous) = self.previous_domain(&p.name, &p.identity).await? else {
+            return Ok(());
+        };
+        if p.owner_domain.as_deref() == Some(previous.as_str()) {
+            return Ok(());
+        }
+        // A revocation already on record keeps its first-seen time, so a
+        // token issued after it can still relist; the publish check decides.
+        let state = self
+            .store
+            .name_state(&p.name)
+            .await
+            .map_err(|e| internal(&e))?;
+        if state.owner_revoked.iter().any(|(id, _)| *id == p.identity) {
+            return Ok(());
+        }
+        if self.domain_revokes(&previous, &p.identity, &p.name).await {
+            self.note_revocation(&p.name, &p.identity).await?;
+            return Err(OWNER_REVOKED);
+        }
+        Ok(())
     }
 
     /// Withdraw a listing (Decision 6). `bytes` is the signed `Withdrawal`.
@@ -674,7 +748,8 @@ impl<S: Store> Directory<S> {
         let stale = DirError::new(409, "stale_seq", "seq is below the listed seq");
         // The core decides whether the withdrawal covers the listed version;
         // the store repeats the check atomically with the delete.
-        if let Some(rec) = self.store.get(&w.name).await.map_err(|e| internal(&e))?
+        let stored = self.store.get(&w.name).await.map_err(|e| internal(&e))?;
+        if let Some(rec) = &stored
             && let Ok(listed) = self.verifier.listing(&rec.bytes)
             && !self.verifier.applies(&w, &listed)
         {
@@ -683,6 +758,16 @@ impl<S: Store> Directory<S> {
             } else {
                 wrong_identity
             });
+        }
+        // Before the listing goes, its owner domain is checked (SPEC
+        // §13.2.4): a key the domain has revoked can't withdraw ahead of the
+        // recheck and come back without the domain.
+        if let Some(rec) = &stored
+            && rec.identity == w.identity
+            && let Some(domain) = &rec.owner_domain
+            && self.domain_revokes(domain, &w.identity, &w.name).await
+        {
+            self.note_revocation(&w.name, &w.identity).await?;
         }
         let entry = std::str::from_utf8(bytes)
             .map_err(|_| DirError::new(400, "bad_request", "malformed or not canonical"))?;

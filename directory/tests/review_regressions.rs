@@ -1,4 +1,5 @@
-//! Regression tests for the PR #30 review findings (H1, M1-M3, L1-L9).
+//! Regression tests for the PR #30 review findings (H1, M1-M3, L1-L9,
+//! N1-N4).
 
 mod common;
 
@@ -80,14 +81,115 @@ async fn m1_owner_revoked_identity_needs_a_later_token() {
         assert_eq!(r.status, StatusCode::FORBIDDEN, "{domain:?}: {}", r.text());
         assert_eq!(r.code(), "owner_revoked", "{domain:?}");
     }
-    // The operator issues a new token after the revocation.
+    // N4: a token dated inside the publish skew of the revocation could
+    // predate it, so it isn't newer.
     h.advance(60);
+    let mut early = h.spec("relist", &id);
+    early.seq = 3;
+    early.token_issued_at = h.now();
+    early.owner_domain = None;
+    let r = h.post("/v0/listings", h.build(&early).bytes).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.text());
+    assert_eq!(r.code(), "owner_revoked");
+    // The operator issues a new token well after the revocation.
+    h.advance(241);
     let mut fresh = h.spec("relist", &id);
-    fresh.seq = 3;
+    fresh.seq = 4;
     fresh.token_issued_at = h.now();
     fresh.owner_domain = None;
     let r = h.post("/v0/listings", h.build(&fresh).bytes).await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+}
+
+/// N1: withdrawing before the recheck doesn't escape the owner's
+/// revocation: the withdrawal checks the domain and records it.
+#[tokio::test]
+async fn n1_withdrawing_first_keeps_the_revocation() {
+    let h = Harness::new();
+    let id = identity();
+    let mut s = h.spec("dodge", &id);
+    s.owner_domain = Some("owner.example".into());
+    h.fetcher.vouch("owner.example", &id.id());
+    h.publish(&s).await;
+    h.fetcher.serve("owner.example", &revoking(&id.id()));
+    let w = h
+        .post("/v0/withdrawals", h.withdrawal("dodge", &id, 1))
+        .await;
+    assert_eq!(w.status, StatusCode::OK, "{}", w.text());
+    // The owner's server is down when the key comes back: the recorded
+    // revocation still holds, with or without a domain.
+    h.fetcher.fail("owner.example", FetchError::Timeout);
+    h.fetcher.vouch("attacker.example", &id.id());
+    for domain in [None, Some("attacker.example")] {
+        let mut again = h.spec("dodge", &id);
+        again.seq = 2;
+        again.owner_domain = domain.map(str::to_owned);
+        let r = h.post("/v0/listings", h.build(&again).bytes).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{domain:?}: {}", r.text());
+        assert_eq!(r.code(), "owner_revoked", "{domain:?}");
+    }
+}
+
+/// N1: a replacement that drops or changes the owner domain is checked
+/// against the previous domain first.
+#[tokio::test]
+async fn n1_dropping_the_domain_checks_it_first() {
+    for domain in [None, Some("attacker.example")] {
+        let h = Harness::new();
+        let id = identity();
+        let mut s = h.spec("leaver", &id);
+        s.owner_domain = Some("owner.example".into());
+        h.fetcher.vouch("owner.example", &id.id());
+        h.fetcher.vouch("attacker.example", &id.id());
+        h.publish(&s).await;
+        h.fetcher.serve("owner.example", &revoking(&id.id()));
+        let mut again = h.spec("leaver", &id);
+        again.seq = 2;
+        again.owner_domain = domain.map(str::to_owned);
+        let r = h.post("/v0/listings", h.build(&again).bytes).await;
+        assert_eq!(r.status, StatusCode::FORBIDDEN, "{domain:?}: {}", r.text());
+        assert_eq!(r.code(), "owner_revoked", "{domain:?}");
+        // Recorded: a later try with the owner down is refused too.
+        h.fetcher.fail("owner.example", FetchError::Timeout);
+        again.seq = 3;
+        let r = h.post("/v0/listings", h.build(&again).bytes).await;
+        assert_eq!(r.code(), "owner_revoked", "{domain:?}");
+    }
+}
+
+/// N1: an unreachable previous domain isn't a revocation, and a change of
+/// domain shows the banner.
+#[tokio::test]
+async fn n1_domain_changes_show_the_banner() {
+    let h = Harness::new();
+    let id = identity();
+    let mut s = h.spec("mover", &id);
+    s.door_expires_at = None;
+    s.owner_domain = Some("old.example".into());
+    h.fetcher.vouch("old.example", &id.id());
+    h.fetcher.vouch("new.example", &id.id());
+    h.publish(&s).await;
+    assert!(
+        !h.get("/a/mover")
+            .await
+            .text()
+            .contains("The key or owner domain changed on")
+    );
+    h.fetcher.fail("old.example", FetchError::Timeout);
+    s.seq = 2;
+    s.owner_domain = Some("new.example".into());
+    let r = h.post("/v0/listings", h.build(&s).bytes).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+    let today = agentconnect_directory::render::date(h.now());
+    let banner = format!("The key or owner domain changed on {today}.");
+    assert!(h.get("/a/mover").await.text().contains(&banner));
+    // Same domain again: no new change.
+    h.advance(31 * DAY);
+    s.seq = 3;
+    s.token_issued_at = h.now();
+    let r = h.post("/v0/listings", h.build(&s).bytes).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+    assert!(!h.get("/a/mover").await.text().contains("changed on"));
 }
 
 const PROXY: &str = "10.0.0.5";
@@ -140,6 +242,36 @@ async fn m2_client_ip_header_only_from_trusted_proxies() {
         let r = h.send_from(from("/healthz", Some(client)), proxy).await;
         assert_eq!(r.status, StatusCode::OK, "{client}");
     }
+}
+
+/// N3: behind a chain of trusted proxies the first untrusted hop from the
+/// right is the client; entries a client prepends don't move its bucket.
+#[tokio::test]
+async fn n3_forwarded_chains_walk_past_trusted_proxies() {
+    let mut h = Harness::with(|d| d.with_limits(tight()));
+    h.http.client_ip_header = Some(HeaderName::from_static("x-forwarded-for"));
+    h.http.trusted_proxies =
+        vec![agentconnect_directory::config::Cidr::parse("10.0.0.0/8").unwrap()];
+    let proxy: IpAddr = PROXY.parse().unwrap();
+    for xff in [
+        "203.0.113.7, 10.0.0.9",
+        "198.51.100.1, 203.0.113.7, 10.0.0.9",
+    ] {
+        let r = h.send_from(from("/healthz", Some(xff)), proxy).await;
+        assert_eq!(r.status, StatusCode::OK, "{xff}");
+    }
+    let r = h
+        .send_from(
+            from("/healthz", Some("192.0.2.200, 203.0.113.7, 10.0.0.9")),
+            proxy,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    // Another client behind the same chain has its own bucket.
+    let r = h
+        .send_from(from("/healthz", Some("203.0.113.8, 10.0.0.9")), proxy)
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
 }
 
 /// M2: one client flooding one name doesn't block publishing other names.

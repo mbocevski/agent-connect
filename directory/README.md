@@ -28,13 +28,14 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | Variable | Default | Meaning |
 |---|---|---|
 | `AC_DIRECTORY_ADDR` | `127.0.0.1:8090` | Listen address. |
-| `AC_DIRECTORY_DB` | required | A `postgres://` URL, or `memory:` for a throwaway store (everything, name marks included, is lost on restart). Migrations run at start. A server that isn't on this machine (a Unix socket, `localhost` or loopback) is reached with TLS and `sslmode=verify-full`; a URL asking for a weaker `sslmode` is refused. |
+| `AC_DIRECTORY_DB` | required | A `postgres://` URL, or `memory:` for a throwaway store (everything, name marks included, is lost on restart). Migrations run at start. A server that isn't on this machine (a Unix socket, or a loopback address literal such as `127.0.0.1` or `[::1]`; the name `localhost` doesn't count) is reached with TLS and `sslmode=verify-full`; a URL asking for a weaker `sslmode` is refused. |
 | `AC_DIRECTORY_DB_INSECURE` | unset | `1` allows a remote Postgres without verified TLS, with a warning at start. |
 | `AC_DIRECTORY_HOST` | required | This directory's public host, e.g. `directory.example.org`. Listings, tokens and withdrawals must name it, and MCP requests must carry it as `Host`. |
 | `AC_DIRECTORY_RELAYS` | `connect.yggdrasill.network` | Comma-separated relays a listing may point at. The first is shown on the site. |
 | `AC_DIRECTORY_TOKEN_KEYS` | required | Comma-separated operator token public keys (`DK.pub`, base64url): one, or two while rotating. Tokens, revocations and the well-known file use them. |
-| `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header a reverse proxy sets to the client address (its last value is used) for rate limiting. Believed only on connections from `AC_DIRECTORY_TRUSTED_PROXIES`, which it requires. |
-| `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. |
+| `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header reverse proxies append the client address to, for rate limiting. Believed only on connections from `AC_DIRECTORY_TRUSTED_PROXIES`, which it requires. |
+| `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6), `/0` included, are refused. Write IPv4 proxies as IPv4 blocks: a peer on an IPv4-mapped IPv6 address is matched as IPv4. |
+| `AC_DIRECTORY_TRUST_ANY_PROXY` | unset | `1` allows the broad blocks above. |
 | `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `RUST_LOG` | `info` | `tracing` filter. |
@@ -49,11 +50,29 @@ windows live in memory, are never logged, and are capped in number.
 The binary speaks plain HTTP, so production runs it behind a TLS proxy.
 That proxy should add `Strict-Transport-Security`. Without
 `AC_DIRECTORY_CLIENT_IP_HEADER`, every request is limited as the proxy's own
-address, so one client can use up everyone's budget: set the header the proxy
-writes (for example `x-forwarded-for`, where the proxy appends the client's
-address last) and `AC_DIRECTORY_TRUSTED_PROXIES` to the proxy's addresses.
+address, so one client can use up everyone's budget (the directory warns at
+start when no proxy is configured). Set the header the proxy writes and
+`AC_DIRECTORY_TRUSTED_PROXIES` to the proxy's addresses. With nginx on the
+same machine:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8090;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+```sh
+AC_DIRECTORY_CLIENT_IP_HEADER=x-forwarded-for
+AC_DIRECTORY_TRUSTED_PROXIES=127.0.0.1/32
+```
+
 The header is ignored on any other connection, so a client that reaches the
-port directly can't choose its own bucket. Writes are limited per address
+port directly can't choose its own bucket. Behind a chain of proxies, list
+every hop's block: the directory reads the header from the right, skips
+addresses in `AC_DIRECTORY_TRUSTED_PROXIES`, and takes the first one that
+isn't, so entries a client writes itself further left are never used. Writes are limited per address
 and also per (address, listing name), so a flood against one name doesn't
 block publishing or withdrawing the others.
 
@@ -163,7 +182,14 @@ and are purged 30 days after their token expires.
 A file that revokes the key withdraws the listing at once, and the directory
 records the revocation against the (name, identity): that identity can list
 the name again, with or without an owner domain, only under an operator
-token issued after the revocation.
+token issued more than 300 s (the publish clock skew) after the directory
+saw the revocation. So the holder of a revoked key can't slip out from under
+the domain between rechecks, the domain is also checked when the identity
+withdraws a listing that claims it, and when a new listing of the identity
+drops or changes the domain it last claimed for the name; a revocation
+found either way is recorded the same way. An unreachable domain is not
+taken as a revocation. A change of owner domain shows the same 30-day
+notice as a change of key.
 
 Tombstones are kept as long as the name (SPEC §13.2.2), so a withdrawn
 listing's public bytes can't be re-posted, however long ago it was

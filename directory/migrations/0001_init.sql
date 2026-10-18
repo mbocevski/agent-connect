@@ -44,6 +44,8 @@ CREATE TABLE tombstones (
     seq BIGINT NOT NULL,
     kind TEXT NOT NULL,
     created_at BIGINT NOT NULL,
+    -- The owner_domain the withdrawn listing claimed.
+    owner_domain TEXT,
     PRIMARY KEY (name, identity)
 );
 

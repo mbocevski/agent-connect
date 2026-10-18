@@ -33,12 +33,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   under a later-issued token, and the newest token ever accepted for a name
   is kept, so a name can't go back to a rotated-out key (`name_held`). A
   listing whose owner state becomes `revoked` is withdrawn, and that
-  identity can't list the name again until it has a token issued after the
-  revocation. Tombstones are never purged. Postgres is reached with TLS and
-  `sslmode=verify-full` unless it is local or `AC_DIRECTORY_DB_INSECURE` is
-  set. A client-address header is believed only from
-  `AC_DIRECTORY_TRUSTED_PROXIES`, and writes are also limited per listing
-  name. See `directory/README.md`.
+  identity can't list the name again until it has a token issued more than
+  the 300 s publish skew after the revocation. The owner domain is also
+  checked when the identity withdraws, or relists without it or under
+  another domain, so withdrawing ahead of the recheck doesn't escape a
+  revocation, and a change of owner domain is shown like a change of key.
+  Tombstones are never purged. Postgres is reached with TLS and
+  `sslmode=verify-full` unless it is a Unix socket or a loopback address
+  literal, or `AC_DIRECTORY_DB_INSECURE` is set. A client-address header is
+  believed only from `AC_DIRECTORY_TRUSTED_PROXIES` (blocks broader than /8
+  or /32 need `AC_DIRECTORY_TRUST_ANY_PROXY=1`) and is walked from the right
+  past trusted hops, writes are also limited per listing name, and the
+  limiter is sharded with constant-time eviction. See `directory/README.md`.
 - `just test-int` runs the integration tier: the directory's Postgres store
   in docker compose (`compose.test.yaml`).
 - Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon

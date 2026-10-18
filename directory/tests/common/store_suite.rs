@@ -184,6 +184,48 @@ pub async fn key_change_is_recorded<S: Store>(s: &S) {
     );
 }
 
+/// A change of claimed owner domain counts as a key change, the domain is
+/// kept on the tombstone, and an owner revocation keeps its latest time.
+pub async fn owner_domain_changes_and_revocations<S: Store>(s: &S) {
+    let id = identity_id();
+    let at = |seq: u64, domain: Option<&str>, t: u64| {
+        let mut r = record("moving", &id, seq);
+        r.owner_domain = domain.map(str::to_owned);
+        r.published_at = t;
+        r
+    };
+    put(s, &at(1, Some("old.example"), NOW)).await;
+    assert_eq!(
+        put(s, &at(2, Some("new.example"), NOW + 10)).await,
+        PublishOutcome::Published { key_changed: true }
+    );
+    assert_eq!(
+        put(s, &at(3, Some("new.example"), NOW + 20)).await,
+        PublishOutcome::Published { key_changed: false }
+    );
+    s.withdraw(&wd("moving", &id, 3), NOW + 25).await.unwrap();
+    let t = s.tombstone_for("moving", &id).await.unwrap().unwrap();
+    assert_eq!(t.owner_domain.as_deref(), Some("new.example"));
+    assert_eq!(
+        put(s, &at(4, None, NOW + 30)).await,
+        PublishOutcome::Published { key_changed: true }
+    );
+    assert_eq!(
+        s.get("moving").await.unwrap().unwrap().key_changed_at,
+        Some(NOW + 30)
+    );
+    s.record_owner_revocation("moving", &id, NOW + 5)
+        .await
+        .unwrap();
+    s.record_owner_revocation("moving", &id, NOW + 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.name_state("moving").await.unwrap().owner_revoked,
+        vec![(id.clone(), NOW + 5)]
+    );
+}
+
 pub async fn withdraw_rules<S: Store>(s: &S) {
     let (id, other) = (identity_id(), identity_id());
     put(s, &record("beta", &id, 5)).await;
@@ -460,6 +502,7 @@ pub async fn run<S: Store, F: std::future::Future<Output = S>>(make: impl Fn() -
     guarded_publish(&make().await).await;
     name_state_is_kept_and_guarded(&make().await).await;
     key_change_is_recorded(&make().await).await;
+    owner_domain_changes_and_revocations(&make().await).await;
     withdraw_rules(&make().await).await;
     token_revocation(&make().await).await;
     owner_updates(&make().await).await;

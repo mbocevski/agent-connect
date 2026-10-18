@@ -221,6 +221,9 @@ pub struct Tombstone {
     pub kind: GoneKind,
     /// Unix seconds.
     pub created_at: u64,
+    /// The `owner_domain` the withdrawn listing claimed, so a relisting
+    /// that drops or changes it can be checked against it first.
+    pub owner_domain: Option<String>,
 }
 
 /// One entry of the withdrawal feed.
@@ -358,6 +361,15 @@ pub trait Store: Send + Sync + 'static {
     /// The name's state: its high-water mark and per-identity tombstones.
     fn name_state(&self, name: &str) -> impl Future<Output = StoreResult<NameState>> + Send;
 
+    /// Record that the owner domain revoked `identity` for `name` at `at`
+    /// (kept as long as the name).
+    fn record_owner_revocation(
+        &self,
+        name: &str,
+        identity: &str,
+        at: u64,
+    ) -> impl Future<Output = StoreResult<()>> + Send;
+
     /// Whether the operator revoked `token_id`.
     fn token_revoked(&self, token_id: &str) -> impl Future<Output = StoreResult<bool>> + Send;
 
@@ -376,8 +388,9 @@ pub trait Store: Send + Sync + 'static {
     /// isn't revoked, the same bytes are idempotent, and the stored listing
     /// and the name's state are still what `guard` says; then it writes
     /// the listing and the name's new high-water mark. On a
-    /// change of identity the store sets `key_changed_at` to
-    /// `published_at`; otherwise it keeps the previous value.
+    /// change of identity or of claimed owner domain the store sets
+    /// `key_changed_at` to `published_at`; otherwise it keeps the previous
+    /// value.
     fn publish(
         &self,
         record: &ListingRecord,
