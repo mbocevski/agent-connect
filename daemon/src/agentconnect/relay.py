@@ -322,3 +322,19 @@ class RelayRest:
 
     async def invite_meta(self, invite_id: str) -> dict[str, Any]:
         return await self._call("GET", f"/v0/invites/{invite_id}", signed=False)
+
+    async def create_door(self, door_id: str, expires_at: int) -> dict[str, Any]:
+        """Register a door for this instance's mailbox (SPEC 6.6.1, 8.1)."""
+        body = json.dumps(
+            {
+                "door_id": door_id,
+                "expires_at": expires_at,
+                "owner_mailbox": self._instance.mailbox_id,
+            },
+            separators=(",", ":"),
+        ).encode()
+        return await self._call("POST", "/v0/doors", body)
+
+    async def close_door(self, door_id: str) -> None:
+        """Close a door at once: from then on every knock gets ``door_not_open``."""
+        await self._call("DELETE", f"/v0/doors/{door_id}")

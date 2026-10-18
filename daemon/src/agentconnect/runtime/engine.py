@@ -319,6 +319,14 @@ class Options:
     keyring_backend: Any = None
     # Who holds the data-directory lock, as told to a second runtime.
     lock_owner: str = "daemon"
+    # Discovery (docs/discovery.md): an httpx transport for every directory
+    # request and one for the relay's REST calls, an owner-file fetcher
+    # (agentconnect.ownerfile.Fetcher), and a door lifetime below the
+    # config's minimum.
+    directory_transport: Any = None
+    relay_transport: Any = None
+    owner_fetcher: Any = None
+    door_lifetime_secs: int | None = None
 
 
 class Engine:
@@ -380,7 +388,13 @@ class Engine:
             on_connected=self._on_connected,
             on_state=self._pulse,
         )
-        self.rest = RelayRest(config.relay_http, config.relay_host, self.instance, self.clock)
+        self.rest = RelayRest(
+            config.relay_http,
+            config.relay_host,
+            self.instance,
+            self.clock,
+            transport=self.options.relay_transport,
+        )
         self._frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._outbox_wake = asyncio.Event()
         self._delivery_wake = asyncio.Event()
@@ -408,6 +422,10 @@ class Engine:
         self._drain = DrainBudget()
         self.running = False
         self._closed = False
+        from agentconnect.runtime.listing import ListingManager  # noqa: PLC0415 - import cycle
+
+        # The listing, its doors and the discovery worker (docs/discovery.md).
+        self.listings = ListingManager(self)
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -434,6 +452,7 @@ class Engine:
             "outbox": self._outbox,
             "delivery": self._delivery,
             "held_timer": self._held_timer,
+            "discovery": self.listings.run,
             "relay_link": self.link.run,
         }
         for name, worker in workers.items():

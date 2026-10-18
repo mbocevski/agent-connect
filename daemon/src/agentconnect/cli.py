@@ -7,8 +7,8 @@ shape (docs/cli.md); errors are then ``{"error": {"code", "message"}}`` on
 stdout with a non-zero exit code.
 
 ``approve``, ``reject``, ``verify`` (and the mismatch path inside it),
-``remove``, ``safety set``, ``audit`` and ``transcript`` use the **human
-token**. They are decisions (or records) only a person may make or read (SPEC
+``remove``, ``safety set``, ``audit``, ``transcript`` and ``listing publish``
+use the **human token**. They are decisions (or records) only a person may make or read (SPEC
 6.2, 11): never give an agent the human token or let it run them for the
 human.
 """
@@ -92,7 +92,15 @@ safety_app = typer.Typer(
     help="A group's safety policy (docs/safety.md). `set` is HUMAN ONLY (human token).",
     pretty_exceptions_show_locals=False,
 )
+listing_app = typer.Typer(
+    no_args_is_help=True,
+    help="Your agent's listing in a directory (docs/discovery.md). `publish` is HUMAN ONLY "
+    "(human token): an agent can't put itself into a public directory. `withdraw` and "
+    "`status` work with the agent token.",
+    pretty_exceptions_show_locals=False,
+)
 app.add_typer(daemon_app, name="daemon")
+app.add_typer(listing_app, name="listing")
 app.add_typer(group_app, name="group")
 app.add_typer(invite_app, name="invite")
 app.add_typer(groups_app, name="groups")
@@ -991,6 +999,194 @@ def transcript(
                 f"{r['seq']}  {_when(r['at'])}  {clean(r['direction']):<3} {clean(r['sender'])}"
             )
             typer.echo(f"    {clean(text)[:MAX_PREVIEW]}")
+
+
+# -- the listing ---------------------------------------------------------------------------
+
+
+def _read_json(path: Path, what: str) -> dict[str, Any]:
+    """A JSON object from a file the calling user can read; the daemon gets
+    its contents, never the path (docs/isolation.md)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        msg = f"can't read the {what} file {path}: {getattr(e, 'strerror', None) or e}"
+        raise CliError("unreadable_file", msg, EXIT_USAGE) from None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        raise CliError("bad_json", f"the {what} file {path} is not JSON", EXIT_USAGE) from None
+    if not isinstance(value, dict):
+        raise CliError("bad_json", f"the {what} file {path} is not a JSON object", EXIT_USAGE)
+    return value
+
+
+def _print_preview(shown: dict[str, Any], *, as_json: bool) -> None:
+    content = shown["content"]
+
+    def say(text: str) -> None:
+        _say(text, as_json=as_json)
+
+    say(f"Listing     {clean(shown['name'])} on {clean(shown['directory'])}")
+    say(f"Identity    {shown['fingerprint']}")
+    say(f'Name        "{clean(content.get("name", ""))}"')
+    say(f'About       "{clean(content.get("description", ""))}"')
+    say(f"Version     {clean(content.get('version', ''))}")
+    provider = content.get("provider")
+    if isinstance(provider, dict):
+        org, url = clean(provider.get("organization", "")), clean(provider.get("url", ""))
+        say(f"Provider    {org} ({url})")
+    for skill in content.get("skills", []):
+        say(f"Skill       {clean(skill.get('name', ''))}: {clean(skill.get('description', ''))}")
+    domain = shown["owner_domain"]
+    say(f"Owner       {clean(domain) if domain else 'none claimed'}")
+    say(f"Token       valid until {_when(shown['token']['expires_at'])}")
+    for warning in shown["warnings"]:
+        say(f"Warning     {clean(warning['message'])}")
+    entry = shown["owner_file_entry"]
+    if entry is not None:
+        say(f"Add this entry to https://{clean(domain)}/.well-known/agentconnect.json:")
+        say("  " + json.dumps(entry))
+    say("The runtime renews the listing's door on its own; changing this text is a new publish.")
+
+
+@listing_app.command(
+    "publish",
+    help="Publish your agent's listing in a directory: shows the card text, the identity and "
+    "the token, asks, then registers a door at the relay, signs and posts the listing. "
+    f"{HUMAN_ONLY_HELP}",
+)
+def listing_publish(  # noqa: PLR0913, PLR0917
+    directory: Annotated[
+        str, typer.Option("--directory", help="The directory host, from your [[directory]].")
+    ],
+    card: Annotated[
+        Path | None, typer.Option("--card", help="The card file (default: listing.card_file).")
+    ] = None,
+    token: Annotated[
+        Path | None,
+        typer.Option("--token", help="The operator's token file (default: listing.token_file)."),
+    ] = None,
+    owner_domain: Annotated[
+        str | None,
+        typer.Option("--owner-domain", help="A domain whose owner file vouches for this key."),
+    ] = None,
+    yes: YesOpt = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        _require_yes(as_json, yes, "publish")
+        if card is None or token is None:
+            cfg = load(config)
+            card = card or cfg.listing_card_file
+            token = token or cfg.listing_token_file
+        if card is None or token is None:  # pragma: no cover - load_config sets both
+            raise CliError("config", "no card or token file", EXIT_USAGE)
+        body: dict[str, Any] = {
+            "directory": directory,
+            "card": _read_json(card, "card"),
+            "token": _read_json(token, "token"),
+        }
+        if owner_domain is not None:
+            body["owner_domain"] = owner_domain
+        api = connect(config, human=True)
+        shown = api.request("POST", "/v0/listing/preview", body)
+        _print_preview(shown, as_json=as_json)
+        if not _confirm("Publish this listing?", yes=yes, as_json=as_json):
+            raise CliError("declined", "not published; nothing was sent", EXIT_REFUSED)
+        out = api.request(
+            "POST", "/v0/listing/publish", {**body, "content_sha256": shown["content_sha256"]}
+        )
+        if out["retrying"]:
+            msg = (
+                "the directory didn't answer; the daemon keeps sending the same signed listing "
+                "(see `agentconnect listing status`)"
+            )
+            raise CliError("publish_retrying", msg, EXIT_FAILED)
+        result = {
+            "directory": out["directory"],
+            "name": out["name"],
+            "url": out["url"],
+            "identity": shown["identity"],
+            "fingerprint": shown["fingerprint"],
+            "seq": out["seq"],
+            "state": out["state"],
+            "door_expires_at": out["door_expires_at"],
+            "renews_at": out["renews_at"],
+            "token_expires_at": out["token_expires_at"],
+            "owner_domain": out["owner_domain"],
+            "owner_state": out["owner_state"],
+            "warnings": out["warnings"],
+        }
+        if as_json:
+            emit_json(result)
+            return
+        typer.echo(f"Published {result['url']} (seq {result['seq']}).")
+        if result["door_expires_at"] is not None:
+            typer.echo(f"Its door is open until {_when(result['door_expires_at'])}; the runtime")
+            typer.echo("renews it while it runs. `agentconnect listing withdraw` takes it down.")
+
+
+@listing_app.command("withdraw")
+def listing_withdraw(
+    yes: YesOpt = False, config: ConfigOpt = None, as_json: JsonOpt = False
+) -> None:
+    """Withdraw your agent's listing: its doors close at the relay first, so knocks stop
+    at once, then the directory takes it down. Allowed with the agent token."""
+    with guard(as_json):
+        _require_yes(as_json, yes, "withdraw")
+        api = connect(config)
+        info = api.request("GET", "/v0/listing")["listing"]
+        if info is None or info["state"] in ("withdrawn", "refused"):
+            raise CliError("not_found", "there is no listing to withdraw", EXIT_FAILED)
+        _say(f"Withdraw {clean(info['name'])} from {clean(info['directory'])}?", as_json=as_json)
+        if not _confirm("Close its doors and withdraw it?", yes=yes, as_json=as_json):
+            raise CliError("declined", "not withdrawn", EXIT_REFUSED)
+        out = api.request("POST", "/v0/listing/withdraw")
+        if out["state"] != "withdrawn":
+            msg = (
+                "the doors are closed, but the directory hasn't taken the withdrawal yet; "
+                "the daemon keeps sending it"
+            )
+            raise CliError("withdraw_pending", msg, EXIT_FAILED)
+        if as_json:
+            emit_json(out)
+            return
+        typer.echo(f"Withdrew {clean(out['name'])} from {clean(out['directory'])}.")
+        if out["doors_close_pending"]:
+            typer.echo("The relay hasn't confirmed every door closed yet; the daemon keeps trying.")
+
+
+@listing_app.command("status")
+def listing_status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    """Show your agent's listing: its state, door, token expiry and last error."""
+    with guard(as_json):
+        info = connect(config).request("GET", "/v0/listing")
+        if as_json:
+            emit_json(info)
+            return
+        listing = info["listing"]
+        if listing is None:
+            typer.echo("No listing. A person publishes one with `agentconnect listing publish`.")
+            return
+        typer.echo(f"listing      {listing['url']}")
+        typer.echo(f"state        {listing['state']} (seq {listing['seq']})")
+        door = listing["door"]
+        if door is None:
+            typer.echo("door         none open")
+        else:
+            renews = door["renews_at"]
+            then = f", renews {_when(renews)}" if renews is not None else ", not renewing"
+            typer.echo(f"door         open until {_when(door['expires_at'])}{then}")
+        typer.echo(f"token        valid until {_when(listing['token']['expires_at'])}")
+        domain = listing["owner_domain"]
+        if domain is not None:
+            state = clean(listing["owner_state"] or "unknown")
+            typer.echo(f"owner        {clean(domain)} ({state}, as the directory reported)")
+        error = listing["last_error"]
+        if error is not None:
+            typer.echo(f"last error   {clean(error['code'])} at {_when(error['at'])}")
 
 
 @app.callback()

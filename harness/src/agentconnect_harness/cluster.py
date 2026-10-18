@@ -122,6 +122,8 @@ class Node:
     serve_api: bool = False
     starts: int = 0
     make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None
+    # Extra Options seams for every start (e.g. a short door lifetime).
+    options: dict[str, Any] = field(default_factory=dict)
     runtime: Runtime = field(init=False)
     # The node's protocol engine (the runtime's), which scenarios drive.
     daemon: Engine = field(init=False)
@@ -137,7 +139,11 @@ class Node:
         # randomness (keys, msg_ids) of its previous run.
         self.starts += 1
         seed = self.seed + self.starts
-        return Options(testing=Seeded(seed), backoff_rng=random.Random(seed))  # noqa: S311
+        return Options(
+            testing=Seeded(seed),
+            backoff_rng=random.Random(seed),  # noqa: S311
+            **self.options,
+        )
 
     def recorder(self, card: dict[str, Any] | None = None) -> RecordingAdapter:
         """A fresh recording adapter for this node's host (set it as
@@ -325,6 +331,7 @@ class Cluster:
         host: str | None = None,
         serve_api: bool = False,
         data_dir: Path | None = None,
+        options: dict[str, Any] | None = None,
         **overrides: Any,
     ) -> Node:
         """A started node. ``identity_of`` makes it a replica (another
@@ -332,7 +339,7 @@ class Cluster:
         built from its config. ``host`` overrides the cluster's host;
         ``serve_api`` serves the local API on the node's socket, in
         ``data_dir`` (default ``<tmp>/<name>``) unless ``api_socket`` says
-        otherwise."""
+        otherwise. ``options`` adds Options seams to each start."""
         name = name or f"n{len(self.nodes)}"
         proxy = RelayProxy(self.relay.ws_url)
         await proxy.start()
@@ -365,6 +372,7 @@ class Cluster:
             host=chosen,
             serve_api=serve_api,
             make_adapters=make_adapters,
+            options=options or {},
             peers=self.nodes,
         )
         await node.start()

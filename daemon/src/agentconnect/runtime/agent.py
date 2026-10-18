@@ -9,8 +9,10 @@ route's JSON (``docs/api.md``).
 
 There is no human-scope operation here: approving or rejecting joins and
 held messages, marking members verified, reporting a SAS mismatch, removing
-members, changing the safety policy and relaxing ``require_verified`` exist
-only as local API routes that need the human token (SPEC 6.2, 10.4, 11).
+members, changing the safety policy, relaxing ``require_verified`` and
+publishing a listing exist only as local API routes that need the human
+token (SPEC 6.2, 10.4, 11, 13.2.2). Withdrawing the listing is here: it
+only reduces exposure (SPEC 13.2.3).
 """
 
 from __future__ import annotations
@@ -128,6 +130,16 @@ class AgentApi:
     async def safety(self, group_id: str) -> dict[str, Any]:
         """The group's safety settings (read only)."""
         return self._engine.safety_settings(group_id)
+
+    async def listing_status(self) -> dict[str, Any]:
+        """The runtime's own listing, if it has one (docs/discovery.md)."""
+        return self._engine.listings.status()
+
+    async def withdraw_listing(self) -> dict[str, Any]:
+        """Close the listing's doors at the relay, then withdraw it from its
+        directory. Allowed to the agent: it only reduces exposure (SPEC
+        13.2.3). Publishing is the human's (no method here)."""
+        return await self._engine.listings.withdraw()
 
     async def events(self, after: int = 0, group_id: str | None = None) -> dict[str, Any]:
         """Events in order, without the safety policy's own (SPEC 10.2): an

@@ -54,10 +54,17 @@ Example file::
     group = "agentconnect"
     agent_users = ["bot"]           # names or UIDs allowed on the socket
     human_users = []                # also allowed to use the human token
+    [[directory]]                   # a directory you may list in (docs/discovery.md)
+    host = "directory.example.org"
+    keys = ["<the operator's DK.pub, base64url>"]
+    [listing]
+    door_lifetime_secs = 601200     # 7 days less 1 hour
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
 import os
 import tomllib
@@ -80,10 +87,26 @@ from agentconnect.policy import (
 )
 
 KEYSTORES = ("auto", "keyring", "file")
+# SPEC 6.6.1: a door lives at most 7 days, measured on the relay's clock, so
+# the default asks for an hour less.
+MIN_DOOR_LIFETIME_SECS = 7200
+DEFAULT_DOOR_LIFETIME_SECS = ac.MAX_DOOR_LIFETIME_SECS - 3600
+MAX_DIRECTORY_KEYS = 2
 
 
 class ConfigError(ValueError):
     """An invalid configuration value."""
+
+
+@dataclass(frozen=True)
+class DirectoryConfig:
+    """One pinned directory (a ``[[directory]]`` table): its canonical host,
+    the operator token keys (``DK.pub``) pinned for it, never fetched (SPEC
+    13.2.1), and the base URL requests go to."""
+
+    host: str
+    keys: tuple[bytes, ...]
+    url: str
 
 
 def _xdg(environ: Mapping[str, str], var: str, fallback: str) -> Path:
@@ -133,6 +156,18 @@ class Config:
     isolation_group: str = "agentconnect"
     isolation_agent_users: tuple[str, ...] = ()
     isolation_human_users: tuple[str, ...] = ()
+    directories: tuple[DirectoryConfig, ...] = ()
+    listing_card_file: Path | None = None
+    listing_token_file: Path | None = None
+    listing_door_lifetime_secs: int = DEFAULT_DOOR_LIFETIME_SECS
+
+    def directory(self, host: str) -> DirectoryConfig | None:
+        """The pinned directory ``host`` names (in any host form), if any."""
+        try:
+            canonical = ac.canonical_relay_host(host)
+        except ac.AgentConnectError:
+            return None
+        return next((d for d in self.directories if d.host == canonical), None)
 
     @property
     def a2a_enabled(self) -> bool:
@@ -221,6 +256,9 @@ class ConfigKey:
     default: str  # as the docs show it
     doc: str
     env: str = ""  # environment variable that overrides it
+    # The TOML type, for a key of an array of tables (`[[directory]]`):
+    # its tables together fill one field, so the field's type isn't the key's.
+    kind: str = ""
 
 
 def shown_default(value: object) -> str:
@@ -448,6 +486,55 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "token is accepted, such as `0` for `sudo agentconnect ...`. The human token "
         "is still required. A user can't be in both lists.",
     ),
+    ConfigKey(
+        "directory.host",
+        "directories",
+        "required",
+        "One `[[directory]]` table per directory you may publish a listing in "
+        "([discovery.md](discovery.md)). Its host, e.g. `directory.example.org`, as "
+        "listings and tokens name it. There is no default directory.",
+        kind="string",
+    ),
+    ConfigKey(
+        "directory.keys",
+        "directories",
+        "required",
+        "The directory operator's token keys (`DK.pub`, base64url): one, or two while "
+        "the operator rotates. They are pinned here and never fetched, not even from "
+        "the directory's `/.well-known/agentconnect-directory.json`.",
+        kind="array",
+    ),
+    ConfigKey(
+        "directory.url",
+        "directories",
+        "`https://<host>`",
+        "Where the daemon sends the directory's requests. `https://`, or `http://` "
+        "for a loopback directory only. It is never taken from a listing.",
+        kind="string",
+    ),
+    ConfigKey(
+        "listing.card_file",
+        "listing_card_file",
+        "`$XDG_CONFIG_HOME/agentconnect/listing-card.json`",
+        "The listing's card text, read by `agentconnect listing publish` as the "
+        "calling user ([discovery.md](discovery.md#the-card-file)).",
+    ),
+    ConfigKey(
+        "listing.token_file",
+        "listing_token_file",
+        "`$XDG_CONFIG_HOME/agentconnect/listing-token.json`",
+        "The listing token from the directory's operator, read by "
+        "`agentconnect listing publish`. It is not a secret.",
+    ),
+    ConfigKey(
+        "listing.door_lifetime_secs",
+        "listing_door_lifetime_secs",
+        shown_default(DEFAULT_DOOR_LIFETIME_SECS),
+        "How long each door lives (7200 to 604800). The relay counts the 7-day "
+        "maximum on its own clock, so the default leaves an hour for clock skew. A "
+        "door never outlives the listing token. The runtime renews the door at half "
+        "its lifetime (SPEC 6.6.1).",
+    ),
 )
 
 # Environment variables that don't override a single key.
@@ -614,6 +701,102 @@ def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+NEVER_AUTO = (
+    "auto_approve isn't a key of [{table}]: publishing a listing and approving a "
+    "knock always need a human"
+)
+
+
+def _closed(table: Mapping[str, Any], name: str, allowed: frozenset[str]) -> None:
+    """The discovery tables refuse keys they don't know (a typo would
+    otherwise leave a default in force), ``auto_approve`` with a reason."""
+    if "auto_approve" in table:
+        raise ConfigError(NEVER_AUTO.format(table=name))
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        msg = f"unknown key(s) in [{name}]: {', '.join(unknown)}"
+        raise ConfigError(msg)
+
+
+def _b64url(text: str) -> bytes | None:
+    """Canonical unpadded base64url, or None."""
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (ValueError, binascii.Error):
+        return None
+    canonical = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    return raw if canonical == text else None
+
+
+def _directory_url(url: str, host: str) -> str:
+    parts = urlsplit(url)
+    plain = parts.scheme == "http" and parts.hostname is not None and _is_loopback(parts.hostname)
+    if parts.scheme != "https" and not plain:
+        msg = f"directory.url must be https:// (or http:// for a loopback directory), got {url!r}"
+        raise ConfigError(msg)
+    if parts.hostname in (None, "") or "@" in parts.netloc or parts.query or parts.fragment:
+        msg = f"directory.url for {host} must be a plain base URL"
+        raise ConfigError(msg)
+    if parts.path not in ("", "/"):
+        msg = f"directory.url for {host} must not have a path"
+        raise ConfigError(msg)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _directories(data: Mapping[str, Any]) -> tuple[DirectoryConfig, ...]:
+    """The ``[[directory]]`` tables (none by default: ADR-006, decision D1)."""
+    raw = data.get("directory", [])
+    if not isinstance(raw, list) or not all(isinstance(t, dict) for t in raw):
+        msg = "directories are [[directory]] tables (an array of tables)"
+        raise ConfigError(msg)
+    out: list[DirectoryConfig] = []
+    for table in raw:
+        _closed(table, "directory", frozenset({"host", "keys", "url"}))
+        host_raw = _typed(table, "host", str, "")
+        try:
+            host = ac.canonical_relay_host(host_raw)
+        except ac.AgentConnectError:
+            msg = f"directory.host {host_raw!r} is not a valid host"
+            raise ConfigError(msg) from None
+        texts = _typed(table, "keys", list, [])
+        if not 1 <= len(texts) <= MAX_DIRECTORY_KEYS or not all(isinstance(k, str) for k in texts):
+            msg = f"directory.keys for {host} must list one or two DK.pub values"
+            raise ConfigError(msg)
+        keys = tuple(k for k in (_b64url(t) for t in texts) if k is not None)
+        if len(keys) != len(texts):
+            msg = f"directory.keys for {host} must be unpadded base64url"
+            raise ConfigError(msg)
+        try:
+            ac.check_directory_keys(host, list(keys))
+        except ac.AgentConnectError as e:
+            msg = f"directory.keys for {host}: {e}"
+            raise ConfigError(msg) from None
+        if any(d.host == host for d in out):
+            msg = f"directory {host} is configured twice"
+            raise ConfigError(msg)
+        url = _directory_url(_typed(table, "url", str, "") or f"https://{host}", host)
+        out.append(DirectoryConfig(host, keys, url))
+    return tuple(out)
+
+
+def _listing(data: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+    table = _section(data, "listing")
+    _closed(table, "listing", frozenset({"card_file", "token_file", "door_lifetime_secs"}))
+    lifetime = _typed(table, "door_lifetime_secs", int, DEFAULT_DOOR_LIFETIME_SECS)
+    if not MIN_DOOR_LIFETIME_SECS <= lifetime <= ac.MAX_DOOR_LIFETIME_SECS:
+        msg = (
+            f"listing.door_lifetime_secs must be {MIN_DOOR_LIFETIME_SECS}.."
+            f"{ac.MAX_DOOR_LIFETIME_SECS} (SPEC 6.6.1)"
+        )
+        raise ConfigError(msg)
+    home = _xdg(environ, "XDG_CONFIG_HOME", ".config")
+    return {
+        "listing_card_file": _path(table, "card_file") or home / "listing-card.json",
+        "listing_token_file": _path(table, "token_file") or home / "listing-token.json",
+        "listing_door_lifetime_secs": lifetime,
+    }
+
+
 def _sdk(data: Mapping[str, Any]) -> dict[str, Any]:
     timeout = _typed(_section(data, "sdk"), "handler_timeout_secs", int, 120)
     if not 1 <= timeout <= 3600:  # noqa: PLR2004
@@ -692,6 +875,7 @@ def load_config(
         "sse_retention": _typed(sse, "retention_secs", int, 3600),
     }
     values.update(_a2a(data) | _isolation(data) | _policy(policy) | _sdk(data))
+    values.update(_listing(data, environ), directories=_directories(data))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"
