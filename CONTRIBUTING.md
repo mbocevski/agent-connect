@@ -74,25 +74,48 @@ user-facing, add the `skip-changelog` label to the PR.
 
 ### Docs that must change with code
 
-`docs/MAP.toml` lists the user-facing code whose behaviour is documented,
-and the docs that describe it:
+`docs/MAP.toml` has three parts. Each rule maps user-facing code to the docs
+that describe it, for example:
 
 | Code | Docs (any one) |
 |---|---|
 | `daemon/src/agentconnect/cli.py` | `docs/cli.md` |
 | `daemon/src/agentconnect/runtime/api.py` (local API routes) | `docs/api.md` |
 | `daemon/src/agentconnect/config.py` | `docs/config.md` |
+| `daemon/src/agentconnect/isolation.py` | `docs/isolation.md` |
+| `core/src/listing/`, `core/src/knock*` | `SPEC.md` |
 | `relay/src/proto.rs`, `rest.rs`, `ws.rs` | `SPEC.md` or `relay/README.md` |
 | `testdata/*.json` (not `MANIFEST.json`) | `SPEC.md` |
 
-`scripts/check_docs.py` fails a branch when a commit changes mapped code and
+`scripts/check_docs.py` fails a branch when a commit changes a rule's code and
 none of that rule's docs changed anywhere on the branch. Commits of type
 `docs`, `test`, `ci`, `chore`, `build` or `style` don't count, and merge
 commits are ignored. When a change leaves the docs correct, for
 example a refactor inside `cli.py`, add the `skip-docs` label to the PR (CI
 sets `SKIP_DOCS=true` from it; set it yourself to skip the pre-push hook for
-that push). Keep the map small: add a rule only for code whose behaviour
-users read about.
+that push).
+
+The components are the inventory behind the README's Status section. Each
+`[[component]]` has a name, `paths` and a `doc`, and exactly one bullet in
+the Status section, which links the doc and ends with an invisible marker:
+
+```markdown
+- **CLI** (`agentconnect`): what it does ([docs/cli.md](docs/cli.md)).
+  <!-- component: cli -->
+```
+
+A branch that adds an entry under `### Added` in the CHANGELOG and changes a
+component's `paths` must also change `README.md`. When the README stays
+correct, add the `skip-readme` label (CI sets `SKIP_README=true` from it; it
+is separate from `skip-docs`). A part with no Status bullet, such as test
+tooling, sets `readme = false`.
+
+The check also fails when a Status bullet has no component or a component has
+no bullet, when a bullet links a missing file, when a Cargo or uv workspace
+member is in no component (give a new crate or package a component, or extend
+one's `paths` to `<dir>/**`), and when a `.rs` or `.py` file under a `src`
+directory is in no rule's `code` and not in `internal`. Put a new file in a
+rule if users read about its behaviour, and in `internal` if not.
 
 ### Writing docs
 

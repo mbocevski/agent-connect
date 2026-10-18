@@ -18,20 +18,27 @@ MCP / Claude Code Channels adapters are deferred.
 
 Pre-alpha. The protocol is in `SPEC.md` and the stack decisions in
 `docs/adr/001-stack.md`; those two files are the source of truth. The core,
-relay and daemon are implemented; the agent adapters and the SDK are still
-stubs.
+relay, daemon, the A2A, webhook and SSE adapters, the safety policy, the
+separate-OS-user mode, the Python SDK (embedded mode by default, attach mode
+for a separate daemon) and the directory are implemented. The daemon and CLI
+side of discovery (publishing a listing, knocking, approving knocks) is not:
+the core and the relay already support signed listings, doors and knocks.
+The README's Status section lists what works; `docs/MAP.toml` keeps it in step.
 
 ## Layout
 
 | Path | What | Lang |
 |---|---|---|
-| `core/` | OpenMLS groups (ML-KEM-768 + X25519 PQ hybrid suite), invite binding, SAS, envelopes | Rust |
+| `core/` | OpenMLS groups (ML-KEM-768 + X25519 PQ hybrid suite), invite binding, SAS, envelopes; signed listings, owner verification, doors and knocks | Rust |
 | `core-py/` | PyO3 bindings for `core` (maturin) | Rust |
-| `relay/` | MLS Delivery Service: commit ordering, fan-out, invites; serves `web/` | Rust (axum) |
-| `directory/` | The directory of signed listings (discovery, ADR-006): search, cards, MCP | Rust (axum) |
-| `daemon/` | `agentconnectd` + `agentconnect` CLI, adapters, policy, group mode | Python |
+| `relay/` | MLS Delivery Service: commit ordering, fan-out, invites, doors and knock forwarding; serves `web/` | Rust (axum) |
+| `directory/` | The directory of signed listings (discovery, ADR-006): search, cards, owner verification, MCP | Rust (axum) |
+| `daemon/` | The runtime (`runtime/`), `agentconnectd` + `agentconnect` CLI, adapters (A2A, webhook, SSE), safety policy, separate-OS-user mode, group mode | Python |
 | `harness/` | Multi-node test harness: relay process, daemons, malicious relay proxy | Python |
-| `sdk/python/` | Python SDK for headless agents | Python |
+| `sdk/python/` | Python SDK for headless agents: embedded runtime by default, attach to a daemon | Python |
+| `examples/` | Runnable agent examples (Claude Agent SDK, LangGraph) | Python |
+| `spikes/` | Throwaway experiments (`mls-xwing`), not shipped | Rust |
+| `packaging/` | systemd and launchd units and sample config for the separate-OS-user mode | Config |
 | `web/` | Static invite landing page | HTML/CSS |
 | `docs/` | `adr/`, `spikes/`, guides | Markdown |
 
@@ -134,11 +141,15 @@ Python. Don't use `pip install` or global venvs.
   Commits), pre-push (`just test`, CHANGELOG and docs checks). If a hook fails, fix the
   cause and re-stage. **Never use `--no-verify`.**
 - Docs change with the code they describe. `docs/MAP.toml` maps user-facing
-  code (CLI, local API, daemon config, relay protocol, `testdata/` wire
-  formats) to its docs, and `scripts/check_docs.py` (pre-push, `just
-  docs-check`, CI `docs` job) fails a branch whose non-docs/test/ci/chore/
-  build/style commits change mapped code without touching one of its docs.
-  If the docs stay correct, label the PR `skip-docs`.
+  code to its docs, lists the components behind the README Status section
+  (one `<!-- component: name -->` bullet each) and the `internal` source
+  files. `scripts/check_docs.py` (pre-push, `just docs-check`, CI `docs`
+  job) fails a branch whose non-docs/test/ci/chore/build/style commits change
+  mapped code without touching one of its docs, a new `### Added` CHANGELOG
+  entry with component code but no README change, an unclassified workspace
+  member or source file, and a Status bullet and component that don't match.
+  If the docs stay correct, label the PR `skip-docs`; if the README does,
+  `skip-readme`.
 - Markdown passes rumdl, lychee (offline) and Vale (`styles/AgentConnect/`:
   no filler, hype, absolute security claims or emoji). The README
   quickstart is a test (`harness/tests/test_readme.py`); keep it runnable.

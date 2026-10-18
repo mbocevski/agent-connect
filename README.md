@@ -63,30 +63,67 @@ What works on `main` today:
 
 - **Core** (`core/`, Rust): MLS groups on OpenMLS with the single v0
   ciphersuite, invite links, join requests, the short code, and an MLS store
-  encrypted at rest with SQLCipher. Python bindings are in `core-py/`.
+  encrypted at rest with SQLCipher. Python bindings are in `core-py/`. The
+  protocol is in [SPEC.md](SPEC.md).
+  <!-- component: core -->
 - **Relay** (`relay/`, Rust): the MLS Delivery Service, per-instance
-  mailboxes, the invite registry and an invite landing page without
-  JavaScript.
+  mailboxes, the invite registry, the door registry and an invite landing
+  page without JavaScript ([relay/README.md](relay/README.md)).
+  <!-- component: relay -->
 - **Runtime and daemon** (`daemon/`, Python): identity and keys, the relay
-  connection, durable inbound and outbound queues, the safety policy and the
-  local control API, in one runtime that `agentconnectd` hosts or an agent
-  embeds.
+  connection, durable inbound and outbound queues and the local control API,
+  in one runtime that `agentconnectd` hosts or an agent embeds
+  ([ADR-005](docs/adr/005-deployment-modes.md)).
+  <!-- component: runtime -->
 - **CLI** (`agentconnect`): runs the daemon and covers the invite lifecycle:
   create and accept invites, approve joins, compare the short code, send a
   test message and read events ([docs/cli.md](docs/cli.md)).
-- **Headless agents**: the Python SDK (`sdk/python/`) runs the runtime
-  inside the agent's process (`AgentConnect.embedded`), with no daemon to
-  start, and hands messages to the agent's handlers directly. It can also
-  attach to a separate daemon through its webhook adapter or event stream.
-  Either way it removes duplicates and sends replies
-  ([docs/sdk.md](docs/sdk.md)).
+  <!-- component: cli -->
+- **Safety policy**: every message passes the policy in both directions. It
+  caps message size and rate, stops reply loops, can require a verified
+  group, and can hold messages until a human approves them
+  ([docs/safety.md](docs/safety.md)).
+  <!-- component: safety-policy -->
+- **Separate OS user**: the daemon can run as its own user, so an agent with
+  a shell cannot read the human token or the keys. It works for the separate
+  daemon only, with setup for Linux (systemd) and macOS (launchd)
+  ([docs/isolation.md](docs/isolation.md)).
+  <!-- component: isolation -->
+- **Python SDK** (`sdk/python/`): for headless agents. Its default mode is
+  embedded: `AgentConnect.embedded` runs the runtime inside the agent's
+  process, with no daemon to start, and hands messages to the agent's
+  handlers directly. Attach mode connects to a separate daemon through its
+  webhook adapter or event stream. Either way the SDK removes duplicates and
+  sends replies ([docs/sdk.md](docs/sdk.md)).
+  <!-- component: sdk -->
 - **A2A adapter** (in the daemon): hands group messages to a local A2A v1.0
   server agent and sends its answers back, and serves a local A2A facade so
   an A2A client can talk to a group
   ([docs/adapters/a2a.md](docs/adapters/a2a.md)).
+  <!-- component: a2a-adapter -->
+- **Webhook and SSE adapters** (in the daemon): deliver messages and events
+  to an agent by HTTP POST to a callback URL, or through a durable event
+  stream that the agent reads and resumes after a disconnect
+  ([docs/adapters/webhook.md](docs/adapters/webhook.md)).
+  <!-- component: webhook-adapter -->
+- **Discovery, core and relay side**: signed listings, listing tokens,
+  withdrawals and owner verification files, checked in one place in the
+  core ([ADR-006](docs/adr/006-discovery.md); [SPEC.md](SPEC.md) §6.6 and §13). An
+  agent's owner can register a door at the relay, and the relay forwards
+  sealed knocks (requests to talk) to the door's mailbox without reading
+  them, within per-door and per-sender limits.
+  <!-- component: discovery -->
+- **Directory** (`directory/`, Rust): a service that indexes signed listings
+  and serves them as search, HTML and Markdown pages, the exact signed card
+  and an MCP server. It checks each listing through the core, fetches the owner's
+  `/.well-known/agentconnect.json` to show an owner state, and holds no
+  keys ([directory/README.md](directory/README.md)).
+  <!-- component: directory -->
 
-What is coming: support for more agent platforms. With no adapter
-configured, a received message waits in the daemon's inbound queue.
+What is coming: the daemon and CLI side of discovery (publishing a listing,
+knocking on a door, and approving knocks), which the core and relay already
+support, and support for more agent platforms. With no adapter configured, a
+received message waits in the daemon's inbound queue.
 
 Platform support:
 
@@ -171,8 +208,8 @@ agentconnect verify <group>
 agentconnect verify <group>
 ```
 
-Alice sends a message. No agent adapter exists yet, so Bob's daemon keeps the
-decrypted message in its inbound queue, and `status` counts it.
+Alice sends a message. This setup configures no adapter, so Bob's daemon keeps
+the decrypted message in its inbound queue, and `status` counts it.
 
 <!-- runnable: alice -->
 ```sh

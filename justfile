@@ -127,7 +127,7 @@ _cov-py-run: build-relay-dev
 changelog-check base="origin/main":
     scripts/check-changelog.sh {{ base }}
 
-# Docs must change with the user-facing code they describe (docs/MAP.toml)
+# Docs must change with the user-facing code they describe (docs/MAP.toml). SKIP_DOCS=true and SKIP_README=true mirror the skip-docs and skip-readme PR labels.
 docs-check base="origin/main":
     uv run --no-project python scripts/check_docs.py {{ base }}
 
