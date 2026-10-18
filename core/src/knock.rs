@@ -493,6 +493,22 @@ impl Knock {
         self.ts.saturating_add(KNOCK_LIFETIME_SECS)
     }
 
+    /// The `KeyPackageRef` (RFC 9420 §5.2) of the knock's KeyPackage, as the
+    /// owner's [`VerifiedKnock::key_package_ref`] computes it.
+    ///
+    /// # Errors
+    ///
+    /// An MLS error if the KeyPackage bytes can't be hashed.
+    pub fn key_package_ref(&self) -> Result<Vec<u8>> {
+        let crypto = CryptoProvider::new().map_err(|_| Error::Rng)?;
+        Ok(
+            openmls::ciphersuite::hash_ref::make_key_package_ref(&self.key_package, CS, &crypto)
+                .map_err(crate::error::mls)?
+                .as_slice()
+                .to_vec(),
+        )
+    }
+
     /// When the knocker stops waiting and reports "no answer":
     /// `ts + 3600 + 300` (SPEC §6.6.6).
     #[must_use]
@@ -529,7 +545,6 @@ impl OpenedKnock {
 /// is the daemon's: deduplication, the local limits, and the human.
 pub struct VerifiedKnock {
     knock: Knock,
-    #[allow(dead_code)] // For the approval's Add (phase 3).
     key_package: KeyPackage,
     key_package_ref: Vec<u8>,
     info: LeafInfo,
@@ -572,6 +587,25 @@ impl VerifiedKnock {
     #[must_use]
     pub fn secret(&self) -> KnockSecret {
         self.knock.secret()
+    }
+
+    /// The knocker's mailbox, where the Welcome goes.
+    #[must_use]
+    pub fn mailbox_id(&self) -> &str {
+        &self.knock.mailbox_id
+    }
+
+    /// The knock's canonical JCS form, for the owner's encrypted store while
+    /// the approval waits; [`Client::restore_knock`] rebuilds it.
+    /// **Contains the `welcome_secret`** and the KeyPackage.
+    #[must_use]
+    pub fn to_secret_bytes(&self) -> Zeroizing<Vec<u8>> {
+        self.knock.to_json()
+    }
+
+    /// The verified KeyPackage, for the approval's Add.
+    pub(crate) fn key_package(&self) -> &KeyPackage {
+        &self.key_package
     }
 }
 
@@ -771,19 +805,12 @@ impl fmt::Debug for VerifiedKnock {
 }
 
 impl<S: Store> Client<S> {
-    /// Knocker side (SPEC §6.6.2): a fresh KeyPackage, a random `knock_id`
-    /// and `welcome_secret`, `ts` from this client's clock, the signature by
-    /// this instance's `SK`, sealed to `door_key`. Returns the sealed knock
-    /// (the envelope's `ct`) and the knock to keep until it lapses.
-    ///
-    /// The caller has verified the listing, checked its relay and that the
-    /// door is open, and shown its human what it knocks on.
+    /// Knocker side (SPEC §6.6.2): [`Client::create_knock_at`] with `ts`
+    /// from this client's clock.
     ///
     /// # Errors
     ///
-    /// [`Error::HpkeKeyLength`] for a door key that isn't 1216 bytes,
-    /// [`Error::Malformed`] for a bad display name, [`Error::InvalidKnock`]
-    /// for a bad note, or an MLS or RNG error.
+    /// As [`Client::create_knock_at`].
     pub fn create_knock(
         &self,
         door_id: &[u8; 16],
@@ -791,11 +818,41 @@ impl<S: Store> Client<S> {
         display_name: &str,
         note: Option<&str>,
     ) -> Result<(Vec<u8>, Knock)> {
+        let ts = self.clock().unix_millis() / 1000;
+        self.create_knock_at(door_id, door_key, display_name, note, ts)
+    }
+
+    /// Knocker side (SPEC §6.6.2): a fresh KeyPackage, a random `knock_id`
+    /// and `welcome_secret`, the given `ts` (the caller's clock, Unix
+    /// seconds), the signature by this instance's `SK`, sealed to
+    /// `door_key`. Returns the sealed knock (the envelope's `ct`) and the
+    /// knock to keep until it lapses.
+    ///
+    /// The caller has verified the listing, checked its relay and that the
+    /// door is open, and shown its human what it knocks on.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::HpkeKeyLength`] for a door key that isn't 1216 bytes,
+    /// [`Error::InvalidKnock`] for a bad display name, note or `ts`, or a
+    /// door key HPKE refuses, or an MLS or RNG error. None of them leaves a
+    /// KeyPackage behind.
+    pub fn create_knock_at(
+        &self,
+        door_id: &[u8; 16],
+        door_key: &[u8],
+        display_name: &str,
+        note: Option<&str>,
+        ts: u64,
+    ) -> Result<(Vec<u8>, Knock)> {
         if door_key.len() != DOOR_KEY_LEN {
             return Err(Error::HpkeKeyLength);
         }
         check_display_name(display_name)?;
         check_note(note)?;
+        if ts > MAX_SAFE_INTEGER {
+            return Err(bad("ts"));
+        }
         // Validate the door key fully before a KeyPackage is stored: HPKE
         // refuses keys of the right length that aren't valid, and a failed
         // knock must leave nothing behind.
@@ -803,7 +860,7 @@ impl<S: Store> Client<S> {
         let mut knock = Knock {
             door_id: *door_id,
             knock_id: self.rng().array()?,
-            ts: self.clock().unix_millis() / 1000,
+            ts,
             display_name: display_name.to_owned(),
             note: note.map(str::to_owned),
             key_package: self.new_key_package()?,
@@ -844,7 +901,26 @@ impl<S: Store> Client<S> {
     /// A KeyPackage validation error ([`Error::KeyPackageReused`] for a
     /// used one), or [`Error::InvalidKnock`] for a bad signature.
     pub fn verify_knock(&self, opened: OpenedKnock) -> Result<VerifiedKnock> {
-        let knock = opened.knock;
+        self.verify_knock_parts(opened.knock)
+    }
+
+    /// Owner side: rebuilds a knock this owner verified earlier from
+    /// [`VerifiedKnock::to_secret_bytes`], kept in its own encrypted store
+    /// while the approval waits. The bytes must be a canonical `Knock`, and
+    /// checks 4–5 run again (the KeyPackage, including that it is still
+    /// unused, and the signature). The door and `ts` checks don't: the
+    /// knock passed them when it arrived, and the approval's own deadline
+    /// is [`Knock::lapses_at`], which [`crate::Group::add_knocker`]
+    /// enforces.
+    ///
+    /// # Errors
+    ///
+    /// As [`Knock::from_json`] and [`Client::verify_knock`].
+    pub fn restore_knock(&self, knock_json: &[u8]) -> Result<VerifiedKnock> {
+        self.verify_knock_parts(Knock::from_json(knock_json)?)
+    }
+
+    fn verify_knock_parts(&self, knock: Knock) -> Result<VerifiedKnock> {
         let (key_package, key_package_ref, info) =
             self.check_peer_key_package(&knock.key_package, &knock.mailbox_id)?;
         let sig_key: [u8; 32] = info
@@ -859,6 +935,28 @@ impl<S: Store> Client<S> {
             key_package_ref,
             info,
         })
+    }
+}
+
+/// What the knocker expects of the group an approved knock creates (SPEC
+/// §6.6.5): the listed identity, which owns and created it and holds the
+/// other leaf, and the listing name, which is the group's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnockExpectation {
+    /// The listing's `identity`.
+    pub identity: String,
+    /// The listing's `name` (slug), which becomes `ac_group_meta.name`.
+    pub name: String,
+}
+
+impl KnockExpectation {
+    /// The expectation for a knock on `listing`.
+    #[must_use]
+    pub fn from_listing(listing: &crate::listing::SignedListing) -> Self {
+        Self {
+            identity: listing.params().identity.clone(),
+            name: listing.params().name.clone(),
+        }
     }
 }
 
@@ -1480,6 +1578,112 @@ pub(crate) mod tests {
         let a = Door::derive(id, &ikm, 5).unwrap();
         let b = Door::derive(id, &ikm, 5).unwrap();
         assert_eq!(a.public_key(), b.public_key());
+    }
+
+    /// Under a test clock the daemon's core client runs on system time, so
+    /// the knocker stamps `ts` from the caller's clock.
+    #[test]
+    fn create_knock_at_uses_the_given_ts() {
+        let s = setup("knock-at");
+        let t = now(&s.clock);
+        let (sealed, k) = s
+            .knocker
+            .create_knock_at(s.door.id(), s.door.public_key(), "bob", None, t - 1000)
+            .unwrap();
+        assert_eq!(k.ts, t - 1000);
+        assert_eq!(k.lapses_at(), t - 1000 + 3600);
+        let opened = s.door.open_knock(s.door.id(), &sealed, t).unwrap();
+        assert_eq!(opened.knock().ts, t - 1000);
+        // create_knock stamps this client's clock.
+        let (_, k2) = knock(&s);
+        assert_eq!(k2.ts, t);
+        // A ts no JSON reader could represent is refused before any
+        // KeyPackage exists.
+        let before = s.knocker.store_for_testing().mls_value_count();
+        assert_eq!(
+            s.knocker
+                .create_knock_at(
+                    s.door.id(),
+                    s.door.public_key(),
+                    "bob",
+                    None,
+                    MAX_SAFE_INTEGER + 1
+                )
+                .err(),
+            Some(bad("ts"))
+        );
+        assert_eq!(s.knocker.store_for_testing().mls_value_count(), before);
+    }
+
+    /// An approval waits for a human, possibly across a restart: the owner
+    /// stores the verified knock and rebuilds it with the KeyPackage and
+    /// signature checks again, but not the door or time checks.
+    #[test]
+    fn a_verified_knock_restores_from_its_secret_bytes() {
+        let s = setup("knock-restore");
+        let t = now(&s.clock);
+        let (sealed, k) = knock(&s);
+        let v = s
+            .owner
+            .verify_knock(s.door.open_knock(s.door.id(), &sealed, t).unwrap())
+            .unwrap();
+        let bytes = v.to_secret_bytes();
+        assert_eq!(*bytes, *k.to_json());
+        assert_eq!(v.mailbox_id(), s.knocker.instance().mailbox_id());
+        assert_eq!(
+            k.key_package_ref().unwrap(),
+            v.key_package_ref(),
+            "the knocker computes the same KeyPackageRef"
+        );
+        // Long after the knock lapsed and the door closed, it still restores.
+        s.clock.advance(std::time::Duration::from_hours(30 * 24));
+        let back = s.owner.restore_knock(&bytes).unwrap();
+        assert_eq!(back.identity(), v.identity());
+        assert_eq!(back.key_package_ref(), v.key_package_ref());
+        assert_eq!(back.knock().knock_id, k.knock_id);
+        assert_eq!(*back.to_secret_bytes(), *bytes);
+        // Tampering is caught: the fields, the form, the signature.
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let renamed = text.replace("bob's agent", "mallory");
+        assert_eq!(
+            s.owner.restore_knock(renamed.as_bytes()).err(),
+            Some(bad("signature"))
+        );
+        assert_eq!(
+            s.owner
+                .restore_knock(text.replacen('{', "{ ", 1).as_bytes())
+                .err(),
+            Some(bad("not canonical"))
+        );
+        assert_eq!(s.owner.restore_knock(b"{}").err(), Some(bad("fields")));
+        // Another instance's signature over the same KeyPackage.
+        let mallory = client("knock-restore-mallory", &s.clock);
+        let mut stolen = k.clone();
+        stolen.sig = mallory.instance().sign(&stolen.signing_input());
+        assert_eq!(
+            s.owner.restore_knock(&stolen.to_json()).err(),
+            Some(bad("signature"))
+        );
+        // Once its KeyPackage was used in an Add, it doesn't restore.
+        s.owner
+            .mark_key_package_used_for_testing(v.key_package_ref())
+            .unwrap();
+        assert_eq!(
+            s.owner.restore_knock(&bytes).err(),
+            Some(Error::KeyPackageReused)
+        );
+        // Debug shows no secret.
+        let secret = b64(k.secret().secret.as_slice());
+        assert!(!format!("{v:?} {back:?}").contains(&secret));
+    }
+
+    #[test]
+    fn a_knock_expectation_comes_from_the_listing() {
+        let f = crate::listing::testing::fixture("knock-expectation");
+        let l = f.card.sign(&f.ik).unwrap();
+        let e = KnockExpectation::from_listing(&l);
+        assert_eq!(e.identity, f.ik.id());
+        assert_eq!(e.name, "release-planner");
     }
 
     #[test]

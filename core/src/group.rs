@@ -24,9 +24,10 @@ use crate::identity::Instance;
 use crate::invite::{Invite, InviteMeta, InviteSecret};
 use crate::join::{JoinRequest, check_display_name, join_request_mac};
 use crate::journal::{self, JournalEntry, Journaled, Stored, Tx, WELCOME_SCOPE, keeps_state};
+use crate::knock::{Knock, KnockExpectation, KnockSecret, VerifiedKnock};
 use crate::mls::{
-    CS, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities, check_group_context,
-    check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
+    CS, GroupContextInfo, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities,
+    check_group_context, check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
     group_context_extensions, guard, join_config, join_config_with_padding, leaf_extensions,
     leaf_mailbox, validate_key_package, validate_leaf,
 };
@@ -573,7 +574,7 @@ impl<S: Store> Client<S> {
         expected: &InviteMeta,
         wrapped: &[u8],
     ) -> Result<Group> {
-        self.join_tx(invite, expected, wrapped, None)
+        self.join_tx(&Joining::Invite { invite, expected }, wrapped, None)
             .map(|j| j.value)
     }
 
@@ -596,13 +597,82 @@ impl<S: Store> Client<S> {
         key: &str,
         context: &[u8],
     ) -> Result<Journaled<Group>> {
-        self.join_tx(invite, expected, wrapped, Some((key, context)))
+        self.join_tx(
+            &Joining::Invite { invite, expected },
+            wrapped,
+            Some((key, context)),
+        )
+    }
+
+    /// Knocker side, SPEC §6.6.5: joins the group an approved knock created
+    /// from its wrapped Welcome. Every check of §6.3 runs except the
+    /// comparison with an `InviteMeta`, which these replace:
+    ///
+    /// - the Welcome unwraps under the knock's `welcome_key`;
+    /// - `ac_group_meta.name` is `expected.name`;
+    /// - `ac_group_meta.created_by` and `ac_group_policy.owner` are both
+    ///   `expected.identity`, which is not this instance's own identity;
+    /// - the group has exactly two leaves: this instance's own, and one of
+    ///   `expected.identity` whose instance certificate verifies.
+    ///
+    /// A failure after the unwrap spends the KeyPackage and keeps no group
+    /// (SPEC §6.3), so the knock is over; [`Error::KnockWelcome`] (kind
+    /// `welcome_mismatch`) should raise `relay_misbehaviour`. The caller
+    /// deletes its stored knock after success (dropping the [`Knock`]
+    /// zeroizes the `welcome_secret`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::WelcomeAuth`] if it doesn't unwrap under this knock (try the
+    /// next pending one), [`Error::NotPermitted`] if `expected` names this
+    /// identity, [`Error::KnockWelcome`], or any error of
+    /// [`Client::join_from_wrapped_welcome`] but [`Error::MetaMismatch`].
+    pub fn join_from_knock_welcome(
+        &self,
+        knock: &Knock,
+        expected: &KnockExpectation,
+        wrapped: &[u8],
+    ) -> Result<Group> {
+        self.join_tx(
+            &Joining::Knock {
+                secret: knock.secret(),
+                expected,
+            },
+            wrapped,
+            None,
+        )
+        .map(|j| j.value)
+    }
+
+    /// [`Client::join_from_knock_welcome`], journalled under `key` with the
+    /// caller's `context` (ADR-004), as [`Client::join_journaled`] is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::join_from_knock_welcome`]; [`Error::Duplicate`] if the
+    /// entry was consumed, [`Error::JournalConflict`] for another Welcome
+    /// under the same key.
+    pub fn join_knock_journaled(
+        &self,
+        knock: &Knock,
+        expected: &KnockExpectation,
+        wrapped: &[u8],
+        key: &str,
+        context: &[u8],
+    ) -> Result<Journaled<Group>> {
+        self.join_tx(
+            &Joining::Knock {
+                secret: knock.secret(),
+                expected,
+            },
+            wrapped,
+            Some((key, context)),
+        )
     }
 
     fn join_tx(
         &self,
-        invite: &InviteSecret,
-        expected: &InviteMeta,
+        joining: &Joining<'_>,
         wrapped: &[u8],
         journal_as: Option<(&str, &[u8])>,
     ) -> Result<Journaled<Group>> {
@@ -619,7 +689,7 @@ impl<S: Store> Client<S> {
             });
         }
         let tx = Tx::begin(self.store())?;
-        match self.join_inner(invite, expected, wrapped) {
+        match self.join_inner(joining, wrapped) {
             Ok(group) => {
                 if let Some((key, context)) = journal_as {
                     journal::record(
@@ -651,16 +721,23 @@ impl<S: Store> Client<S> {
         }
     }
 
-    fn join_inner(
-        &self,
-        invite: &InviteSecret,
-        expected: &InviteMeta,
-        wrapped: &[u8],
-    ) -> Result<Group> {
-        if expected.invite_id != invite.id_b64() {
-            return Err(Error::InviteMismatch);
-        }
-        let welcome_bytes = invite.unwrap_welcome(wrapped)?;
+    fn join_inner(&self, joining: &Joining<'_>, wrapped: &[u8]) -> Result<Group> {
+        let welcome_bytes = match joining {
+            Joining::Invite { invite, expected } => {
+                if expected.invite_id != invite.id_b64() {
+                    return Err(Error::InviteMismatch);
+                }
+                invite.unwrap_welcome(wrapped)?
+            }
+            Joining::Knock { secret, expected } => {
+                if expected.identity == self.instance.identity() {
+                    return Err(Error::NotPermitted(
+                        "a knock on this identity's own listing",
+                    ));
+                }
+                secret.unwrap_welcome(wrapped)?
+            }
+        };
         let msg = MlsMessageIn::tls_deserialize_exact(welcome_bytes.as_slice())
             .map_err(|_| Error::Malformed("welcome"))?;
         let MlsMessageBodyIn::Welcome(welcome) = msg.extract() else {
@@ -704,20 +781,81 @@ impl<S: Store> Client<S> {
                 return Err(Error::WrongCiphersuite);
             }
             let ctx = check_group_context(staged.group_context().extensions())?;
-            if ctx.meta.name != expected.group_name || ctx.meta.purpose != expected.purpose {
-                return Err(Error::MetaMismatch);
-            }
+            joining.check_context(&ctx)?;
             let mut group = Group {
                 mls: staged.into_group(&self.provider).map_err(mls)?,
             };
             self.fail("join.after_stage")?;
-            let checked = group.check_all_leaves(&ctx.policy);
+            let checked = group.check_all_leaves(&ctx.policy).and_then(|()| {
+                if let Joining::Knock { expected, .. } = joining {
+                    group.check_knock_members(self.instance.identity(), &expected.identity)
+                } else {
+                    Ok(())
+                }
+            });
             if let Err(e) = checked {
                 group.mls.delete(self.provider.storage()).map_err(storage)?;
                 return Err(e);
             }
             Ok(group)
         })
+    }
+}
+
+/// What a Welcome is joined under and checked against.
+enum Joining<'a> {
+    /// An invite (SPEC §6.3): the `InviteMeta` shown to the human.
+    Invite {
+        invite: &'a InviteSecret,
+        expected: &'a InviteMeta,
+    },
+    /// An approved knock (SPEC §6.6.5): the listing knocked on.
+    Knock {
+        secret: KnockSecret,
+        expected: &'a KnockExpectation,
+    },
+}
+
+impl Joining<'_> {
+    /// The group-context checks: the `InviteMeta` comparison, or the knock
+    /// checks that replace it.
+    fn check_context(&self, ctx: &GroupContextInfo) -> Result<()> {
+        match self {
+            Self::Invite { expected, .. } => {
+                if ctx.meta.name != expected.group_name || ctx.meta.purpose != expected.purpose {
+                    return Err(Error::MetaMismatch);
+                }
+            }
+            Self::Knock { expected, .. } => {
+                if ctx.meta.name != expected.name {
+                    return Err(Error::KnockWelcome("name"));
+                }
+                if ctx.meta.created_by != expected.identity {
+                    return Err(Error::KnockWelcome("created_by"));
+                }
+                if ctx.policy.owner != expected.identity {
+                    return Err(Error::KnockWelcome("owner"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How a commit's Welcome is wrapped (SPEC §6.4).
+enum WelcomeWrap<'a> {
+    /// Under the invite's `welcome_key` (SPEC §6.2 step 6).
+    Invite(&'a Invite),
+    /// Under the knock's `welcome_key` (SPEC §6.6.4 step 4).
+    Knock(KnockSecret),
+}
+
+impl WelcomeWrap<'_> {
+    fn wrap(&self, rng: &Rng, welcome: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::Invite(invite) => invite.secret().wrap_welcome(rng, welcome),
+            Self::Knock(secret) => secret.wrap_welcome(rng, welcome),
+        }
     }
 }
 
@@ -868,7 +1006,7 @@ pub fn peek_header(bytes: &[u8]) -> Result<MessageHeader> {
 
 /// Builds, stages and checks a commit; `$build` maps the commit builder.
 macro_rules! commit {
-    ($self:ident, $client:ident, $invite:expr, |$b:ident| $build:expr) => {{
+    ($self:ident, $client:ident, $wrap:expr, |$b:ident| $build:expr) => {{
         $self.ready()?;
         $self.handshake_padding($client)?;
         let signer = $client.signer();
@@ -885,7 +1023,7 @@ macro_rules! commit {
             .map_err(mls)?
             .stage_commit(&$client.provider)
             .map_err(mls)?;
-        $self.finish_commit($client, &bundle, $invite)
+        $self.finish_commit($client, &bundle, $wrap)
     }};
 }
 
@@ -914,6 +1052,33 @@ impl Group {
         self.atomically(client, |g| {
             g.add_member_inner(client, request, invite, switch_floor)
         })
+    }
+
+    /// SPEC §6.6.4 steps 3–4: commits `Add` of an approved knock's
+    /// KeyPackage and wraps the Welcome under the knock's `welcome_key`,
+    /// with `aad = "agentconnect/v0/knock-welcome" ‖ knock_id`. The group
+    /// must be a fresh one of this instance's own: one leaf, created and
+    /// owned by this identity, floor `free`, epoch 0 (the caller creates it
+    /// with [`Client::create_group`] under the listing's name).
+    ///
+    /// Only a human approves a knock (SPEC §6.6.4); this is the step after.
+    /// `now` is the caller's clock: the approval lapses at
+    /// [`Knock::lapses_at`], and no Add is committed after it. Atomic, and
+    /// the knock is only borrowed, as for [`Group::add_member`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidKnock`] `"lapsed"` (kind `expired`),
+    /// [`Error::KeyPackageReused`], [`Error::NotPermitted`] for a knock
+    /// from this instance's own identity or a group that isn't fresh,
+    /// [`Error::CommitPending`], or an MLS error.
+    pub fn add_knocker<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        knock: &VerifiedKnock,
+        now: u64,
+    ) -> Result<CommitOut> {
+        self.atomically(client, |g| g.add_knocker_inner(client, knock, now))
     }
 
     /// Commits the removal of every instance of `identity` (SPEC §9.2:
@@ -1320,6 +1485,30 @@ impl Group {
         Ok(())
     }
 
+    /// SPEC §6.6.5: exactly two leaves, this instance's own and one of
+    /// `listed` (each validated by [`Group::members`], certificate
+    /// included).
+    fn check_knock_members(&self, me: &str, listed: &str) -> Result<()> {
+        let members = self.members()?;
+        let own = self.own_leaf_index();
+        if members.len() != 2 {
+            return Err(Error::KnockWelcome("not exactly two members"));
+        }
+        let ok = members.iter().all(|m| {
+            if m.leaf_index == own {
+                m.identity == me
+            } else {
+                m.identity == listed
+            }
+        });
+        if !ok {
+            return Err(Error::KnockWelcome(
+                "the other member is not the listed identity",
+            ));
+        }
+        Ok(())
+    }
+
     fn ready(&self) -> Result<()> {
         if !self.mls.is_active() {
             return Err(Error::NotMember);
@@ -1477,7 +1666,7 @@ impl Group {
         &mut self,
         client: &Client<S>,
         bundle: &openmls::prelude::CommitMessageBundle,
-        invite: Option<&Invite>,
+        wrap: Option<WelcomeWrap<'_>>,
     ) -> Result<CommitOut> {
         let epoch = self.epoch();
         let staged = self
@@ -1494,10 +1683,8 @@ impl Group {
             }
         };
         let built = (|| {
-            let welcome = match (invite, bundle.to_welcome_msg()) {
-                (Some(invite), Some(w)) => {
-                    Some(invite.secret().wrap_welcome(client.rng(), &wire(&w)?)?)
-                }
+            let welcome = match (wrap, bundle.to_welcome_msg()) {
+                (Some(wrap), Some(w)) => Some(wrap.wrap(client.rng(), &wire(&w)?)?),
                 _ => None,
             };
             let commit = wire(bundle.commit())?;
@@ -1574,7 +1761,7 @@ impl Group {
         };
         let key_package = request.key_package.clone();
         guard(|| {
-            commit!(self, client, Some(invite), |b| {
+            commit!(self, client, Some(WelcomeWrap::Invite(invite)), |b| {
                 let b = b.propose_adds([key_package]);
                 match gce {
                     Some(exts) => b.propose_group_context_extensions(exts).map_err(mls)?,
@@ -1582,6 +1769,65 @@ impl Group {
                 }
             })
         })
+    }
+
+    fn add_knocker_inner<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        knock: &VerifiedKnock,
+        now: u64,
+    ) -> Result<CommitOut> {
+        if now > knock.knock().lapses_at() {
+            return Err(Error::InvalidKnock("lapsed"));
+        }
+        let me = client.instance.identity();
+        if knock.identity() == me {
+            return Err(Error::NotPermitted("a knock from this identity"));
+        }
+        if records::key_package_used(client.provider.records(), knock.key_package_ref())? {
+            return Err(Error::KeyPackageReused);
+        }
+        let ctx = check_group_context(self.mls.extensions())?;
+        if ctx.policy.owner != me || ctx.meta.created_by != me {
+            return Err(Error::NotPermitted(
+                "not a group this identity created and owns",
+            ));
+        }
+        if ctx.policy.floor != Floor::Free {
+            return Err(Error::NotPermitted("the floor is not free"));
+        }
+        if self.mls.members().count() != 1 || self.epoch() != 0 {
+            return Err(Error::NotPermitted("not a fresh group"));
+        }
+        let key_package = knock.key_package().clone();
+        guard(|| {
+            commit!(
+                self,
+                client,
+                Some(WelcomeWrap::Knock(knock.secret())),
+                |b| b.propose_adds([key_package])
+            )
+        })
+    }
+
+    /// [`Group::add_knocker`] without its checks, adding `extra`
+    /// KeyPackages too: Welcomes a broken owner could send.
+    #[cfg(test)]
+    pub(crate) fn add_knocker_unchecked<S: Store>(
+        &mut self,
+        client: &Client<S>,
+        knock: &VerifiedKnock,
+        extra: &[KeyPackage],
+    ) -> Result<CommitOut> {
+        let adds: Vec<KeyPackage> = std::iter::once(knock.key_package().clone())
+            .chain(extra.iter().cloned())
+            .collect();
+        commit!(
+            self,
+            client,
+            Some(WelcomeWrap::Knock(knock.secret())),
+            |b| b.propose_adds(adds)
+        )
     }
 
     fn remove_inner<S: Store>(&mut self, client: &Client<S>, identity: &str) -> Result<CommitOut> {
@@ -1920,5 +2166,7 @@ impl Group {
     }
 }
 
+#[cfg(test)]
+mod knock_tests;
 #[cfg(test)]
 mod tests;
