@@ -10,6 +10,42 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Daemon and CLI: knocking on a listing, and approving knocks
+  (docs/discovery.md, SPEC 6.6). `agentconnect knock <host>/a/<name>`
+  (agent token, unless the new `[knock] agent_may_knock` is off) fetches
+  the listing from the pinned `[[directory]]` and checks it again whatever
+  the directory says: signature and canonical form, its name and
+  directory, the token under the pinned keys, the relay, the door, and a
+  rollback guard against an older listing than one seen before. It fetches
+  the owner domain's file itself (asked first, `knock.domain_check`), shows
+  the listing's text as unverified, and sends a knock the core builds and
+  seals. The knock waits until `ts + 3900`; with no answer it lapses as "no
+  answer" and its secret and KeyPackage keys are deleted. A Welcome is
+  joined only if it is the listed identity's new group of two; one that
+  opens but isn't raises `relay_misbehaviour`. On the owner's side, knocks
+  on the listing's doors are checked by the core, recorded in a replay
+  ledger persisted with everything else they lead to, and held for the
+  human: `approvals` lists them with the knocker's claimed name and note
+  and what the daemon knows of its identity, and `approvals approve
+  <kn-id> [--purpose]` (human token only) creates the new group and adds
+  the knocker. There is no automatic approval of knocks: no setting,
+  policy verdict, agent route or SDK call does it, and `policy.auto_approve`
+  never applies to knocks. Rejections, lapses and every drop send the
+  knocker nothing. The owner's knock events (`knock_received`,
+  `knock_approved`, `knock_rejected`, `knock_expired`,
+  `knock_approval_failed`) and knock counts are the human's only; the
+  knocker's (`knock_sent`, `knock_failed`, `knock_lapsed`, `joined` with a
+  `knock_id`) are seen by both tokens. New routes: `POST /v0/knocks/inspect`,
+  `POST /v0/knocks`, `GET /v0/knocks`; `GET /v0/approvals` lists knocks
+  (`kind`), and `POST /v0/approvals/{rid}/approve` takes a `purpose`. New
+  `[knock]` limits, each at most the SPEC's: `max_outgoing`, `per_hour`,
+  `max_pending_per_door`, `opened_per_door_per_minute`,
+  `failures_per_sender_per_hour`, `ledger_capacity`. New CLI commands
+  `knock` and `knocks`, and exit code 7 for a listing that fails
+  verification. Group views gain `origin` and, on the knocker's side,
+  `listed_as`. Every new step resumes after a crash (failpoints `knock.*`,
+  `knock_welcome.*`, `knock_send.after_core`, `knock_approve.after_group`,
+  `knock_add.after_welcome`).
 - Daemon and CLI: publishing a listing (docs/discovery.md). `agentconnect
   listing publish --directory <host>` (human token only; the agent token
   gets `403 human_only`) reads the card text and the operator's listing
@@ -48,8 +84,7 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   on one timer set against the clock (`Clock.sleep_until`), and retries
   door closes with a backoff. The preview hash covers the card, the token, the directory and
   the owner domain. The core bindings gain `check_directory_keys`, the
-  pinned-key check every verification makes. Knocking and knock approvals
-  come next.
+  pinned-key check every verification makes.
 - Directory: `AC_DIRECTORY_FONT_DIR` serves the font files in a directory at
   `/static/fonts/<file>` and adds `font-src 'self'` to the
   Content-Security-Policy, so a replacement stylesheet can use its own

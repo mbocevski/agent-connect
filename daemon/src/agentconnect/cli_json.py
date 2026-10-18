@@ -72,6 +72,74 @@ LISTING: dict[str, Any] = {
     "owner_state": Opt("str"),
     "last_error": Opt({"code": "str", "at": "int"}),
     "retrying": Opt({"since": "int", "code": Opt("str")}),
+    # The human token only: knocks waiting for approval, and dropped since start.
+    "pending_knocks?": "int",
+    "knocks_dropped?": "int",
+}
+# Knocking (docs/discovery.md): what a knock names and what its owner file said.
+KNOCK_LISTING: dict[str, Any] = {
+    "directory": "str",
+    "name": "str",
+    "identity": "str",
+    "fingerprint": "str",
+}
+KNOCK_OWNER: dict[str, Any] = {"domain": Opt("str"), "state": "str"}
+KNOCK_INSPECT: dict[str, Any] = {
+    "listing": {
+        "url": "str",
+        "directory": "str",
+        "name": "str",
+        "identity": "str",
+        "fingerprint": "str",
+        "display_name": "str",
+        "description": "str",
+        "version": "str",
+        "organization": Opt("str"),
+        "skills": [{"name": "str", "description": "str", "tags": ["str"]}],
+        "sha256": "str",
+        "token_expires_at": "int",
+    },
+    "owner": {**KNOCK_OWNER, "fetch": Opt("str"), "checked_at": Opt("int")},
+    "door": {"expires_at": "int"},
+    "untrusted": "bool",
+    "notice": "str",
+    "warnings": [{"code": "str", "message": "str"}],
+}
+KNOCK_SUMMARY: dict[str, Any] = {
+    "knock_id": "str",
+    "status": "str",
+    "gives_up_at": "int",
+    "listing": KNOCK_LISTING,
+    "owner": KNOCK_OWNER,
+}
+KNOCKS: dict[str, Any] = {
+    "knock_id": "str",
+    "directory": "str",
+    "name": "str",
+    "fingerprint": "str",
+    "owner_state": "str",
+    "status": "str",
+    "created_at": "int",
+    "gives_up_at": "int",
+    "group_id": Opt("str"),
+}
+# A pending approval (`GET /v0/approvals`, human token): a join, or a knock
+# with the knock's fields.
+APPROVAL: dict[str, Any] = {
+    "kind": "str",
+    "request_id": "str",
+    "group_id": Opt("str"),
+    "identity": "str",
+    "display_name": "str",
+    "received_at": "int",
+    "display_name_verified": "bool",
+    "fingerprint": "str",
+    "listing?": {"directory": "str", "name": "str"},
+    "note?": Opt("str"),
+    "note_verified?": "bool",
+    "ts?": "int",
+    "lapses_at?": "int",
+    "known?": {"groups": "int", "verified_in": ["str"]},
 }
 HELD_DECISION: dict[str, Any] = {"hold_id": "str", "group_id": "str", "status": "str"}
 SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}
@@ -120,20 +188,33 @@ SCHEMAS: dict[str, Any] = {
     "approvals list": {
         "approvals": [
             {
+                "kind": "str",
                 "request_id": "str",
-                "group_id": "str",
-                "group_name": "str",
+                "group_id": Opt("str"),
+                "group_name": Opt("str"),
                 "display_name": "str",
                 "display_name_verified": "bool",
                 "identity": "str",
                 "fingerprint": "str",
                 "received_at": "int",
                 "group_sas": Opt(SAS),
+                "listing?": {"directory": "str", "name": "str"},
+                "note?": Opt("str"),
+                "note_verified?": "bool",
+                "lapses_at?": "int",
+                "known?": {"groups": "int", "verified_in": ["str"]},
             }
         ],
         "messages": [HELD],
     },
     "approvals approve": {"request_id": "str", "status": "str", "group_id": "str"},
+    "approvals approve (knock)": {
+        "request_id": "str",
+        "kind": "str",
+        "status": "str",
+        "group_id": "str",
+        "listing": {"directory": "str", "name": "str"},
+    },
     "approvals approve (held message)": HELD_DECISION,
     "approvals reject": {"request_id": "str", "status": "str"},
     "approvals reject (held message)": HELD_DECISION,
@@ -207,6 +288,24 @@ SCHEMAS: dict[str, Any] = {
         "forced": "bool",
     },
     "listing status": {"listing": Opt(LISTING)},
+    "knock (joined)": {
+        "status": "str",
+        "knock_id": "str",
+        "group_id": "str",
+        "listing": KNOCK_LISTING,
+        "owner": KNOCK_OWNER,
+        "sas": SAS,
+        "hint": "str",
+    },
+    "knock (sent)": {
+        "status": "str",
+        "knock_id": "str",
+        "gives_up_at": "int",
+        "listing": KNOCK_LISTING,
+        "owner": KNOCK_OWNER,
+        "group_id": "null",
+    },
+    "knocks": {"knocks": [KNOCKS]},
     "events (one object per line)": {
         "seq": "int",
         "group_id": Opt("str"),
@@ -233,6 +332,10 @@ NOTES: dict[str, str] = {
         "(from `sender`) or `out` (your agent's)."
     ),
     "approvals approve": "`status` is `approving`.",
+    "approvals approve (knock)": (
+        "`status` is `approving`: the new group exists, and the knocker joins it once "
+        "its Add and Welcome went out."
+    ),
     "approvals approve (held message)": "`status` is `approved`.",
     "approvals reject": "`status` is `rejected`.",
     "approvals reject (held message)": "`status` is `rejected`.",
@@ -263,5 +366,22 @@ NOTES: dict[str, str] = {
         "directory takes the withdrawal the command fails with `withdraw_pending` "
         "(exit 1); the doors are closed already and the daemon keeps sending it."
     ),
-    "listing status": "`listing` is `null` when the runtime has never had a listing.",
+    "listing status": (
+        "`listing` is `null` when the runtime has never had a listing. With the human "
+        "token it adds `pending_knocks` and `knocks_dropped` (since the runtime started)."
+    ),
+    "knock (joined)": (
+        "The owner's human approved: `group_id` is the new group and `sas` its short "
+        "code. `owner.state` is this daemon's own check of the owner domain. Compare the "
+        "code with the owner before trusting the group."
+    ),
+    "knock (sent)": (
+        "`--wait 0`, or the wait ended first: the knock waits until `gives_up_at`. With "
+        "no answer by then the command fails with `no_answer` (exit 1), which never says "
+        "why: the owner may be offline or busy, or chose not to answer."
+    ),
+    "knocks": (
+        "`status` is `queued`, `sent`, `joined` (with `group_id`), `lapsed` (no answer) "
+        "or `failed`."
+    ),
 }

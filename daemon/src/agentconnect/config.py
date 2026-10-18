@@ -59,6 +59,9 @@ Example file::
     keys = ["<the operator's DK.pub, base64url>"]
     [listing]
     door_lifetime_secs = 601200     # 7 days less 1 hour
+    [knock]                         # knocking on listings (docs/discovery.md)
+    agent_may_knock = true          # false: only the human token may knock
+    domain_check = true             # fetch the owner's domain file before a knock
 """
 
 from __future__ import annotations
@@ -82,6 +85,7 @@ from agentconnect.policy import (
     DEFAULT_TRANSCRIPT_MAX_BYTES,
     KNOB,
     KNOBS,
+    MAX_PENDING_KNOCKS,
     PolicyError,
     Settings,
 )
@@ -92,6 +96,14 @@ KEYSTORES = ("auto", "keyring", "file")
 MIN_DOOR_LIFETIME_SECS = 7200
 DEFAULT_DOOR_LIFETIME_SECS = ac.MAX_DOOR_LIFETIME_SECS - 3600
 MAX_DIRECTORY_KEYS = 2
+# SPEC 6.6.2, 6.6.3 and 8.3: the knock limits a daemon may only lower.
+MAX_OUTGOING_KNOCKS = 8
+MAX_KNOCKS_PER_HOUR = 20
+MAX_PENDING_KNOCKS_PER_DOOR = MAX_PENDING_KNOCKS
+MAX_KNOCKS_OPENED_PER_MINUTE = 10
+DEFAULT_KNOCK_FAILURES_PER_HOUR = 10
+MAX_KNOCK_FAILURES_PER_HOUR = 100
+MIN_LEDGER_CAPACITY = 1024
 
 
 class ConfigError(ValueError):
@@ -160,6 +172,14 @@ class Config:
     listing_card_file: Path | None = None
     listing_token_file: Path | None = None
     listing_door_lifetime_secs: int = DEFAULT_DOOR_LIFETIME_SECS
+    knock_agent_may_knock: bool = True
+    knock_domain_check: bool = True
+    knock_max_outgoing: int = MAX_OUTGOING_KNOCKS
+    knock_per_hour: int = MAX_KNOCKS_PER_HOUR
+    knock_max_pending_per_door: int = MAX_PENDING_KNOCKS_PER_DOOR
+    knock_opened_per_door_per_minute: int = MAX_KNOCKS_OPENED_PER_MINUTE
+    knock_failures_per_sender_per_hour: int = DEFAULT_KNOCK_FAILURES_PER_HOUR
+    knock_ledger_capacity: int = ac.DEFAULT_LEDGER_CAPACITY
 
     def directory(self, host: str) -> DirectoryConfig | None:
         """The pinned directory ``host`` names (in any host form), if any."""
@@ -350,7 +370,8 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "auto_approve",
         "`false`",
         "Approve JoinRequests without asking a human. Leave it off unless every "
-        "holder of your invite links is trusted.",
+        "holder of your invite links is trusted. It never applies to knocks: every "
+        "knock needs a person (SPEC 6.6.4), and no setting changes that.",
     ),
     *_POLICY_KEYS,
     ConfigKey(
@@ -534,6 +555,66 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "maximum on its own clock, so the default leaves an hour for clock skew. A "
         "door never outlives the listing token. The runtime renews the door at half "
         "its lifetime (SPEC 6.6.1).",
+    ),
+    ConfigKey(
+        "knock.agent_may_knock",
+        "knock_agent_may_knock",
+        "`true`",
+        "Whether the agent token may knock on a listing (`agentconnect knock`, `POST "
+        "/v0/knocks`). `false` leaves knocking to the human token. Approving a knock is "
+        "always the human's, whatever this says ([discovery.md](discovery.md#knocking)).",
+    ),
+    ConfigKey(
+        "knock.domain_check",
+        "knock_domain_check",
+        "`true`",
+        "Before a knock, fetch the listing owner's `/.well-known/agentconnect.json` to "
+        "check the owner domain it claims. The domain's web server learns that someone "
+        "is about to knock, and from which address. `agentconnect knock` asks unless "
+        "`--yes` or `--json`; `--no-domain-check` skips it.",
+    ),
+    ConfigKey(
+        "knock.max_outgoing",
+        "knock_max_outgoing",
+        shown_default(MAX_OUTGOING_KNOCKS),
+        "Knocks this runtime may have waiting for an answer at once (1 to 8, SPEC 6.6.2).",
+    ),
+    ConfigKey(
+        "knock.per_hour",
+        "knock_per_hour",
+        shown_default(MAX_KNOCKS_PER_HOUR),
+        "Knocks this runtime sends in an hour at most (1 to 20, the relay's limit), and "
+        "never more than one on the same door in 10 minutes.",
+    ),
+    ConfigKey(
+        "knock.max_pending_per_door",
+        "knock_max_pending_per_door",
+        shown_default(MAX_PENDING_KNOCKS_PER_DOOR),
+        "Knocks on one of your doors that may wait for your approval at once (1 to 32, "
+        "SPEC 6.6.3); the rest are dropped. One per knocking identity.",
+    ),
+    ConfigKey(
+        "knock.opened_per_door_per_minute",
+        "knock_opened_per_door_per_minute",
+        shown_default(MAX_KNOCKS_OPENED_PER_MINUTE),
+        "Sealed knocks on one door the runtime opens in a minute (1 to 10); the rest are "
+        "dropped unopened, so a flood can't spend the CPU that opening one takes.",
+    ),
+    ConfigKey(
+        "knock.failures_per_sender_per_hour",
+        "knock_failures_per_sender_per_hour",
+        shown_default(DEFAULT_KNOCK_FAILURES_PER_HOUR),
+        "Knocks from one sender mailbox that may fail the owner's checks in an hour "
+        "(1 to 100). Past it, that mailbox's knocks are dropped unopened until the hour "
+        "is over.",
+    ),
+    ConfigKey(
+        "knock.ledger_capacity",
+        "knock_ledger_capacity",
+        shown_default(ac.DEFAULT_LEDGER_CAPACITY),
+        f"Knocks the replay ledger remembers at most ({MIN_LEDGER_CAPACITY} to "
+        f"{ac.DEFAULT_LEDGER_CAPACITY}). It forgets none early: when it is full, new "
+        "knocks are dropped until old ones expire.",
     ),
 )
 
@@ -815,6 +896,47 @@ def _listing(data: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, A
     }
 
 
+#: ``[knock]`` integer keys: (default, lowest, highest). The highest is the
+#: SPEC's limit, so a setting can only tighten it.
+_KNOCK_LIMITS: dict[str, tuple[int, int, int]] = {
+    "max_outgoing": (MAX_OUTGOING_KNOCKS, 1, MAX_OUTGOING_KNOCKS),
+    "per_hour": (MAX_KNOCKS_PER_HOUR, 1, MAX_KNOCKS_PER_HOUR),
+    "max_pending_per_door": (MAX_PENDING_KNOCKS_PER_DOOR, 1, MAX_PENDING_KNOCKS_PER_DOOR),
+    "opened_per_door_per_minute": (
+        MAX_KNOCKS_OPENED_PER_MINUTE,
+        1,
+        MAX_KNOCKS_OPENED_PER_MINUTE,
+    ),
+    "failures_per_sender_per_hour": (
+        DEFAULT_KNOCK_FAILURES_PER_HOUR,
+        1,
+        MAX_KNOCK_FAILURES_PER_HOUR,
+    ),
+    "ledger_capacity": (
+        ac.DEFAULT_LEDGER_CAPACITY,
+        MIN_LEDGER_CAPACITY,
+        ac.DEFAULT_LEDGER_CAPACITY,
+    ),
+}
+
+
+def _knock(data: Mapping[str, Any]) -> dict[str, Any]:
+    """``[knock]``. There is no key that approves a knock (SPEC 6.6.4)."""
+    table = _section(data, "knock")
+    _closed(table, "knock", frozenset({"agent_may_knock", "domain_check", *_KNOCK_LIMITS}))
+    out: dict[str, Any] = {
+        "knock_agent_may_knock": _typed(table, "agent_may_knock", bool, True),
+        "knock_domain_check": _typed(table, "domain_check", bool, True),
+    }
+    for key, (default, lo, hi) in _KNOCK_LIMITS.items():
+        value = _typed(table, key, int, default)
+        if not lo <= value <= hi:
+            msg = f"knock.{key} must be {lo}..{hi} (a local limit may only be lower)"
+            raise ConfigError(msg)
+        out[f"knock_{key}"] = value
+    return out
+
+
 def _sdk(data: Mapping[str, Any]) -> dict[str, Any]:
     timeout = _typed(_section(data, "sdk"), "handler_timeout_secs", int, 120)
     if not 1 <= timeout <= 3600:  # noqa: PLR2004
@@ -894,6 +1016,7 @@ def load_config(
     }
     values.update(_a2a(data) | _isolation(data) | _policy(policy) | _sdk(data))
     values.update(_listing(data, environ), directories=_directories(data))
+    values.update(_knock(data))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"

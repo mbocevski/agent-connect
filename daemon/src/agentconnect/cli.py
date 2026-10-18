@@ -6,11 +6,11 @@ in the daemon. Every command takes ``--json`` for a stable machine-readable
 shape (docs/cli.md); errors are then ``{"error": {"code", "message"}}`` on
 stdout with a non-zero exit code.
 
-``approve``, ``reject``, ``verify`` (and the mismatch path inside it),
-``remove``, ``safety set``, ``audit``, ``transcript`` and ``listing publish``
-use the **human token**. They are decisions (or records) only a person may make or read (SPEC
-6.2, 11): never give an agent the human token or let it run them for the
-human.
+``approve`` and ``reject`` (joins, knocks and held messages), ``verify`` (and
+the mismatch path inside it), ``remove``, ``safety set``, ``audit``,
+``transcript`` and ``listing publish`` use the **human token**. They are
+decisions (or records) only a person may make or read (SPEC 6.2, 6.6.4, 11):
+never give an agent the human token or let it run them for the human.
 """
 
 from __future__ import annotations
@@ -83,8 +83,8 @@ groups_app = typer.Typer(
 )
 approvals_app = typer.Typer(
     invoke_without_command=True,
-    help="Pending join requests and held messages. `approve` and `reject` are HUMAN ONLY "
-    "(human token): never give an agent the human token or run them for the human.",
+    help="Pending join requests, knocks and held messages. `approve` and `reject` are "
+    "HUMAN ONLY (human token): never give an agent the human token or run them for the human.",
     pretty_exceptions_show_locals=False,
 )
 safety_app = typer.Typer(
@@ -448,8 +448,28 @@ def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) 
 
 
 def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
+    if a.get("kind") == "knock":
+        # A knock has no group yet: approving creates one (SPEC 6.6.4).
+        return {
+            "kind": "knock",
+            "request_id": a["request_id"],
+            "group_id": None,
+            "group_name": None,
+            "display_name": a["display_name"],
+            "display_name_verified": a["display_name_verified"],
+            "identity": a["identity"],
+            "fingerprint": a["fingerprint"],
+            "received_at": a["received_at"],
+            "group_sas": None,
+            "listing": a["listing"],
+            "note": a["note"],
+            "note_verified": a["note_verified"],
+            "lapses_at": a["lapses_at"],
+            "known": a["known"],
+        }
     info = api.request("GET", f"/v0/groups/{a['group_id']}")
     return {
+        "kind": "join",
         "request_id": a["request_id"],
         "group_id": a["group_id"],
         "group_name": info["name"],
@@ -462,7 +482,40 @@ def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _history(known: dict[str, Any]) -> str:
+    groups, verified = int(known["groups"]), [clean(n) for n in known["verified_in"]]
+    if not groups:
+        return "new to you"
+    text = f"member of {groups} group(s) with you"
+    if verified:
+        text += ", verified in " + ", ".join(f'"{n}"' for n in verified)
+    return text
+
+
+def _print_knock_approval(v: dict[str, Any], *, as_json: bool = False) -> None:
+    listing = v["listing"]
+    _say(
+        f"Knock {v['request_id']} on {clean(listing['name'])} ({clean(listing['directory'])})",
+        as_json=as_json,
+    )
+    _say(
+        f'  who          "{clean(v["display_name"])}" (a claimed name, not verified)',
+        as_json=as_json,
+    )
+    if v["note"] is not None:
+        _say(
+            f'  note         "{clean(v["note"])}" (written by the knocker, not verified)',
+            as_json=as_json,
+        )
+    _say(f"  fingerprint  {v['fingerprint']}", as_json=as_json)
+    _say(f"  history      {_history(v['known'])}", as_json=as_json)
+    _say(f"  lapses       {_when(int(v['lapses_at']))}", as_json=as_json)
+
+
 def _print_approval(v: dict[str, Any], *, as_json: bool = False) -> None:
+    if v["kind"] == "knock":
+        _print_knock_approval(v, as_json=as_json)
+        return
     _say(f"Request {v['request_id']}", as_json=as_json)
     _say(
         f"  who          {clean(v['display_name'])} (a claimed name, not verified)", as_json=as_json
@@ -497,8 +550,8 @@ def _print_held(m: dict[str, Any], *, as_json: bool = False) -> None:
 
 @approvals_app.command("list")
 def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
-    """List pending join requests with the joiner's name and fingerprint, and the
-    messages the safety policy holds (`require_approval`)."""
+    """List pending join requests with the joiner's name and fingerprint, knocks on
+    your listing, and the messages the safety policy holds (`require_approval`)."""
     with guard(as_json):
         api = connect(config, human=True)
         listed = api.request("GET", "/v0/approvals")
@@ -508,7 +561,7 @@ def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             emit_json({"approvals": views, "messages": held})
             return
         if not views:
-            typer.echo("No pending join requests.")
+            typer.echo("No pending join requests or knocks.")
         for v in views:
             _print_approval(v)
         if views:
@@ -629,15 +682,47 @@ FullOpt = Annotated[
 ]
 
 
+def _approve_knock(
+    api: ApiClient, v: dict[str, Any], purpose: str | None, *, yes: bool, as_json: bool
+) -> None:
+    _print_knock_approval(v, as_json=as_json)
+    if not _confirm(
+        "Approving creates a new group with this agent. Start it?", yes=yes, as_json=as_json
+    ):
+        raise CliError("declined", "not approved; the knock stays pending", EXIT_REFUSED)
+    body = None if purpose is None else {"purpose": purpose}
+    out = api.request("POST", f"/v0/approvals/{v['request_id']}/approve", body)
+    if as_json:
+        emit_json(
+            {
+                "request_id": v["request_id"],
+                "kind": "knock",
+                "status": out["status"],
+                "group_id": out["group_id"],
+                "listing": v["listing"],
+            }
+        )
+        return
+    typer.echo("Approved. Once the agent has joined, compare the short code with its owner")
+    typer.echo(f"over a call or in person, then run `agentconnect verify {out['group_id']}`.")
+
+
 @approvals_app.command(
     "approve",
     cls=IdArgsCommand,
-    help=f"Approve a join request or a held message. {HUMAN_ONLY_HELP}",
+    help=f"Approve a join request, a knock or a held message. {HUMAN_ONLY_HELP}",
 )
-def approvals_approve(
+def approvals_approve(  # noqa: PLR0913, PLR0917
     request_id: str,
     yes: YesOpt = False,
     full: FullOpt = False,
+    purpose: Annotated[
+        str | None,
+        typer.Option(
+            "--purpose",
+            help="Knocks only: the new group's purpose (default: the listing's description).",
+        ),
+    ] = None,
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
@@ -648,6 +733,11 @@ def approvals_approve(
             _approve_held(api, request_id, yes=yes, as_json=as_json, full=full)
             return
         v = _pending(api, request_id)
+        if v["kind"] == "knock":
+            _approve_knock(api, v, purpose, yes=yes, as_json=as_json)
+            return
+        if purpose is not None:
+            raise CliError("bad_request", "--purpose is for knocks only", EXIT_USAGE)
         _print_approval(v, as_json=as_json)
         if not _confirm("Let this member join?", yes=yes, as_json=as_json):
             raise CliError("declined", "not approved; the request stays pending", EXIT_REFUSED)
@@ -662,7 +752,8 @@ def approvals_approve(
 @approvals_app.command(
     "reject",
     cls=IdArgsCommand,
-    help=f"Reject a join request or drop a held message. {HUMAN_ONLY_HELP}",
+    help="Reject a join request or a knock (nothing tells the peer), or drop a held "
+    f"message. {HUMAN_ONLY_HELP}",
 )
 def approvals_reject(request_id: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     with guard(as_json):
@@ -1229,6 +1320,227 @@ def listing_status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
         error = listing["last_error"]
         if error is not None:
             typer.echo(f"last error   {clean(error['code'])} at {_when(error['at'])}")
+
+
+# -- knocking -------------------------------------------------------------------------------
+
+KNOCK_WAIT_SECS = 3900  # ADR-006: until the knock's gives_up_at (ts + 3600 + 300)
+OWNER_STATES = {
+    "verified": "{domain}: verified by this daemon just now",
+    "stale": "{domain}: vouched before, not at the last check",
+    "revoked": "{domain}: revoked this key",
+    "unchecked": "{domain}: not checked",
+    "checking": "{domain}: not checked yet",
+}
+
+
+def _knock_call(api: ApiClient, path: str, body: dict[str, Any] | None = None) -> Any:
+    """A knock request, with the knock's own exit codes (an unverified
+    listing is 7, a suspect directory) and messages."""
+    try:
+        return api.request("POST" if body is not None else "GET", path, body)
+    except ApiClientError as e:
+        if e.code == "wrong_relay":
+            msg = (
+                "this listing is on a different relay than this daemon uses; AgentConnect v0 "
+                "supports one relay, so nothing was sent"
+            )
+            raise CliError("wrong_relay", msg, EXIT_REFUSED) from None
+        if e.code in cli_support.KNOCK_EXITS:
+            raise CliError(e.code, e.message or e.code, cli_support.KNOCK_EXITS[e.code]) from None
+        raise
+
+
+def _owner_line(owner: dict[str, Any], *, skipped: bool) -> str:
+    domain = owner["domain"]
+    if domain is None:
+        return "no owner claimed"
+    shown = clean(domain)
+    if skipped:
+        return f"{shown}: not checked, --no-domain-check"
+    if owner["fetch"] is not None:
+        return f"could not fetch {shown}"
+    if owner["state"] == "failed":
+        return f"{shown} does not vouch for this key"
+    template = OWNER_STATES.get(owner["state"], "{domain}: " + clean(owner["state"]))
+    return template.format(domain=shown)
+
+
+def _print_knock_listing(shown: dict[str, Any], *, skipped: bool, as_json: bool) -> None:
+    listing = shown["listing"]
+
+    def say(text: str) -> None:
+        _say(text, as_json=as_json)
+
+    say(f"Listing     {clean(listing['name'])} on {clean(listing['directory'])}")
+    say(f"Identity    {listing['fingerprint']}")
+    say(f"Owner       {_owner_line(shown['owner'], skipped=skipped)}")
+    if listing["organization"] is not None:
+        say(f"Org         {clean(listing['organization'])} (shown next to a verified domain)")
+    say(
+        f'Name        "{clean(listing["display_name"])}"   '
+        "(written by the listing's owner, not verified)"
+    )
+    say(
+        f'About       "{clean(listing["description"])}"   '
+        "(written by the listing's owner, not verified)"
+    )
+    for skill in listing["skills"]:
+        say(f"Skills      {clean(skill['name'])}: {clean(skill['description'])}")
+    say(f"Door        open until {_when(int(shown['door']['expires_at']))}")
+    say("A listing proves who signed it, not what the agent does or who runs it.")
+    say("Compare the short code with its owner after joining.")
+
+
+def _wait_for_knock(api: ApiClient, knock_id: str, wait: int) -> dict[str, Any] | None:
+    """Poll the event log for this knock's outcome; ``None`` if the wait ended first."""
+    after = 0
+    kinds = ("joined", "knock_lapsed", "knock_failed")
+    for attempt in range(max(1, math.ceil(wait / WAIT_POLL_SECS)) if wait else 1):
+        if attempt:
+            cli_support.pause(WAIT_POLL_SECS)
+        for ev in events_after(api, after):
+            after = int(ev["seq"])
+            if ev["data"].get("knock_id") == knock_id and ev["type"] in kinds:
+                return ev
+        if not wait:
+            return None
+    return None
+
+
+def _inspect_for_knock(
+    api: ApiClient, listing: str, config: Path | None, *, no_check: bool, ask: bool
+) -> tuple[dict[str, Any], bool | None]:
+    """The listing as the daemon checked it, and the domain check chosen:
+    asked (default ``knock.domain_check``) when there is a domain to check
+    and a person to ask, the daemon's default with ``--yes`` or ``--json``."""
+    if no_check:
+        body = {"listing": listing, "domain_check": False}
+        return _knock_call(api, "/v0/knocks/inspect", body), False
+    if not ask:
+        return _knock_call(api, "/v0/knocks/inspect", {"listing": listing}), None
+    shown = _knock_call(api, "/v0/knocks/inspect", {"listing": listing, "domain_check": False})
+    domain = shown["owner"]["domain"]
+    if domain is None:
+        return shown, False
+    check = typer.confirm(
+        f"Check {clean(domain)} now? Its web server learns that someone is about to knock, "
+        "and from which address.",
+        default=load(config).knock_domain_check,
+    )
+    if check:
+        shown = _knock_call(api, "/v0/knocks/inspect", {"listing": listing, "domain_check": True})
+    return shown, check
+
+
+@app.command()
+def knock(  # noqa: PLR0913, PLR0917
+    listing: Annotated[
+        str, typer.Argument(help="The listing: <directory host>/a/<name>, as the directory shows.")
+    ],
+    name: Annotated[
+        str | None, typer.Option("--name", help="The name to knock as (default: display_name).")
+    ] = None,
+    note: Annotated[
+        str | None, typer.Option("--note", help="One line for the owner's human (optional).")
+    ] = None,
+    no_domain_check: Annotated[
+        bool,
+        typer.Option("--no-domain-check", help="Don't fetch the owner domain's file."),
+    ] = False,
+    wait: Annotated[
+        int,
+        typer.Option("--wait", help="Seconds to wait for an answer (0: don't)."),
+    ] = KNOCK_WAIT_SECS,
+    yes: YesOpt = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Knock on a listing: ask its owner's human for a new group with this agent.
+
+    Shows the listing (checked by this daemon, its text marked unverified) and
+    asks first (unless --yes). Only the owner's human can approve. There is no
+    reject: with no answer by the deadline (about an hour) the knock lapses,
+    and nothing says why.
+    """
+    with guard(as_json):
+        _require_yes(as_json, yes, "knock")
+        api = connect(config)
+        shown, check = _inspect_for_knock(
+            api, listing, config, no_check=no_domain_check, ask=not (yes or as_json)
+        )
+        _print_knock_listing(shown, skipped=no_domain_check, as_json=as_json)
+        if not _confirm("Knock?", yes=yes, as_json=as_json):
+            raise CliError("declined", "not knocking; nothing was sent", EXIT_REFUSED)
+        body: dict[str, Any] = {"listing": listing, "listing_sha256": shown["listing"]["sha256"]}
+        if check is not None:
+            body["domain_check"] = check
+        if name is not None:
+            body["display_name"] = name
+        if note is not None:
+            body["note"] = note
+        sent = _knock_call(api, "/v0/knocks", body)
+        knock_id = sent["knock_id"]
+        _say("Knock sent. Waiting for the owner's human to answer...", as_json=as_json)
+        ev = _wait_for_knock(api, knock_id, wait)
+        base = {"knock_id": knock_id, "listing": sent["listing"], "owner": sent["owner"]}
+        if ev is None:
+            if as_json:
+                emit_json(
+                    {
+                        "status": "sent",
+                        **base,
+                        "gives_up_at": sent["gives_up_at"],
+                        "group_id": None,
+                    }
+                )
+            else:
+                typer.echo(f"No answer yet. The knock waits until {_when(sent['gives_up_at'])};")
+                typer.echo("`agentconnect knocks` shows how it ends.")
+            return
+        if ev["type"] == "knock_lapsed":
+            msg = cli_support.NO_ANSWER.format(time=_when(sent["gives_up_at"]))
+            raise CliError("no_answer", msg, EXIT_FAILED)
+        if ev["type"] == "knock_failed":
+            code = clean(ev["data"].get("code", "knock_failed"))
+            raise CliError(code, f"the knock failed ({code})", EXIT_FAILED)
+        view = group_view(api, ev["group_id"])
+        hint = COMPARE_REMINDER.replace("<group>", view["group_id"])
+        if as_json:
+            emit_json(
+                {
+                    "status": "joined",
+                    **base,
+                    "group_id": view["group_id"],
+                    "sas": view["sas"],
+                    "hint": hint,
+                }
+            )
+            return
+        typer.echo(f"Joined {clean(view['name'])} ({view['group_id']}). The short code now is:")
+        sas = view["sas"]
+        typer.echo(f"  {' '.join(sas['emoji'].split())}")
+        typer.echo(f"  ({', '.join(sas['emoji_names'])})")
+        typer.echo(f"  {sas['decimal']}")
+        typer.echo(hint)
+
+
+@app.command()
+def knocks(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    """List this agent's knocks: waiting, joined, lapsed (no answer) or failed."""
+    with guard(as_json):
+        out = _knock_call(connect(config), "/v0/knocks")
+        if as_json:
+            emit_json(out)
+            return
+        if not out["knocks"]:
+            typer.echo("No knocks.")
+        for k in out["knocks"]:
+            where = f"{clean(k['name'])} on {clean(k['directory'])}"
+            end = f", group {k['group_id']}" if k["group_id"] else ""
+            typer.echo(
+                f"{k['knock_id']}  {where}  [{k['status']}{end}]  until {_when(k['gives_up_at'])}"
+            )
 
 
 @app.callback()

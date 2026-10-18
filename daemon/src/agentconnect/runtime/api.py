@@ -9,11 +9,12 @@ Authentication: ``Authorization: Bearer <token>``. There are two tokens,
 each in a 0600 file in the data directory:
 
 * ``api-token`` (scope ``agent``): everything an agent integration may do;
-* ``human-token`` (scope ``human``): additionally approving JoinRequests
-  and held messages, marking members verified, removing members,
+* ``human-token`` (scope ``human``): additionally approving JoinRequests,
+  knocks and held messages, marking members verified, removing members,
   changing or reading the group's safety policy, audit log and transcript,
   and publishing a listing (SPEC 13.2.2: an agent can't put itself into a
-  public directory; withdrawing is allowed to either token).
+  public directory; withdrawing is allowed to either token). Knocks this
+  runtime received, and the events about them, are the human's only.
 
 Approval and verification are human decisions (SPEC §6.2, §11). An agent
 that could approve joins or mark the SAS as compared would defeat both
@@ -42,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from agentconnect import log
-from agentconnect.cli_json import HELD, LISTING
+from agentconnect.cli_json import APPROVAL, HELD, KNOCK_INSPECT, KNOCK_SUMMARY, KNOCKS, LISTING
 from agentconnect.isolation import PeerGate
 from agentconnect.runtime.agent import AgentApi, a2a_text
 from agentconnect.runtime.engine import Engine
@@ -71,7 +72,9 @@ STATUS_TEXT = {
     404: "Not Found",
     405: "Method Not Allowed",
     409: "Conflict",
+    410: "Gone",
     413: "Payload Too Large",
+    422: "Unprocessable Content",
     429: "Too Many Requests",
     500: "Internal Server Error",
     502: "Bad Gateway",
@@ -177,10 +180,17 @@ _GROUP_INFO: dict[str, Any] = {
             "verified": "bool",
             "instances": ["object"],
             "self": "bool",
+            "listed_as?": {
+                "directory": "str",
+                "name": "str",
+                "owner_domain": Opt("str"),
+                "owner_state": "str",
+            },
         }
     ],
     "agent_cards": "object",
     "sas?": {"decimal": "str", "emoji_indices": ["int"]},
+    "origin?": {"kind": "str", "directory": "str", "name": "str"},
 }
 
 _HELD: dict[str, Any] = HELD
@@ -333,24 +343,14 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "GET",
         "/v0/approvals",
         "_list_approvals",
-        "Pending join requests, with the joiner's fingerprint, and the messages the "
-        "safety policy holds for approval (`messages`, metadata only). With the agent "
-        "token, `approvals` is empty and `messages` lists only the agent's own held "
-        "sends: what is held of the peers' messages is the human's to know.",
-        response={
-            "approvals": [
-                {
-                    "request_id": "str",
-                    "group_id": "str",
-                    "identity": "str",
-                    "display_name": "str",
-                    "received_at": "int",
-                    "display_name_verified": "bool",
-                    "fingerprint": "str",
-                }
-            ],
-            "messages": [_HELD],
-        },
+        "Pending join requests (`kind: join`) with the joiner's fingerprint, knocks on "
+        "your listing waiting for approval (`kind: knock`, no `group_id` yet: the knocker's "
+        "name and note are claims, `known` is what this daemon already knows of its "
+        "identity), and the messages the safety policy holds for approval (`messages`, "
+        "metadata only). With the agent token, `approvals` is empty and `messages` lists "
+        "only the agent's own held sends: what is held of the peers' messages, and who "
+        "knocked, is the human's to know.",
+        response={"approvals": [APPROVAL], "messages": [_HELD]},
     ),
     RouteSpec(
         "GET",
@@ -388,15 +388,21 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/approvals/{rid}/approve",
         "_approve",
-        "Approve a join request.",
-        response={"status": "str"},
+        "Approve a join request or a knock. For a knock the daemon creates a new group named "
+        "after the listing, with `purpose` (default: the listing's description) as its "
+        "scope, and adds the knocker (SPEC 6.6.4); `group_id` is that group. A knock past "
+        "its lapse (an hour after it was sent) answers `409 expired`. Only the human token "
+        "approves a knock: there is no setting, policy or agent route that does.",
+        request={"purpose?": "str"},
+        response={"status": "str", "group_id?": "str"},
         human=True,
     ),
     RouteSpec(
         "POST",
         "/v0/approvals/{rid}/reject",
         "_reject",
-        "Reject a join request.",
+        "Reject a join request or a knock. Nothing is sent to the knocker: a rejection "
+        "looks the same as no answer.",
         response={"status": "str"},
         human=True,
     ),
@@ -580,8 +586,52 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/listing",
         "_listing_status",
         "The runtime's listing, if it has one: its state, door, token expiry and last "
-        "error. `owner_state` is what the directory last reported, for information only.",
+        "error. `owner_state` is what the directory last reported, for information only. "
+        "With the human token it adds `pending_knocks` and `knocks_dropped`.",
         response={"listing": Opt(LISTING)},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/knocks/inspect",
+        "_knock_inspect",
+        "Fetch a listing (`listing` is `<directory host>/a/<name>`, on a pinned "
+        "`[[directory]]`) and check it as a knock would: signature, token under the pinned "
+        "keys, directory and name, relay, door, and no rollback. With `domain_check` "
+        "(default `knock.domain_check`) the daemon fetches the owner domain's file itself; "
+        "`owner.state` is that check, never the directory's. The text is the listing's "
+        "own claim: `untrusted`, with a `notice` to show in front of it. A listing that "
+        "fails a check answers `422` (`listing_invalid`, `listing_mismatch`, "
+        "`listing_rolled_back`) or `403 token_invalid`.",
+        request={"listing": "str", "domain_check?": "bool"},
+        response=KNOCK_INSPECT,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/knocks",
+        "_knock",
+        "Knock on a listing: ask its owner's human for a new group (SPEC 6.6.2). Pass the "
+        "`sha256` the inspection showed as `listing_sha256` (`409 listing_changed` if it "
+        "changed). `display_name` defaults to the daemon's; `note` is optional (one line, "
+        "1 to 500 characters). The knock waits until `gives_up_at`: a `joined` event "
+        "with its `knock_id` is the only answer, otherwise `knock_lapsed` (no answer, "
+        "never why). Either token, unless `knock.agent_may_knock` is off (then "
+        "`403 human_only` for the agent token).",
+        request={
+            "listing": "str",
+            "listing_sha256?": "str",
+            "display_name?": "str",
+            "note?": "str",
+            "domain_check?": "bool",
+        },
+        response=KNOCK_SUMMARY,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/knocks",
+        "_knocks",
+        "This daemon's own knocks, oldest first: `queued`, `sent`, `joined` (with "
+        "`group_id`), `lapsed` or `failed`.",
+        response={"knocks": [KNOCKS]},
     ),
     RouteSpec(
         "GET",
@@ -589,7 +639,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "_events",
         "Daemon events in order, at most 200 per call. The agent token doesn't see the "
         "safety policy's events (`message_held`, `held_expired`, `repeated_violations`): "
-        "they would tell the agent, and so a peer, what the policy did. With "
+        "they would tell the agent, and so a peer, what the policy did. Nor does it see "
+        "the knocks your listing received (`knock_received`, `knock_approved`, "
+        "`knock_rejected`, `knock_expired`, `knock_approval_failed`). With "
         "`Accept: text/event-stream` it is instead a Server-Sent Events stream "
         "of messages and events from a durable feed (needs "
         '`daemon.default_adapter = "sse"`, else `409 no_sse_adapter`): each '
@@ -636,6 +688,13 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (400, "bad_token", "Publish: the token is not a listing token (malformed)."),
     (
         400,
+        "bad_listing_ref",
+        "Knock: the listing is not `[https://]<host>/a/<name>[.json]` (no query, fragment, "
+        "user or other path).",
+    ),
+    (400, "self_knock", "Knock: the listing is this runtime's own identity's."),
+    (
+        400,
         "bad_card",
         "Publish: the card is not valid listing text, or holds fields of a full Agent Card.",
     ),
@@ -650,8 +709,8 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (
         403,
         "token_invalid",
-        "Publish: the token doesn't verify under the pinned keys: expired, not valid "
-        "yet, bad signature, or for another directory.",
+        "Publish or knock: the listing token doesn't verify under the pinned keys: "
+        "expired, not valid yet, bad signature, an unpinned key, or for another directory.",
     ),
     (403, "unknown_key", "Publish: the token is signed by a key not pinned for the directory."),
     (
@@ -682,7 +741,11 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (405, "method_not_allowed", "The path exists but not for this method."),
     (408, "timeout", "The request was not received within 10 seconds."),
     (409, "stale_epoch", "The group changed since the epoch you passed."),
-    (409, "expired", "The invite or request has expired."),
+    (
+        409,
+        "expired",
+        "The invite or request has expired (a knock lapses an hour after it was sent).",
+    ),
     (409, "invite_not_open", "The invite was used up, revoked or never open."),
     (
         409,
@@ -700,11 +763,33 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "name_held",
         "Publish: the directory holds the name for a newer token or a higher `seq`.",
     ),
+    (409, "listing_changed", "Knock: the listing changed since it was inspected."),
+    (409, "already_pending", "Knock: a knock on this listing already waits for an answer."),
+    (409, "door_closed", "Knock: the listing has no open door."),
+    (410, "listing_withdrawn", "Knock: the directory says the listing was withdrawn."),
     (413, "too_large", "The headers or the body (over 1 MiB) are too large."),
-    (429, "rate_limited", "Too many requests."),
+    (
+        422,
+        "listing_invalid",
+        "Knock: the listing the directory served doesn't verify (signature, canonical "
+        "form, schema) or its door key is unusable. Also `listing_mismatch` (a listing "
+        "for another name or directory) and `listing_rolled_back` (older than one this "
+        "daemon has seen).",
+    ),
+    (429, "too_many_knocks", "Knock: 8 knocks (`knock.max_outgoing`) already wait."),
+    (
+        429,
+        "rate_limited",
+        "Too many requests (knocks: one per door in 10 minutes, `knock.per_hour`).",
+    ),
     (500, "internal", "An unexpected failure; the daemon logs it."),
     (502, "relay", "The relay reported an error."),
-    (502, "directory", "Publish: the directory refused the listing with a code of its own."),
+    (
+        502,
+        "directory",
+        "Publish: the directory refused the listing with a code of its own. Knock: it "
+        "didn't serve the listing.",
+    ),
     (503, "busy", "Too many open connections."),
 )
 
@@ -720,6 +805,20 @@ def _int(body: dict[str, Any], key: str, default: int) -> int:
     value = body.get(key, default)
     if not isinstance(value, int) or isinstance(value, bool):
         raise ApiError(400, "bad_request", f"{key} must be an integer")
+    return value
+
+
+def _opt_str(body: dict[str, Any], key: str) -> str | None:
+    value = body.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ApiError(400, "bad_request", f"{key} must be a string")
+    return value
+
+
+def _opt_bool(body: dict[str, Any], key: str) -> bool | None:
+    value = body.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise ApiError(400, "bad_request", f"{key} must be a boolean")
     return value
 
 
@@ -898,13 +997,14 @@ class ApiServer:
     async def _leave(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return await self.agent.leave(p["gid"])
 
-    async def _approve(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        self.daemon.approve(p["rid"])
-        return {"status": "approving"}
+    async def _approve(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        purpose = b.get("purpose")
+        if purpose is not None and not isinstance(purpose, str):
+            raise ApiError(400, "bad_request", "purpose must be a string")
+        return self.daemon.approve(p["rid"], purpose)
 
     async def _reject(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        self.daemon.reject(p["rid"])
-        return {"status": "rejected"}
+        return self.daemon.reject(p["rid"])
 
     async def _verify(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         verified = b.get("verified", True)
@@ -933,8 +1033,32 @@ class ApiServer:
             return await self.agent.withdraw_listing()
         return await self.daemon.listings.withdraw(force=True, human=p.get(SCOPE) == "human")
 
-    async def _listing_status(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return await self.agent.listing_status()
+    async def _listing_status(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        info = await self.agent.listing_status()
+        if p.get(SCOPE) == "human" and info["listing"] is not None:
+            # Who knocks is the human's to know (docs/discovery.md).
+            info["listing"]["pending_knocks"] = self.daemon.knocks.pending()
+            info["listing"]["knocks_dropped"] = self.daemon.knocks.dropped
+        return info
+
+    async def _knock_inspect(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        return await self.agent.knock_inspect(
+            _str(b, "listing"), domain_check=_opt_bool(b, "domain_check")
+        )
+
+    async def _knock(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        args: dict[str, Any] = {
+            "listing_sha256": _opt_str(b, "listing_sha256"),
+            "display_name": _opt_str(b, "display_name"),
+            "note": _opt_str(b, "note"),
+            "domain_check": _opt_bool(b, "domain_check"),
+        }
+        if p.get(SCOPE) == "human":
+            return await self.daemon.knocks.knock(_str(b, "listing"), human=True, **args)
+        return await self.agent.knock(_str(b, "listing"), **args)
+
+    async def _knocks(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return await self.agent.knocks()
 
     async def _events(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         """Events as JSON (``after``), or, with ``Accept: text/event-stream``,

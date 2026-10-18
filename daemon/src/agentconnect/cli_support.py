@@ -29,6 +29,7 @@ EXIT_REFUSED = 3  # refused: declined at a prompt, wrong token, wrong relay
 EXIT_INTERCEPTED = 4  # invite already used or revoked: possible interception
 EXIT_UNREACHABLE = 5  # the daemon is not running
 EXIT_MISMATCH = 6  # the human reported different short codes; the group was left
+EXIT_UNVERIFIED = 7  # a listing failed verification: a suspect directory, not "no answer"
 
 # The same codes with their meaning, for the docs (scripts/gen_reference.py).
 EXIT_CODES: tuple[tuple[int, str, str], ...] = (
@@ -62,12 +63,20 @@ EXIT_CODES: tuple[tuple[int, str, str], ...] = (
         "EXIT_MISMATCH",
         "`verify` mismatch: you reported different codes and left the group.",
     ),
+    (
+        EXIT_UNVERIFIED,
+        "EXIT_UNVERIFIED",
+        "`knock`: the listing the directory served failed verification (signature, "
+        "canonical form, the token under the pinned keys, another name's listing, or "
+        "older than one seen before). The directory may be lying; nothing was sent.",
+    ),
 )
 
 EXIT_CODES_HELP = (
     "Exit codes: 0 ok, 1 failed, 2 usage or bad invite, 3 refused (declined, "
     "wrong token, other relay), 4 invite already used or revoked (possible "
-    "interception), 5 daemon not running, 6 short-code mismatch reported."
+    "interception), 5 daemon not running, 6 short-code mismatch reported, 7 a "
+    "listing failed verification."
 )
 
 HUMAN_ONLY_HELP = (
@@ -102,6 +111,23 @@ LISTING_EXITS = {
     "token_not_for_identity": EXIT_REFUSED,
     "unknown_key": EXIT_REFUSED,
 }
+
+
+# Knock refusals: a listing that fails verification is a suspect directory
+# (unverified), not a failure to answer; the rest are about the request.
+KNOCK_EXITS = {
+    "listing_invalid": EXIT_UNVERIFIED,
+    "listing_mismatch": EXIT_UNVERIFIED,
+    "listing_rolled_back": EXIT_UNVERIFIED,
+    "token_invalid": EXIT_UNVERIFIED,
+    "self_knock": EXIT_REFUSED,
+    "bad_listing_ref": EXIT_USAGE,
+    "unknown_directory": EXIT_USAGE,
+}
+NO_ANSWER = (
+    "No answer by {time}. The owner may be offline or busy, or chose not to answer; "
+    "nothing tells them apart."
+)
 
 
 class CliError(Exception):

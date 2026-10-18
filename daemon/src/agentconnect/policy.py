@@ -105,6 +105,7 @@ MAX_TRACKED = 10_000  # (group, sender) violation counters kept at most
 DEFAULT_VIOLATION_THRESHOLD = 10
 DEFAULT_VIOLATION_WINDOW_SECS = 600
 DEFAULT_AUDIT_RETENTION_DAYS = 30
+MAX_PENDING_KNOCKS = 32  # SPEC 6.6.3 step 7, per door
 
 
 class Verdict(enum.StrEnum):
@@ -568,6 +569,24 @@ class Outbound:
         return str(self.inner.get("kind"))
 
 
+@dataclass(frozen=True)
+class KnockInbound:
+    """A knock that passed the owner's checks 1-5 and the replay ledger
+    (SPEC 6.6.3), as the policy sees it: who, on which door, and how many
+    knocks already wait for the human. Never its name or note."""
+
+    identity: str  # the knocker, authenticated by the knock's KeyPackage
+    door_id: str
+    pending_on_door: int  # knocks on this door waiting for the human
+    pending_for_identity: int  # this identity's waiting knocks on the listing
+    max_pending_per_door: int  # knock.max_pending_per_door (at most 32)
+
+
+#: Every verdict :meth:`SafetyPolicy.knock` can give. There is no delivering
+#: verdict: a knock is held for the human or dropped (SPEC 6.6.4).
+KNOCK_VERDICTS = frozenset({Verdict.HOLD_FOR_APPROVAL, Verdict.DROP})
+
+
 class SafetyPolicy:
     """The policy for every group of one daemon."""
 
@@ -718,6 +737,42 @@ class SafetyPolicy:
             if decision is not None:
                 return decision
         return DELIVER
+
+    @staticmethod
+    def knock(m: KnockInbound) -> Decision:
+        """The decision for a verified knock (SPEC 6.6.3 steps 6-8): hold it
+        for the human, or drop it. Nothing here can approve one: there is no
+        automatic approval of knocks (SPEC 6.6.4), and ``auto_approve`` is
+        about joins only. The limits are the SPEC's or lower."""
+        if m.pending_for_identity > 0:
+            return drop("knock_identity_pending")
+        if m.pending_on_door >= min(m.max_pending_per_door, MAX_PENDING_KNOCKS):
+            return drop("knock_door_full")
+        return hold("knock")
+
+    def audit_knock(
+        self,
+        *,
+        sender: str,
+        msg_id: str,
+        size: int,
+        decision: str,
+        reason: str = "",
+    ) -> None:
+        """One metadata-only audit row for a knock (no group yet): who (the
+        knocker's identity once its knock verified, else ``mailbox:<id>``),
+        the envelope's ``msg_id``, the sealed size and the decision. Never
+        the knock's name, note or door."""
+        self.audit(
+            "",
+            "in",
+            sender=sender,
+            msg_id=msg_id,
+            kind="knock",
+            size=size,
+            decision=decision,
+            reason=reason,
+        )
 
     def _hold(  # noqa: PLR0913
         self,

@@ -7,12 +7,14 @@ call it for the agent token, and the embedded SDK calls it in-process, so
 the two paths can't drift apart. Every answer has the shape of the matching
 route's JSON (``docs/api.md``).
 
-There is no human-scope operation here: approving or rejecting joins and
-held messages, marking members verified, reporting a SAS mismatch, removing
-members, changing the safety policy, relaxing ``require_verified`` and
-publishing a listing exist only as local API routes that need the human
-token (SPEC 6.2, 10.4, 11, 13.2.2). Withdrawing the listing is here: it
-only reduces exposure (SPEC 13.2.3).
+There is no human-scope operation here: approving or rejecting joins,
+knocks and held messages, listing or reading knock approvals, marking
+members verified, reporting a SAS mismatch, removing members, changing the
+safety policy, relaxing ``require_verified`` and publishing a listing exist
+only as local API routes that need the human token (SPEC 6.2, 6.6.4, 10.4,
+11, 13.2.2). Withdrawing the listing is here: it only reduces exposure (SPEC
+13.2.3). So is knocking on another agent's listing (SPEC 6.6.2), unless
+``knock.agent_may_knock`` is off; approving a knock never is.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ class AgentApi:
         """The runtime's status. SPEC 10.2: the agent can't learn (and tell
         a peer) what is held of the peers' messages; ``held_messages``
         counts its own held sends only."""
-        info = self._engine.status()
+        info = self._engine.status(human=False)
         info["held_messages"] = len(self._engine.held_messages(direction="out"))
         return info
 
@@ -141,8 +143,42 @@ class AgentApi:
         13.2.3). Publishing is the human's (no method here)."""
         return await self._engine.listings.withdraw()
 
+    async def knock_inspect(
+        self, listing: str, *, domain_check: bool | None = None
+    ) -> dict[str, Any]:
+        """A listing, checked as a knock would check it, with its text marked
+        ``untrusted`` (docs/discovery.md). ``domain_check`` defaults to
+        ``knock.domain_check``."""
+        return await self._engine.knocks.inspect(listing, domain_check)
+
+    async def knock(
+        self,
+        listing: str,
+        *,
+        listing_sha256: str | None = None,
+        display_name: str | None = None,
+        note: str | None = None,
+        domain_check: bool | None = None,
+    ) -> dict[str, Any]:
+        """Knock on a listing: ask its owner's human for a new group (SPEC
+        6.6.2). Only a Welcome answers it (``joined``); otherwise it lapses
+        as "no answer" (``knock_lapsed``). Refused with ``403 human_only``
+        when ``knock.agent_may_knock`` is off."""
+        return await self._engine.knocks.knock(
+            listing,
+            listing_sha256=listing_sha256,
+            display_name=display_name,
+            note=note,
+            domain_check=domain_check,
+        )
+
+    async def knocks(self) -> dict[str, Any]:
+        """This runtime's own knocks (not the ones it received)."""
+        return {"knocks": self._engine.knocks.knocks()}
+
     async def events(self, after: int = 0, group_id: str | None = None) -> dict[str, Any]:
         """Events in order, without the safety policy's own (SPEC 10.2): an
-        agent that heard of a hold could tell the sender."""
+        agent that heard of a hold could tell the sender. Nor the knocks this
+        runtime received: those are the human's."""
         rows = self._engine.store.events(after, group_id=group_id, exclude=tuple(HUMAN_EVENTS))
         return {"events": rows}

@@ -106,15 +106,20 @@ code = [
 ]
 # The local API's routes are documented in docs/api.md (rule local-api), the
 # listing in docs/discovery.md (rule discovery).
-exclude = ["daemon/src/agentconnect/runtime/api.py", "daemon/src/agentconnect/runtime/listing.py"]
+exclude = [
+    "daemon/src/agentconnect/runtime/api.py",
+    "daemon/src/agentconnect/runtime/listing.py",
+    "daemon/src/agentconnect/runtime/knocks.py",
+]
 docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
 
 [[rule]]
 name = "discovery"
-# The owner's listing, its doors and renewal, and the fetches to directories
-# and owner domains.
+# The owner's listing, its doors and renewal, knocking and knock approvals,
+# and the fetches to directories and owner domains.
 code = [
     "daemon/src/agentconnect/runtime/listing.py",
+    "daemon/src/agentconnect/runtime/knocks.py",
     "daemon/src/agentconnect/directory_client.py",
     "daemon/src/agentconnect/ownerfile.py",
 ]
@@ -212,6 +217,7 @@ paths = [
     "core/src/net.rs",
     "core-py/src/discovery.rs",
     "daemon/src/agentconnect/runtime/listing.py",
+    "daemon/src/agentconnect/runtime/knocks.py",
     "daemon/src/agentconnect/directory_client.py",
     "daemon/src/agentconnect/ownerfile.py",
 ]

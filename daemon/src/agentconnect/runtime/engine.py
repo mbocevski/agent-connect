@@ -110,7 +110,21 @@ DELIVERY_BATCH = 100  # pending rows a group's delivery worker reads at a time
 # recorded for the human (GET /v0/events with the human token, the CLI), never
 # passed to the agent's adapter.
 HELD_PRIVATE = ("payload", "inbox_seq", "status")  # never in held listings
-HUMAN_EVENTS = frozenset({"message_held", "held_expired", "repeated_violations"})
+# The owner's knock events (docs/discovery.md): who knocked and what the
+# human decided. Strangers' knocks come before any relationship, as held
+# messages do, so the agent hears of the group only once the knocker is in.
+KNOCK_OWNER_EVENTS = frozenset(
+    {
+        "knock_received",
+        "knock_approved",
+        "knock_rejected",
+        "knock_expired",
+        "knock_approval_failed",
+    }
+)
+HUMAN_EVENTS = (
+    frozenset({"message_held", "held_expired", "repeated_violations"}) | KNOCK_OWNER_EVENTS
+)
 INVITE_WARNING = (
     "This invite was already used or revoked. If you didn't expect this, "
     "the link may have been intercepted. Tell the sender."
@@ -193,8 +207,13 @@ def _core_error(e: Exception) -> str:
     return "rejected"
 
 
-ENVELOPE_KINDS = frozenset({"commit", "proposal", "application", "welcome_wrapped", "join_request"})
+KNOCK_REQUEST_PREFIX = "kn-"  # knock request ids (agentconnect.runtime.knocks)
+ENVELOPE_KINDS = frozenset(
+    {"commit", "proposal", "application", "welcome_wrapped", "join_request", "knock"}
+)
 MAX_ID_LEN = 64
+DOOR_ID_CHARS = 22  # 16 bytes, base64url without padding
+GROUP_FIELDS = ("group_id", "epoch", "to", "routing")  # never on a knock (SPEC 7.1)
 # The last signed relay request's ts (RelayRest), kept across restarts.
 REST_TS_KEY = "relay/rest_ts"
 # An internal frame: finish every pending journal entry (ADR-004).
@@ -208,17 +227,33 @@ def journal_key(sender: str, msg_id: str) -> str:
 
 
 def journal_context(
-    env: dict[str, Any], *, from_relay: bool, invite_id: str | None = None
+    env: dict[str, Any],
+    *,
+    from_relay: bool,
+    invite_id: str | None = None,
+    knock_id: str | None = None,
 ) -> bytes:
     """What the daemon needs to finish a journal entry after a restart: the
-    envelope without its ciphertext."""
+    envelope without its ciphertext (and the join's invite or knock)."""
     ctx: dict[str, Any] = {
         "env": {k: v for k, v in env.items() if k != "ct"},
         "from_relay": from_relay,
     }
     if invite_id is not None:
         ctx["invite_id"] = invite_id
+    if knock_id is not None:
+        ctx["knock_id"] = knock_id
     return canonical(ctx)
+
+
+def _door_id(value: Any) -> bool:
+    """SPEC 7.1: canonical base64url of 16 bytes."""
+    if not isinstance(value, str) or len(value) != DOOR_ID_CHARS:
+        return False
+    try:
+        return b64(unb64(value)) == value
+    except ValueError:
+        return False
 
 
 def _is_int(value: Any) -> bool:
@@ -233,7 +268,7 @@ def _str_list(value: Any) -> bool:
     return isinstance(value, list) and all(_short_str(x) for x in value)
 
 
-def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911
+def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR0912
     """Why a delivered envelope is malformed (SPEC 7.1), or None.
 
     Checked before anything reaches the core: the relay controls every
@@ -247,6 +282,13 @@ def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911
         return "ids"
     if not isinstance(env.get("ct"), str):
         return "ct"
+    if kind == "knock":
+        # SPEC 7.1: {v, kind, door_id, msg_id, sender, ct} and nothing of a group's.
+        if not _door_id(env.get("door_id")):
+            return "door_id"
+        return "knock_fields" if any(k in env for k in GROUP_FIELDS) else None
+    if "door_id" in env:
+        return "door_id"  # no other kind may carry one
     if kind != "join_request" and not _short_str(env.get("group_id")):
         return "group_id"
     if kind in ("commit", "proposal", "application"):
@@ -426,10 +468,13 @@ class Engine:
         self._drain = DrainBudget()
         self.running = False
         self._closed = False
+        from agentconnect.runtime.knocks import KnockService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.listing import ListingManager  # noqa: PLC0415 - import cycle
 
         # The listing, its doors and the discovery worker (docs/discovery.md).
         self.listings = ListingManager(self)
+        # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
+        self.knocks = KnockService(self)
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -457,6 +502,7 @@ class Engine:
             "delivery": self._delivery,
             "held_timer": self._held_timer,
             "discovery": self.listings.run,
+            "knock_timer": self.knocks.run,
             "relay_link": self.link.run,
         }
         for name, worker in workers.items():
@@ -702,7 +748,7 @@ class Engine:
             self._cause = (scope, n + 1)
             cause = f"{scope}#{n}"
         if cause is None:
-            for field in ("msg_id", "request_id", "invite_id", "epoch"):
+            for field in ("msg_id", "request_id", "invite_id", "knock_id", "epoch"):
                 if data.get(field) is not None:
                     cause = f"{field}={data[field]}"
                     break
@@ -1003,7 +1049,7 @@ class Engine:
                 self.store.finish_join(invite_id, "expired")
                 self.keystore.delete(f"join/{invite_id}")
                 await self.emit(None, "join_failed", invite_id=invite_id, reason="expired")
-        if self._parked and not self.store.pending_joins():
+        if self._parked and not self._may_join():
             self._parked.clear()
         # Hops are needed only while a reply can still arrive (relay TTL);
         # so are the journal's tombstones of consumed entries.
@@ -1012,6 +1058,10 @@ class Engine:
             self.client.journal_purge(now - HOP_MEMORY_SECS)
         await self.expire_held()
         self.safety.purge()
+
+    def _may_join(self) -> bool:
+        """Whether a Welcome may still come: a join or a knock is pending."""
+        return bool(self.store.pending_joins()) or self.knocks.waiting()
 
     async def _handle_frame(self, frame: dict[str, Any]) -> None:
         await self.expire()
@@ -1067,6 +1117,10 @@ class Engine:
             return
         group_id = env.get("group_id")
         now = self.now()
+        if kind == "knock":
+            # Recorded, acked and audited there; silent toward the knocker.
+            await self.knocks.on_knock(env)
+            return
         if kind == "join_request":
             await self._on_join_request(env)
             self.store.record_inbox(sender, msg_id, None, "done", now)
@@ -1076,7 +1130,7 @@ class Engine:
         elif kind in ("application", "commit", "proposal") and isinstance(group_id, str):
             group = self.store.group(group_id)
             if group is None or group.status != "active":
-                if group is None and self.store.pending_joins():
+                if group is None and self._may_join():
                     # Sent after our Add but before the Welcome reached us.
                     self._park(group_id, env)
                     return
@@ -1350,7 +1404,9 @@ class Engine:
                 )
                 continue
             LOG.info("journal_replay", kind=env.get("kind"), msg=log.hid(str(env.get("msg_id"))))
-            if entry["welcome"]:
+            if entry["welcome"] and isinstance(ctx.get("knock_id"), str):
+                await self.knocks.finish_welcome(env, ctx["knock_id"], entry["group_id"])
+            elif entry["welcome"]:
                 await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
             else:
                 event = {**entry["event"], "replayed": True}
@@ -1577,6 +1633,11 @@ class Engine:
         )
 
     async def _on_join_request(self, env: dict[str, Any]) -> None:
+        if str(env["msg_id"]).startswith(KNOCK_REQUEST_PREFIX):
+            # A join's request id is its msg_id, which the joiner (or the
+            # relay) picks: it must never look like a knock's.
+            LOG.info("join_request_malformed")
+            return
         raw = unb64(str(env.get("ct", "")))
         try:
             invite_id = str(json.loads(raw)["invite_id"])
@@ -1627,7 +1688,8 @@ class Engine:
             display_name_verified=False,
         )
         if self.config.auto_approve:
-            self.approve(request_id)
+            # Joins only: nothing approves a knock but the human (SPEC 6.6.4).
+            self._approve_join(request_id)
 
     async def check_joins(self) -> None:
         """SPEC 4.3: a pending join whose invite was used up or revoked
@@ -1707,8 +1769,11 @@ class Engine:
                 return None
             self.failpoints.hit("welcome.after_core")
             return await self._finish_welcome(env, invite_id, gid)
-        LOG.info("welcome_unmatched")
-        return None
+        # No pending join opened it: one of this runtime's knocks may (SPEC 6.6.5).
+        joined = await self.knocks.on_welcome(env, wrapped)
+        if joined is None:
+            LOG.info("welcome_unmatched")
+        return joined
 
     async def _finish_welcome(self, env: dict[str, Any], invite_id: str, gid: bytes) -> str:
         """Record a journalled join once, consume the entry, ack (ADR-004)."""
@@ -2205,7 +2270,9 @@ class Engine:
                 # never be delivered.
                 if row.kind == "app":
                     await self.emit(row.group_id, "send_failed", msg_id=msg_id, code=code)
-                elif row.kind == "commit" and code != BENIGN:
+                elif row.kind == "commit" and code != BENIGN and not self._knock_row(row):
+                    # (An approved knock's Add failing is the human's
+                    # knock_approval_failed, not the agent's to hear.)
                     intent = row.payload.get("intent") or {}
                     await self.emit(
                         row.group_id,
@@ -2215,6 +2282,11 @@ class Engine:
                         code=code,
                     )
             self._pulse()
+
+    @staticmethod
+    def _knock_row(row: OutboxRow) -> bool:
+        intent = row.payload.get("intent")
+        return isinstance(intent, dict) and bool(intent.get("type") == "knock_add")
 
     async def _run_row(self, row: OutboxRow) -> str:
         if row.kind == "frame":
@@ -2235,6 +2307,8 @@ class Engine:
 
     async def _run_frame(self, row: OutboxRow) -> str:
         frame, msg_id = row.payload["frame"], row.payload["msg_id"]
+        if frame.get("t") == "knock":
+            return await self.knocks.send_frame(row.payload)
         try:
             await self._request(frame, msg_id)
         except RelayError as e:
@@ -2342,6 +2416,8 @@ class Engine:
             return self.client.remove(gid, intent["identity"])
         if t == "policy":
             return self.client.set_policy(gid, canonical(intent["policy"]))
+        if t == "knock_add":
+            return self.knocks.build_add(gid, intent)
         if t == "add":
             approval = self.store.approval(intent["request_id"])
             invite = None if approval is None else self.store.invite(approval["invite_id"])
@@ -2414,7 +2490,7 @@ class Engine:
                     if e.code != "epoch_conflict":
                         LOG.info("commit_rejected", code=e.code)
                         self._fail_codes[row.seq] = e.code
-                        self._fail_intent(intent)
+                        self._fail_intent(intent, e.code)
                         return "failed"
                     LOG.info("epoch_conflict", group=log.hid(group.group_id))
                     await self._await_epoch(group.group_id, built_epoch)
@@ -2430,7 +2506,7 @@ class Engine:
             with contextlib.suppress(ac.AgentConnectError):
                 self.client.discard_pending_commit(gid)
         self._fail_codes[row.seq] = "attempts_exhausted"
-        self._fail_intent(intent)
+        self._fail_intent(intent, "attempts_exhausted")
         return "failed"
 
     def _own_commit_landed(self, env: dict[str, Any]) -> bool:
@@ -2480,7 +2556,7 @@ class Engine:
             if not benign:
                 LOG.info("commit_not_built", intent=intent["type"], reason=str(e)[:80])
             self._fail_codes[row.seq] = BENIGN if benign else "not_built"
-            self._fail_intent(intent)
+            self._fail_intent(intent, "not_built")
             return False
         payload["env"] = {
             "v": 0,
@@ -2515,16 +2591,22 @@ class Engine:
             # Our own cancellation, here or in the wait, still propagates.
             await cancel_and_wait(waiter, timer, ignore=(TimeoutError,))
 
-    def _fail_intent(self, intent: dict[str, Any]) -> None:
+    def _fail_intent(self, intent: dict[str, Any], code: str = "failed") -> None:
         if intent["type"] == "add":
             self.store.set_approval_status(intent["request_id"], "failed")
+        elif intent["type"] == "knock_add":
+            self.knocks.add_failed(str(intent["request_id"]), code)
 
     async def _commit_followups(
         self, row: OutboxRow, group: GroupRow, intent: dict[str, Any], payload: dict[str, Any]
     ) -> None:
         """After an Add is confirmed: send the Welcome, then consume the
         invite. Each step is recorded in the row, so a retry after a dropped
-        connection neither sends a second Welcome nor consumes a second use."""
+        connection neither sends a second Welcome nor consumes a second use.
+        An approved knock's Add has a Welcome and no use to consume."""
+        if intent["type"] == "knock_add":
+            await self.knocks.after_add(row.seq, group, intent, payload)
+            return
         if intent["type"] != "add":
             return
         approval = self.store.approval(intent["request_id"])
@@ -2741,6 +2823,11 @@ class Engine:
         return {"invite_id": invite_id, "status": "pending", "meta": meta}
 
     def approvals(self) -> list[dict[str, Any]]:
+        """**Human-only.** Join requests (``kind: join``), then knocks
+        (``kind: knock``), waiting for the human's decision."""
+        return self.join_approvals() + self.knocks.approvals()
+
+    def join_approvals(self) -> list[dict[str, Any]]:
         out = []
         for a in self.store.approvals():
             if self.now() - a["received_at"] > APPROVAL_TIMEOUT_SECS:
@@ -2752,6 +2839,7 @@ class Engine:
                     for k in ("request_id", "group_id", "identity", "display_name", "received_at")
                 }
                 | {
+                    "kind": "join",
                     "display_name_verified": False,
                     "fingerprint": ac.fingerprint(ac_identity_key(a["identity"])),
                 }
@@ -2766,8 +2854,30 @@ class Engine:
             or self.store.uses_taken(str(invite["invite_id"])) >= int(invite["max_uses"])
         )
 
-    def approve(self, request_id: str) -> None:
-        """Human-gated: commit the Add for a verified JoinRequest.
+    def approve(self, request_id: str, purpose: str | None = None) -> dict[str, Any]:
+        """**Human-only** (the local API's human-token route): approve a join
+        request, or a knock (``purpose`` is for knocks only: the new
+        group's scope)."""
+        if self.store.knock_request(request_id) is not None:
+            return self.knocks.approve(request_id, purpose)
+        if purpose is not None:
+            raise DaemonError("bad_request", "purpose is for knocks only")
+        self._approve_join(request_id)
+        return {"status": "approving"}
+
+    def reject(self, request_id: str) -> dict[str, Any]:
+        """**Human-only.** Reject a join request or a knock. Neither peer is told."""
+        if self.store.knock_request(request_id) is not None:
+            return self.knocks.reject(request_id)
+        approval = self.store.approval(request_id)
+        if approval is None or approval["status"] != "pending":
+            raise DaemonError("not_found", "no such pending request")
+        self.store.set_approval_status(request_id, "rejected")
+        return {"status": "rejected"}
+
+    def _approve_join(self, request_id: str) -> None:
+        """Human-gated (or ``policy.auto_approve``): commit the Add for a
+        verified JoinRequest.
 
         Each approval reserves one of the invite's uses before its Add is
         queued (SPEC 6.2 step 1), so a single-use link admits one joiner even
@@ -2789,12 +2899,6 @@ class Engine:
         self._enqueue(
             "commit", approval["group_id"], {"intent": {"type": "add", "request_id": request_id}}
         )
-
-    def reject(self, request_id: str) -> None:
-        approval = self.store.approval(request_id)
-        if approval is None or approval["status"] != "pending":
-            raise DaemonError("not_found", "no such pending request")
-        self.store.set_approval_status(request_id, "rejected")
 
     def inner(  # noqa: PLR0913
         self,
@@ -3194,7 +3298,31 @@ class Engine:
         }
         if group.status == "active":
             info["sas"] = self._sas(unb64(group_id))
+        self._knock_origin(group_id, info)
         return info
+
+    def _knock_origin(self, group_id: str, info: dict[str, Any]) -> None:
+        """A group that started from a knock says so: ``origin`` on both
+        sides, and on the knocker's side ``listed_as`` on the member the
+        listing named (its listing, not a verification: SPEC 6.6.5, 11)."""
+        peer = self.store.listed_peer(group_id)
+        request = None if peer is not None else self.store.knock_request_for_group(group_id)
+        if peer is not None:
+            info["origin"] = {"kind": "knock", "directory": peer["directory"], "name": peer["name"]}
+            for m in info["members"]:
+                if m["identity"] == peer["identity"]:
+                    m["listed_as"] = {
+                        "directory": peer["directory"],
+                        "name": peer["name"],
+                        "owner_domain": peer["owner_domain"],
+                        "owner_state": peer["owner_state"],
+                    }
+        elif request is not None and request["status"] in ("approving", "approved"):
+            info["origin"] = {
+                "kind": "knock",
+                "directory": request["directory"],
+                "name": request["name"],
+            }
 
     def list_groups(self) -> list[dict[str, Any]]:
         return [
@@ -3209,8 +3337,11 @@ class Engine:
             for g in self.store.groups()
         ]
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, human: bool = True) -> dict[str, Any]:
+        """The runtime's status. ``pending_approvals`` counts knocks only for
+        the human (the agent doesn't learn of incoming knocks)."""
         groups = self.store.groups()
+        pending = self.approvals() if human else self.join_approvals()
         return {
             "identity": self.me,
             "fingerprint": self.identity.fingerprint,
@@ -3222,7 +3353,7 @@ class Engine:
             "out_of_sync": [g.group_id for g in groups if g.out_of_sync],
             "outbox_queued": len(self.store.outbox()),
             "inbox_pending": len(self.store.pending_deliveries()),
-            "pending_approvals": len(self.approvals()),
+            "pending_approvals": len(pending),
             "held_messages": len(self.held_messages()),
         }
 
