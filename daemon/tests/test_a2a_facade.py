@@ -31,7 +31,7 @@ from a2a.types import (
 from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, convert
 from agentconnect.a2a_adapter import facade as facade_module
 from agentconnect.a2a_adapter.serve import LoopbackServer
-from agentconnect.adapter import Delivery, GroupView, Sender
+from agentconnect.adapter import Delivery, Event, GroupView, Sender
 from agentconnect.daemon import DaemonError
 
 GID = "Z3JvdXA"
@@ -259,3 +259,38 @@ async def test_loopback_server_edges() -> None:
     with pytest.raises(OSError, match="in use"):
         await taken.start()
     await server.stop()
+
+
+async def test_a_decision_before_the_wait_is_kept(setup: Any) -> None:
+    adapter, _group, _client = setup
+    facade = adapter.facade
+    assert facade is not None
+    facade.track("h1")
+    data = {"msg_id": "m1", "hold_id": "h1", "code": "rejected"}
+    await adapter.on_event(VIEW, Event("send_failed", GID, data))
+    assert await facade.hold("h1") == "rejected"
+    waiting = facade.hold("m2")
+    facade.decided("m2", "approved")
+    facade.decided("m2", "expired")  # a second word changes nothing
+    assert await waiting == "approved"
+
+
+async def test_the_early_decision_buffer_keeps_only_own_holds_for_a_while(setup: Any) -> None:
+    adapter, _group, _client = setup
+    facade = adapter.facade
+    assert facade is not None
+    now = [1000.0]
+    facade.now = lambda: now[0]
+    # A decision on a send the facade never made is not kept.
+    facade.decided("someone-elses", "approved")
+    assert facade.early() == 0
+    facade.track("mine")
+    facade.decided("mine", "rejected")
+    assert facade.early() == 1
+    assert await facade.hold("mine") == "rejected"
+    assert facade.early() == 0, "consumed"
+    facade.track("late")
+    facade.decided("late", "approved")
+    now[0] += 3601
+    facade.decided("late-too", "approved")  # sweeps
+    assert facade.early() == 0, "expired"

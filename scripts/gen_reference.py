@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Generate the reference sections of docs/cli.md, docs/api.md and docs/config.md.
+"""Generate the reference sections of docs/cli.md, docs/api.md, docs/config.md
+and docs/safety.md.
 
 The facts come from the code, never from scraped terminal output:
 
@@ -9,7 +10,8 @@ The facts come from the code, never from scraped terminal output:
   real output against the same shapes);
 * local API routes: ``agentconnect.api.ROUTE_SPECS`` (the server is built from
   that table) and ``API_ERRORS``;
-* config keys: ``agentconnect.config.CONFIG_KEYS`` and the ``Config`` dataclass.
+* config keys: ``agentconnect.config.CONFIG_KEYS`` and the ``Config`` dataclass;
+* safety settings: ``agentconnect.policy.KNOBS``.
 
 Each generated section sits between ``<!-- generated:NAME:start -->`` and
 ``<!-- generated:NAME:end -->`` in its doc. Prose outside the markers is
@@ -32,7 +34,7 @@ import typer
 import typer.core
 import typer.main
 
-from agentconnect import api, cli, cli_json, cli_support, config
+from agentconnect import api, cli, cli_json, cli_support, config, policy
 from agentconnect.shapes import Opt
 
 REPO = Path(__file__).resolve().parents[1]
@@ -329,6 +331,31 @@ def render_config_env() -> str:
     )
 
 
+# -- safety settings ---------------------------------------------------------------------
+
+
+def render_safety_settings() -> str:
+    kinds: dict[type, str] = {bool: "boolean", int: "integer", str: "string"}
+    rows = [
+        (
+            f"`{k.name}`",
+            kinds[k.kind],
+            config.shown_default(k.default),
+            "yes" if k.per_sender else "no",
+            k.doc,
+        )
+        for k in policy.KNOBS
+    ]
+    return "\n\n".join(
+        [
+            NOTICE,
+            table(["Setting", "Type", "Default", "Per sender", "Meaning"], rows),
+            "Each setting is also a key of `[policy]` in `config.toml` (`policy.<setting>`), "
+            "which sets the default for every group.",
+        ]
+    )
+
+
 # -- splicing -------------------------------------------------------------------------------
 
 
@@ -347,6 +374,7 @@ SECTIONS: tuple[Section, ...] = (
     Section("api-errors", "docs/api.md", render_api_errors),
     Section("config-keys", "docs/config.md", render_config_keys),
     Section("config-env", "docs/config.md", render_config_env),
+    Section("safety-settings", "docs/safety.md", render_safety_settings),
 )
 
 

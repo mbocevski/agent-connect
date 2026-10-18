@@ -34,6 +34,7 @@ from agentconnect.a2a_adapter import adapter as adapter_module
 from agentconnect.a2a_adapter.seen import Seen
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
 from agentconnect.daemon import DaemonError
+from agentconnect.schemas import normalize
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor, ScriptedExecutor
 
 GID = "Z3JvdXA"
@@ -517,3 +518,76 @@ def test_signatures_with_unpinned_or_garbled_headers() -> None:
     garbled = _signed(k1, "k1")
     garbled.signatures[0].protected = "%%%"
     assert cards.signature_status(garbled, {"k1": public}) == "unverified"
+
+
+async def test_a_cancel_delivered_as_context_does_not_cancel(tmp_path: Path) -> None:
+    executor = ScriptedExecutor()
+    agent = AgentServer(executor, "tasks")
+    await agent.start()
+    try:
+        adapter, sent = await started(A2AOptions(local_agent_url=agent.url, data_dir=tmp_path))
+        d = delivery("m0", text("wait here"))
+        await adapter.deliver(view(), d.sender, d.to, d)
+        (*_, working) = await sent.wait_for(2)
+        task = working["body"]["taskId"]
+        # Past the loop guard, or for someone else: context, never a command.
+        context = delivery("c0", convert.cancel_body(task), kind="a2a.task_cancel", addressed=False)
+        assert await adapter.deliver(view(), context.sender, context.to, context) is (
+            DeliveryResult.ACK
+        )
+        assert executor.canceled == []
+        cancel = delivery("c1", convert.cancel_body(task), kind="a2a.task_cancel")
+        await adapter.deliver(view(), cancel.sender, cancel.to, cancel)
+        await executor.wait_canceled(1)
+        await adapter.aclose()
+    finally:
+        await agent.stop()
+
+
+# -- R2-2: cards are checked, never rewritten -----------------------------------------
+
+
+def _rich_card() -> AgentCard:
+    card = convert._parse(
+        {
+            "name": "Bob",
+            "description": "Line one.\nLine two.",
+            "version": "1",
+            "skills": [
+                {
+                    "id": "s",
+                    "name": "S",
+                    "description": "d",
+                    "securityRequirements": [{"schemes": {"oauth": {"list": ["r"]}}}],
+                }
+            ],
+            "capabilities": {"streaming": True},
+        },
+        AgentCard(),
+    )
+    assert card is not None
+    return card
+
+
+def test_normalising_a_card_keeps_every_known_field_as_sent() -> None:
+    body = convert.to_json(_rich_card())
+    shaped = normalize("a2a.agent_card", body | {"future": "x"})
+    assert shaped == body, "known fields as sent, the unknown one left out"
+    loose = body | {"capabilities": {"streaming": True, "anything": "free text " * 300}}
+    assert normalize("a2a.agent_card", loose) == body
+    assert normalize("a2a.agent_card", body | {"description": "x" * 501}) is None, (
+        "over a cap is refused, not cut"
+    )
+
+
+def test_a_signed_card_survives_normalising_and_verifies() -> None:
+    private, public = _es256("k1")
+    signer = create_agent_card_signer(
+        private, {"kid": "k1", "alg": "ES256", "jku": None, "typ": "JOSE"}
+    )
+    signed = convert.to_json(signer(_rich_card()))
+    shaped = normalize("a2a.agent_card", signed | {"future": 1})
+    assert shaped is not None
+    parsed = convert.parse_card(shaped)
+    assert parsed is not None
+    assert cards.signature_status(parsed, {"k1": public}) == "verified"

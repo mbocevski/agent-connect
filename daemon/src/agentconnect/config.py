@@ -22,6 +22,10 @@ Example file::
 
     [policy]
     auto_approve = false            # approve JoinRequests without a human
+    require_approval = "off"        # off | inbound | outbound | both
+    frame_text = true               # the SPEC 10.1 notice for text consumers
+    sender_per_minute = 30          # and the other limits: docs/safety.md
+    transcript = false              # full transcript (encrypted), per group
 
     [api]
     socket = "~/.local/share/agentconnect/agentconnectd.sock"
@@ -62,6 +66,16 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import agentconnect_core as ac
+from agentconnect.policy import (
+    DEFAULT_AUDIT_GROUP_ROWS,
+    DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_AUDIT_SENDER_ROWS,
+    DEFAULT_TRANSCRIPT_MAX_BYTES,
+    KNOB,
+    KNOBS,
+    PolicyError,
+    Settings,
+)
 
 DEFAULT_RELAY_URL = "wss://connect.yggdrasill.network"
 KEYSTORES = ("auto", "keyring", "file")
@@ -123,6 +137,39 @@ class Config:
         """Whether the daemon runs the A2A adapter: a local agent, a facade or both."""
         return self.a2a_local_agent_url is not None or self.a2a_facade_port > 0
 
+    # [policy]: the safety policy's defaults (agentconnect.policy.KNOBS).
+    policy_max_message_bytes: int = KNOB["max_message_bytes"].default
+    policy_sender_per_minute: int = KNOB["sender_per_minute"].default
+    policy_group_per_minute: int = KNOB["group_per_minute"].default
+    policy_identity_rate_multiple: int = KNOB["identity_rate_multiple"].default
+    policy_task_per_minute: int = KNOB["task_per_minute"].default
+    policy_group_task_per_minute: int = KNOB["group_task_per_minute"].default
+    policy_allow_files: bool = KNOB["allow_files"].default
+    policy_max_file_bytes: int = KNOB["max_file_bytes"].default
+    policy_frame_text: bool = KNOB["frame_text"].default
+    policy_require_approval: str = KNOB["require_approval"].default
+    policy_approval_ttl_secs: int = KNOB["approval_ttl_secs"].default
+    policy_max_held_per_group: int = KNOB["max_held_per_group"].default
+    policy_max_held_per_sender: int = KNOB["max_held_per_sender"].default
+    policy_max_held_bytes: int = KNOB["max_held_bytes"].default
+    policy_max_held_bytes_per_sender: int = KNOB["max_held_bytes_per_sender"].default
+    policy_task_approval_window_secs: int = KNOB["task_approval_window_secs"].default
+    policy_violation_threshold: int = KNOB["violation_threshold"].default
+    policy_violation_window_secs: int = KNOB["violation_window_secs"].default
+    policy_transcript: bool = KNOB["transcript"].default
+    policy_transcript_retention_days: int = KNOB["transcript_retention_days"].default
+    policy_transcript_max_rows: int = KNOB["transcript_max_rows"].default
+    policy_transcript_max_bytes: int = DEFAULT_TRANSCRIPT_MAX_BYTES
+    policy_audit_max_rows_per_group: int = DEFAULT_AUDIT_GROUP_ROWS
+    policy_audit_max_rows_per_sender: int = DEFAULT_AUDIT_SENDER_ROWS
+    policy_transcript_max_rows_per_sender: int = KNOB["transcript_max_rows_per_sender"].default
+    policy_transcript_max_group_bytes: int = KNOB["transcript_max_group_bytes"].default
+    policy_audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
+
+    def safety_defaults(self) -> Settings:
+        """The safety policy every group starts from (docs/safety.md)."""
+        return Settings.of({k.name: getattr(self, f"policy_{k.name}") for k in KNOBS})
+
     @property
     def relay_http(self) -> str:
         """The relay's REST base URL (``http(s)://host[:port]``), derived from
@@ -164,6 +211,49 @@ class ConfigKey:
     doc: str
     env: str = ""  # environment variable that overrides it
 
+
+def shown_default(value: object) -> str:
+    """A default as the docs show it: TOML syntax in backticks."""
+    if isinstance(value, bool):
+        return "`true`" if value else "`false`"
+    if isinstance(value, str):
+        return f'`"{value}"`'
+    return f"`{value}`"
+
+
+_POLICY_KEYS: tuple[ConfigKey, ...] = (
+    *(
+        ConfigKey(f"policy.{k.name}", f"policy_{k.name}", shown_default(k.default), k.doc)
+        for k in KNOBS
+    ),
+    ConfigKey(
+        "policy.audit_retention_days",
+        "policy_audit_retention_days",
+        shown_default(DEFAULT_AUDIT_RETENTION_DAYS),
+        "Days the metadata-only audit log keeps a row (1 to 365). It also keeps at most "
+        "the newest 100000 rows.",
+    ),
+    ConfigKey(
+        "policy.transcript_max_bytes",
+        "policy_transcript_max_bytes",
+        shown_default(DEFAULT_TRANSCRIPT_MAX_BYTES),
+        "Bytes all transcripts together keep at most (1048576 to 67108864, 64 MiB); the "
+        "oldest entries go first.",
+    ),
+    ConfigKey(
+        "policy.audit_max_rows_per_group",
+        "policy_audit_max_rows_per_group",
+        shown_default(DEFAULT_AUDIT_GROUP_ROWS),
+        "Audit rows one group keeps at most (1000 to 20000); the oldest go first.",
+    ),
+    ConfigKey(
+        "policy.audit_max_rows_per_sender",
+        "policy_audit_max_rows_per_sender",
+        shown_default(DEFAULT_AUDIT_SENDER_ROWS),
+        "Audit rows one sender keeps in a group at most (100 to 2000), so a sender "
+        "flooding the log pushes out only its own rows.",
+    ),
+)
 
 CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey(
@@ -213,6 +303,7 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "Approve JoinRequests without asking a human. Leave it off unless every "
         "holder of your invite links is trusted.",
     ),
+    *_POLICY_KEYS,
     ConfigKey(
         "api.socket",
         "api_socket",
@@ -467,6 +558,43 @@ def _isolation(data: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+MAX_AUDIT_RETENTION_DAYS = 365
+MIN_TRANSCRIPT_BYTES = 1024 * 1024
+
+
+def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
+    """The safety policy keys of ``[policy]`` (agentconnect.policy.KNOBS)."""
+    out: dict[str, Any] = {}
+    for knob in KNOBS:
+        if knob.name in table:
+            try:
+                out[f"policy_{knob.name}"] = knob.check(table[knob.name])
+            except PolicyError as e:
+                msg = f"policy.{e}"
+                raise ConfigError(msg) from None
+    days = _typed(table, "audit_retention_days", int, DEFAULT_AUDIT_RETENTION_DAYS)
+    if not 1 <= days <= MAX_AUDIT_RETENTION_DAYS:
+        msg = f"policy.audit_retention_days must be 1..{MAX_AUDIT_RETENTION_DAYS}"
+        raise ConfigError(msg)
+    out["policy_audit_retention_days"] = days
+    size = _typed(table, "transcript_max_bytes", int, DEFAULT_TRANSCRIPT_MAX_BYTES)
+    if not MIN_TRANSCRIPT_BYTES <= size <= DEFAULT_TRANSCRIPT_MAX_BYTES:
+        msg = f"policy.transcript_max_bytes must be {MIN_TRANSCRIPT_BYTES}.."
+        msg += str(DEFAULT_TRANSCRIPT_MAX_BYTES)
+        raise ConfigError(msg)
+    out["policy_transcript_max_bytes"] = size
+    for key, lo, hi in (
+        ("audit_max_rows_per_group", 1000, DEFAULT_AUDIT_GROUP_ROWS),
+        ("audit_max_rows_per_sender", 100, DEFAULT_AUDIT_SENDER_ROWS),
+    ):
+        value = _typed(table, key, int, hi)
+        if not lo <= value <= hi:
+            msg = f"policy.{key} must be {lo}..{hi}"
+            raise ConfigError(msg)
+        out[f"policy_{key}"] = value
+    return out
+
+
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
@@ -516,7 +644,7 @@ def load_config(
         "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
         "sse_retention": _typed(sse, "retention_secs", int, 3600),
     }
-    values.update(_a2a(data) | _isolation(data))
+    values.update(_a2a(data) | _isolation(data) | _policy(policy))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"

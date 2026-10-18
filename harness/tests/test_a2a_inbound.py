@@ -290,3 +290,56 @@ async def test_a_follow_up_cannot_hijack_another_members_task(
     seen = await executor.wait_for(2)
     assert not seen[1].continued
     assert seen[1].task_id != task_id
+
+
+async def test_the_group_policy_sets_the_framing_of_the_a2a_call(cluster: Cluster) -> None:
+    executor = HelloWorldExecutor()
+    agent = AgentServer(executor, "helloworld")
+    await agent.start()
+    try:
+        a, b, gid = await one_to_one(cluster, agent)
+        send = a.adapter.send
+        assert send is not None
+        await send(gid, body("framed", gid))
+        (first,) = await executor.wait_for(1)
+        meta = convert.to_json(first.message)["metadata"]
+        notice = meta["notice"]
+        assert (meta["untrusted"], meta["scope"], meta["frame_text"]) == (
+            True,
+            "Exercise the A2A adapter",
+            True,
+        )
+        assert '(scope: "Exercise the A2A adapter")' in notice
+        assert [p.text for p in first.message.parts] == [notice, "framed"]
+        # b's human turns framing off for this group: the scope and the
+        # notice stay in metadata, the parts are the peer's alone.
+        b.daemon.update_safety(gid, {"frame_text": False})
+        await send(gid, body("plain", gid))
+        second = (await executor.wait_for(2))[1]
+        meta = convert.to_json(second.message)["metadata"]
+        assert (meta["untrusted"], meta["scope"], meta["frame_text"]) == (
+            True,
+            "Exercise the A2A adapter",
+            False,
+        )
+        assert meta["notice"] == notice
+        assert [p.text for p in second.message.parts] == ["plain"]
+    finally:
+        await agent.stop()
+
+
+async def test_a_task_cancel_is_held_with_require_approval(cluster: Cluster) -> None:
+    executor = HelloWorldExecutor()
+    agent = AgentServer(executor, "helloworld")
+    await agent.start()
+    try:
+        a, b, gid = await one_to_one(cluster, agent)
+        b.daemon.update_safety(gid, {"require_approval": "inbound"})
+        sent = a.daemon.send_message(gid, convert.cancel_body("t1"), kind="a2a.task_cancel")
+        await a.idle()
+        await b.wait(lambda: any(m["msg_id"] == sent for m in b.daemon.held_messages()))
+        (held,) = b.daemon.held_messages()
+        assert held["kind"] == "a2a.task_cancel"
+        assert b.daemon.store.inbox_state(a.daemon.mailbox, sent) == "held"
+    finally:
+        await agent.stop()

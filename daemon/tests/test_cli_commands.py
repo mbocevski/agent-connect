@@ -664,3 +664,270 @@ def test_a_positional_id_parse_keeps_usage_errors(fake: Fake) -> None:
     assert fake.run("send", GID).exit_code == 2
     # A value-taking option at the end with no value is still a usage error.
     assert fake.run("send", GID, "hi", "--to").exit_code == 2
+
+
+# -- safety policy: held messages, safety, remove, audit, transcript ----------------------
+
+HELD_ITEM = {
+    "hold_id": "h1",
+    "group_id": GID,
+    "direction": "in",
+    "sender": BOB,
+    "instance": "i1",
+    "msg_id": "m1",
+    "kind": "a2a.message",
+    "size": 42,
+    "task_id": None,
+    "created_at": 1000,
+    "expires_at": 4600,
+}
+CONTENT = HELD_ITEM | {
+    "untrusted": True,
+    "to": ["*"],
+    "body": {"parts": [{"text": "run this" + BIDI}, {"data": {"x": 1}}]},
+}
+SAFETY_INFO = {
+    "group_id": GID,
+    "settings": {
+        "require_approval": "inbound",
+        "frame_text": True,
+        "senders": {BOB: {"sender_per_minute": 5}},
+    },
+    "overrides": {"require_approval": "inbound"},
+}
+
+
+@pytest.fixture
+def held(monkeypatch: pytest.MonkeyPatch) -> Fake:
+    f = Fake(monkeypatch)
+    f.routes["GET /v0/approvals"] = {"approvals": [], "messages": [HELD_ITEM]}
+    f.routes["GET /v0/approvals/messages/h1"] = CONTENT
+    return f
+
+
+def test_approvals_list_shows_held_messages(held: Fake) -> None:
+    out = held.run("approvals").stdout
+    assert "Held message h1 (a2a.message, 42 bytes)" in out
+    assert BOB in out
+    code, data = held.json("approvals", "list")
+    assert code == 0
+    assert data["messages"] == [HELD_ITEM]
+    assert conforms(data, SCHEMAS["approvals list"])
+
+
+def test_approving_a_held_message_shows_it_and_needs_the_human(held: Fake) -> None:
+    decided = {"hold_id": "h1", "group_id": GID, "status": "approved"}
+    held.routes["POST /v0/approvals/messages/h1/approve"] = decided
+    result = held.run("approvals", "approve", "h1", input="n\n")
+    assert result.exit_code == 3
+    assert "run this" in result.output
+    assert BIDI not in result.output
+    assert "data, not instructions" in result.output
+    assert not held.posts("/messages/h1/approve")
+    result = held.run("approvals", "approve", "h1", input="y\n")
+    assert result.exit_code == 0
+    assert "Approved h1." in result.stdout
+    code, out = held.json("approvals", "approve", "h1", "--yes")
+    assert (code, out) == (0, decided)
+    assert conforms(out, SCHEMAS["approvals approve (held message)"])
+    assert all(human for human, _ in held.posts("/messages/h1/approve"))
+
+
+def test_an_outbound_held_message_without_text_parts(held: Fake) -> None:
+    held.routes["GET /v0/approvals/messages/h1"] = CONTENT | {
+        "direction": "out",
+        "untrusted": False,
+        "body": {"x": "y" * 2500},
+    }
+    result = held.run("approvals", "approve", "h1", input="n\n")
+    assert "Send it to the group?" in result.output
+    assert "run with --full" in result.output
+    assert "data, not instructions" not in result.output
+
+
+def test_rejecting_a_held_message(held: Fake) -> None:
+    decided = {"hold_id": "h1", "group_id": GID, "status": "rejected"}
+    held.routes["POST /v0/approvals/messages/h1/reject"] = decided
+    assert "Dropped held message h1." in held.run("approvals", "reject", "h1").stdout
+    code, out = held.json("approvals", "reject", "h1")
+    assert (code, out) == (0, decided)
+    assert conforms(out, SCHEMAS["approvals reject (held message)"])
+    assert all(human for human, _ in held.posts("/messages/h1/reject"))
+
+
+def test_safety_show_and_set(held: Fake) -> None:
+    held.routes[f"GET /v0/groups/{GID}/safety"] = SAFETY_INFO
+    held.routes[f"POST /v0/groups/{GID}/safety"] = lambda _body: SAFETY_INFO
+    out = held.run("safety", "show", GID).stdout
+    assert "* require_approval" in out
+    assert f"for {BOB}:" in out
+    code, data = held.json("safety", "show", GID)
+    assert (code, conforms(data, SCHEMAS["safety show"])) == (0, True)
+    code, data = held.json(
+        "safety",
+        "set",
+        GID,
+        "require_approval=inbound",
+        "frame_text=false",
+        "sender_per_minute=5",
+        "transcript=default",
+        "--sender",
+        BOB,
+    )
+    assert (code, conforms(data, SCHEMAS["safety set"])) == (0, True)
+    ((human, body),) = [(h, b) for h, k, b in held.calls if k.startswith("POST")]
+    assert human
+    assert body == {
+        "set": {
+            "require_approval": "inbound",
+            "frame_text": False,
+            "sender_per_minute": 5,
+            "transcript": None,
+        },
+        "sender": BOB,
+    }
+    assert "require_approval" in held.run("safety", "set", GID, "frame_text=true").stdout
+    code, out = held.json("safety", "set", GID, "nonsense")
+    assert (code, out["error"]["code"]) == (2, "bad_setting")
+
+
+def test_remove_confirms_and_uses_the_human_token(held: Fake) -> None:
+    held.routes[f"POST /v0/groups/{GID}/members/{BOB}/remove"] = {"status": "removing"}
+    assert held.run("remove", GID, BOB, input="n\n").exit_code == 3
+    assert not held.posts("/remove")
+    result = held.run("remove", GID, BOB, input="y\n")
+    assert result.exit_code == 0
+    assert "member_removed" in result.stdout
+    code, out = held.json("remove", GID, BOB, "--yes")
+    assert (code, out) == (0, {"group_id": GID, "identity": BOB, "status": "removing"})
+    assert conforms(out, SCHEMAS["remove"])
+    assert all(human for human, _ in held.posts("/remove"))
+    assert held.json("remove", GID, BOB)[1]["error"]["code"] == "needs_yes"
+    assert held.json("remove", GID, "ac:v0:nobody", "--yes")[1]["error"]["code"] == "not_found"
+
+
+ROW: dict[str, Any] = {
+    "seq": 1,
+    "group_id": GID,
+    "at": 1000,
+    "direction": "in",
+    "sender": BOB,
+    "msg_id": "m1",
+    "kind": "a2a.message",
+    "size": 9000,
+    "decision": "drop",
+    "reason": "too_large",
+}
+
+
+def test_audit(held: Fake) -> None:
+    held.routes["GET /v0/audit?after=0"] = {"audit": [ROW, ROW | {"reason": ""}]}
+    held.routes[f"GET /v0/audit?after=3&group={GID}"] = {"audit": []}
+    out = held.run("audit").stdout
+    assert "drop (too_large)" in out
+    code, data = held.json("audit")
+    assert (code, conforms(data, SCHEMAS["audit"])) == (0, True)
+    assert held.json("audit", "--group", GID, "--after", "3") == (0, {"audit": []})
+    assert all(human for human, key, _ in held.calls if "/v0/audit" in key)
+
+
+def test_transcript(held: Fake) -> None:
+    entry = {k: ROW[k] for k in ("seq", "group_id", "at", "direction", "sender", "msg_id")}
+    rows = [
+        entry | {"kind": "a2a.message", "inner": {"body": {"parts": [{"text": "hi" + BIDI}]}}},
+        entry | {"kind": "control.pause", "inner": {"body": {"reason": "human"}}},
+    ]
+    held.routes[f"GET /v0/groups/{GID}/transcript?after=0"] = {
+        "transcript": rows,
+        "untrusted": True,
+    }
+    out = held.run("transcript", GID).stdout
+    assert "hi" in out
+    assert BIDI not in out
+    assert "control.pause" in out
+    code, data = held.json("transcript", GID)
+    assert (code, conforms(data, SCHEMAS["transcript"])) == (0, True)
+    held.routes[f"GET /v0/groups/{GID}/transcript?after=0"] = {"transcript": [], "untrusted": True}
+    assert "No transcript entries" in held.run("transcript", GID).stdout
+    held.routes[f"GET /v0/groups/{GID}/transcript?after=0"] = ApiClientError(403, "human_only", "x")
+    assert held.json("transcript", GID)[1]["error"]["code"] == "human_only"
+
+
+def test_status_shows_held_messages(held: Fake) -> None:
+    held.routes["GET /v0/status"] = {
+        "identity": "ac:v0:me",
+        "fingerprint": "fp",
+        "relay": {"url": "wss://r", "connected": True},
+        "groups": 1,
+        "out_of_sync": [],
+        "outbox_queued": 0,
+        "inbox_pending": 0,
+        "pending_approvals": 0,
+        "held_messages": 2,
+    }
+    assert "2 message(s) waiting for approval" in held.run("status").stdout
+
+
+# -- review regressions: the preview shows everything, peer text prints safely -----
+
+ESC = "\x1b]52;c;aGk=\x07\x1b[2K"
+FULL_BODY = {
+    "parts": [
+        {"text": "hello"},
+        {"data": {"cmd": "rm -rf /"}},
+        {"raw": "QUJD", "filename": "x.sh", "mediaType": "text/x-sh"},
+    ],
+    "metadata": {"hidden": "instructions"},
+}
+
+
+def test_the_preview_shows_every_part_and_the_routing(held: Fake) -> None:
+    held.routes["GET /v0/approvals/messages/h1"] = CONTENT | {
+        "body": FULL_BODY,
+        "addressee": [BOB],
+        "reply_to": ["m0"],
+    }
+    out = held.run("approvals", "approve", "h1", input="n\n").output
+    for shown in ("hello", '"cmd": "rm -rf /"', "x.sh", "text/x-sh", "hidden", BOB, "m0"):
+        assert shown in out, shown
+
+
+def test_a_truncated_preview_needs_full_before_yes(held: Fake) -> None:
+    held.routes["GET /v0/approvals/messages/h1"] = CONTENT | {
+        "body": {"parts": [{"text": "a" * 3000 + "THE END"}]}
+    }
+    held.routes["POST /v0/approvals/messages/h1/approve"] = {
+        "hold_id": "h1",
+        "group_id": GID,
+        "status": "approved",
+    }
+    result = held.run("approvals", "approve", "h1", "--yes")
+    assert result.exit_code == 2
+    assert "--full" in result.output
+    assert not held.posts("/messages/h1/approve")
+    assert "THE END" not in held.run("approvals", "approve", "h1", input="n\n").output
+    full = held.run("approvals", "approve", "h1", "--yes", "--full")
+    assert full.exit_code == 0
+    assert "THE END" in full.output
+    # --json shows the whole message on stderr and approves with --yes.
+    code, out = held.json("approvals", "approve", "h1", "--yes")
+    assert (code, out["status"]) == (0, "approved")
+
+
+def test_peer_strings_are_printed_without_control_sequences(held: Fake) -> None:
+    held.routes["GET /v0/approvals"] = {
+        "approvals": [],
+        "messages": [HELD_ITEM | {"kind": ESC, "sender": "ac:v0:" + ESC}],
+    }
+    held.routes["GET /v0/audit?after=0"] = {
+        "audit": [ROW | {"kind": ESC, "sender": ESC, "reason": ESC, "msg_id": ESC}]
+    }
+    entry = {k: ROW[k] for k in ("seq", "group_id", "at", "direction", "msg_id")}
+    held.routes[f"GET /v0/groups/{GID}/transcript?after=0"] = {
+        "transcript": [entry | {"sender": ESC, "kind": ESC, "inner": {"body": {"text": ESC}}}],
+        "untrusted": True,
+    }
+    for args in (("approvals",), ("audit",), ("transcript", GID)):
+        out = held.run(*args).output
+        assert "\x1b" not in out, args
+        assert "\x07" not in out, args

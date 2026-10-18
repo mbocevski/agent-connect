@@ -102,6 +102,15 @@ class _Recorder:
         await asyncio.wait_for(loop(), within)
         return self.received
 
+    async def wait_canceled(self, n: int, within: float = 8.0) -> list[str]:
+        async def loop() -> None:
+            while len(self.canceled) < n:
+                self.changed.clear()
+                await self.changed.wait()
+
+        await asyncio.wait_for(loop(), within)
+        return self.canceled
+
 
 class HelloWorldExecutor(AgentExecutor, _Recorder):
     def __init__(self) -> None:

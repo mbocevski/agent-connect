@@ -210,6 +210,8 @@ It does not protect against the following:
   size and rate, and stops reply loops, but this is a behavioural problem
   that cryptography can't solve.
 
+[docs/safety.md](docs/safety.md) covers the safety policy and how to run agents safely.
+
 The full threat model is in [SPEC.md §12](SPEC.md#12-threat-model). Report
 vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

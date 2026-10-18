@@ -83,6 +83,129 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   aarch64 relay binary and a macOS arm64 `agentconnect-core` wheel, all
   signed and attested. The reproducibility check covers both Linux
   architectures. See ADR-001 for the platform table.
+- Safety policy (`agentconnect.policy`): every decrypted message gets one
+  decision before any adapter sees it (`deliver`, `deliver_as_context`,
+  `hold_for_approval` or `drop` with a reason), and every message the agent
+  sends goes through it too. The SPEC 10.2 limits, the 7.3 control rules and
+  the loop guard moved into it unchanged. See `docs/safety.md`.
+- Every A2A part must have exactly one content member that matches its
+  `kind`, and no other members but `metadata`, `filename` and
+  `mediaType`; any other part is `malformed`. The daemon, the A2A adapter
+  and the SDK apply the same rule (`testdata/a2a-parts.json`), and the
+  approval preview shows every member of a part.
+- The loop guard decides on the hop alone, so its pause no longer tells a
+  peer whether the policy accepted a probe. The reconnect drain's rate
+  exemption is bounded per identity (twice its per-sender rate). An
+  `a2a.task_cancel` delivered as context no longer cancels the A2A agent's
+  task, and the A2A facade answers a held send with an `input-required`
+  task instead of timing out. Adapters' sends return a `SendReceipt` (the
+  `msg_id`, with `held`).
+- The transcript is capped per group (`policy.transcript_max_rows`, 10000)
+  and for the whole daemon (`policy.transcript_max_bytes`, 64 MiB), oldest
+  first, and the audit log's 100000-row cap holds on every row.
+- The approval preview shows every part (data as JSON, files by name, type
+  and size), the body's other fields and the routing, and
+  `approvals approve --yes` needs `--full` when the preview was cut. The
+  CLI prints every peer-controlled string with control characters
+  replaced, the audit log records unknown kinds as `unknown`, and the
+  SPEC 10.1 notice quotes and cleans the sender's name and the scope.
+- Audit rows come in two classes, drops and decisions, with their own caps:
+  a sender's flood of drops can no longer push out the deliver row of the
+  injection it sent before.
+- Held messages: each identity may have at most its byte share waiting
+  (`policy.max_held_bytes_per_sender`, 1 MiB, or `max_held_bytes` divided
+  by the senders waiting), and a task approval covers a peer task's later
+  updates for `policy.task_approval_window_secs` (600 seconds, at most
+  3600) instead of `approval_ttl_secs`.
+- The adapter, SDK, webhook and API docs list `send_approved` and the codes
+  of a held send's `send_failed`, and no longer say the policy's own events
+  reach the webhook.
+- A facade request cancelled while its send waits for approval withdraws
+  the send (audited as `cancelled`, `send_failed` code `cancelled`), so a late
+  approval can't send it. `send_approved` and a held send's `send_failed`
+  carry its `hold_id`, and adapters' `SendReceipt` has `hold_id` and
+  `withdraw()`.
+- The A2A facade follows a held send through: its task waits in
+  `input-required`, moves to `working` when the human approves (the agent's
+  adapter gets a new `send_approved` event), receives the peer's reply, and
+  ends `rejected` or `failed` if the human rejects it or the hold expires.
+- `agentconnect events` and `agentconnect approvals` (list) now need the
+  human token. With the agent token, `GET /v0/approvals` lists only the
+  agent's own held sends (no join requests, no held peer messages) and
+  `GET /v0/status` counts only those.
+- The audit log and the transcript are also capped per group and per sender
+  (`policy.audit_max_rows_per_group` 20000, `policy.audit_max_rows_per_sender`
+  2000, `transcript_max_rows_per_sender` 1000, `transcript_max_group_bytes`
+  16 MiB), and the daemon-wide transcript cap takes from the biggest group
+  first, so one sender can't flush the record of the others. Each cap is
+  enforced through an index, with running byte totals.
+- The held-message expiry timer logs a failure by type, backs off and keeps
+  running (failpoint `held_timer.expire`).
+- Held messages: each direction has its own queue, the per-sender cap also
+  counts all instances of an identity, and a full group queue drops a new
+  message as `hold_queue_full` (no violation) unless its sender holds its
+  fair share already. Approving a peer task's first update covers only that
+  task's inbound updates, for `approval_ttl_secs` or until the task ends;
+  the agent's own task updates are each held.
+- Held messages: the queue is capped per group (100), per sender instance
+  (20) and in bytes (8 MiB; `policy.max_held_per_group`,
+  `max_held_per_sender`, `max_held_bytes`), and a message over a cap is
+  dropped as `hold_overflow` and counts as a violation. A task is held once,
+  on its first update, and decided whole. Holds expire on a timer, are
+  decided exactly once, and fail with `send_failed` code `group_gone` when
+  the group ends. `message_held` is recorded with the hold. The policy's
+  events are the human's: they no longer reach the agent's adapter, and
+  `GET /v0/events` leaves them out for the agent token.
+- Rate limits: received and sent messages have separate budgets, so a
+  member's own sends no longer make honest peers look like violators and
+  peer traffic can't stop the human's sends; the human's control messages
+  are never rate limited. Task updates also count against an identity cap
+  (3 times the task budget) and a group cap (`policy.group_task_per_minute`,
+  1200). The limiter and the violation counters are bounded and forget a
+  group once it ends.
+- Control messages, Agent Cards and task cancellations keep only the fields
+  their schemas define: unknown fields are stripped (SPEC 7.2), and a body
+  that carries content (`parts` anywhere, or a top-level `text`, `data`,
+  `file` or `raw`) is malformed, so they can't carry text, data or files
+  past `require_approval` or the file-part ban. An Agent Card the A2A
+  types can't parse is dropped as `malformed`, so its signature check is
+  never skipped. A card's signature
+  is verified against the pinned keys first (a failing card is dropped as
+  `bad_signature`), its known A2A fields are kept exactly as sent, a card
+  over the ADR-006 listing limits is refused rather than cut, our own card
+  goes out as built, and with inbound approval a changed card is held.
+  Controls and cards are delivered as context only, the SDK shows no text
+  for them (a card is in `msg.card`), and the agent token can't send them.
+  The safety and adapter docs say card text is untrusted peer content,
+  never to be pasted into a prompt as instructions.
+- Per-group safety settings with per-sender overrides of the limits: message
+  size, messages a minute per sender and per group, a per-task budget for task
+  updates (300 a minute), and `file` parts (off by default, with a size cap
+  when on). Defaults come from new `[policy]` keys in `config.toml`;
+  `agentconnect safety show|set` and `GET|POST /v0/groups/{gid}/safety`
+  (human token to change) override them.
+- `require_approval` (`inbound`, `outbound` or `both`): agent messages wait
+  for the human, who sees them with `agentconnect approvals` and decides with
+  `approvals approve|reject <id>` (human token). Held messages raise
+  `message_held` and expire after `approval_ttl_secs` with `held_expired`,
+  without telling the sender.
+- `repeated_violations` event when one sender breaks the policy
+  `violation_threshold` times (10) within `violation_window_secs` (600). The
+  daemon never removes a member on its own; the new `agentconnect remove`
+  (human token, `POST /v0/groups/{gid}/members/{identity}/remove`) lets the
+  owner or an admin do it.
+- Audit log in the encrypted daemon database: who, when, kind, size and the
+  decision for every message in and out, never a body, kept 30 days
+  (`agentconnect audit`, `GET /v0/audit`, human token). An opt-in
+  per-group transcript keeps full messages, also encrypted, for
+  `transcript_retention_days` (`agentconnect transcript`).
+- The A2A adapter honours the group's `frame_text` (the notice is the first
+  part only while both `a2a.frame_text` and the group's setting are on) and
+  adds `frame_text` and `notice` to the call's `metadata`, next to
+  `scope`. `require_approval` also holds `a2a.task_cancel`.
+- Webhook and SSE payloads carry `frame_text` and `notice` (the SPEC 10.1
+  sentence); `POST /v0/groups/{gid}/messages` answers with `status`
+  (`queued` or `held`); `GET /v0/status` counts `held_messages`.
 - Webhook adapter (`daemon.default_adapter = "webhook"`): every message and
   event is POSTed to a loopback `webhook.callback_url` (remote hosts need
   `webhook.allow_remote` and https), signed with HMAC-SHA256 over
@@ -239,6 +362,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   planned A2A extension URI in SPEC §13 is
   `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't
   hold `agentconnect.dev`, so nothing refers to it any more.
+- SPEC 10.2: the limits are maximums. Receivers may lower them, never raise
+  them, and a `[policy]` value or group setting above one is an error.
+  Per-sender rates count per instance, with a cap for all instances of one
+  identity (`policy.identity_rate_multiple`, 3 times the per-sender rate),
+  so replicas each get a rate but can't multiply their identity's budget.
+  Receivers must not tell a sender that its message was dropped, held,
+  rejected or expired. A new informative SPEC 10.6 describes local policy
+  (approvals, framing, local limits).
+- SDK: `msg.text` puts the SPEC 10.1 notice in front of the text while the
+  group's `frame_text` is on (the default). The text alone is now
+  `msg.raw_text`.
+- `Daemon` no longer takes a `policy=` hook; `PolicyHook`,
+  `PassThroughPolicy` and `PolicyDecision` are replaced by the safety policy.
 - The `text` shorthand of `POST /v0/groups/{id}/messages` (and so `agentconnect
   send`) now sends an A2A v1.0 `Message` (`messageId`, `contextId`, `role`,
   `parts`) instead of a bare `{"text": ...}` body (SPEC 7.2).
