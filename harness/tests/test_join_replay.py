@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 import agentconnect_core as ac
-from agentconnect.relay import b64, unb64
+from agentconnect.relay import b64
 from agentconnect.runtime.engine import APPROVAL_TIMEOUT_SECS, DaemonError
 from agentconnect_harness.cluster import Cluster, Node
 from agentconnect_harness.proxy import RelayProxy
@@ -178,10 +178,10 @@ async def test_a_full_ledger_drops_new_requests_and_keeps_live_ones(
     a, (b,), gid, invite = await requested(cluster)
     proxy = malicious_relay(a)
     frame = frame_of(proxy, b)
-    full = ac.ReplayLedger(1)
-    for request_id, kp_ref, until in a.daemon.store.ledger_rows(a.daemon.now(), ledger="join"):
-        full.insert(request_id.encode(), unb64(kp_ref), until)
-    a.daemon._join_ledger = full
+    # A ledger of one entry, kept across a reload (a rollback or a restart
+    # would rebuild it at the same capacity).
+    a.daemon._join_capacity = 1
+    a.daemon._join_ledger = a.daemon._load_join_ledger()
     c = await cluster.node("c")
     await c.daemon.accept_invite(invite["url"])
     await a.wait(lambda: "join_ledger_full" in join_audit(a))
@@ -218,3 +218,23 @@ async def test_a_forward_clock_jump_doesnt_purge_live_entries(
     await redeliver(a, frame, rng)
     assert a.daemon.join_approvals() == []
     assert pending_events(a) == 1
+
+
+async def test_a_flooded_invite_tells_the_human_and_not_the_agent(cluster: Cluster) -> None:
+    """Over the invite's pending cap a request is dropped silently, and the
+    human (only) hears that the invite is being flooded."""
+    a = await cluster.node("a", auto_approve=False, policy_max_pending_joins_per_invite=1)
+    gid = a.daemon.create_group("Flood", "")
+    await a.idle()
+    invite = await a.daemon.create_invite(gid, max_uses=3)
+    for name in ("b", "c"):
+        joiner = await cluster.node(name)
+        await joiner.daemon.accept_invite(invite["url"])
+    await a.wait(lambda: "join_invite_full" in join_audit(a))
+    assert len(a.daemon.join_approvals()) == 1
+    (flooded,) = [e for e in a.daemon.store.events(limit=1000) if e["type"] == "invite_flooded"]
+    assert flooded["data"]["invite_id"] == invite["invite_id"]
+    assert flooded["data"]["reason"] == "join_invite_full"
+    assert not a.adapter.of_type("invite_flooded")
+    assert not [e for e in a.daemon.store.agent_events(limit=1000) if e["type"] == "invite_flooded"]
+    assert not [h for h in a.handled if getattr(h, "type", None) == "invite_flooded"]

@@ -307,10 +307,12 @@ CREATE TABLE IF NOT EXISTS knock_ledger (
 CREATE INDEX IF NOT EXISTS knock_ledger_until ON knock_ledger (forget_after);
 CREATE TABLE IF NOT EXISTS join_ledger (
     request_id TEXT PRIMARY KEY,
+    invite_id TEXT NOT NULL,
     kp_ref TEXT NOT NULL,
     forget_after INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS join_ledger_until ON join_ledger (forget_after);
+CREATE INDEX IF NOT EXISTS join_ledger_invite ON join_ledger (invite_id);
 CREATE TABLE IF NOT EXISTS knock_requests (
     request_id TEXT PRIMARY KEY,
     knock_id TEXT NOT NULL UNIQUE,
@@ -1258,20 +1260,46 @@ class Store:
     # -- knocks: the owner's ledger and approvals, the knocker's knocks -------
 
     def ledger_add(
-        self, entry_id: str, kp_ref: str, forget_after: int, *, ledger: Ledger = "knock"
+        self,
+        entry_id: str,
+        kp_ref: str,
+        forget_after: int,
+        *,
+        ledger: Ledger = "knock",
+        invite_id: str | None = None,
     ) -> None:
         """Remember a request that passed the owner's checks (SPEC 6.2
-        "Replays" for joins, 6.6.3 step 6 for knocks), in the transaction
-        that records what happened to it. A row for the same id can only be
-        one the ledger already forgot (a live one makes the request a
-        replay), so it is replaced whole."""
-        table, key = LEDGERS[ledger]
+        "Replays" for joins, with its ``invite_id``; 6.6.3 step 6 for
+        knocks), in the transaction that records what happened to it. A row
+        for the same id can only be one the ledger already forgot (a live one
+        makes the request a replay), so it is replaced whole."""
+        if ledger == "join":
+            self._db.execute(
+                "INSERT INTO join_ledger (request_id, invite_id, kp_ref, forget_after) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(request_id) DO UPDATE SET "
+                "invite_id = excluded.invite_id, kp_ref = excluded.kp_ref, "
+                "forget_after = excluded.forget_after",
+                (entry_id, invite_id or "", kp_ref, forget_after),
+            )
+            return
         self._db.execute(
-            f"INSERT INTO {table} ({key}, kp_ref, forget_after) VALUES (?, ?, ?) "  # noqa: S608
-            f"ON CONFLICT({key}) DO UPDATE SET "
+            "INSERT INTO knock_ledger (knock_id, kp_ref, forget_after) VALUES (?, ?, ?) "
+            "ON CONFLICT(knock_id) DO UPDATE SET "
             "kp_ref = excluded.kp_ref, forget_after = excluded.forget_after",
             (entry_id, kp_ref, forget_after),
         )
+
+    def join_ledger_count(self, invite_id: str) -> int:
+        """How many join requests of this invite the ledger remembers."""
+        row = self._one("SELECT count(*) FROM join_ledger WHERE invite_id = ?", invite_id)
+        return 0 if row is None else int(row[0])
+
+    def join_ledger_forget(self, invite_id: str) -> int:
+        """Forget an invite's join requests: it was revoked or has expired,
+        both final, so step 1 refuses any copy (SPEC 6.2 "Replays")."""
+        return self._db.execute(
+            "DELETE FROM join_ledger WHERE invite_id = ?", (invite_id,)
+        ).rowcount
 
     def ledger_rows(self, now: int, *, ledger: Ledger = "knock") -> list[tuple[str, str, int]]:
         """``(id, kp_ref, forget_after)`` of every request still remembered at ``now``."""
@@ -1616,6 +1644,17 @@ class Store:
             kp_ref,
         )
         return None if row is None else str(row[0])
+
+    def pending_approvals_for(self, invite_id: str, since: int) -> int:
+        """Join requests of this invite waiting for the human, received at
+        or after ``since`` (older ones have lapsed)."""
+        row = self._one(
+            "SELECT count(*) FROM approvals WHERE invite_id = ? AND status = 'pending' "
+            "AND received_at >= ?",
+            invite_id,
+            since,
+        )
+        return 0 if row is None else int(row[0])
 
     def uses_taken(self, invite_id: str) -> int:
         """Approvals that hold one of the invite's uses (approving or done)."""

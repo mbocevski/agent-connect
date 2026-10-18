@@ -12,9 +12,11 @@ The core's bounded ``ReplayLedger`` answers "seen?"; its entries are
 persisted in a table of the encrypted store, written in the transaction that
 records what the request led to. The in-memory ledger has no remove, so a
 transaction that rolls back is followed by :func:`load`. When the ledger is
-full, new requests are refused (``busy``) and nothing live is evicted.
-Purges run on the clock's current time on every pass and keep nothing from
-earlier passes.
+full, new requests are refused (``busy``) and nothing live is evicted. Each
+invite also has a share of the join ledger (:func:`join_quota`), and an
+invite's entries are forgotten once it is revoked or has expired. Purges
+run on the clock's current time on every pass and keep nothing from
+earlier passes; loading purges nothing.
 """
 
 from __future__ import annotations
@@ -22,8 +24,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import agentconnect_core as ac
+from agentconnect.config import MIN_JOIN_LEDGER_PER_INVITE
 from agentconnect.relay import b64, unb64
 from agentconnect.store import Ledger, Store
+
+KNOCK_ID_LEN = 16
 
 #: What a request the ledger refuses is dropped as, by its error kind.
 REASONS: dict[Ledger, dict[str, str]] = {
@@ -32,13 +37,16 @@ REASONS: dict[Ledger, dict[str, str]] = {
 }
 
 
-def load(store: Store, ledger: Ledger, capacity: int, now: int) -> ac.ReplayLedger:
-    """The ledger from the database, purged at ``now``. It holds every live
-    entry, even past a lowered capacity: a request seen before a restart
-    must never pass after it."""
-    store.ledger_purge(now, ledger=ledger)
-    rows = store.ledger_rows(now, ledger=ledger)
-    core = ac.ReplayLedger(max(capacity, len(rows)))
+def load(store: Store, ledger: Ledger, capacity: int) -> ac.ReplayLedger:
+    """The ledger from the database, every row of it, even past a lowered
+    capacity: a request seen before a restart must never pass after it.
+    Loading purges nothing. A clock that is ahead at start and put right
+    before the next pass would otherwise forget live entries; the passes
+    purge (for joins right after marking expired invites, at the same now)."""
+    rows = store.ledger_rows(0, ledger=ledger)
+    core = ac.ReplayLedger(
+        max(capacity, len(rows)), id_len=KNOCK_ID_LEN if ledger == "knock" else None
+    )
     for entry_id, kp_ref, forget_after in rows:
         core.insert(entry_key(ledger, entry_id), unb64(kp_ref), forget_after)
     return core
@@ -59,6 +67,7 @@ def remember(  # noqa: PLR0913
     entry_id: str,
     kp_ref: bytes,
     forget_after: int,
+    invite_id: str | None = None,
 ) -> str | None:
     """Inside the transaction that records the request: ``None`` if it is
     new (now remembered, in memory and in the store), else the reason code
@@ -67,8 +76,16 @@ def remember(  # noqa: PLR0913
         remember_in(core)
     except ac.AgentConnectError as e:
         return REASONS[ledger].get(e.kind, f"{ledger}_check:{e.kind}")
-    store.ledger_add(entry_id, b64(kp_ref), forget_after, ledger=ledger)
+    store.ledger_add(entry_id, b64(kp_ref), forget_after, ledger=ledger, invite_id=invite_id)
     return None
+
+
+def join_quota(max_uses: int, per_invite: int) -> int:
+    """How many entries one invite may hold in the join ledger: 4 times its
+    uses, at least ``MIN_JOIN_LEDGER_PER_INVITE``, at most ``per_invite``
+    (``policy.join_ledger_per_invite``). A leaked link fills only its own
+    share."""
+    return min(max(4 * max_uses, MIN_JOIN_LEDGER_PER_INVITE), per_invite)
 
 
 def purge(store: Store, ledger: Ledger, core: ac.ReplayLedger, now: int) -> None:

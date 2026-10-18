@@ -9,6 +9,7 @@ end-to-end scenarios, on both hosts, are in ``harness/tests/test_join_replay.py`
 
 from __future__ import annotations
 
+import json
 import random
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -19,12 +20,13 @@ import pytest
 import agentconnect_core as ac
 from agentconnect.clock import FakeClock
 from agentconnect.config import Config
-from agentconnect.failpoints import FailpointError
+from agentconnect.failpoints import FailpointError, SimulatedCrash
 from agentconnect.identity import Seeded
 from agentconnect.keystore import FileKeystore
-from agentconnect.relay import b64
+from agentconnect.relay import b64, unb64
 from agentconnect.runtime import Options, Runtime
-from agentconnect.runtime.engine import Engine
+from agentconnect.runtime import ledger as replay
+from agentconnect.runtime.engine import HUMAN_EVENTS, Engine
 
 RELAY = "127.0.0.1:1"
 
@@ -36,6 +38,7 @@ class Owner:
         self, tmp: Path, rng: random.Random, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self.tmp, self.rng, self.clock, self.monkeypatch = tmp, rng, clock, monkeypatch
+        self.cfg: dict[str, Any] = {"auto_approve": False}
         self.rt = self._runtime()
 
     def _runtime(self) -> Runtime:
@@ -45,7 +48,7 @@ class Owner:
             data_dir=self.tmp / "data",
             keystore="file",
             api_socket=self.tmp / "s.sock",
-            auto_approve=False,
+            **self.cfg,
         )
         return Runtime(
             config,
@@ -63,19 +66,30 @@ class Owner:
     def now(self) -> int:
         return self.clock.unix_millis() // 1000
 
-    async def restart(self) -> None:
+    async def restart(self, **cfg: Any) -> None:
         await self.rt.stop(flush=0)
+        self.cfg |= cfg
         self.rt = self._runtime()
 
-    async def invite(self, ttl_secs: int = 7 * 86_400) -> str:
+    async def invite(self, ttl_secs: int = 7 * 86_400, max_uses: int = 10) -> str:
         async def registered(_meta: dict[str, Any]) -> dict[str, Any]:
             return {}
 
         self.engine.client._set_time_for_testing(self.now)
         gid = self.engine.create_group("Replay", "")
         self.monkeypatch.setattr(self.engine.rest, "create_invite", registered)
-        out = await self.engine.create_invite(gid, ttl_secs=ttl_secs, max_uses=10)
+        out = await self.engine.create_invite(gid, ttl_secs=ttl_secs, max_uses=max_uses)
         return str(out["url"])
+
+    async def revoke(self, url: str) -> None:
+        async def revoked(_invite_id: str) -> None:
+            return None
+
+        self.monkeypatch.setattr(self.engine.rest, "revoke_invite", revoked)
+        await self.engine.revoke_invite(invite_id(url))
+
+    def flooded(self) -> list[dict[str, Any]]:
+        return [e for e in self.engine.store.events(limit=10_000) if e["type"] == "invite_flooded"]
 
     async def deliver(self, request: bytes, sender: str, msg_id: str | None = None) -> str:
         msg_id = msg_id or b64(self.rng.randbytes(16))
@@ -92,6 +106,10 @@ class Owner:
         return len(self.engine.store.ledger_rows(self.now, ledger="join"))
 
 
+def invite_id(url: str) -> str:
+    return ac.parse_invite_url(url).invite_id_b64
+
+
 class Joiner:
     def __init__(self, rng: random.Random, now: int) -> None:
         identity = ac.Identity._generate_for_testing(rng.getrandbits(63))
@@ -99,8 +117,8 @@ class Joiner:
         self.client = ac.Client._for_testing(None, instance.to_secret_bytes(), rng.getrandbits(63))
         self.client._set_time_for_testing(now)
 
-    def request(self, url: str) -> bytes:
-        return self.client.create_join_request(ac.parse_invite_url(url), "bob")
+    def request(self, url: str, name: str = "bob") -> bytes:
+        return self.client.create_join_request(ac.parse_invite_url(url), name)
 
     @property
     def mailbox(self) -> str:
@@ -201,7 +219,7 @@ async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(
     assert owner.engine.join_approvals() == []
 
 
-async def test_the_join_ledger_is_purged_at_the_invites_expiry(
+async def test_the_join_ledger_forgets_an_invites_requests_when_it_expires(
     owner: Owner, rng: random.Random
 ) -> None:
     url = await owner.invite(ttl_secs=600)
@@ -209,10 +227,206 @@ async def test_the_join_ledger_is_purged_at_the_invites_expiry(
     await owner.deliver(bob.request(url), bob.mailbox)
     (row,) = owner.engine.store.ledger_rows(owner.now, ledger="join")
     assert row[2] == owner.now + 600 + ac.LEDGER_GRACE_SECS
-    owner.clock.advance(600 + ac.LEDGER_GRACE_SECS)
+    owner.clock.advance(599)
     await owner.engine.expire()
     assert owner.ledger() == 1
     owner.clock.advance(1)
-    await owner.engine.expire()
+    await owner.engine.expire()  # expired, which is final: step 1 refuses any copy
+    assert owner.engine.store.invite(invite_id(url))["status"] == "expired"  # ty: ignore[not-subscriptable]
     assert owner.engine.store.ledger_rows(0, ledger="join") == []
     assert len(owner.engine._join_ledger) == 0
+
+
+# -- F1: a leaked link floods only its own invite -----------------------------------
+
+
+async def test_a_leaked_link_is_held_to_its_invites_quota(owner: Owner, rng: random.Random) -> None:
+    """A link thief with fresh KeyPackages fills the invite's pending cap and
+    then its ledger quota, never the daemon's ledger: another invite's
+    joiner still reaches the human, and the human hears of the flood."""
+    await owner.restart(policy_max_pending_joins_per_invite=2)
+    leaked = await owner.invite(max_uses=1)
+    quota = replay.join_quota(1, owner.engine.config.policy_join_ledger_per_invite)
+    assert quota == 64
+    thief = Joiner(rng, owner.now)
+    for _ in range(quota + 1):
+        await owner.deliver(thief.request(leaked), thief.mailbox)
+    audit = owner.audit()
+    assert audit.count("join_invite_full") == quota - 2
+    assert audit[-1] == "join_invite_quota"
+    assert len(owner.engine.join_approvals()) == 2
+    assert owner.ledger() == quota
+    # The human hears of it once per reason; the agent token never does.
+    assert [(e["data"]["invite_id"], e["data"]["reason"]) for e in owner.flooded()] == [
+        (invite_id(leaked), "join_invite_full"),
+        (invite_id(leaked), "join_invite_quota"),
+    ]
+    assert "revoke" in owner.flooded()[0]["data"]["warning"]
+    assert "invite_flooded" in HUMAN_EVENTS
+    assert not [
+        e for e in owner.engine.store.agent_events(limit=10_000) if e["type"] == "invite_flooded"
+    ]
+    # Another invite is unaffected.
+    other = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    await owner.deliver(bob.request(other), bob.mailbox)
+    assert len(owner.engine.join_approvals()) == 3
+
+
+async def test_revoking_or_expiring_an_invite_frees_its_entries(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Revoked and expired are final: step 1 refuses any copy, so their
+    entries go at once and make room in a full ledger for other invites."""
+    owner.engine._join_capacity = 2
+    owner.engine._join_ledger = owner.engine._load_join_ledger()
+    leaked = await owner.invite()
+    short = await owner.invite(ttl_secs=600)
+    other = await owner.invite()
+    thief = Joiner(rng, owner.now)
+    leaked_request = thief.request(leaked)
+    await owner.deliver(leaked_request, thief.mailbox)
+    await owner.deliver(thief.request(short), thief.mailbox)
+    bob = Joiner(rng, owner.now)
+    await owner.deliver(bob.request(other), bob.mailbox)
+    assert owner.audit() == ["join_ledger_full"]
+    assert [e["data"]["reason"] for e in owner.flooded()] == ["join_ledger_full"]
+    await owner.revoke(leaked)
+    assert owner.ledger() == 1
+    # The revoked invite refuses its copy before the ledger is asked.
+    await owner.deliver(leaked_request, thief.mailbox)
+    owner.clock.advance(600)
+    await owner.engine.expire()
+    assert owner.ledger() == 0
+    late = bob.request(other)
+    await owner.deliver(late, bob.mailbox)
+    await owner.restart()
+    await owner.deliver(late, bob.mailbox)
+    assert owner.audit() == ["join_ledger_full", "join_replay"]
+    mine = [a for a in owner.engine.join_approvals() if a["identity"] == bob.client.identity]
+    assert len(mine) == 1
+
+
+# -- F2: no purge before the invites are marked ------------------------------------
+
+
+async def test_a_clock_ahead_at_boot_forgets_nothing(owner: Owner, rng: random.Random) -> None:
+    """The load purges nothing: only ``expire()`` purges, right after it
+    marks expired invites, so a clock that was ahead at start and is put
+    right before the first frame can't reopen a rejected request."""
+    url = await owner.invite(ttl_secs=600)
+    bob = Joiner(rng, owner.now)
+    request = bob.request(url)
+    await owner.deliver(request, bob.mailbox)
+    (approval,) = owner.engine.join_approvals()
+    owner.engine.reject(approval["request_id"])
+    start = owner.clock.now()
+    await owner.rt.stop(flush=0)
+    owner.clock.advance(86_400)
+    owner.rt = owner._runtime()
+    assert len(owner.engine._join_ledger) == 1
+    owner.clock.set(start)
+    await owner.deliver(request, bob.mailbox)
+    assert owner.audit() == ["join_replay"]
+    assert owner.engine.join_approvals() == []
+
+
+# -- F3: a request refused at receipt is not remembered ------------------------------
+
+
+async def test_a_request_refused_at_receipt_by_the_use_limit_is_not_remembered(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Only requests that pass steps 1-3 are remembered (SPEC 6.2). One
+    that arrives while the invite's last use is taken is refused by step 1,
+    and is shown once a failed Add gives the use back."""
+    url = await owner.invite(max_uses=1)
+    bob, carol = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    await owner.deliver(bob.request(url), bob.mailbox)
+    (first,) = owner.engine.join_approvals()
+    owner.engine.approve(first["request_id"])
+    late = carol.request(url)
+    await owner.deliver(late, carol.mailbox)
+    assert owner.ledger() == 1
+    owner.engine.store.set_approval_status(first["request_id"], "failed")
+    await owner.deliver(late, carol.mailbox)
+    assert [a["display_name"] for a in owner.engine.join_approvals()] == ["bob"]
+    assert owner.audit() == []
+
+
+# -- F4 and F5: crashes after the record, and a re-MACed request -------------------
+
+
+@pytest.mark.parametrize("action", ["raise", "crash"])
+async def test_auto_approve_survives_a_failure_after_the_record(
+    owner: Owner, rng: random.Random, action: str
+) -> None:
+    """With ``auto_approve`` the approval is marked approving and its Add
+    queued in the record's own transaction, so a failure or a crash right
+    after it commits can't leave it pending until it lapses."""
+    await owner.restart(auto_approve=True)
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    request = bob.request(url)
+    owner.engine.failpoints.arm("join_request.after_tx", action)  # ty: ignore[invalid-argument-type]
+    with pytest.raises((FailpointError, SimulatedCrash)):
+        await owner.deliver(request, bob.mailbox, msg_id="first")
+    if action == "crash":
+        await owner.restart()
+    (approval,) = owner.engine.store.approvals("approving")
+    assert approval["request_id"] == "first"
+    intents = [r.payload.get("intent") for r in owner.engine.store.outbox()]
+    assert {"type": "add", "request_id": "first"} in intents
+    assert owner.ledger() == 1
+    await owner.deliver(request, bob.mailbox, msg_id="first")  # the relay's redelivery
+    await owner.deliver(request, bob.mailbox)
+    assert owner.audit() == ["join_replay"]
+    assert len(owner.engine.store.approvals("approving")) == 1
+
+
+async def test_a_crash_after_the_record_keeps_the_approval_once(
+    owner: Owner, rng: random.Random
+) -> None:
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    request = bob.request(url)
+    owner.engine.failpoints.arm("join_request.after_tx", "crash")
+    with pytest.raises(SimulatedCrash):
+        await owner.deliver(request, bob.mailbox, msg_id="first")
+    await owner.restart()
+    await owner.deliver(request, bob.mailbox, msg_id="first")
+    await owner.deliver(request, bob.mailbox)
+    assert len(owner.engine.join_approvals()) == 1
+    assert owner.audit() == ["join_replay"]
+    assert owner.ledger() == 1
+
+
+async def test_the_same_key_package_under_a_new_name_and_mac_is_a_replay(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Whoever holds the link can re-MAC a request. Keeping the KeyPackage
+    and changing the name makes another request with the same
+    KeyPackageRef: still a replay."""
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    request = bob.request(url)
+    await owner.deliver(request, bob.mailbox)
+    (approval,) = owner.engine.join_approvals()
+    owner.engine.reject(approval["request_id"])
+    link = ac.parse_invite_url(url)
+    body = json.loads(request)
+    body["display_name"] = "bob, again"
+    body["mac"] = b64(
+        ac.join_request_mac(
+            link.invite_id,
+            link.secret_bytes(),
+            unb64(body["key_package"]),
+            body["mailbox_id"],
+            body["display_name"],
+        )
+    )
+    renamed = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    assert renamed != request
+    await owner.deliver(renamed, bob.mailbox)
+    assert owner.audit() == ["join_replay"]
+    assert owner.engine.join_approvals() == []

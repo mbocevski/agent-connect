@@ -810,8 +810,28 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `KnockLedger` and `MemoryKnockLedger`, with `Error::Replayed` and
   `Error::LedgerFull` for the `replay` and `busy` kinds;
   `VerifiedJoinRequest` gains `forget_after` and `remember_in`, and Python
-  gets `ReplayLedger` in place of `KnockLedger`. New daemon failpoints
-  `join_request.in_tx` and `join_request.after_tx`.
+  gets `ReplayLedger` (with `seen`, and `id_len=16` for knock ids) in
+  place of `KnockLedger`. New daemon failpoints `join_request.in_tx` and
+  `join_request.after_tx`; with `policy.auto_approve` the approval and its
+  Add are recorded in the same transaction as the request, so a failure
+  after it can't leave the approval waiting until it lapses.
+  - A leaked invite link can't fill the ledger for every invite. Each entry
+    records its invite; a revoked or expired invite's entries are forgotten
+    at once (both are final, and step 1 refuses any copy); each invite holds
+    at most max(4 × `max_uses`, 64) entries, at most the new
+    `policy.join_ledger_per_invite` (default 1024, 64 to 1024), and at most
+    the new `policy.max_pending_joins_per_invite` (default 32, 1 to 32)
+    pending requests. Past either, requests for that invite are dropped
+    (`join_invite_quota`, `join_invite_full`), and the human gets a new
+    `invite_flooded` event, once per invite and reason, which the agent token
+    and the adapters never see, suggesting revoking the invite. SPEC §6.2
+    allows forgetting at revocation and expiry, and recommends the per-invite
+    bounds.
+  - The ledgers load in full and purge only in the runtime's passes. The
+    knock ledger's load used to purge on the start-time clock (since the
+    knock ledger landed), so a clock that was ahead at start and put right
+    before the next knock forgot live entries; the join ledger shared that
+    load.
 - Dependencies: RUSTSEC-2026-0329 (`libcrux-hmac-drbg` 0.0.1),
   RUSTSEC-2026-0330 and RUSTSEC-2026-0331 (`libcrux-kem` 0.0.9) are cleared
   and no longer ignored by `cargo deny`. `openmls_traits`,

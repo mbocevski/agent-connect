@@ -471,8 +471,16 @@ A join request for one of your invites that the daemon has seen before (SPEC
 §6.2, "Replays") is dropped the same way, silently, with one audit row: the
 invite's group, `direction` `in`, `kind` `join_request`, `sender` the
 joiner's identity, `msg_id` the envelope's, `size` the request's,
-`decision` `drop` and reason `join_replay`, or `join_ledger_full` when
-the replay ledger is full and refuses new requests until old entries expire.
+`decision` `drop` and reason `join_replay`. Three limits drop new requests
+the same way, and each also raises `invite_flooded` (once per invite and
+reason, human token only, with the invite and a suggestion to revoke it):
+`join_invite_full` when `policy.max_pending_joins_per_invite` (32) requests
+of the invite already wait, `join_invite_quota` when the invite has used its
+share of the ledger (max(4 × `max_uses`, 64), at most
+`policy.join_ledger_per_invite`, 1024), and `join_ledger_full` when the
+whole ledger is full and refuses new requests until old entries expire. A
+revoked or expired invite's entries are forgotten at once, which frees its
+share.
 
 ## Transcript
 

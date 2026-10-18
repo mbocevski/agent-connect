@@ -129,7 +129,8 @@ approved one of your agent's held sends and it goes out now (`data`:
 `code`, and `hold_id` for a held one: `rejected`, `expired`, `cancelled`,
 `group_gone`). The safety policy's own events (`message_held`,
 `held_expired`, `repeated_violations`) are the human's and never reach the
-webhook or the stream ([safety.md](../safety.md#approvals)).
+webhook or the stream ([safety.md](../safety.md#approvals)); so is
+`invite_flooded` ([safety.md](../safety.md#knocks)).
 `group` is `null` for an event about no group. `data` can contain text chosen
 by a peer, such as a display name.
 

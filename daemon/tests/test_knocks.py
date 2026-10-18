@@ -341,9 +341,33 @@ async def test_the_ledger_loads_past_a_lowered_capacity(world: World) -> None:
             store.ledger_add(b64(world.rng.randbytes(16)), b64(world.rng.randbytes(32)), until)
         store.ledger_add(b64(world.rng.randbytes(16)), b64(world.rng.randbytes(32)), world.now - 1)
     await owner.restart(knock_ledger_capacity=1024)
+    # Loaded in full: the load purges nothing, the timer pass does.
+    assert len(owner.knocks._ledger) == 1031
+    assert owner.knocks._ledger.capacity == 1031
+    owner.knocks._purge()
     assert len(owner.knocks._ledger) == 1030
-    assert owner.knocks._ledger.capacity == 1030
     assert len(owner.engine.store.ledger_rows(0)) == 1030  # the expired row was purged
+
+
+async def test_a_clock_ahead_at_boot_forgets_no_knock(world: World) -> None:
+    """The load purged on the start-time clock: a clock that was ahead at
+    start and put right before the next knock forgot a rejected one."""
+    owner = world.node("owner")
+    door = world.door()
+    door_id = owner.add_door(door)
+    sealed = world.sealed(door)
+    await owner.deliver(door_id, sealed)
+    (request,) = owner.knocks.approvals()
+    owner.engine.reject(request["request_id"])
+    start = world.clock.now()
+    await owner.rt.stop(flush=0)
+    world.clock.advance(86_400)
+    owner.rt = owner._runtime()
+    assert len(owner.knocks._ledger) == 1
+    world.clock.set(start)
+    await owner.deliver(door_id, sealed)
+    assert owner.audit() == ["knock", "knock_replay"]
+    assert owner.knocks.approvals() == []
 
 
 async def test_a_rolled_back_record_rebuilds_the_ledger(world: World) -> None:

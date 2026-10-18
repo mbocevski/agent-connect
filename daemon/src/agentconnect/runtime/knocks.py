@@ -234,9 +234,7 @@ class KnockService:
     def _load_ledger(self) -> None:
         """The replay ledger from the database (SPEC 6.6.3 step 6,
         :mod:`agentconnect.runtime.ledger`)."""
-        self._ledger = replay.load(
-            self._store, "knock", self._engine.config.knock_ledger_capacity, self._now()
-        )
+        self._ledger = replay.load(self._store, "knock", self._engine.config.knock_ledger_capacity)
 
     def waiting(self) -> bool:
         """Whether a sent knock may still be answered (frames for a group

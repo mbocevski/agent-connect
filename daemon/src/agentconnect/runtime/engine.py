@@ -123,8 +123,16 @@ KNOCK_OWNER_EVENTS = frozenset(
         "knock_approval_failed",
     }
 )
+# A flood of join requests on one of the human's invites (SPEC 6.2
+# "Replays"): the human's to act on, by revoking the invite.
 HUMAN_EVENTS = (
-    frozenset({"message_held", "held_expired", "repeated_violations"}) | KNOCK_OWNER_EVENTS
+    frozenset({"message_held", "held_expired", "repeated_violations", "invite_flooded"})
+    | KNOCK_OWNER_EVENTS
+)
+INVITE_FLOOD_WARNING = (
+    "This invite gets more join requests than it can hold, and new ones are "
+    "dropped. If you didn't expect that many, the link may have leaked: revoke "
+    "it with `agentconnect invite revoke <invite_id>`."
 )
 INVITE_WARNING = (
     "This invite was already used or revoked. If you didn't expect this, "
@@ -478,6 +486,7 @@ class Engine:
         # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
         self.knocks = KnockService(self)
         # The inviter's JoinRequest replay ledger (SPEC 6.2, "Replays").
+        self._join_capacity = ac.DEFAULT_LEDGER_CAPACITY
         self._join_ledger = self._load_join_ledger()
 
     # -- lifecycle ------------------------------------------------------------
@@ -1052,6 +1061,7 @@ class Engine:
             if now >= int(invite["expires_at"]):
                 self.store.set_invite_status(invite["invite_id"], "expired")
                 self.keystore.delete(f"invite/{invite['invite_id']}")
+                self._forget_invite_requests(str(invite["invite_id"]))
         for pending in self.store.pending_joins():
             expires = pending["meta"].get("expires_at")
             if isinstance(expires, int) and now >= expires + JOIN_CLOSED_GRACE_SECS:
@@ -1719,16 +1729,40 @@ class Engine:
             LOG.info("join_request_dropped", invite=log.hid(invite_id), reason=reason)
             return "dropped"
 
+        async def flooded(reason: str) -> str:
+            # The human hears that this invite takes more requests than it
+            # can hold, once per invite and reason; the agent never does.
+            await self.emit(
+                group_id,
+                "invite_flooded",
+                cause=f"invite_flooded/{invite_id}/{reason}",
+                invite_id=invite_id,
+                reason=reason,
+                warning=INVITE_FLOOD_WARNING,
+            )
+            return drop_it(reason)
+
         async def body() -> str:
+            key = replay.entry_key("join", request_id)
+            quota = replay.join_quota(
+                int(invite["max_uses"]), self.config.policy_join_ledger_per_invite
+            )
+            if self.store.join_ledger_count(invite_id) >= quota and not self._join_ledger.seen(
+                key, verified.key_package_ref
+            ):
+                return await flooded("join_invite_quota")
             refused = replay.remember(
                 self.store,
                 "join",
                 self._join_ledger,
-                lambda ledger: verified.remember_in(ledger, replay.entry_key("join", request_id)),
+                lambda ledger: verified.remember_in(ledger, key),
                 entry_id=request_id,
                 kp_ref=verified.key_package_ref,
                 forget_after=verified.forget_after,
+                invite_id=invite_id,
             )
+            if refused == "join_ledger_full":
+                return await flooded(refused)
             if refused is not None:
                 return drop_it(refused)
             if (
@@ -1738,6 +1772,11 @@ class Engine:
                 # Past the ledger's window the request id or the KeyPackage
                 # may still be taken: one approval per id and per KeyPackage.
                 return drop_it("join_replay")
+            waiting = self.store.pending_approvals_for(
+                invite_id, self.now() - APPROVAL_TIMEOUT_SECS
+            )
+            if waiting >= self.config.policy_max_pending_joins_per_invite:
+                return await flooded("join_invite_full")
             self.store.add_approval(
                 {
                     "request_id": request_id,
@@ -1759,21 +1798,29 @@ class Engine:
                 display_name=verified.display_name,
                 display_name_verified=False,
             )
+            if self.config.auto_approve:
+                # Joins only: nothing approves a knock but the human (SPEC
+                # 6.6.4). In this transaction, so a failure once it commits
+                # can't leave the approval pending until it lapses.
+                self._approve_join(request_id)
             self.store.record_inbox(sender, msg_id, None, "done", self.now())
             return "held"
 
         try:
-            held = await self._apply("join_request", body) == "held"
+            await self._apply("join_request", body)
         except BaseException:
             # The in-memory ledger has no remove: rebuild it from the store.
             self._join_ledger = self._load_join_ledger()
             raise
-        if held and self.config.auto_approve:
-            # Joins only: nothing approves a knock but the human (SPEC 6.6.4).
-            self._approve_join(request_id)
 
     def _load_join_ledger(self) -> ac.ReplayLedger:
-        return replay.load(self.store, "join", ac.DEFAULT_LEDGER_CAPACITY, self.now())
+        return replay.load(self.store, "join", self._join_capacity)
+
+    def _forget_invite_requests(self, invite_id: str) -> None:
+        """Revoked or expired: both final, so step 1 refuses any copy of the
+        invite's requests and the join ledger forgets them (SPEC 6.2)."""
+        if self.store.join_ledger_forget(invite_id):
+            self._join_ledger = self._load_join_ledger()
 
     async def check_joins(self) -> None:
         """SPEC 4.3: a pending join whose invite was used up or revoked
@@ -2863,6 +2910,7 @@ class Engine:
         await self.rest.revoke_invite(invite_id)
         self.store.set_invite_status(invite_id, "revoked")
         self.keystore.delete(f"invite/{invite_id}")
+        self._forget_invite_requests(invite_id)
 
     def _link(self, url: str) -> ac.InviteLink:
         try:
