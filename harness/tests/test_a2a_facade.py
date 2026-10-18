@@ -35,6 +35,7 @@ from starlette.routing import Route
 
 from agentconnect.a2a_adapter import A2AAdapter
 from agentconnect.a2a_adapter.serve import LoopbackServer
+from agentconnect.daemon import DaemonError
 from agentconnect_harness.a2a_agents import (
     AgentServer,
     HelloWorldExecutor,
@@ -316,3 +317,112 @@ async def test_facade_auth_and_loopback(cluster: Cluster) -> None:
     # The facade listens on loopback only.
     server = adapter.facade.listening()
     assert server == [("127.0.0.1", adapter.facade.port)]
+
+
+async def test_a_held_send_is_reported_not_timed_out(
+    cluster: Cluster, scripted: AgentServer
+) -> None:
+    a, _b, gid = await pair(cluster, scripted)
+    a.daemon.update_safety(gid, {"require_approval": "outbound"})
+    f = await open_facade(a, gid)
+    try:
+        # The stream says so at once (and stays open until the human decides).
+        events: list[StreamResponse] = []
+        async for event in f.client.send_message(user("echo hello")):
+            events.append(event)
+            if states(events)[-1] == "TASK_STATE_INPUT_REQUIRED":
+                break
+        note = events[-1].status_update.status.message.parts[0].text
+        assert "approval" in note
+        (held,) = a.daemon.held_messages()
+        assert held["direction"] == "out"
+    finally:
+        await f.http.aclose()
+
+
+async def poll_task(f: Facade, task_id: str, state: int) -> Any:
+    """The facade task once it reaches ``state`` (each poll is a request,
+    so the loop yields to the daemon and the agents; WAIT bounds it)."""
+
+    async def loop() -> Any:
+        while True:
+            task = await f.client.get_task(GetTaskRequest(id=task_id))
+            if task.status.state == state:
+                return task
+            await asyncio.sleep(0)
+
+    return await asyncio.wait_for(loop(), WAIT)
+
+
+def seen_texts(agent: AgentServer) -> list[str]:
+    received = getattr(agent.executor, "received", [])
+    return [p.text for s in received for p in s.message.parts]
+
+
+async def test_an_approved_held_send_goes_out_and_its_reply_reaches_the_task(
+    cluster: Cluster, scripted: AgentServer
+) -> None:
+    a, _b, gid = await pair(cluster, scripted)
+    a.daemon.update_safety(gid, {"require_approval": "outbound"})
+    f = await open_facade(a, gid)
+    try:
+        (first,) = await collect(f.plain.send_message(user("echo held")))
+        task_id = first.task.id
+        assert first.task.status.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        (held,) = a.daemon.held_messages()
+        a.daemon.approve_message(held["hold_id"])
+        task = await poll_task(f, task_id, TaskState.TASK_STATE_COMPLETED)
+        replies = [p.text for m in task.history for p in m.parts]
+        assert any(t.endswith("echo held") for t in replies), replies
+        # It reached b's agent once, as the request it is.
+        assert sum("echo held" in t for t in seen_texts(scripted)) == 1
+    finally:
+        await f.http.aclose()
+
+
+@pytest.mark.parametrize(("decide", "state"), [("reject", "REJECTED"), ("expire", "FAILED")])
+async def test_a_rejected_or_expired_held_send_ends_the_task(
+    cluster: Cluster, scripted: AgentServer, decide: str, state: str
+) -> None:
+    a, _b, gid = await pair(cluster, scripted)
+    a.daemon.update_safety(gid, {"require_approval": "outbound", "approval_ttl_secs": 60})
+    f = await open_facade(a, gid)
+    try:
+        (first,) = await collect(f.plain.send_message(user("echo never")))
+        (held,) = a.daemon.held_messages()
+        if decide == "reject":
+            await a.daemon.reject_message(held["hold_id"])
+        else:
+            await cluster.advance(61)
+        await poll_task(f, first.task.id, getattr(TaskState, f"TASK_STATE_{state}"))
+        assert not any("echo never" in t for t in seen_texts(scripted))
+    finally:
+        await f.http.aclose()
+
+
+async def test_cancelling_a_held_facade_request_withdraws_the_send(
+    cluster: Cluster, scripted: AgentServer
+) -> None:
+    a, _b, gid = await pair(cluster, scripted)
+    a.daemon.update_safety(gid, {"require_approval": "outbound"})
+    f = await open_facade(a, gid)
+    facade = adapter_of(a).facade
+    assert facade is not None
+    try:
+        (first,) = await collect(f.plain.send_message(user("echo cancel me")))
+        (held,) = a.daemon.held_messages()
+        await f.plain.cancel_task(CancelTaskRequest(id=first.task.id))
+        await a.wait(lambda: a.daemon.held_messages() == [])
+        await a.wait(lambda: not facade.waiters)
+        failed = [
+            e["data"] for e in a.daemon.store.events(limit=10_000) if e["type"] == "send_failed"
+        ]
+        assert [(e["msg_id"], e["code"]) for e in failed] == [(held["msg_id"], "cancelled")]
+        decisions = [
+            r["decision"] for r in a.daemon.store.audit(gid) if r["msg_id"] == held["msg_id"]
+        ]
+        assert decisions == ["hold_for_approval", "cancelled"]
+        with pytest.raises(DaemonError):
+            a.daemon.approve_message(held["hold_id"])
+    finally:
+        await f.http.aclose()

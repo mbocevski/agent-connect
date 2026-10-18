@@ -186,6 +186,62 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS group_safety (
+    group_id TEXT PRIMARY KEY,
+    settings TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS held (
+    hold_id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    instance TEXT NOT NULL DEFAULT '',
+    msg_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    task_id TEXT,
+    inbox_seq INTEGER,
+    payload TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE TABLE IF NOT EXISTS task_decisions (
+    group_id TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, sender, task_id)
+);
+CREATE TABLE IF NOT EXISTS audit (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    class TEXT NOT NULL DEFAULT 'decision'
+);
+CREATE TABLE IF NOT EXISTS transcript_bytes (
+    group_id TEXT PRIMARY KEY,
+    bytes INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS transcript (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    inner TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0
+);
 """
 
 GROUP_COLUMNS = (
@@ -275,6 +331,11 @@ class Store:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
+            "CREATE INDEX IF NOT EXISTS audit_class ON audit (class, seq);"
+            "CREATE INDEX IF NOT EXISTS audit_group ON audit (group_id, class, seq);"
+            "CREATE INDEX IF NOT EXISTS audit_sender ON audit (group_id, sender, class, seq);"
+            "CREATE INDEX IF NOT EXISTS transcript_group ON transcript (group_id, seq);"
+            "CREATE INDEX IF NOT EXISTS transcript_sender ON transcript (group_id, sender, seq);"
         )
 
     def close(self) -> None:
@@ -438,9 +499,367 @@ class Store:
         return {r[0]: json.loads(r[1]) for r in rows}
 
     def delete_group_data(self, group_id: str) -> None:
+        """Forget a group's members, cards and safety settings; its held
+        messages are dropped. Audit rows and transcript entries stay until
+        their retention ends."""
         with self.tx() as db:
-            for table in ("members", "agent_cards"):
+            for table in ("members", "agent_cards", "group_safety", "task_decisions"):
                 db.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))  # noqa: S608
+            db.execute(
+                "UPDATE inbox SET state = 'dropped', delivery = NULL "
+                "WHERE group_id = ? AND state = 'held'",
+                (group_id,),
+            )
+            db.execute(
+                "UPDATE held SET status = 'dropped', payload = NULL "
+                "WHERE group_id = ? AND status = 'pending'",
+                (group_id,),
+            )
+
+    # -- safety policy (agentconnect.policy) ----------------------------------
+
+    def safety_overrides(self, group_id: str) -> dict[str, Any]:
+        """A group's policy overrides (``{}`` when it has none)."""
+        row = self._one("SELECT settings FROM group_safety WHERE group_id = ?", group_id)
+        return {} if row is None else dict(json.loads(row[0]))
+
+    def set_safety_overrides(self, group_id: str, overrides: dict[str, Any]) -> None:
+        if not overrides:
+            self._db.execute("DELETE FROM group_safety WHERE group_id = ?", (group_id,))
+            return
+        self._db.execute(
+            "INSERT INTO group_safety (group_id, settings) VALUES (?, ?) "
+            "ON CONFLICT(group_id) DO UPDATE SET settings = excluded.settings",
+            (group_id, json.dumps(overrides, sort_keys=True)),
+        )
+
+    def add_held(self, row: dict[str, Any]) -> None:
+        """A message waiting for the human's approval. ``payload`` (outbound
+        only) is the queued send; an inbound one waits in its inbox row."""
+        payload = row.get("payload")
+        self._db.execute(
+            "INSERT OR IGNORE INTO held (hold_id, group_id, direction, sender, instance, msg_id, "
+            "kind, size, task_id, inbox_seq, payload, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                row["hold_id"],
+                row["group_id"],
+                row["direction"],
+                row["sender"],
+                row.get("instance", ""),
+                row["msg_id"],
+                row["kind"],
+                row["size"],
+                row.get("task_id"),
+                row.get("inbox_seq"),
+                None if payload is None else json.dumps(payload),
+                row["created_at"],
+                row["expires_at"],
+            ),
+        )
+
+    _HELD_COLUMNS = (
+        "hold_id",
+        "group_id",
+        "direction",
+        "sender",
+        "instance",
+        "msg_id",
+        "kind",
+        "size",
+        "task_id",
+        "inbox_seq",
+        "payload",
+        "created_at",
+        "expires_at",
+        "status",
+    )
+
+    def _held(self, row: tuple[Any, ...]) -> dict[str, Any]:
+        d = dict(zip(self._HELD_COLUMNS, row, strict=True))
+        d["payload"] = None if d["payload"] is None else json.loads(d["payload"])
+        return d
+
+    def held(self, hold_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(self._HELD_COLUMNS)} FROM held WHERE hold_id = ?",  # noqa: S608
+            hold_id,
+        )
+        return None if row is None else self._held(row)
+
+    def held_items(self, status: str = "pending") -> list[dict[str, Any]]:
+        rows = self._all(
+            f"SELECT {', '.join(self._HELD_COLUMNS)} FROM held "  # noqa: S608
+            "WHERE status = ? ORDER BY created_at, hold_id",
+            status,
+        )
+        return [self._held(r) for r in rows]
+
+    def set_held_status(self, hold_id: str, status: str) -> bool:
+        """Decide a pending held item; its payload (plaintext) is no longer
+        needed. False if it was already decided (by a concurrent caller)."""
+        cur = self._db.execute(
+            "UPDATE held SET status = ?, payload = NULL WHERE hold_id = ? AND status = 'pending'",
+            (status, hold_id),
+        )
+        return cur.rowcount == 1
+
+    def held_load(
+        self, group_id: str, direction: str, instance: str, identity: str
+    ) -> tuple[int, int, int, int, int, int]:
+        """Pending holds of a group in one direction: how many, how many from
+        ``instance``, how many from ``identity`` (all its instances), their
+        bytes, how many identities have one, and ``identity``'s bytes."""
+        row = self._one(
+            "SELECT COUNT(*), COALESCE(SUM(instance = ?), 0), COALESCE(SUM(sender = ?), 0), "
+            "COALESCE(SUM(size), 0), COUNT(DISTINCT sender), "
+            "COALESCE(SUM(CASE WHEN sender = ? THEN size ELSE 0 END), 0) FROM held "
+            "WHERE group_id = ? AND direction = ? AND status = 'pending'",
+            instance,
+            identity,
+            identity,
+            group_id,
+            direction,
+        )
+        if row is None:
+            return 0, 0, 0, 0, 0, 0
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3]), int(row[4]), int(row[5])
+
+    def task_decision(self, group_id: str, sender: str, task_id: str) -> tuple[str, int] | None:
+        """A task's state (``pending``, ``approved``, ``rejected``) and when it
+        was set, or None."""
+        row = self._one(
+            "SELECT state, at FROM task_decisions WHERE group_id = ? AND sender = ? "
+            "AND task_id = ?",
+            group_id,
+            sender,
+            task_id,
+        )
+        return None if row is None else (str(row[0]), int(row[1]))
+
+    def forget_task(self, group_id: str, sender: str, task_id: str) -> None:
+        self._db.execute(
+            "DELETE FROM task_decisions WHERE group_id = ? AND sender = ? AND task_id = ?",
+            (group_id, sender, task_id),
+        )
+
+    def task_state(self, group_id: str, sender: str, task_id: str) -> str | None:
+        """``pending``, ``approved`` or ``rejected``: the human's decision on a
+        task's first update (held with require_approval), or None."""
+        row = self._one(
+            "SELECT state FROM task_decisions WHERE group_id = ? AND sender = ? AND task_id = ?",
+            group_id,
+            sender,
+            task_id,
+        )
+        return None if row is None else str(row[0])
+
+    def set_task_state(
+        self, group_id: str, sender: str, task_id: str, state: str, now: int
+    ) -> None:
+        self._db.execute(
+            "INSERT INTO task_decisions (group_id, sender, task_id, state, at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(group_id, sender, task_id) "
+            "DO UPDATE SET state = excluded.state, at = excluded.at",
+            (group_id, sender, task_id, state, now),
+        )
+
+    def task_states_purge(self, before: int) -> None:
+        """Forget decided tasks not touched since ``before``."""
+        self._db.execute(
+            "DELETE FROM task_decisions WHERE at < ? AND state != 'pending'", (before,)
+        )
+
+    def audit_add(  # noqa: PLR0913
+        self,
+        group_id: str,
+        *,
+        at: int,
+        direction: str,
+        sender: str,
+        msg_id: str,
+        kind: str,
+        size: int,
+        decision: str,
+        reason: str,
+        keep: int | None = None,
+        keep_group: int | None = None,
+        keep_sender: int | None = None,
+    ) -> None:
+        """One audit row, in one of two classes that never evict each other:
+        ``drop`` rows (what the policy refused) and ``decision`` rows (what
+        it delivered, held, approved, rejected or expired). A drop row keeps
+        only the newest ``keep_sender`` drops of its sender in the group, and
+        ``keep_group`` and ``keep`` drops in the group and in all; a decision
+        row is trimmed only by the group and daemon caps, across senders. So a
+        sender flooding the log with drops can't erase what it got through,
+        its own record included."""
+        row_class = "drop" if decision == "drop" else "decision"
+        self._db.execute(
+            "INSERT INTO audit (group_id, at, direction, sender, msg_id, kind, size, decision, "
+            "reason, class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (group_id, at, direction, sender, msg_id, kind, size, decision, reason, row_class),
+        )
+        if keep_sender is not None and row_class == "drop":
+            self._trim_audit(
+                "group_id = ? AND sender = ? AND class = ?",
+                (group_id, sender, row_class),
+                keep_sender,
+            )
+        if keep_group is not None:
+            self._trim_audit("group_id = ? AND class = ?", (group_id, row_class), keep_group)
+        if keep is not None:
+            self._trim_audit("class = ?", (row_class,), keep)
+
+    def _trim_audit(self, where: str, args: tuple[str, ...], keep: int) -> None:
+        """Delete the audit rows matching ``where`` beyond the newest ``keep``
+        (an indexed walk, not a table scan)."""
+        edge = self._one(
+            f"SELECT seq FROM audit WHERE {where} ORDER BY seq DESC LIMIT 1 OFFSET ?",  # noqa: S608
+            *args,
+            keep,
+        )
+        if edge is not None:
+            self._db.execute(f"DELETE FROM audit WHERE {where} AND seq <= ?", (*args, edge[0]))  # noqa: S608
+
+    _AUDIT_COLUMNS = (
+        "seq",
+        "group_id",
+        "at",
+        "direction",
+        "sender",
+        "msg_id",
+        "kind",
+        "size",
+        "decision",
+        "reason",
+    )
+
+    def audit(
+        self, group_id: str | None = None, after: int = 0, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        rows = self._all(
+            f"SELECT {', '.join(self._AUDIT_COLUMNS)} FROM audit WHERE seq > ? "  # noqa: S608
+            "AND (? IS NULL OR group_id = ?) ORDER BY seq LIMIT ?",
+            after,
+            group_id,
+            group_id,
+            limit,
+        )
+        return [dict(zip(self._AUDIT_COLUMNS, r, strict=True)) for r in rows]
+
+    def audit_purge(self, before: int, keep: int) -> None:
+        """Delete audit rows older than ``before`` and all but the newest ``keep``."""
+        self._db.execute("DELETE FROM audit WHERE at < ?", (before,))
+        row = self._one("SELECT MAX(seq) FROM audit")
+        if row is not None and row[0] is not None:
+            self._db.execute("DELETE FROM audit WHERE seq <= ?", (int(row[0]) - keep,))
+
+    def transcript_add(  # noqa: PLR0913
+        self,
+        group_id: str,
+        *,
+        at: int,
+        direction: str,
+        sender: str,
+        msg_id: str,
+        kind: str,
+        inner: dict[str, Any],
+        max_rows: int,
+        max_sender_rows: int,
+        max_group_bytes: int,
+        max_bytes: int,
+    ) -> None:
+        """One transcript entry. Its sender keeps its newest ``max_sender_rows``
+        in the group, the group its newest ``max_rows`` and ``max_group_bytes``,
+        and over ``max_bytes`` for all groups the group holding the most gives
+        way first, oldest entries first: one sender can't flush the record of
+        the others. Every trim walks an index, and the byte totals are kept
+        as they change (``transcript_bytes``), never summed over the table."""
+        text = json.dumps(inner, sort_keys=True)
+        self._db.execute(
+            "INSERT INTO transcript (group_id, at, direction, sender, msg_id, kind, inner, size) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (group_id, at, direction, sender, msg_id, kind, text, len(text)),
+        )
+        self._add_transcript_bytes(group_id, len(text))
+        self._trim_transcript(
+            "group_id = ? AND sender = ?", (group_id, sender), max_sender_rows, group_id
+        )
+        self._trim_transcript("group_id = ?", (group_id,), max_rows, group_id)
+        while self.transcript_bytes(group_id) > max_group_bytes:
+            self._drop_oldest_transcript(group_id)
+        while self.transcript_bytes() > max_bytes:
+            biggest = self._one(
+                "SELECT group_id FROM transcript_bytes ORDER BY bytes DESC, group_id LIMIT 1"
+            )
+            if biggest is None:
+                break
+            self._drop_oldest_transcript(str(biggest[0]))
+
+    def _add_transcript_bytes(self, group_id: str, delta: int) -> None:
+        self._db.execute(
+            "INSERT INTO transcript_bytes (group_id, bytes) VALUES (?, ?) "
+            "ON CONFLICT(group_id) DO UPDATE SET bytes = bytes + excluded.bytes",
+            (group_id, delta),
+        )
+        self._db.execute("DELETE FROM transcript_bytes WHERE bytes <= 0")
+
+    def _trim_transcript(self, where: str, args: tuple[str, ...], keep: int, group_id: str) -> None:
+        """Delete the rows matching ``where`` beyond the newest ``keep``."""
+        edge = self._one(
+            f"SELECT seq FROM transcript WHERE {where} ORDER BY seq DESC LIMIT 1 OFFSET ?",  # noqa: S608
+            *args,
+            keep,
+        )
+        if edge is None:
+            return
+        cond = f"{where} AND seq <= ?"
+        total = f"SELECT COALESCE(SUM(size), 0) FROM transcript WHERE {cond}"  # noqa: S608
+        gone = self._one(total, *args, edge[0])
+        self._db.execute(f"DELETE FROM transcript WHERE {cond}", (*args, edge[0]))  # noqa: S608
+        self._add_transcript_bytes(group_id, -int(gone[0]) if gone is not None else 0)
+
+    def _drop_oldest_transcript(self, group_id: str) -> None:
+        row = self._one(
+            "SELECT seq, size FROM transcript WHERE group_id = ? ORDER BY seq LIMIT 1", group_id
+        )
+        if row is None:
+            self._db.execute("DELETE FROM transcript_bytes WHERE group_id = ?", (group_id,))
+            return
+        self._db.execute("DELETE FROM transcript WHERE seq = ?", (row[0],))
+        self._add_transcript_bytes(group_id, -int(row[1]))
+
+    def transcript_bytes(self, group_id: str | None = None) -> int:
+        """Bytes kept in one group's transcript, or in all of them."""
+        if group_id is None:
+            row = self._one("SELECT COALESCE(SUM(bytes), 0) FROM transcript_bytes")
+        else:
+            row = self._one("SELECT bytes FROM transcript_bytes WHERE group_id = ?", group_id)
+        return 0 if row is None else int(row[0])
+
+    def transcript(self, group_id: str, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self._all(
+            "SELECT seq, group_id, at, direction, sender, msg_id, kind, inner FROM transcript "
+            "WHERE group_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+            group_id,
+            after,
+            limit,
+        )
+        keys = ("seq", "group_id", "at", "direction", "sender", "msg_id", "kind")
+        return [dict(zip(keys, r[:7], strict=True)) | {"inner": json.loads(r[7])} for r in rows]
+
+    def transcript_groups(self) -> list[str]:
+        return [str(r[0]) for r in self._all("SELECT DISTINCT group_id FROM transcript")]
+
+    def transcript_purge(self, group_id: str, before: int) -> None:
+        gone = self._one(
+            "SELECT COALESCE(SUM(size), 0) FROM transcript WHERE group_id = ? AND at < ?",
+            group_id,
+            before,
+        )
+        self._db.execute("DELETE FROM transcript WHERE group_id = ? AND at < ?", (group_id, before))
+        self._add_transcript_bytes(group_id, -int(gone[0]) if gone is not None else 0)
 
     # -- invites and approvals ---------------------------------------------
 
@@ -634,6 +1053,19 @@ class Store:
 
     # -- inbox --------------------------------------------------------------
 
+    def inbox_seq(self, sender: str, msg_id: str) -> int | None:
+        row = self._one("SELECT seq FROM inbox WHERE sender = ? AND msg_id = ?", sender, msg_id)
+        return None if row is None else int(row[0])
+
+    def inbox_row(self, seq: int) -> InboxRow | None:
+        row = self._one(
+            "SELECT seq, sender, msg_id, group_id, delivery, state FROM inbox WHERE seq = ?", seq
+        )
+        if row is None:
+            return None
+        delivery = None if row[4] is None else json.loads(row[4])
+        return InboxRow(row[0], row[1], row[2], row[3], delivery, row[5])
+
     def inbox_state(self, sender: str, msg_id: str) -> str | None:
         row = self._one("SELECT state FROM inbox WHERE sender = ? AND msg_id = ?", sender, msg_id)
         return None if row is None else str(row[0])
@@ -687,7 +1119,7 @@ class Store:
     def pending_deliveries(self) -> list[InboxRow]:
         rows = self._all(
             "SELECT seq, sender, msg_id, group_id, delivery, state FROM inbox "
-            "WHERE state IN ('pending', 'held') ORDER BY seq"
+            "WHERE state = 'pending' ORDER BY seq"
         )
         return [
             InboxRow(r[0], r[1], r[2], r[3], None if r[4] is None else json.loads(r[4]), r[5])
@@ -814,14 +1246,21 @@ class Store:
         }
 
     def events(
-        self, after: int = 0, limit: int = 200, group_id: str | None = None
+        self,
+        after: int = 0,
+        limit: int = 200,
+        group_id: str | None = None,
+        exclude: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
+        """Events after ``after``, oldest first; ``exclude`` leaves out types."""
         rows = self._all(
             "SELECT seq, group_id, type, data, at, event_id FROM events WHERE seq > ? "
-            "AND (? IS NULL OR group_id = ?) ORDER BY seq LIMIT ?",
+            "AND (? IS NULL OR group_id = ?) "
+            "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq LIMIT ?",
             after,
             group_id,
             group_id,
+            json.dumps(list(exclude)),
             limit,
         )
         return [self._event(r) for r in rows]

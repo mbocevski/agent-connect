@@ -62,7 +62,7 @@ async def test_a_message_triggers_the_handler_and_the_reply_carries_hop(
     async def handle(msg: Message, group: Group) -> None:
         seen.append(msg)
         if msg.addressed_to_me:
-            await group.reply(msg, f"echo {msg.text}")
+            await group.reply(msg, f"echo {msg.raw_text}")
 
     sent = say(alice, gid, "ping")
     await alice.adapter.wait_for(lambda: bool(received(alice)), WAIT)
@@ -74,7 +74,7 @@ async def test_a_message_triggers_the_handler_and_the_reply_carries_hop(
     assert msg.addressed_to_me
     assert msg.group.id == gid
     assert msg.trust_state.members == 2
-    assert msg.text == "ping"
+    assert msg.raw_text == "ping"
     (answer,) = received(alice)
     assert answer.body["parts"] == [{"text": "echo ping"}]
     assert answer.inner["reply_to"] == [sent]
@@ -147,7 +147,7 @@ async def test_messages_queue_while_the_webhook_is_down_and_arrive_in_order(
 
     @bob.sdk.on_message
     async def handle(msg: Message, _group: Group) -> None:
-        handled.append(msg.text)
+        handled.append(msg.raw_text)
         if len(handled) == 3:
             done.set()
 
@@ -205,7 +205,7 @@ async def test_sse_streams_resume_after_a_disconnect(cluster: Cluster, sockdir: 
 
     @bob.sdk.on_message
     async def handle(msg: Message, _group: Group) -> None:
-        handled.append(msg.text)
+        handled.append(msg.raw_text)
         changed.set()
 
     async def until(n: int) -> None:
@@ -250,7 +250,7 @@ async def test_sse_streams_resume_after_a_disconnect(cluster: Cluster, sockdir: 
 
     @other.on_message
     async def collect(msg: Message, _group: Group) -> None:
-        replayed.append(msg.text)
+        replayed.append(msg.raw_text)
         again.set()
 
     second = asyncio.create_task(other.stream(last_event_id=ids[0]))
@@ -272,7 +272,7 @@ async def test_sse_resume_survives_a_daemon_restart(cluster: Cluster, sockdir: P
 
     @bob.sdk.on_message
     async def handle(msg: Message, _group: Group) -> None:
-        handled.append(msg.text)
+        handled.append(msg.raw_text)
         changed.set()
 
     stream = asyncio.create_task(bob.sdk.stream())
@@ -298,7 +298,7 @@ async def test_sse_resume_survives_a_daemon_restart(cluster: Cluster, sockdir: P
 
     @resumed.on_message
     async def collect(msg: Message, _group: Group) -> None:
-        replayed.append(msg.text)
+        replayed.append(msg.raw_text)
         again.set()
 
     task = asyncio.create_task(resumed.stream(last_event_id=str(first_id)))
@@ -327,7 +327,7 @@ async def test_sse_filters_by_group_and_refuses_without_the_adapter(
 
     @bob.sdk.on_message
     async def handle(msg: Message, _group: Group) -> None:
-        seen.append(msg.text)
+        seen.append(msg.raw_text)
         got.set()
 
     stream = asyncio.create_task(bob.sdk.stream(gid))
@@ -456,7 +456,7 @@ async def test_sse_resume_past_the_retention_window_gets_a_gap_event(
 
     @bob.sdk.on_message
     async def handle(msg: Message, _group: Group) -> None:
-        handled.append(msg.text)
+        handled.append(msg.raw_text)
         changed.set()
 
     stream = asyncio.create_task(bob.sdk.stream())

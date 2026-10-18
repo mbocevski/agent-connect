@@ -186,6 +186,11 @@ class A2AAdapter:
             elif event.type in ("member_left", "member_removed"):
                 self._peers.get(gid, set()).discard(identity)
                 self._cards.get(gid, {}).pop(identity, None)
+        if self.facade is not None and event.type in ("send_approved", "send_failed"):
+            # A facade send the group held for the human: approved or not.
+            hold_id = event.data.get("hold_id")
+            if isinstance(hold_id, str):
+                self.facade.decided(hold_id, str(event.data.get("code", "approved")))
         if event.type == "joined" and self.options.local_agent_url is not None:
             # SPEC: the card goes out on join; fetch it fresh first.
             await self._load_card()
@@ -308,7 +313,10 @@ class A2AAdapter:
     def _local_message(self, d: Delivery) -> Message:
         peer = convert.parse_message(d.body)
         msg = Message(role=Role.ROLE_USER, message_id=f"ac-{d.msg_id}", context_id=d.group_id)
-        if self.options.frame_text:
+        # The notice goes first unless the adapter (a2a.frame_text) or the
+        # group's safety policy (frame_text) turned it off.
+        framed = self.options.frame_text and d.frame_text
+        if framed:
             msg.parts.append(Part(text=d.framed_text()))
         msg.parts.extend(peer.parts)
         ref = self._tasks.get(peer.task_id) if peer.task_id else None
@@ -317,6 +325,8 @@ class A2AAdapter:
         meta: dict[str, Any] = {
             "untrusted": True,
             "scope": d.scope,
+            "frame_text": framed,
+            "notice": d.framed_text(),
             "sender": {
                 "identity": d.sender.identity,
                 "instance_id": d.sender.instance_id,
@@ -421,11 +431,13 @@ class A2AAdapter:
     async def _maybe_cancel(self, d: Delivery) -> None:
         """SPEC 7.2: ``a2a.task_cancel`` (an A2A ``CancelTaskRequest``) from
         the task's requester cancels the agent's task; from anyone else it is
-        ignored."""
+        ignored, and so is one delivered as context (past the loop guard, or
+        addressed to another member): it has no command's standing."""
         request = convert.parse_cancel(d.body)
         ref = None if request is None else self._tasks.get(request.id)
         if (
-            request is None
+            not d.addressed_to_me
+            or request is None
             or ref is None
             or ref.group_id != d.group_id
             or ref.requester != d.sender.identity

@@ -10,7 +10,12 @@ One shape for both transports, so the SDK parses one thing. A message::
      "untrusted": true, "trust_state": {...},
      "origin": "agent" | "human", "hop": n, "reply_to": [...],
      "addressee": [...],             # when the sender named it (SPEC 9.3)
+     "frame_text": bool, "notice": <the SPEC 10.1 prefix>,
      "a2a": <the inner body>}
+
+``frame_text`` is the group's policy (on by default): a consumer that hands
+the text to a model shows ``notice`` in front of it. The SDK's ``msg.text``
+does that.
 
 A daemon event (``member_joined``, ``epoch_changed``, ``loop_guard``, ...)::
 
@@ -75,6 +80,8 @@ def message_payload(group: GroupView, delivery: Delivery) -> dict[str, Any]:
         "trust_state": delivery.trust_state,
         "origin": delivery.origin,
         "hop": delivery.hop,
+        "frame_text": delivery.frame_text,
+        "notice": delivery.framed_text(),
         "a2a": delivery.body,
     }
     refs = delivery.inner.get("reply_to")

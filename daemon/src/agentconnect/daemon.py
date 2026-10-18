@@ -42,16 +42,15 @@ from typing import Any
 
 import agentconnect_core as ac
 from agentconnect import log
+from agentconnect.a2a_adapter import cards, convert
 from agentconnect.adapter import (
     Adapter,
     Delivery,
     DeliveryResult,
     Event,
     GroupView,
-    PassThroughPolicy,
-    PolicyDecision,
-    PolicyHook,
     Sender,
+    SendReceipt,
 )
 from agentconnect.backoff import Backoff
 from agentconnect.clock import Clock, SystemClock, unix_seconds
@@ -65,7 +64,19 @@ from agentconnect.identity import (
     open_core_client,
 )
 from agentconnect.keystore import DataDirLock, Keystore, open_keystore
-from agentconnect.limits import KNOWN_KINDS, RateLimiter, content_problem
+from agentconnect.limits import DRAIN_RATE_MULTIPLE, KNOWN_KINDS, DrainBudget
+from agentconnect.policy import (
+    HUMAN_ONLY_KINDS,
+    Decision,
+    Inbound,
+    Outbound,
+    PolicyError,
+    SafetyPolicy,
+    Verdict,
+    drop,
+    task_of,
+    verification_holds,
+)
 from agentconnect.relay import (
     DRAIN_KEY,
     NotConnectedError,
@@ -75,6 +86,7 @@ from agentconnect.relay import (
     b64,
     unb64,
 )
+from agentconnect.schemas import normalize
 from agentconnect.store import GroupRow, OutboxRow, Store
 from agentconnect.tasks import cancel_and_wait
 
@@ -89,12 +101,14 @@ MAX_PARKED_PER_GROUP = 256
 MAX_REPLY_TO = 16  # SPEC 7.2
 MAX_ADDRESSEE = 50  # SPEC 7.2: at most the group size
 HOP_MEMORY_SECS = 7 * 24 * 3600
-MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain
 TRANSFER_TIMEOUT_SECS = 10.0  # owner hand-over before a SAS-mismatch exit
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
-# SPEC 7.3: controls only a human-originated message may carry.
-HUMAN_ONLY_KINDS = frozenset({"control.resume"})
+# Safety-policy events that reveal what the policy did with a peer's message:
+# recorded for the human (GET /v0/events with the human token, the CLI), never
+# passed to the agent's adapter.
+HELD_PRIVATE = ("payload", "inbox_seq", "status")  # never in held listings
+HUMAN_EVENTS = frozenset({"message_held", "held_expired", "repeated_violations"})
 INVITE_WARNING = (
     "This invite was already used or revoked. If you didn't expect this, "
     "the link may have been intercepted. Tell the sender."
@@ -145,8 +159,22 @@ RETRYABLE_RELAY_ERRORS = frozenset({"rate_limited", "internal"})
 BENIGN = "benign"  # a failed outbox row nobody needs to hear about
 OUTBOUND_PROBLEMS = {
     "unknown_kind": ("bad_request", "unknown message kind"),
-    "too_large": ("too_large", "message too large (SPEC 10.2: 256 KiB)"),
-    "part_kind": ("forbidden", "only text and data parts are allowed (SPEC 10.2)"),
+    "too_large": ("too_large", "message too large (SPEC 10.2: 256 KiB, or the group's limit)"),
+    "part_kind": (
+        "forbidden",
+        "only text and data parts are allowed (SPEC 10.2), and file parts where the group's "
+        "policy allows them",
+    ),
+    "file_too_large": ("too_large", "file part larger than the group's max_file_bytes"),
+    "rate_limited": ("rate_limited", "over the SPEC 10.2 message rate"),
+    "hold_overflow": ("rate_limited", "too many messages already wait for the human's approval"),
+    "hold_queue_full": ("rate_limited", "the group's approval queue is full"),
+    "task_pending": ("forbidden", "the task's first update waits for the human's approval"),
+    "task_rejected": ("forbidden", "the human rejected this task"),
+    "not_for_agents": (
+        "forbidden",
+        "control messages and Agent Cards come from the daemon or the human, not the agent",
+    ),
 }
 
 
@@ -292,20 +320,18 @@ class Options:
 class Daemon:
     """One daemon: one identity, one instance, one relay connection."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         config: Config,
         adapters: Iterable[Adapter] = (),
         *,
         clock: Clock | None = None,
         keystore: Keystore | None = None,
-        policy: PolicyHook | None = None,
         options: Options | None = None,
     ) -> None:
         self.config = config
         self.clock: Clock = clock or SystemClock()
         self.adapters: dict[str, Adapter] = {a.name: a for a in adapters}
-        self.policy: PolicyHook = policy or PassThroughPolicy()
         self.options = options or Options()
         self.failpoints = Failpoints()  # inert unless a test arms one
         # Set while one journal entry's effects are being recorded (_apply).
@@ -356,10 +382,23 @@ class Daemon:
         self._proposed_leaves: dict[str, set[str]] = {}
         self._tasks: list[asyncio.Task[None]] = []
         self._delivery_backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
-        self.limits = RateLimiter(self.clock)
+        # Every message in and out goes through it (agentconnect.policy).
+        self.safety = SafetyPolicy(
+            config.safety_defaults(),
+            self.store,
+            self.clock,
+            audit_retention_days=config.policy_audit_retention_days,
+            transcript_max_bytes=config.policy_transcript_max_bytes,
+            audit_group_rows=config.policy_audit_max_rows_per_group,
+            audit_sender_rows=config.policy_audit_max_rows_per_sender,
+        )
+        self._background: set[asyncio.Task[None]] = set()
+        # Pinned card-signing keys (SPEC 10.5), checked on every received card.
+        self._card_keys = cards.load_jwks(config.a2a_card_keys_file)
+        self._held_wake = asyncio.Event()
         self._fail_codes: dict[int, str] = {}
         self._drain_frame = False
-        self._drain_exempted = 0
+        self._drain = DrainBudget()
         self.running = False
 
     # -- lifecycle ------------------------------------------------------------
@@ -385,6 +424,7 @@ class Daemon:
             "inbound": self._inbound,
             "outbox": self._outbox,
             "delivery": self._delivery,
+            "held_timer": self._held_timer,
             "relay_link": self.link.run,
         }
         for name, worker in workers.items():
@@ -485,16 +525,17 @@ class Daemon:
 
         await asyncio.wait_for(loop(), within)
 
-    def _drain_exempt(self) -> bool:
+    def _drain_exempt(self, group_id: str, identity: str) -> bool:
         """Whether the frame being handled is part of the reconnect drain and
-        still within :data:`MAX_DRAIN_EXEMPT` for this connection."""
-        if not self._drain_frame or self._drain_exempted >= MAX_DRAIN_EXEMPT:
+        still within the drain's budget: :data:`MAX_DRAIN_EXEMPT` for this
+        connection, and twice the per-sender rate for each identity."""
+        if not self._drain_frame:
             return False
-        self._drain_exempted += 1
-        return True
+        limit = self.safety.settings(group_id).limits(identity).sender_per_minute
+        return self._drain.take(f"{group_id}/{identity}", DRAIN_RATE_MULTIPLE * limit)
 
     async def _on_connected(self) -> None:
-        self._drain_exempted = 0
+        self._drain.reset()
         # Anything a failure in this run left unfinished in the journal.
         self._frames.put_nowait({"t": REPLAY_JOURNAL})
         self._outbox_wake.set()
@@ -553,16 +594,43 @@ class Daemon:
         again on start and on every reconnect. Inside :meth:`_apply` the
         event is recorded in its transaction and the adapter is told once
         that commits."""
-        event_id = self._event_id(group_id, kind, cause, data)
-        new = self.store.add_event(group_id, kind, data, self.now(), event_id)
-        LOG.info("event", type=kind, group=log.hid(group_id), event_id=log.hid(event_id))
-        if not new and self.store.event_notified(event_id):
-            return  # regenerated after a crash, and the adapter already has it
-        event = Event(kind, group_id, data, event_id)
+        event = self._record(group_id, kind, cause, data)
+        if event is None:
+            return
         if self._batch is not None:
             self._batch.append(event)
             return
         await self._notify(event)
+
+    def _record(
+        self, group_id: str | None, kind: str, cause: str | None, data: dict[str, Any]
+    ) -> Event | None:
+        """Record an event (in the current transaction, if any); the event to
+        notify, or None if the adapter already has it."""
+        event_id = self._event_id(group_id, kind, cause, data)
+        new = self.store.add_event(group_id, kind, data, self.now(), event_id)
+        LOG.info("event", type=kind, group=log.hid(group_id), event_id=log.hid(event_id))
+        if not new and self.store.event_notified(event_id):
+            return None  # regenerated after a crash, and the adapter already has it
+        return Event(kind, group_id, data, event_id)
+
+    def _notify_soon(self, events: list[Event]) -> None:
+        """Tell the adapter about recorded events from synchronous code. They
+        are durable already: if this never runs, :meth:`_renotify` sends them."""
+        if not events:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no loop (never in the daemon): the next renotify sends them
+
+        async def notify() -> None:
+            for event in events:
+                await self._notify(event)
+
+        task = loop.create_task(notify())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     def _event_id(
         self, group_id: str | None, kind: str, cause: str | None, data: dict[str, Any]
@@ -629,7 +697,9 @@ class Daemon:
         adapter = self._adapter_for(event.group_id)
         try:
             self.failpoints.hit("event.after_record")
-            if adapter is not None:
+            # The policy's own events are for the human only: an agent that
+            # heard of a hold could tell the sender (SPEC 10.2).
+            if adapter is not None and event.type not in HUMAN_EVENTS:
                 view = None if event.group_id is None else self._view(event.group_id)
                 await adapter.on_event(view, event)
             self.failpoints.hit("event.after_notify")
@@ -785,12 +855,14 @@ class Daemon:
         round, a crash would leave an "active" group with no MLS state."""
         gid = unb64(group_id)
         self.store.update_group(group_id, status=kind)
+        await self._drop_group_holds(group_id)
         self.store.delete_group_data(group_id)
         self.store.kv_set(f"leaving/{group_id}", "0")
         await self.emit(group_id, kind)
 
         def forget() -> None:
             self._leaving.discard(group_id)
+            self.safety.forget_group(group_id)
             with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
                 self.client.delete_group(gid)
 
@@ -854,8 +926,9 @@ class Daemon:
         past ``expires_at`` is marked expired and its secret deleted; a
         pending join past its invite's expiry (plus a grace period for an
         in-flight Welcome) fails and its secret goes. With no join pending,
-        parked frames are dropped. Runs before each inbound frame and on
-        (re)connect."""
+        parked frames are dropped. Held messages past their approval window
+        are dropped, and the audit log and transcripts keep their retention.
+        Runs before each inbound frame and on (re)connect."""
         now = self.now()
         for invite in self.store.invites("open"):
             if now >= int(invite["expires_at"]):
@@ -875,6 +948,8 @@ class Daemon:
         self.store.forget_hops(now - HOP_MEMORY_SECS)
         with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
             self.client.journal_purge(now - HOP_MEMORY_SECS)
+        await self.expire_held()
+        self.safety.purge()
 
     async def _handle_frame(self, frame: dict[str, Any]) -> None:
         await self.expire()
@@ -1128,24 +1203,49 @@ class Daemon:
                 await self.emit(group_id, "relay_misbehaviour", reason="epoch_mismatch")
                 return "dropped"
             self.store.bump_messages(group_id)
-            delivery = self._make_delivery(
-                group, msg_id, event, replayed=bool(event.get("replayed"))
+            replayed = bool(event.get("replayed"))
+            delivery, decision, kind, hop = self._make_delivery(
+                group, msg_id, event, replayed=replayed
             )
+            identity, size = str(event["sender"]["identity"]), len(event["plaintext"])
+            self.safety.audit(
+                group_id,
+                "in",
+                sender=identity,
+                msg_id=msg_id,
+                kind=kind,
+                size=size,
+                decision=decision.verdict,
+                reason=decision.reason,
+            )
+            # SPEC 10.3 on the hop alone, before and whatever the policy
+            # decided: a pause only for what passed would tell a peer which of
+            # its probes passed (SPEC 10.2).
+            if hop is not None and hop > _max_turns(group.policy):
+                await self._loop_guard(group, msg_id, identity, hop)
             if delivery is None:
                 self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
+                alert = (
+                    None if replayed else self.safety.violation(group_id, identity, decision.reason)
+                )
+                if alert is not None:
+                    await self.emit(group_id, "repeated_violations", **alert)
                 return "dropped"
+            held = decision.verdict is Verdict.HOLD_FOR_APPROVAL
             self.store.record_inbox(
                 sender,
                 msg_id,
                 group_id,
-                "pending",
+                "held" if held else "pending",
                 now,
                 delivery=delivery.to_json(),
                 hop=delivery.hop,
             )
-            self._defer(self._delivery_wake.set)
-            if delivery.hop > _max_turns(group.policy) and delivery.origin != "human":
-                await self._loop_guard(group, delivery)
+            if held:
+                await self._hold_inbound(group, sender, delivery, size)
+            else:
+                self.safety.transcribe(group_id, "in", identity, msg_id, delivery.inner)
+                self._defer(self._delivery_wake.set)
             if delivery.kind == "control.close":
                 # SPEC 7.3: the owner asks everyone to leave. Leaving is the
                 # human's decision; the daemon never leaves on its own.
@@ -1156,7 +1256,7 @@ class Daemon:
                     sender=delivery.sender.identity,
                     reason=reason[:200] if isinstance(reason, str) else "",
                 )
-            return "pending"
+            return "held" if held else "pending"
         if etype in ("commit", "own_commit_confirmed"):
             await self._after_commit(
                 group_id,
@@ -1195,74 +1295,127 @@ class Daemon:
                 path = "receive" if ctx.get("from_relay", True) else "confirm"
                 await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
 
-    def _make_delivery(
-        self, group: GroupRow, msg_id: str, event: dict[str, Any], *, replayed: bool = False
-    ) -> Delivery | None:
-        try:
-            inner = json.loads(event["plaintext"])
-        except ValueError:
-            return None
-        if not isinstance(inner, dict) or not isinstance(inner.get("kind"), str):
-            return None
-        sender = event["sender"]
-        identity = sender["identity"]
-        # SPEC 7.2 (unknown kinds are ignored) and 10.2 (size, parts, rate).
-        problem = content_problem(inner, len(event["plaintext"]))
-        # A replayed journal entry was counted against the rate when the core
-        # first processed it.
-        if (
-            problem is None
-            and not replayed
-            and not self._drain_exempt()
-            and not self.limits.allow_inner(
-                group.group_id, identity, inner.get("kind"), inner.get("body")
-            )
-        ):
-            problem = "rate_limited"
-        if problem is not None:
-            LOG.info("message_dropped", group=log.hid(group.group_id), reason=problem)
-            return None
-        body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
-        verified = any(
-            m.identity == identity and m.verified for m in self.store.members(group.group_id)
-        )
-        policy = group.policy
-        to = inner.get("to") if isinstance(inner.get("to"), list) else ["*"]
+    def _received_hop(self, group_id: str, inner: dict[str, Any]) -> int:
+        """The SPEC 10.3 hop of a received message: what it claims, and at
+        least one more than any message it replies to that we know (SPEC
+        7.2), whatever the sender claims."""
         raw_hop = inner.get("hop")
         hop = raw_hop if isinstance(raw_hop, int) and not isinstance(raw_hop, bool) else 0
         hop = max(hop, 0)
-        # SPEC 7.2/10.3: a reply names what it replies to. If we know those
-        # messages, the hop is at least one more than theirs, whatever the
-        # sender claims.
         refs = inner.get("reply_to")
         if isinstance(refs, list):
             known = self.store.inbox_hops(
-                group.group_id, [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)]
+                group_id, [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)]
             )
             if known:
                 hop = max(hop, max(known) + 1)
-        self.store.record_hop(group.group_id, msg_id, hop, self.now())
-        origin = "human" if inner.get("origin") == "human" else "agent"
-        if inner["kind"] in HUMAN_ONLY_KINDS:
-            if origin != "human":
-                return None  # SPEC 7.3: an agent can't resume; ignore it
-            self._reset_loop_guard(group.group_id)
-        if inner["kind"] == "control.close" and identity != group.policy.get("owner"):
-            return None  # SPEC 7.3: only the owner may close
-        # SPEC 10.3: past max_agent_turns the agent is not triggered.
-        addressed = hop <= _max_turns(policy) and addressed_to_me(
+        return hop
+
+    def _card_problem(self, inner: dict[str, Any]) -> str:
+        """Why a received Agent Card can't be used, or ``""``. A card the A2A
+        types can't parse is ``malformed`` (its signature couldn't be checked,
+        so it is never let through unchecked); one whose signature fails
+        against a pinned key (``a2a.card_keys_file``, SPEC 10.5) is
+        ``bad_signature``. Checked on the card as received."""
+        if inner.get("kind") != "a2a.agent_card":
+            return ""
+        body = inner.get("body")
+        parsed = convert.parse_card(body) if isinstance(body, dict) else None
+        if parsed is None:
+            return "malformed"
+        if self._card_keys and cards.signature_status(parsed, self._card_keys) == "invalid":
+            return "bad_signature"
+        return ""
+
+    def _card_changed(self, group_id: str, identity: str, inner: dict[str, Any]) -> bool:
+        """Whether an Agent Card says something new: with inbound approval, a
+        changed card is held like any content (its text reaches the agent)."""
+        if inner.get("kind") != "a2a.agent_card" or not isinstance(inner.get("body"), dict):
+            return False
+        shaped = normalize("a2a.agent_card", inner["body"])
+        return shaped is not None and self.store.cards(group_id).get(identity) != shaped
+
+    def _triggered(self, group_id: str, hop: int, msg_id: str) -> None:
+        """The default "message replied to" for this instance's next agent
+        message in the group (see _reply_hop)."""
+        self.store.kv_set(f"trigger_hop/{group_id}", str(hop))
+        self.store.kv_set(f"trigger_msg/{group_id}", msg_id)
+
+    def _make_delivery(
+        self, group: GroupRow, msg_id: str, event: dict[str, Any], *, replayed: bool = False
+    ) -> tuple[Delivery | None, Decision, str, int | None]:
+        """Apply the safety policy to a received application message. Returns
+        the delivery to record (``None`` if dropped), the decision and the
+        message kind."""
+        try:
+            inner = json.loads(event["plaintext"])
+        except ValueError:
+            return None, drop("malformed"), "", None
+        if not isinstance(inner, dict) or not isinstance(inner.get("kind"), str):
+            return None, drop("malformed"), "", None
+        # The kind is peer text: record only the ones the protocol defines.
+        kind = str(inner["kind"]) if inner["kind"] in KNOWN_KINDS else "unknown"
+        sender = event["sender"]
+        identity = sender["identity"]
+        policy = group.policy
+        hop = self._received_hop(group.group_id, inner)
+        # The hop the loop guard acts on (None: a human's message, SPEC 10.3).
+        guard_hop = None if inner.get("origin") == "human" else hop
+        addressed = addressed_to_me(
             str(policy.get("floor", "free")),
             inner,
             self.me,
             self.instance.instance_id_hex,
             policy.get("floor_moderator"),
         )
-        if addressed:
-            # The default "message replied to" for this instance's next
-            # agent message in the group (see _reply_hop).
-            self.store.kv_set(f"trigger_hop/{group.group_id}", str(hop))
-            self.store.kv_set(f"trigger_msg/{group.group_id}", msg_id)
-        return Delivery(
+        # One decision: SPEC 7.2 (unknown kinds are ignored), 7.3, 9.3, 10.2
+        # (size, parts, rates; a replayed journal entry was counted when the
+        # core first processed it), 10.3 and require_approval.
+        decision = self.safety.inbound(
+            Inbound(
+                group.group_id,
+                identity,
+                str(sender["instance_id_hex"]),
+                inner,
+                len(event["plaintext"]),
+                policy.get("owner"),
+                hop,
+                _max_turns(policy),
+                addressed,
+                replayed=replayed,
+                drain_exempt=lambda: self._drain_exempt(group.group_id, identity),
+                card_changed=self._card_changed(group.group_id, identity, inner),
+                card_problem=self._card_problem(inner),
+            )
+        )
+        if decision.verdict is Verdict.DROP:
+            LOG.info("message_dropped", group=log.hid(group.group_id), reason=decision.reason)
+            return None, decision, kind, guard_hop
+        self.store.record_hop(group.group_id, msg_id, hop, self.now())
+        if inner["kind"] in HUMAN_ONLY_KINDS:
+            self._reset_loop_guard(group.group_id)
+        if decision.verdict is Verdict.DELIVER:
+            self._triggered(group.group_id, hop, msg_id)
+        # A held message triggers once approved if it would trigger now.
+        triggers = decision.verdict is Verdict.DELIVER or (
+            decision.verdict is Verdict.HOLD_FOR_APPROVAL
+            and addressed
+            and hop <= _max_turns(policy)
+        )
+        body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
+        # Controls, cards and cancels reach adapters in their schema's shape
+        # only: unknown fields stripped, card text capped (agentconnect.schemas).
+        shaped = normalize(inner["kind"], body)
+        if shaped is not None and shaped is not body:
+            body = shaped
+            inner = dict(inner)
+            inner["body"] = shaped
+        verified = any(
+            m.identity == identity and m.verified for m in self.store.members(group.group_id)
+        )
+        raw_to = inner.get("to")
+        to: list[Any] = raw_to if isinstance(raw_to, list) else ["*"]
+        delivery = Delivery(
             group_id=group.group_id,
             msg_id=msg_id,
             kind=inner["kind"],
@@ -1274,13 +1427,15 @@ class Daemon:
                 verified,
             ),
             to=[str(x) for x in to],
-            addressed_to_me=addressed,
+            addressed_to_me=triggers,
             scope=group.purpose,
             trust_state=self._trust_state(group.group_id),
-            origin=origin,
+            origin="human" if inner.get("origin") == "human" else "agent",
             hop=hop,
             inner=inner,
+            frame_text=self.safety.settings(group.group_id).frame_text,
         )
+        return delivery, decision, kind, guard_hop
 
     # -- loop guard (SPEC 10.3) ---------------------------------------------
 
@@ -1311,7 +1466,7 @@ class Daemon:
         self.store.kv_set(f"trigger_msg/{group_id}", "")
         self.store.kv_set(f"loop_paused/{group_id}", "0")
 
-    async def _loop_guard(self, group: GroupRow, delivery: Delivery) -> None:
+    async def _loop_guard(self, group: GroupRow, msg_id: str, sender: str, hop: int) -> None:
         """SPEC 10.3: the agent was not triggered; pause the group once and
         tell the human (until a ``control.resume``)."""
         key = f"loop_paused/{group.group_id}"
@@ -1321,9 +1476,9 @@ class Daemon:
         await self.emit(
             group.group_id,
             "loop_guard",
-            msg_id=delivery.msg_id,
-            sender=delivery.sender.identity,
-            hop=delivery.hop,
+            msg_id=msg_id,
+            sender=sender,
+            hop=hop,
             max_agent_turns=_max_turns(group.policy),
         )
         try:
@@ -1331,7 +1486,7 @@ class Daemon:
                 group.group_id,
                 {"reason": "loop_guard"},
                 kind="control.pause",
-                reply_to=[delivery.msg_id],
+                reply_to=[msg_id],
                 internal=True,
             )
         except DaemonError as e:
@@ -1538,6 +1693,297 @@ class Daemon:
         self._pulse()
         return group_id
 
+    # -- safety policy: approvals, audit, settings (agentconnect.policy) -----------
+
+    def _hold_id(self, group_id: str, direction: str, msg_id: str) -> str:
+        """Stable, so a replayed journal entry holds the same item."""
+        return b64(hashlib.sha256(canonical([group_id, direction, msg_id])).digest()[:16])
+
+    def _held_event(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Metadata only: the human reads the content with the human token."""
+        keys = ("hold_id", "direction", "sender", "msg_id", "size", "expires_at")
+        return {k: item[k] for k in keys} | {"message_kind": item["kind"]}
+
+    def _new_hold(
+        self, group_id: str, direction: str, inner: dict[str, Any], **row: Any
+    ) -> dict[str, Any]:
+        now = self.now()
+        item = {
+            "hold_id": self._hold_id(group_id, direction, row["msg_id"]),
+            "group_id": group_id,
+            "direction": direction,
+            "kind": str(inner.get("kind")),
+            "task_id": task_of(inner),
+            "created_at": now,
+            "expires_at": now + self.safety.settings(group_id).approval_ttl_secs,
+            **row,
+        }
+        self.store.add_held(item)
+        self._held_wake.set()
+        return item
+
+    async def _hold_inbound(
+        self, group: GroupRow, mailbox: str, delivery: Delivery, size: int
+    ) -> None:
+        """Inside :meth:`_apply`: the inbox row (state ``held``) keeps the
+        message; this records the approval item and tells the human."""
+        item = self._new_hold(
+            group.group_id,
+            "in",
+            delivery.inner,
+            sender=delivery.sender.identity,
+            instance=delivery.sender.instance_id,
+            msg_id=delivery.msg_id,
+            size=size,
+            inbox_seq=self.store.inbox_seq(mailbox, delivery.msg_id),
+        )
+        await self.emit(
+            group.group_id,
+            "message_held",
+            cause=f"hold={item['hold_id']}",
+            **self._held_event(item),
+        )
+
+    def _hold_outbound(self, group: GroupRow, payload: dict[str, Any], size: int) -> list[Event]:
+        """Inside :meth:`queue_message`'s transaction: keep a send for the
+        human's approval and record ``message_held`` with it, so a crash
+        can't lose the event. Returns the events to notify."""
+        item = self._new_hold(
+            group.group_id,
+            "out",
+            payload["inner"],
+            sender=self.me,
+            instance=self.instance.instance_id_hex,
+            msg_id=payload["msg_id"],
+            size=size,
+            payload=payload,
+        )
+        event = self._record(
+            group.group_id, "message_held", f"hold={item['hold_id']}", self._held_event(item)
+        )
+        return [] if event is None else [event]
+
+    def held_messages(self, direction: str | None = None) -> list[dict[str, Any]]:
+        """Messages waiting for the human's approval, metadata only; with
+        ``direction`` (``in`` or ``out``) only those."""
+        now = self.now()
+        return [
+            {k: v for k, v in item.items() if k not in HELD_PRIVATE}
+            for item in self.store.held_items()
+            if now < int(item["expires_at"]) and direction in (None, item["direction"])
+        ]
+
+    def _pending_hold(self, hold_id: str) -> dict[str, Any]:
+        item = self.store.held(hold_id)
+        if item is None or item["status"] != "pending":
+            raise DaemonError("not_found", "no such held message")
+        if self.now() >= int(item["expires_at"]):
+            raise DaemonError("expired", "the approval window has passed")
+        return item
+
+    def _held_inner(self, item: dict[str, Any]) -> dict[str, Any]:
+        if item["direction"] == "out":
+            payload = item["payload"] or {}
+            return dict(payload.get("inner") or {})
+        row = self.store.inbox_row(int(item["inbox_seq"] or 0))
+        if row is None or row.delivery is None:
+            return {}
+        return dict(row.delivery["inner"])
+
+    def held_message(self, hold_id: str) -> dict[str, Any]:
+        """One held message with everything the agent (or the group) would
+        get: the whole body, ``to``, ``addressee`` and ``reply_to`` (human
+        scope only: the content is what the human decides on). Peer content
+        stays untrusted."""
+        item = self._pending_hold(hold_id)
+        inner = self._held_inner(item)
+        body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
+        out = {k: v for k, v in item.items() if k not in HELD_PRIVATE}
+        return out | {
+            "untrusted": item["direction"] == "in",
+            "to": inner.get("to"),
+            "addressee": inner.get("addressee"),
+            "reply_to": inner.get("reply_to"),
+            "body": body,
+        }
+
+    def approve_message(self, hold_id: str) -> dict[str, Any]:
+        """Human-gated: release a held message, to the adapter (inbound) or
+        to the relay (outbound). Approving a task's first update approves the
+        task's later updates too."""
+        item = self._pending_hold(hold_id)
+        group_id = str(item["group_id"])
+        group = self.store.group(group_id)
+        if group is None or group.status != "active":
+            raise DaemonError("not_found", "the group is no longer active")
+        events: list[Event] = []
+        with self.store.tx():
+            if not self.store.set_held_status(hold_id, "approved"):
+                raise DaemonError("not_found", "no such held message")
+            if item["direction"] == "in":
+                row = self.store.inbox_row(int(item["inbox_seq"] or 0))
+                if row is not None and row.state == "held" and row.delivery is not None:
+                    delivery = Delivery.from_json(row.delivery)
+                    self.store.set_inbox_state(row.seq, "pending")
+                    if delivery.addressed_to_me:
+                        self._triggered(group_id, delivery.hop, delivery.msg_id)
+                    self.safety.transcribe(
+                        group_id, "in", item["sender"], item["msg_id"], delivery.inner
+                    )
+            else:
+                payload = item["payload"] or {}
+                self._enqueue("app", group_id, payload)
+                self.safety.transcribe(group_id, "out", self.me, item["msg_id"], payload["inner"])
+                # The agent's own message goes out: tell its adapter (the
+                # A2A facade waits for it), in the same transaction.
+                sent = self._record(
+                    group_id,
+                    "send_approved",
+                    f"hold={hold_id}/approved",
+                    {"msg_id": item["msg_id"], "hold_id": hold_id},
+                )
+                events = [] if sent is None else [sent]
+            if item["task_id"] is not None and item["direction"] == "in":
+                self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=True)
+            self._audit_hold(item, "approved")
+        self._notify_soon(events)
+        self._delivery_wake.set()
+        self._held_wake.set()
+        self._pulse()
+        return {"hold_id": hold_id, "group_id": group_id, "status": "approved"}
+
+    def _audit_hold(self, item: dict[str, Any], decision: str) -> None:
+        self.safety.audit(
+            str(item["group_id"]),
+            str(item["direction"]),
+            sender=str(item["sender"]),
+            msg_id=str(item["msg_id"]),
+            kind=str(item["kind"]),
+            size=int(item["size"]),
+            decision=decision,
+        )
+
+    def _drop_hold(self, item: dict[str, Any], status: str, code: str) -> list[Event]:
+        """Drop a held item once (a concurrent caller that decided it first
+        wins): its plaintext goes, the audit log records it, its task is
+        rejected, and the events are recorded in the same transaction (the
+        human's ``held_expired`` on expiry, the agent's ``send_failed`` for
+        its own send). Nothing reaches the peer (SPEC 10.2). Returns the
+        events to notify."""
+        hold_id, group_id = str(item["hold_id"]), str(item["group_id"])
+        events: list[Event | None] = []
+        with self.store.tx():
+            if not self.store.set_held_status(hold_id, status):
+                return []
+            if item["direction"] == "in" and item["inbox_seq"] is not None:
+                row = self.store.inbox_row(int(item["inbox_seq"]))
+                if row is not None and row.state == "held":
+                    self.store.set_inbox_state(row.seq, "dropped")
+            if item["task_id"] is not None and item["direction"] == "in":
+                self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=False)
+            self._audit_hold(item, status)
+            if status == "expired":
+                events.append(
+                    self._record(
+                        group_id, "held_expired", f"hold={hold_id}/expired", self._held_event(item)
+                    )
+                )
+            if item["direction"] == "out":
+                data = {"msg_id": item["msg_id"], "hold_id": hold_id, "code": code}
+                events.append(
+                    self._record(group_id, "send_failed", f"hold={hold_id}/{status}", data)
+                )
+        self._held_wake.set()
+        return [e for e in events if e is not None]
+
+    async def reject_message(self, hold_id: str) -> dict[str, Any]:
+        """Human-gated: drop a held message. Nothing tells the peer; an
+        outbound one fails like any send (``send_failed``)."""
+        item = self._pending_hold(hold_id)
+        for event in self._drop_hold(item, "rejected", "rejected"):
+            await self._notify(event)
+        return {"hold_id": hold_id, "group_id": item["group_id"], "status": "rejected"}
+
+    async def expire_held(self) -> None:
+        """Held messages past ``approval_ttl_secs`` are dropped silently (the
+        peer is not told) and the human gets ``held_expired``. Runs on a timer
+        (:meth:`_held_timer`), so plaintext doesn't outlive the window."""
+        now = self.now()
+        for item in self.store.held_items():
+            if now < int(item["expires_at"]):
+                continue
+            for event in self._drop_hold(item, "expired", "expired"):
+                await self._notify(event)
+
+    async def _drop_group_holds(self, group_id: str) -> None:
+        """The group ended: its held messages are dropped, and the agent's own
+        held sends fail with ``group_gone`` (inside :meth:`_apply` the
+        events join its batch)."""
+        for item in self.store.held_items():
+            if item["group_id"] != group_id:
+                continue
+            for event in self._drop_hold(item, "dropped", "group_gone"):
+                if self._batch is not None:
+                    self._batch.append(event)
+                else:
+                    await self._notify(event)
+
+    async def _held_timer(self) -> None:
+        """Expire held messages when their window ends, traffic or not (the
+        plaintext of a held message must not outlive it). A failure is logged
+        by type only and retried after a backoff; the timer keeps running."""
+        backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
+        while True:
+            try:
+                await self._held_timer_step()
+                backoff.reset()
+            except Exception as e:
+                LOG.warning("held_timer_failed", error=type(e).__name__)
+                await self._sleep(backoff.next())
+
+    async def _held_timer_step(self) -> None:
+        """Wait for the next expiry (or a new hold), then expire what is due."""
+        self._held_wake.clear()
+        pending = self.store.held_items()
+        if not pending:
+            await self._held_wake.wait()
+            return
+        delay = min(int(item["expires_at"]) for item in pending) - self.now()
+        if delay > 0:
+            sleep = asyncio.ensure_future(self.clock.sleep(delay))
+            woken = asyncio.ensure_future(self._held_wake.wait())
+            try:
+                await asyncio.wait({sleep, woken}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in (sleep, woken):
+                    waiter.cancel()
+            return
+        self.failpoints.hit("held_timer.expire")
+        await self.expire_held()
+
+    def safety_settings(self, group_id: str) -> dict[str, Any]:
+        group = self._group_or_raise(group_id)
+        return {
+            "group_id": group.group_id,
+            "settings": self.safety.settings(group.group_id).as_json(),
+            "overrides": self.safety.overrides(group.group_id),
+        }
+
+    def update_safety(
+        self, group_id: str, changes: dict[str, Any], sender: str | None = None
+    ) -> dict[str, Any]:
+        """Human-gated: change a group's policy (``None`` clears an override)."""
+        group = self._group_or_raise(group_id)
+        try:
+            self.safety.update(group.group_id, changes, sender)
+        except PolicyError as e:
+            raise DaemonError("bad_request", str(e)) from None
+        return self.safety_settings(group.group_id)
+
+    def transcript(self, group_id: str, after: int = 0) -> list[dict[str, Any]]:
+        group = self._group_or_raise(group_id)
+        return self.store.transcript(group.group_id, after)
+
     # -- delivery -------------------------------------------------------------
 
     def _gated(self, group_id: str | None) -> bool:
@@ -1555,12 +2001,12 @@ class Daemon:
                 required = bool(json.loads(self.client.policy(unb64(group_id)))["require_verified"])
             except (ac.AgentConnectError, ac.CoreError, ValueError, KeyError):
                 required = True
-        return required and str(self._trust_state(group_id)["self"]) != "verified"
+        return verification_holds(required, self._trust_state(group_id))
 
     def _keep_card(self, delivery: Delivery) -> None:
         """A peer's Agent Card (and the name in it) is peer-controlled text:
         keep it only once its delivery has passed the SPEC 10.4 gate and the
-        policy hook, like any other message."""
+        safety policy, like any other message."""
         identity = delivery.sender.identity
         if delivery.kind != "a2a.agent_card" or identity == self.me:
             return
@@ -1594,10 +2040,6 @@ class Daemon:
                 view = self._view(delivery.group_id)
                 adapter = self._adapter_for(delivery.group_id)
                 if view is None or adapter is None:
-                    continue
-                if self.policy.inbound(view, delivery) is PolicyDecision.DROP:
-                    self.store.set_inbox_state(row.seq, "dropped")
-                    await self._ack(row.msg_id)
                     continue
                 self._keep_card(delivery)
                 try:
@@ -2021,8 +2463,15 @@ class Daemon:
     async def _send_card(self, group_id: str, to: list[str]) -> None:
         adapter = self._adapter_for(group_id)
         card = adapter.capabilities().agent_card if adapter is not None else None
+        if card is not None and convert.parse_card(card) is None:
+            LOG.warning("own_card_refused", code="malformed")
+            return
         if card is not None:
-            self.send_message(group_id, card, to=to, kind="a2a.agent_card", internal=True)
+            try:
+                self.send_message(group_id, card, to=to, kind="a2a.agent_card", internal=True)
+            except DaemonError as e:
+                # Over a card cap (agentconnect.schemas): fix the agent's card.
+                LOG.warning("own_card_refused", code=e.code)
 
     # -- operations (local API and adapters) --------------------------------
 
@@ -2280,14 +2729,43 @@ class Daemon:
         internal: bool = False,
         addressee: list[str] | None = None,
     ) -> str:
-        """Queue an application message. ``hop`` is computed here (SPEC 10.3):
-        0 for the human's own messages, otherwise see :meth:`_reply_hop`.
+        """Queue an application message (:meth:`queue_message`); returns its
+        ``msg_id``, also when the policy holds it for approval."""
+        return self.queue_message(
+            group_id,
+            body,
+            to=to,
+            kind=kind,
+            origin=origin,
+            reply_to=reply_to,
+            internal=internal,
+            addressee=addressee,
+        )[0]
 
-        SPEC 10.2 applies: at most 256 KiB, ``text``/``data`` parts only, and
-        30 messages a minute from this sender (120 in the group). The
-        daemon's own messages (``internal``: Agent Cards, loop-guard pauses)
-        don't count against the rate. Task updates have their own budget
-        (300 a minute per task).
+    def queue_message(  # noqa: PLR0913
+        self,
+        group_id: str,
+        body: dict[str, Any],
+        *,
+        to: list[str] | None = None,
+        kind: str = "a2a.message",
+        origin: str = "agent",
+        reply_to: list[str] | None = None,
+        internal: bool = False,
+        addressee: list[str] | None = None,
+    ) -> tuple[str, str]:
+        """Queue an application message; returns ``(msg_id, status)`` where
+        ``status`` is ``queued``, or ``held`` when the group's
+        ``require_approval`` holds it for the human. ``hop`` is computed here
+        (SPEC 10.3): 0 for the human's own messages, otherwise see
+        :meth:`_reply_hop`.
+
+        The safety policy applies (:meth:`SafetyPolicy.outbound`): SPEC 10.2
+        by default allows at most 256 KiB, ``text``/``data`` parts only, and
+        30 messages a minute from this sender (120 in the group); task
+        updates have their own budget (300 a minute per task). The daemon's
+        own messages (``internal``: Agent Cards, loop-guard pauses) don't
+        count against the rate and are never held.
 
         ``addressee`` (SPEC 9.3): with ``to: ["*"]`` every member sees the
         message, and only the members listed are triggered."""
@@ -2306,24 +2784,65 @@ class Daemon:
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
             hop, refs = self._reply_hop(group.group_id, reply_to)
+        # A control or cancel goes out in its schema's shape only. A card goes
+        # out exactly as built (a signature covers it): it must already fit.
+        shaped = normalize(kind, body)
+        if shaped is not None and kind != "a2a.agent_card":
+            body = shaped
         inner = self.inner(
             kind, body, to or ["*"], origin=origin, hop=hop, reply_to=refs, addressee=addressee
         )
-        view = self._view(group_id)
-        if view is not None and self.policy.outbound(view, inner) is PolicyDecision.DROP:
-            raise DaemonError("forbidden", "blocked by policy")
-        problem = content_problem(inner, len(canonical(inner)))
-        if problem is not None:
-            code, text = OUTBOUND_PROBLEMS.get(problem, ("bad_request", "malformed message"))
+        size = len(canonical(inner))
+        decision = self.safety.outbound(
+            Outbound(
+                group.group_id,
+                self.me,
+                self.instance.instance_id_hex,
+                inner,
+                size,
+                internal=internal,
+            )
+        )
+        if decision.verdict is Verdict.DROP:
+            self.safety.audit(
+                group.group_id,
+                "out",
+                sender=self.me,
+                msg_id="",
+                kind=kind,
+                size=size,
+                decision=decision.verdict,
+                reason=decision.reason,
+            )
+            code, text = OUTBOUND_PROBLEMS.get(decision.reason, ("bad_request", "malformed"))
             raise DaemonError(code, text)
-        if not internal and not self.limits.allow_inner(group.group_id, self.me, kind, body):
-            raise DaemonError("rate_limited", "over the SPEC 10.2 message rate")
         msg_id = new_msg_id()
-        self._enqueue("app", group.group_id, {"inner": inner, "msg_id": msg_id})
-        self.store.record_hop(group.group_id, msg_id, hop, self.now())
+        payload = {"inner": inner, "msg_id": msg_id}
+        with self.store.tx():
+            self.store.record_hop(group.group_id, msg_id, hop, self.now())
+            self.safety.audit(
+                group.group_id,
+                "out",
+                sender=self.me,
+                msg_id=msg_id,
+                kind=kind,
+                size=size,
+                decision=decision.verdict,
+                reason=decision.reason,
+            )
+            held = decision.verdict is Verdict.HOLD_FOR_APPROVAL
+            events: list[Event] = []
+            if held:
+                events = self._hold_outbound(group, payload, size)
+            else:
+                self._enqueue("app", group.group_id, payload)
+                self.safety.transcribe(group.group_id, "out", self.me, msg_id, inner)
+        if held:
+            self._notify_soon(events)
+            return msg_id, "held"
         if kind in HUMAN_ONLY_KINDS:
             self._reset_loop_guard(group.group_id)
-        return msg_id
+        return msg_id, "queued"
 
     async def adapter_send(  # noqa: PLR0913
         self,
@@ -2334,11 +2853,13 @@ class Daemon:
         reply_to: list[str] | None = None,
         *,
         addressee: list[str] | None = None,
-    ) -> str:
+    ) -> SendReceipt:
         """What adapters get through ``on_outbound``: agent-originated only.
         ``reply_to`` names the ``msg_id``s of the deliveries this answers;
-        ``addressee`` names who is triggered (SPEC 9.3)."""
-        return self.send_message(
+        ``addressee`` names who is triggered (SPEC 9.3). The answer is the
+        ``msg_id``, a :class:`SendReceipt` whose ``held`` says the group's
+        ``require_approval`` holds the message for the human."""
+        msg_id, status = self.queue_message(
             group_id,
             body,
             to=to,
@@ -2347,6 +2868,22 @@ class Daemon:
             reply_to=reply_to,
             addressee=addressee,
         )
+        if status != "held":
+            return SendReceipt(msg_id)
+        hold_id = self._hold_id(group_id, "out", msg_id)
+        return SendReceipt(
+            msg_id, held=True, hold_id=hold_id, withdraw=lambda: self.withdraw_send(hold_id)
+        )
+
+    async def withdraw_send(self, hold_id: str) -> None:
+        """The adapter takes back a held send (its request was cancelled): the
+        hold is rejected and audited, and the send fails with ``cancelled``.
+        Nothing happens to one the human already decided."""
+        item = self.store.held(hold_id)
+        if item is None or item["status"] != "pending" or item["direction"] != "out":
+            return
+        for event in self._drop_hold(item, "cancelled", "cancelled"):
+            await self._notify(event)
 
     def update(self, group_id: str) -> None:
         group = self._group_or_raise(group_id)
@@ -2579,6 +3116,7 @@ class Daemon:
             "outbox_queued": len(self.store.outbox()),
             "inbox_pending": len(self.store.pending_deliveries()),
             "pending_approvals": len(self.approvals()),
+            "held_messages": len(self.held_messages()),
         }
 
 

@@ -231,8 +231,10 @@ async def test_correct_envelopes_still_process(group: GroupFixture) -> None:
 async def test_control_close_prompts_the_human_and_never_leaves(group: GroupFixture) -> None:
     (a, b, c), gid = await group(3)
     # A non-owner's close is ignored (SPEC 7.3).
-    b.daemon.send_message(gid, {"reason": "not mine to close"}, kind="control.close")
-    a.daemon.send_message(gid, {"reason": "done here"}, kind="control.close")
+    b.daemon.send_message(
+        gid, {"reason": "not mine to close"}, kind="control.close", origin="human"
+    )
+    a.daemon.send_message(gid, {"reason": "done here"}, kind="control.close", origin="human")
     await c.adapter.wait_for(lambda: bool(c.adapter.of_type("close_requested")))
     (event,) = c.adapter.of_type("close_requested")
     assert event.data == {"sender": a.me, "reason": "done here"}

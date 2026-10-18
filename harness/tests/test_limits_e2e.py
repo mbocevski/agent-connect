@@ -74,12 +74,12 @@ async def test_messages_queued_during_an_outage_are_exempt_but_a_live_flood_is_n
     group: GroupFixture,
     partition: Callable[[Node], Awaitable[None]],
     heal: Callable[[Node], Awaitable[None]],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A lower per-sender rate keeps the test under the relay's own 50/s.
-    limit = 5
-    monkeypatch.setattr("agentconnect.limits.SENDER_PER_MINUTE", limit)
     (a, b), gid = await group(2)
+    # A lower per-sender rate (the group's policy) keeps the test under the
+    # relay's own 50/s.
+    limit = 5
+    b.daemon.update_safety(gid, {"sender_per_minute": limit})
     await partition(b)
     # Twice the limit queues at the relay while b is away.
     queued = [raw_send(a, gid, "a2a.message", {"text": f"q{i}"}) for i in range(2 * limit)]

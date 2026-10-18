@@ -530,7 +530,13 @@ Inner = {
   message. `to` controls who is *triggered* (§9.3). Conversations that need
   privacy from some members belong in a separate group.
 - Unknown `kind` values MUST be ignored. Unknown fields MUST be preserved
-  when a message is relayed to adapters and otherwise ignored.
+  when a message is relayed to adapters and otherwise ignored, except in
+  the bodies of control messages (§7.3), Agent Cards (§10.5) and
+  `a2a.task_cancel`: those carry no content, so a receiver strips their
+  unknown fields before adapters see them (and doesn't hold an unknown
+  field against the sender), and MUST treat such a body that carries
+  content (`parts` anywhere, or a top-level `text`, `data`, `file` or
+  `raw`) as malformed.
 
 ### 7.3 Control messages
 
@@ -947,22 +953,49 @@ Text-oriented adapters SHOULD prefix content with: *"Message from remote agent
 
 ### 10.2 Limits
 
-Defaults: messages are at most 256 KiB; each sender may send 30 messages per
-minute and the group as a whole 120. Messages received in the reconnect
+Defaults: messages are at most 256 KiB; each sender instance may send 30
+messages per minute, all instances of one identity together 3 times that
+(90), and the group as a whole 120. A sender instance is identified by its
+instance certificate (§3.3), so replicas of one identity (§9.4) each get the
+per-sender rate, and the identity cap keeps replicas from multiplying an
+identity's budget. Messages received in the reconnect
 drain (§8.2) are exempt from the per-minute rates, since they queued while
 the member was away (an implementation SHOULD still bound the exemption;
-the reference daemon allows 1000 per connection); the size, kind and part
+the reference daemon allows 1000 per connection, and per identity twice its
+per-sender rate, so one peer's queued messages can't use up the exemption); the
+size, kind and part
 limits always apply. Allowed A2A part kinds are `text` and
-`data`. `file` parts are disabled by default.
+`data`. A part carries exactly one content member (`text`, `data`, or a
+file as `file`, `raw` or `url`); an explicit `kind` MUST name that member,
+and the only other members are `metadata`, `filename` and `mediaType`. A
+receiver MUST treat any other part as malformed and drop its message. `file` parts are disabled by default; a receiver MAY accept them,
+with a size cap of its own choosing (§10.6).
+
+These limits are maximums. A receiver MAY apply lower values, for a group or
+for one sender, and MUST NOT apply higher ones; an implementation MUST
+reject a configuration that raises one. They limit what a receiver accepts
+from its peers: its own sends MUST NOT count against them, and an
+implementation that limits its own sends keeps a separate budget for them,
+which MUST NOT apply to the controls its human sends (§7.3).
 
 Task updates have their own budget. An `a2a.task_status` or
 `a2a.task_artifact` whose `body.taskId` is a string of 1 to 256 characters
-counts against a budget of 300 per minute for that sender and task, instead
-of the per-sender and per-group rates. The first update of a task in the
+counts against a budget of 300 per minute for that sender instance and task,
+instead of the per-sender and per-group rates. Task updates have caps of their
+own too: all task updates of one identity's instances together 3 times that
+(900), and those of the whole group 1200 per minute, so replicas and many
+open tasks can't multiply the budget. The first update of a task in the
 window also counts as one ordinary message, so opening tasks is held to the
 message rates. The size, kind and part limits apply to task updates
 unchanged. Every other message, `a2a.task_cancel` included, counts against
 the ordinary rates.
+
+A receiver MUST NOT tell the sender that a message it received was dropped,
+held for approval (§10.6), rejected or expired: no control message, receipt
+or other signal goes back, so a peer can't probe the receiver's policy. This
+binds only what reaches the peer. An implementation tells its own agent when
+a message the agent sent was held and then rejected or expired (the
+reference daemon raises `send_failed`).
 
 ### 10.3 Loop guard
 
@@ -978,7 +1011,9 @@ the ordinary rates.
   episode, until a `control.resume`.
 - If a member receives `hop > loop_guard.max_agent_turns`, it MUST NOT trigger
   its agent. It SHOULD send `control.pause{reason: "loop_guard"}` and notify
-  its human.
+  its human. It MUST decide this on the hop alone, whether or not its
+  policy (§10.2) accepts the message, so that the pause tells the sender
+  nothing about that policy.
 - A `control.resume` resets the counter.
 
 ### 10.4 Verification gating
@@ -1002,6 +1037,43 @@ and no more: its name, description and skills are untrusted content
 - A card with a signature that fails against a pinned key MUST NOT be used.
 - A signature with no pinned key proves nothing beyond the sender's MLS
   authentication.
+
+### 10.6 Local policy
+
+This section is informative. Beyond the minimums above, a member's own
+policy decides what reaches its agent and what its agent sends. Other
+members can't see it, and it changes nothing they accept. The reference
+daemon offers:
+
+- **Approvals.** A group can hold agent content (`a2a.message`,
+  `a2a.task_status`, `a2a.task_artifact`, `a2a.task_cancel`) in either
+  direction until the member's human approves it, with an expiry. A peer's
+  task is decided on its first update, and an approval covers that task's
+  later inbound updates only, for a short window of its own (the
+  reference daemon's `task_approval_window_secs`, 600 seconds by default
+  and at most 3600) or until the task's end, whichever comes first; the
+  member's own sends are each held. The held messages are capped per
+  sender identity, in count and in bytes (each sender at most its share of
+  the queue), and per group in each direction, and only a sender over its
+  share is charged. Controls
+  and Agent Cards are never held, so membership, the loop guard and SAS
+  verification keep working. They carry no content: the daemon keeps only
+  the fields each control, card and cancellation defines (§7.2), drops one
+  that carries content, verifies a card's signature against pinned keys
+  before anything else, refuses (never cuts) a card over the listing
+  limits of ADR-006, so a signed card is passed on as signed, and delivers
+  controls and cards as context only. With inbound approval
+  on, a card that changed is held, since its text reaches the agent. Approval is a human action, like SAS
+  verification (§11): it is not offered to the agent.
+- **Framing.** Besides the §10.1 fields, every delivery says whether the
+  group wants the §10.1 notice shown in front of the text (`frame_text`, on
+  by default) and carries the notice itself.
+- **Local limits.** Lower §10.2 limits for a group or one sender, whether
+  `file` parts are accepted and how large they may be, an alert when one
+  sender keeps breaking the limits (the daemon never removes a member on
+  its own), a metadata-only audit log, and an opt-in transcript.
+
+`docs/safety.md` describes them.
 
 ## 11. Short authentication string (SAS)
 
@@ -1067,7 +1139,7 @@ and no more: its name, description and skills are untrusted content
 | Quantum adversary recording traffic | Future decryption | Hybrid ML-KEM-768 + X25519 KEM in every path secret; Update cadence | Rests on ML-KEM-768 (and X25519 until a quantum computer exists) |
 | **Model provider of any member's agent** | Sees what that agent processes | — (inherent) | **Sees plaintext. E2E runs daemon to daemon, not to the model.** |
 | Compromised host | Has keys and state | Encrypted-at-rest storage (see below); Updates heal after removal or re-key | That member fully, until removed |
-| Malicious or prompt-injected peer agent | Social-engineers the local agent | Untrusted framing, scope, limits, approval hooks (§10) | Behavioural; can't be solved with cryptography |
+| Malicious or prompt-injected peer agent | Social-engineers the local agent | Untrusted framing, scope, limits (§10.1, §10.2), approval hooks (§10.6) | Behavioural; can't be solved with cryptography |
 | Agent loops | Runaway costs or spam | Loop guard, rate limits, floor modes | Bounded by the limits |
 | Malicious software distributor | Backdoored daemon | Open source, reproducible builds, signed releases with provenance | Users who don't verify |
 
@@ -1227,6 +1299,16 @@ Decided by the maintainer (2026-10-17), now normative:
 - Task replies go to `["*"]` with the requester as `addressee` (§7.2,
   §9.3).
 - In `mention` mode an agent's `["*"]` triggers nobody (§9.3).
+- The §10.2 limits are maximums: receivers may lower them, never raise
+  them (§10.2).
+- Per-sender rates count per instance, with a per-identity cap of 3 times
+  the per-sender rate; task updates are capped per identity and per group
+  too, and a member's own sends never count against what it accepts
+  (§10.2).
+- Receivers never tell the sender that a message was dropped, held,
+  rejected or expired (§10.2).
+- Local policy (approvals, framing, local limits) is described in an
+  informative §10.6; the file-part size cap is local.
 
 Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 

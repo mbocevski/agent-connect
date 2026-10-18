@@ -72,5 +72,6 @@ event a stable `event_id`; deduplicate by them. Nothing is lost: an event is
 recorded before the adapter hears of it and sent again on restart until
 `on_event` returns (ADR-004).
 The webhook adapter ([docs/adapters/webhook.md](../docs/adapters/webhook.md)) and the SSE adapter (`GET /v0/events`, [docs/api.md](../docs/api.md#event-stream)) serve headless agents.
-`RecordingAdapter` is the in-memory adapter used by tests; the policy layer
-plugs in through `PolicyHook` (pass-through by default).
+`RecordingAdapter` is the in-memory adapter used by tests. Every message in
+and out goes through the safety policy (`agentconnect.policy`) before any
+adapter sees it ([docs/safety.md](../docs/safety.md)).
