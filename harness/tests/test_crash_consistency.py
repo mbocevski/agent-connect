@@ -72,12 +72,24 @@ def events(node: Node, kind: str) -> list[dict[str, object]]:
 
 
 async def settled(nodes: list[Node], gid: str) -> None:
-    """Every node at the same epoch and SAS, nothing left in a journal."""
-    await until(lambda: len({n.daemon.client.epoch(raw(gid)) for n in nodes}) == 1)
-    for n in nodes:
-        await n.wait(lambda n=n: n.epoch(gid) == n.daemon.client.epoch(raw(gid)))
-        await n.idle()
-        await until(lambda n=n: n.daemon.client.journal_pending() == [])
+    """Every node at the same epoch and SAS, nothing left in a journal.
+
+    A commit still in flight (a removal, a rebuilt intent) can move one node
+    on while the others are being checked, so this repeats until the epochs
+    are still equal after every node went idle."""
+
+    def epochs() -> set[int]:
+        return {n.daemon.client.epoch(raw(gid)) for n in nodes}
+
+    for _ in range(10):
+        await until(lambda: len(epochs()) == 1)
+        for n in nodes:
+            await n.wait(lambda n=n: n.epoch(gid) == n.daemon.client.epoch(raw(gid)))
+            await n.idle()
+            await until(lambda n=n: n.daemon.client.journal_pending() == [])
+        if len(epochs()) == 1:
+            break
+    assert len(epochs()) == 1
     assert len({n.sas(gid) for n in nodes}) == 1
     for n in nodes:
         assert not n.daemon.group_info(gid)["out_of_sync"]
