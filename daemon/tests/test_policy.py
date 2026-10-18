@@ -348,6 +348,8 @@ def test_config_policy_keys(tmp_path: Path) -> None:
         "sender_per_minute = 0",
         "audit_retention_days = 0",
         "transcript_max_bytes = 10",
+        "audit_max_rows_per_group = 5",
+        "audit_max_rows_per_sender = 999999",
     ],
 )
 def test_config_rejects_bad_policy_values(tmp_path: Path, line: str) -> None:

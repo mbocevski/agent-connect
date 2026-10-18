@@ -226,6 +226,10 @@ CREATE TABLE IF NOT EXISTS audit (
     decision TEXT NOT NULL,
     reason TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS transcript_bytes (
+    group_id TEXT PRIMARY KEY,
+    bytes INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS transcript (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     group_id TEXT NOT NULL,
@@ -326,6 +330,10 @@ class Store:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
+            "CREATE INDEX IF NOT EXISTS audit_group ON audit (group_id, seq);"
+            "CREATE INDEX IF NOT EXISTS audit_sender ON audit (group_id, sender, seq);"
+            "CREATE INDEX IF NOT EXISTS transcript_group ON transcript (group_id, seq);"
+            "CREATE INDEX IF NOT EXISTS transcript_sender ON transcript (group_id, sender, seq);"
         )
 
     def close(self) -> None:
@@ -671,15 +679,34 @@ class Store:
         decision: str,
         reason: str,
         keep: int | None = None,
+        keep_group: int | None = None,
+        keep_sender: int | None = None,
     ) -> None:
-        """One audit row; with ``keep``, only the newest ``keep`` rows stay."""
+        """One audit row. Then only the newest ``keep_sender`` rows of this
+        sender in the group, ``keep_group`` of the group and ``keep`` in all
+        stay: a sender flooding the log only pushes out its own rows."""
         cur = self._db.execute(
             "INSERT INTO audit (group_id, at, direction, sender, msg_id, kind, size, decision, "
             "reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (group_id, at, direction, sender, msg_id, kind, size, decision, reason),
         )
+        if keep_sender is not None:
+            self._trim_audit("group_id = ? AND sender = ?", (group_id, sender), keep_sender)
+        if keep_group is not None:
+            self._trim_audit("group_id = ?", (group_id,), keep_group)
         if keep is not None:
             self._db.execute("DELETE FROM audit WHERE seq <= ?", (int(cur.lastrowid) - keep,))
+
+    def _trim_audit(self, where: str, args: tuple[str, ...], keep: int) -> None:
+        """Delete the audit rows matching ``where`` beyond the newest ``keep``
+        (an indexed walk, not a table scan)."""
+        edge = self._one(
+            f"SELECT seq FROM audit WHERE {where} ORDER BY seq DESC LIMIT 1 OFFSET ?",  # noqa: S608
+            *args,
+            keep,
+        )
+        if edge is not None:
+            self._db.execute(f"DELETE FROM audit WHERE {where} AND seq <= ?", (*args, edge[0]))  # noqa: S608
 
     _AUDIT_COLUMNS = (
         "seq",
@@ -725,28 +752,77 @@ class Store:
         kind: str,
         inner: dict[str, Any],
         max_rows: int,
+        max_sender_rows: int,
+        max_group_bytes: int,
         max_bytes: int,
     ) -> None:
-        """One transcript entry. The group keeps its newest ``max_rows``, and
-        all groups together at most ``max_bytes``: the oldest entries go."""
+        """One transcript entry. Its sender keeps its newest ``max_sender_rows``
+        in the group, the group its newest ``max_rows`` and ``max_group_bytes``,
+        and over ``max_bytes`` for all groups the group holding the most gives
+        way first, oldest entries first: one sender can't flush the record of
+        the others. Every trim walks an index, and the byte totals are kept
+        as they change (``transcript_bytes``), never summed over the table."""
         text = json.dumps(inner, sort_keys=True)
         self._db.execute(
             "INSERT INTO transcript (group_id, at, direction, sender, msg_id, kind, inner, size) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (group_id, at, direction, sender, msg_id, kind, text, len(text)),
         )
-        self._db.execute(
-            "DELETE FROM transcript WHERE group_id = ? AND seq NOT IN (SELECT seq FROM "
-            "transcript WHERE group_id = ? ORDER BY seq DESC LIMIT ?)",
-            (group_id, group_id, max_rows),
+        self._add_transcript_bytes(group_id, len(text))
+        self._trim_transcript(
+            "group_id = ? AND sender = ?", (group_id, sender), max_sender_rows, group_id
         )
-        # Over the byte cap, drop the oldest entries until it fits: every row
-        # whose running total from the newest one passes the cap.
+        self._trim_transcript("group_id = ?", (group_id,), max_rows, group_id)
+        while self.transcript_bytes(group_id) > max_group_bytes:
+            self._drop_oldest_transcript(group_id)
+        while self.transcript_bytes() > max_bytes:
+            biggest = self._one(
+                "SELECT group_id FROM transcript_bytes ORDER BY bytes DESC, group_id LIMIT 1"
+            )
+            if biggest is None:
+                break
+            self._drop_oldest_transcript(str(biggest[0]))
+
+    def _add_transcript_bytes(self, group_id: str, delta: int) -> None:
         self._db.execute(
-            "DELETE FROM transcript WHERE seq IN (SELECT seq FROM (SELECT seq, SUM(size) "
-            "OVER (ORDER BY seq DESC) AS total FROM transcript) WHERE total > ?)",
-            (max_bytes,),
+            "INSERT INTO transcript_bytes (group_id, bytes) VALUES (?, ?) "
+            "ON CONFLICT(group_id) DO UPDATE SET bytes = bytes + excluded.bytes",
+            (group_id, delta),
         )
+        self._db.execute("DELETE FROM transcript_bytes WHERE bytes <= 0")
+
+    def _trim_transcript(self, where: str, args: tuple[str, ...], keep: int, group_id: str) -> None:
+        """Delete the rows matching ``where`` beyond the newest ``keep``."""
+        edge = self._one(
+            f"SELECT seq FROM transcript WHERE {where} ORDER BY seq DESC LIMIT 1 OFFSET ?",  # noqa: S608
+            *args,
+            keep,
+        )
+        if edge is None:
+            return
+        cond = f"{where} AND seq <= ?"
+        total = f"SELECT COALESCE(SUM(size), 0) FROM transcript WHERE {cond}"  # noqa: S608
+        gone = self._one(total, *args, edge[0])
+        self._db.execute(f"DELETE FROM transcript WHERE {cond}", (*args, edge[0]))  # noqa: S608
+        self._add_transcript_bytes(group_id, -int(gone[0]) if gone is not None else 0)
+
+    def _drop_oldest_transcript(self, group_id: str) -> None:
+        row = self._one(
+            "SELECT seq, size FROM transcript WHERE group_id = ? ORDER BY seq LIMIT 1", group_id
+        )
+        if row is None:
+            self._db.execute("DELETE FROM transcript_bytes WHERE group_id = ?", (group_id,))
+            return
+        self._db.execute("DELETE FROM transcript WHERE seq = ?", (row[0],))
+        self._add_transcript_bytes(group_id, -int(row[1]))
+
+    def transcript_bytes(self, group_id: str | None = None) -> int:
+        """Bytes kept in one group's transcript, or in all of them."""
+        if group_id is None:
+            row = self._one("SELECT COALESCE(SUM(bytes), 0) FROM transcript_bytes")
+        else:
+            row = self._one("SELECT bytes FROM transcript_bytes WHERE group_id = ?", group_id)
+        return 0 if row is None else int(row[0])
 
     def transcript(self, group_id: str, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         rows = self._all(
@@ -763,7 +839,13 @@ class Store:
         return [str(r[0]) for r in self._all("SELECT DISTINCT group_id FROM transcript")]
 
     def transcript_purge(self, group_id: str, before: int) -> None:
+        gone = self._one(
+            "SELECT COALESCE(SUM(size), 0) FROM transcript WHERE group_id = ? AND at < ?",
+            group_id,
+            before,
+        )
         self._db.execute("DELETE FROM transcript WHERE group_id = ? AND at < ?", (group_id, before))
+        self._add_transcript_bytes(group_id, -int(gone[0]) if gone is not None else 0)
 
     # -- invites and approvals ---------------------------------------------
 

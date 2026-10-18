@@ -386,8 +386,10 @@ class Daemon:
             config.safety_defaults(),
             self.store,
             self.clock,
-            config.policy_audit_retention_days,
-            config.policy_transcript_max_bytes,
+            audit_retention_days=config.policy_audit_retention_days,
+            transcript_max_bytes=config.policy_transcript_max_bytes,
+            audit_group_rows=config.policy_audit_max_rows_per_group,
+            audit_sender_rows=config.policy_audit_max_rows_per_sender,
         )
         self._background: set[asyncio.Task[None]] = set()
         self._held_wake = asyncio.Event()

@@ -89,6 +89,10 @@ PURGE_EVERY_SECS = 60
 MAX_AUDIT_ROWS = 100_000
 DEFAULT_TRANSCRIPT_MAX_ROWS = 10_000
 DEFAULT_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_TRANSCRIPT_SENDER_ROWS = 1000
+DEFAULT_TRANSCRIPT_GROUP_BYTES = 16 * 1024 * 1024
+DEFAULT_AUDIT_GROUP_ROWS = 20_000
+DEFAULT_AUDIT_SENDER_ROWS = 2000
 DEFAULT_MAX_HELD_PER_GROUP = 100
 DEFAULT_MAX_HELD_PER_SENDER = 20
 DEFAULT_MAX_HELD_BYTES = 8 * 1024 * 1024
@@ -332,6 +336,23 @@ KNOBS: tuple[Knob, ...] = (
         1,
         DEFAULT_TRANSCRIPT_MAX_ROWS,
     ),
+    Knob(
+        "transcript_max_rows_per_sender",
+        int,
+        DEFAULT_TRANSCRIPT_SENDER_ROWS,
+        "Transcript entries one sender keeps in a group at most (1 to 1000), so a flood "
+        "pushes out only its own.",
+        1,
+        DEFAULT_TRANSCRIPT_SENDER_ROWS,
+    ),
+    Knob(
+        "transcript_max_group_bytes",
+        int,
+        DEFAULT_TRANSCRIPT_GROUP_BYTES,
+        "Bytes a group's transcript keeps at most (65536 to 16777216, 16 MiB).",
+        65536,
+        DEFAULT_TRANSCRIPT_GROUP_BYTES,
+    ),
 )
 KNOB = {k.name: k for k in KNOBS}
 LIMIT_FIELDS = tuple(f.name for f in fields(Limits))
@@ -361,6 +382,8 @@ class Settings:
     transcript: bool = False
     transcript_retention_days: int = 7
     transcript_max_rows: int = DEFAULT_TRANSCRIPT_MAX_ROWS
+    transcript_max_rows_per_sender: int = DEFAULT_TRANSCRIPT_SENDER_ROWS
+    transcript_max_group_bytes: int = DEFAULT_TRANSCRIPT_GROUP_BYTES
     senders: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     @staticmethod
@@ -522,19 +545,24 @@ class Outbound:
 class SafetyPolicy:
     """The policy for every group of one daemon."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         defaults: Settings,
         store: Store,
         clock: Clock,
+        *,
         audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS,
         transcript_max_bytes: int = DEFAULT_TRANSCRIPT_MAX_BYTES,
+        audit_group_rows: int = DEFAULT_AUDIT_GROUP_ROWS,
+        audit_sender_rows: int = DEFAULT_AUDIT_SENDER_ROWS,
     ) -> None:
         self.defaults = defaults
         self.store = store
         self.clock = clock
         self.audit_retention_days = audit_retention_days
         self.transcript_max_bytes = transcript_max_bytes
+        self.audit_group_rows = audit_group_rows
+        self.audit_sender_rows = audit_sender_rows
         self.limiter = RateLimiter(clock)
         # Bounded: pruned by purge(), dropped with their group, and at most
         # MAX_TRACKED senders (least recently seen go first).
@@ -814,6 +842,8 @@ class SafetyPolicy:
             decision=decision,
             reason=reason,
             keep=MAX_AUDIT_ROWS,
+            keep_group=self.audit_group_rows,
+            keep_sender=self.audit_sender_rows,
         )
 
     def transcribe(
@@ -831,6 +861,8 @@ class SafetyPolicy:
                 kind=str(inner.get("kind")),
                 inner=inner,
                 max_rows=settings.transcript_max_rows,
+                max_sender_rows=settings.transcript_max_rows_per_sender,
+                max_group_bytes=settings.transcript_max_group_bytes,
                 max_bytes=self.transcript_max_bytes,
             )
 

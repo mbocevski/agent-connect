@@ -67,7 +67,9 @@ from urllib.parse import urlsplit
 
 import agentconnect_core as ac
 from agentconnect.policy import (
+    DEFAULT_AUDIT_GROUP_ROWS,
     DEFAULT_AUDIT_RETENTION_DAYS,
+    DEFAULT_AUDIT_SENDER_ROWS,
     DEFAULT_TRANSCRIPT_MAX_BYTES,
     KNOB,
     KNOBS,
@@ -156,6 +158,10 @@ class Config:
     policy_transcript_retention_days: int = KNOB["transcript_retention_days"].default
     policy_transcript_max_rows: int = KNOB["transcript_max_rows"].default
     policy_transcript_max_bytes: int = DEFAULT_TRANSCRIPT_MAX_BYTES
+    policy_audit_max_rows_per_group: int = DEFAULT_AUDIT_GROUP_ROWS
+    policy_audit_max_rows_per_sender: int = DEFAULT_AUDIT_SENDER_ROWS
+    policy_transcript_max_rows_per_sender: int = KNOB["transcript_max_rows_per_sender"].default
+    policy_transcript_max_group_bytes: int = KNOB["transcript_max_group_bytes"].default
     policy_audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
 
     def safety_defaults(self) -> Settings:
@@ -231,6 +237,19 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         shown_default(DEFAULT_TRANSCRIPT_MAX_BYTES),
         "Bytes all transcripts together keep at most (1048576 to 67108864, 64 MiB); the "
         "oldest entries go first.",
+    ),
+    ConfigKey(
+        "policy.audit_max_rows_per_group",
+        "policy_audit_max_rows_per_group",
+        shown_default(DEFAULT_AUDIT_GROUP_ROWS),
+        "Audit rows one group keeps at most (1000 to 20000); the oldest go first.",
+    ),
+    ConfigKey(
+        "policy.audit_max_rows_per_sender",
+        "policy_audit_max_rows_per_sender",
+        shown_default(DEFAULT_AUDIT_SENDER_ROWS),
+        "Audit rows one sender keeps in a group at most (100 to 2000), so a sender "
+        "flooding the log pushes out only its own rows.",
     ),
 )
 
@@ -562,6 +581,15 @@ def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
         msg += str(DEFAULT_TRANSCRIPT_MAX_BYTES)
         raise ConfigError(msg)
     out["policy_transcript_max_bytes"] = size
+    for key, lo, hi in (
+        ("audit_max_rows_per_group", 1000, DEFAULT_AUDIT_GROUP_ROWS),
+        ("audit_max_rows_per_sender", 100, DEFAULT_AUDIT_SENDER_ROWS),
+    ):
+        value = _typed(table, key, int, hi)
+        if not lo <= value <= hi:
+            msg = f"policy.{key} must be {lo}..{hi}"
+            raise ConfigError(msg)
+        out[f"policy_{key}"] = value
     return out
 
 

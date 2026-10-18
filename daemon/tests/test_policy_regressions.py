@@ -684,3 +684,63 @@ def test_known_card_fields_are_kept_in_shape() -> None:
     }
     assert normalize("control.floor", {"holder": None}) == {"holder": None}
     assert normalize("a2a.message", {"parts": []}) == {"parts": []}
+
+
+# -- N6: one sender can't flush the record -------------------------------------------
+
+
+def audit_row(store: Store, group: str, sender: str, msg_id: str) -> None:
+    store.audit_add(
+        group,
+        at=0,
+        direction="in",
+        sender=sender,
+        msg_id=msg_id,
+        kind="k",
+        size=1,
+        decision="drop",
+        reason="rate_limited",
+        keep=100,
+        keep_group=4,
+        keep_sender=2,
+    )
+
+
+def test_a_flooding_sender_keeps_only_its_own_audit_rows(store: Store) -> None:
+    audit_row(store, G, "ac:v0:honest", "h1")
+    for i in range(10):
+        audit_row(store, G, MALLORY, f"m{i}")
+    assert [r["msg_id"] for r in store.audit(G)] == ["h1", "m8", "m9"]
+    audit_row(store, "g2", MALLORY, "other-group")
+    for i in range(3):
+        audit_row(store, G, f"ac:v0:s{i}", f"s{i}")
+    assert len(store.audit(G)) == 4, "the group's cap"
+    assert [r["msg_id"] for r in store.audit("g2")] == ["other-group"], "other groups keep theirs"
+
+
+def test_a_flooding_sender_keeps_only_its_own_transcript(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    policy.update(G, {"transcript": True, "transcript_max_rows_per_sender": 2})
+    policy.transcribe(G, "in", "ac:v0:honest", "h1", msg())
+    for i in range(10):
+        policy.transcribe(G, "in", MALLORY, f"m{i}", msg())
+    assert [e["msg_id"] for e in store.transcript(G)] == ["h1", "m8", "m9"]
+
+
+def test_the_transcript_byte_caps_spare_the_other_groups(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    size = len(json.dumps(msg(), sort_keys=True))
+    policy.update("g2", {"transcript": True})
+    policy.transcribe("g2", "in", "ac:v0:honest", "keep-me", msg())
+    policy.update(G, {"transcript": True, "transcript_max_group_bytes": 65536})
+    policy.transcript_max_bytes = 10 * size
+    for i in range(30):
+        policy.transcribe(G, "in", f"ac:v0:s{i}", f"m{i}", msg())
+    assert [e["msg_id"] for e in store.transcript("g2")] == ["keep-me"], (
+        "over the daemon's cap, the biggest group gives way"
+    )
+    assert store.transcript_bytes() <= 10 * size
+    assert store.transcript_bytes(G) == size * len(store.transcript(G))
+    policy.update(G, {"transcript_max_group_bytes": 65536})
