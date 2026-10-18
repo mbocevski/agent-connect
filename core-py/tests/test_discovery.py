@@ -341,7 +341,9 @@ LINE_OR_DISGUISE = {
     "U+3164 HANGUL FILLER": chr(0x3164),
     "U+2800 BRAILLE PATTERN BLANK": chr(0x2800),
     "U+034F COMBINING GRAPHEME JOINER": chr(0x034F),
-    "U+FE0F VARIATION SELECTOR-16": chr(0x2764) + chr(0xFE0F),
+    "U+FE0F after a non-emoji": "a" + chr(0xFE0F),
+    "U+FE0F doubled": chr(0x2764) + chr(0xFE0F) * 2,
+    "ZWJ sequence": chr(0x1F468) + chr(0x200D) + chr(0x1F469),
     "five combining marks": "a" + chr(0x0336) * 5,
     "not NFC (e + U+0301)": "e" + chr(0x0301),
 }
@@ -359,6 +361,26 @@ def test_listing_text_is_one_line(
             ac.sign_listing(json.dumps(doc).encode(), ik)
         with pytest.raises(ac.AgentConnectError, match="text character"):
             ac.canonical_card(json.dumps(doc).encode())
+
+
+HEART = chr(0x2764) + chr(0xFE0F)
+
+
+def test_emoji_presentation_selector_is_text_in_every_path(
+    keys: tuple[ac.DirectoryKey, ac.Identity, bytes], rng: random.Random
+) -> None:
+    """SPEC 13.1.2: one VS16 right after an Emoji character is allowed in
+    listing text, group names, display names and knock text."""
+    _, ik, token = keys
+    for field in ("name", "description"):
+        doc = card(ik, token, None, **{field: f"I {HEART} releases"})
+        ac.sign_listing(json.dumps(doc).encode(), ik)
+    client = make_client(rng)
+    client.create_group(f"Trip {HEART}", f"Plan {HEART}")
+    link = ac.parse_invite_url(client.create_invite("relay.example").url)
+    make_client(rng).create_join_request(link, f"bob {HEART}")
+    door = ac.Door.generate(T0 + 86_400)
+    make_client(rng).create_knock(door.id, door.public_key, f"bob {HEART}", f"hi {HEART}")
 
 
 @pytest.mark.parametrize("char", LINE_OR_DISGUISE.values(), ids=LINE_OR_DISGUISE.keys())

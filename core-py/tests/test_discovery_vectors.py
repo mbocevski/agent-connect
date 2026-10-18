@@ -170,6 +170,9 @@ def test_listing_content() -> None:
     assert ac.verify_listing(load("listings.json")["valid"]["listing"].encode()).content == (
         v["canonical"].encode()
     )
+    for case in v["valid_texts"]:
+        got = ac.canonical_listing_content(case["input"].encode())
+        assert got == case["canonical"].encode(), case["name"]
     for case in v["invalid"]:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.canonical_listing_content(case["input"].encode())
