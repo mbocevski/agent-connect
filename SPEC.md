@@ -64,6 +64,19 @@ what it does not protect against.
   - **Codepoint (provisional):** `0x004F`, the value OpenMLS uses until IANA
     assigns one. A different final codepoint or KEM derivation is a protocol
     version change (§13).
+  - **Key derivation:** `DeriveKeyPair(ikm)` for `MLKEM768-X25519` is the
+    one in `draft-ietf-hpke-pq`: the 32-byte key seed is
+    `SHAKE256.LabeledDerive(ikm, "DeriveKeyPair", "", 32)` with
+    `suite_id = "KEM" || I2OSP(0x647a, 2)`, that is
+    `SHAKE256(ikm || "HPKE-v1" || suite_id || I2OSP(13, 2) ||
+    "DeriveKeyPair" || I2OSP(32, 2), 32)`, as implemented by hpke-rs 0.8.
+    MLS uses it for the HPKE keys of tree nodes derived from path secrets
+    (RFC 9420 §7.4). Door key pairs (§6.6.1) are generated with it from 32
+    random bytes, which is also how the test vectors rebuild a door.
+    - (Informative.) `openmls_libcrux_crypto` 0.4.0 derived the seed as the
+      unlabeled `SHAKE256(ikm, 32)`. Daemons built on it derive different
+      node keys, so they don't interoperate with v0 daemons on commits that
+      carry an update path. v0 is unreleased, so there is no migration.
   - Implementations MUST reject KeyPackages, Welcomes and groups that use any
     other ciphersuite. v0 has **no ciphersuite negotiation**.
   - In OpenMLS the suite is behind the `draft-ietf-mls-pq-ciphersuites`

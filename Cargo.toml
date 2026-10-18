@@ -83,6 +83,33 @@ unicode-properties = { version = "=0.1.4", default-features = false, features = 
 ] }
 zeroize = { version = "1.9.1", features = ["derive"] }
 
+# TEMPORARY, added 2026-10-18 for RUSTSEC-2026-0329, RUSTSEC-2026-0330 and
+# RUSTSEC-2026-0331. openmls_libcrux_crypto 0.4.0, the latest crates.io
+# release, pins the affected libcrux-kem 0.0.9 and libcrux-hmac-drbg 0.0.1;
+# upstream openmls main depends on the fixed releases.
+#
+# The patch is mixed on purpose: only the provider side (openmls_traits,
+# openmls_libcrux_crypto, openmls_memory_storage, openmls_rust_crypto)
+# comes from main, while
+# openmls 0.9.1, openmls_basic_credential 0.6.0 and openmls_sqlite_storage
+# 0.3.0 stay on crates.io. Main's openmls has openmls_sqlite_storage as an
+# optional dependency on rusqlite 0.40, whose libsqlite3-sys 0.38 conflicts
+# (one `links = "sqlite3"` per build) with sqlx 0.9, which allows < 0.38.
+# Pinned by full rev, never a branch: `deny.toml` allows only this git
+# source and requires a rev.
+#
+# Remove this block once crates.io has (1) an openmls and
+# openmls_libcrux_crypto release that depends on libcrux-kem >= 0.0.10 and
+# libcrux-hmac-drbg >= 0.0.2, and (2) a sqlx release that allows the
+# libsqlite3-sys of that family, so the whole family moves together.
+[patch.crates-io]
+openmls_libcrux_crypto = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+# Not built (an optional dependency of openmls and the provider), but its
+# 0.6.0 release would keep hpke-rs 0.7 and libcrux-kem 0.0.9 in Cargo.lock.
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+openmls_traits = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

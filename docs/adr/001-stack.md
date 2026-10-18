@@ -101,8 +101,9 @@ upstream docs.
 **Spike outcome (2026-10-17): GO** (`docs/spikes/mls-xwing.md`). OpenMLS
 covers everything v0 needs, so the classical fallback isn't needed.
 
-**Accepted risk: provider advisories.** `openmls_libcrux_crypto` 0.4.0, the
-only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
+**Provider advisories (accepted 2026-10-17, cleared 2026-10-18).**
+`openmls_libcrux_crypto` 0.4.0, the only release, pins `libcrux-kem` 0.0.9
+and `libcrux-hmac-drbg` 0.0.1.
 
 - RUSTSEC-2026-0331 is reachable: a validly signed KeyPackage with a short
   hybrid key panics the inviter, so anyone holding an invite link can crash
@@ -113,6 +114,26 @@ only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
   advisories are ignored in `deny.toml` as **temporary**.
 - **Release blocker:** no release and no public relay until a fixed provider
   is published and the ignores are removed.
+- **Resolution (2026-10-18).** The workspace patches the provider side
+  (`openmls_traits`, `openmls_libcrux_crypto`, `openmls_memory_storage`,
+  and `openmls_rust_crypto`, which isn't built but whose 0.6.0 release
+  would keep `libcrux-kem` 0.0.9 in `Cargo.lock`) to
+  upstream OpenMLS commit `be2368a21ec5e0380abd568821addc57b79013ea`, which
+  depends on `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2 and `hpke-rs`
+  0.8. The three ignores are gone and the blocker is lifted.
+  - The patch is mixed: `openmls` 0.9.1, `openmls_basic_credential` 0.6.0
+    and `openmls_sqlite_storage` 0.3.0 stay on crates.io, because main's
+    `openmls` pulls rusqlite 0.40, whose libsqlite3-sys 0.38 can't share a
+    build with sqlx 0.9. `deny.toml` allows only this git source, pinned
+    by rev.
+  - Remove the patch once crates.io has an `openmls` /
+    `openmls_libcrux_crypto` release on the fixed libcrux crates and a sqlx
+    release that allows the family's libsqlite3-sys.
+  - hpke-rs 0.8 changes `DeriveKeyPair` for the suite's KEM to
+    `draft-ietf-hpke-pq` (SPEC §3.1). Daemons built on the 0.4.0 provider
+    don't interoperate on commits with an update path; v0 is unreleased,
+    so there is no migration.
+  - The HPKE key length check stays as defence in depth.
 
 ### 3. Tooling
 

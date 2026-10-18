@@ -483,6 +483,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Core: HPKE `DeriveKeyPair` for the v0 suite's KEM (`MLKEM768-X25519`) now
+  follows `draft-ietf-hpke-pq`, `SHAKE256.LabeledDerive(ikm,
+  "DeriveKeyPair", "", 32)`, as implemented by hpke-rs 0.8 (SPEC §3.1). It
+  was the unlabeled `SHAKE256(ikm, 32)`. MLS node keys derived from path
+  secrets and door keys change, so daemons built before this don't
+  interoperate on commits that carry an update path; v0 is unreleased, so
+  there is no migration. The door-key vectors in `knocks.json`,
+  `listings.json`, `listing-tokens.json` and `withdrawals.json` are
+  regenerated from their stored seeds.
 - There is no built-in relay any more: `relay.url` (daemon, CLI, embedded SDK) and
   `AC_DIRECTORY_RELAYS` (directory) are required.
 - The daemon's protocol engine and local API moved into the
@@ -687,6 +696,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Dependencies: RUSTSEC-2026-0329 (`libcrux-hmac-drbg` 0.0.1),
+  RUSTSEC-2026-0330 and RUSTSEC-2026-0331 (`libcrux-kem` 0.0.9) are cleared
+  and no longer ignored by `cargo deny`. `openmls_traits`,
+  `openmls_libcrux_crypto`, `openmls_memory_storage` and the unbuilt
+  `openmls_rust_crypto` are patched, here and in the fuzz workspaces, to
+  upstream OpenMLS commit `be2368a21ec5e0380abd568821addc57b79013ea`, which
+  uses `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2 and `hpke-rs` 0.8;
+  the rest of OpenMLS stays on crates.io (ADR-001 §2). The patch goes once
+  crates.io has a fixed provider release. The HPKE key length check stays.
 - Daemon: agent messages carry the `msg_id`s they reply to in a new inner
   `reply_to` field (SPEC §7.2, at most 16). A receiver that knows any of
   them treats the message's `hop` as at least one more than theirs, so a

@@ -19,6 +19,14 @@ path = ".."
 # `directory/` (needs `cargo install cargo-fuzz`).
 [workspace]
 
+# The same provider patch as the main workspace (see its Cargo.toml):
+# RUSTSEC-2026-0329/-0330/-0331. Keep the rev in step with it.
+[patch.crates-io]
+openmls_libcrux_crypto = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+openmls_traits = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
+
 [[bin]]
 name = "card_text"
 path = "fuzz_targets/card_text.rs"

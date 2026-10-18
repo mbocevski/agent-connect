@@ -1,10 +1,12 @@
-//! Spike item 9: reachability of RUSTSEC-2026-0331 (libcrux-kem 0.0.9,
-//! "Panic on Decoding Short Hybrid Keys") through the OpenMLS provider.
+//! Spike item 9: RUSTSEC-2026-0331 (libcrux-kem 0.0.9, "Panic on Decoding
+//! Short Hybrid Keys") through the OpenMLS provider.
 //!
 //! A KeyPackage `init_key` or a leaf `encryption_key` is attacker-chosen
 //! (the attacker signs its own KeyPackage), and the committer HPKE-seals to
-//! it. If sealing to a short X-Wing key panics, a malicious joiner can crash
-//! the inviter's daemon.
+//! it. With libcrux-kem 0.0.9, sealing to a short X-Wing key panicked, so a
+//! malicious joiner could crash the inviter's daemon. With the fixed
+//! libcrux-kem 0.0.10 (the provider patch in the workspace Cargo.toml) it is
+//! an error.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -44,7 +46,7 @@ fn malicious_key_package(p: &Provider, id: &Identity) -> Vec<u8> {
 }
 
 #[test]
-fn malicious_key_package_crashes_the_inviter() {
+fn malicious_key_package_is_an_error_not_a_crash() {
     let pm = Provider::new().unwrap();
     let mallory = Identity::new("ac:v0:mallory", &pm);
     let bytes = malicious_key_package(&pm, &mallory);
@@ -65,9 +67,13 @@ fn malicious_key_package_crashes_the_inviter() {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         ga.add_members(&pa, &a.signer, &[kp]).map(|_| ())
     }));
-    // While libcrux-kem 0.0.9 is in the tree this panics. When the provider
-    // is upgraded this assertion fails; flip it to `Ok(Err(_))`.
-    assert!(outcome.is_err(), "no panic any more: {outcome:?}");
+    // RUSTSEC-2026-0331: libcrux-kem 0.0.9 panicked here. The fixed release
+    // returns an error, so the inviter rejects the Add and keeps running.
+    match outcome {
+        Ok(Err(_)) => {}
+        Ok(Ok(())) => panic!("committing an Add with a short init_key must fail"),
+        Err(_) => panic!("RUSTSEC-2026-0331: sealing to a short init_key panics"),
+    }
 }
 
 #[test]
@@ -79,9 +85,9 @@ fn hpke_seal_to_short_xwing_key() {
             .hpke_seal(CS.hpke_config(), &short_pk, b"info", b"aad", b"secret")
     }));
     match outcome {
+        Ok(Err(_)) => {}
         Ok(Ok(_)) => panic!("sealing to a short key must not succeed"),
-        Ok(Err(e)) => println!("returns an error: {e:?}"),
-        Err(_) => println!("PANICS: reachable denial of service"),
+        Err(_) => panic!("RUSTSEC-2026-0331: sealing to a short key panics"),
     }
 }
 
@@ -89,10 +95,11 @@ fn hpke_seal_to_short_xwing_key() {
 fn wg_track_suite_0x004f_also_runs_on_libcrux() {
     // MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519 (draft-ietf-mls-pq-ciphersuites
     // TBD1, OpenMLS provisional 0x004F) maps to the same X-Wing KEM in OpenMLS.
+    // Since upstream openmls#2274 the provider also advertises it.
     let cs = Ciphersuite::MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519;
     let p = Provider::new().unwrap();
     assert!(p.crypto().supports(cs).is_ok());
-    assert!(!p.crypto().supported_ciphersuites().contains(&cs));
+    assert!(p.crypto().supported_ciphersuites().contains(&cs));
     let config = MlsGroupCreateConfig::builder()
         .ciphersuite(cs)
         .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)

@@ -5,16 +5,11 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-# TEMPORARY, accepted 2026-10-17 (ADR-001 §2, docs/spikes/mls-xwing.md).
-# openmls_libcrux_crypto 0.4.0 pins these versions; upstream main already uses
-# the fixed releases, but no provider release ships them yet. Until one does,
-# `core` MUST length-check every HPKE public key before calling OpenMLS.
-# RELEASE BLOCKER: no release and no public relay while any of these entries
-# remain. Remove them as soon as a fixed provider is published.
+# RUSTSEC-2026-0329, -0330 and -0331 (libcrux-hmac-drbg 0.0.1, libcrux-kem
+# 0.0.9) were cleared on 2026-10-18 by the `[patch.crates-io]` block in
+# Cargo.toml, which takes the provider from an upstream commit that depends
+# on the fixed releases. Don't ignore them again.
 ignore = [
-    { id = "RUSTSEC-2026-0329", reason = "libcrux-hmac-drbg 0.0.1 via openmls_libcrux_crypto 0.4.0; fixed in 0.0.2" },
-    { id = "RUSTSEC-2026-0330", reason = "libcrux-kem 0.0.9 via hpke-rs-libcrux 0.7.0; fixed in 0.0.10" },
-    { id = "RUSTSEC-2026-0331", reason = "libcrux-kem 0.0.9 via hpke-rs-libcrux 0.7.0; reachable DoS, see spikes/mls-xwing t9; fixed in 0.0.10" },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; build-time only, via libcrux's hax-lib-macros" },
 ]
 
@@ -60,3 +55,8 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# Git sources must be pinned by full rev, never a branch or tag. The only
+# allowed one is upstream OpenMLS, for the temporary provider patch in
+# Cargo.toml (RUSTSEC-2026-0329/-0330/-0331); remove it with that patch.
+required-git-spec = "rev"
+allow-git = ["https://github.com/openmls/openmls"]
