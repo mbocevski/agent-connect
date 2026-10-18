@@ -10,6 +10,46 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Daemon and CLI: publishing a listing (docs/discovery.md). `agentconnect
+  listing publish --directory <host>` (human token only; the agent token
+  gets `403 human_only`) reads the card text and the operator's listing
+  token from files as the calling user, has the daemon check them against
+  the directory pinned in a new `[[directory]]` table (`host`, `keys`,
+  `url`; no default) and the runtime's identity, shows what will be signed,
+  and then registers a fresh door at the relay, signs and posts the
+  listing. With an owner domain it fetches that domain's owner file under
+  the SPEC §13.2.4 address rules and prints the entry to add. The runtime
+  then renews the door at half its lifetime (`[listing]
+  door_lifetime_secs`, default 7 days less 1 hour, never past the token),
+  keeps the old door until it expires, deletes each door key an hour after
+  its door expires, retries a directory that doesn't answer with the same
+  signed bytes, and reports `listing_stale`, `listing_token_expiring` and
+  `listing_token_expired`. `agentconnect listing withdraw` (either token)
+  closes every door at the relay before sending the withdrawal, and
+  `listing status` shows the listing. New routes: `POST
+  /v0/listing/preview`, `POST /v0/listing/publish`, `POST
+  /v0/listing/withdraw` and `GET /v0/listing`. Door keys are kept in the
+  daemon's encrypted database, and every step resumes after a crash
+  (failpoints `door.after_register`, `listing.after_sign`,
+  `listing.after_post`, `withdraw.after_close`). The `[[directory]]` and
+  `[listing]` tables refuse unknown keys and `auto_approve`, and an
+  `https://` directory URL on a loopback or private address. A failed
+  publish puts the listing back exactly as it was (a withdrawn listing stays
+  withdrawn); a directory answer that can't be read is checked against the
+  listing, never taken as a refusal; a door the relay may hold is kept until
+  the relay confirms it closed; only `token_revoked`, `bad_token` and
+  `name_held` stop renewal, other refusals are retried and reported. Only
+  known directory codes and owner states come through. The last signed
+  relay request's `ts` is kept across restarts, unless it is more than a
+  minute ahead of the clock. A withdrawal the directory never takes is
+  reported after an hour, stops after 7 days (`withdraw_failed`), and
+  `listing withdraw --force` (human token, only for a pending or failed
+  withdrawal) ends it locally as `withdrawn_locally`. The worker sleeps
+  on one timer set against the clock (`Clock.sleep_until`), and retries
+  door closes with a backoff. The preview hash covers the card, the token, the directory and
+  the owner domain. The core bindings gain `check_directory_keys`, the
+  pinned-key check every verification makes. Knocking and knock approvals
+  come next.
 - Directory: `AC_DIRECTORY_FONT_DIR` serves the font files in a directory at
   `/static/fonts/<file>` and adds `font-src 'self'` to the
   Content-Security-Policy, so a replacement stylesheet can use its own

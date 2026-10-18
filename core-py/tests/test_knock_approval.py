@@ -197,6 +197,25 @@ def test_bad_arguments_raise_instead_of_panicking(rng: random.Random) -> None:
     assert e.value.kind == "malformed"
 
 
+def test_pinned_directory_keys_are_checked_as_verification_does(rng: random.Random) -> None:
+    a = ac.DirectoryKey._generate_for_testing(rng.getrandbits(64)).public_key
+    b = ac.DirectoryKey._generate_for_testing(rng.getrandbits(64)).public_key
+    ac.check_directory_keys("directory.example.org", [a])
+    ac.check_directory_keys("directory.example.org", [a, b])
+    # Not a point on the curve: y = 2 has no x.
+    not_a_point = (2).to_bytes(32, "little")
+    for host, keys in (
+        ("directory.example.org", []),
+        ("directory.example.org", [a, b, a]),
+        ("directory.example.org", [a, a]),
+        ("directory.example.org", [a[:31]]),
+        ("directory.example.org", [not_a_point]),
+        ("Directory.Example.Org", [a]),
+    ):
+        with pytest.raises(ac.AgentConnectError):
+            ac.check_directory_keys(host, keys)
+
+
 def test_constants_and_names() -> None:
     assert ac.MAX_LISTING_BYTES == 32 * 1024
     assert ac.MAX_OWNER_FILE_BYTES == 64 * 1024

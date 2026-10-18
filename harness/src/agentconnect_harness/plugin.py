@@ -1,6 +1,7 @@
 """pytest fixtures for multi-node tests (registered in the root conftest).
 
 * ``relay``: the real relay binary on a random port (one per session);
+* ``directory``: the real directory binary, listing that relay (one per session);
 * ``cluster``: runtimes with recording adapters on a shared FakeClock,
   once per host (``daemon``, ``embedded``); ``@pytest.mark.hosts(...)``
   keeps a scenario to some;
@@ -25,6 +26,7 @@ import pytest
 import pytest_asyncio
 
 from agentconnect_harness.cluster import HOSTS, Cluster, Node
+from agentconnect_harness.directory import DirectoryProcess, run_directory
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import RelayProcess, run_relay
 
@@ -61,6 +63,14 @@ def _runs_on_its_host(item: pytest.Item) -> bool:
 def relay(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RelayProcess]:
     with run_relay(tmp_path_factory.mktemp("relay")) as r:
         yield r
+
+
+@pytest.fixture(scope="session")
+def directory(relay: RelayProcess, session_seed: int) -> Iterator[DirectoryProcess]:
+    """The real directory on the in-memory store, listing the harness relay
+    (one per session, like the relay: scenarios use names of their own)."""
+    with run_directory(relay.host, session_seed) as d:
+        yield d
 
 
 @pytest_asyncio.fixture(params=HOSTS)

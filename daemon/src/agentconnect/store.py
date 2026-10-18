@@ -253,6 +253,44 @@ CREATE TABLE IF NOT EXISTS handled (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT NOT NULL UNIQUE
 );
+CREATE TABLE IF NOT EXISTS listings (
+    directory TEXT NOT NULL,
+    name TEXT NOT NULL,
+    state TEXT NOT NULL,
+    content TEXT NOT NULL,
+    token TEXT NOT NULL,
+    token_expires_at INTEGER NOT NULL,
+    owner_domain TEXT,
+    seq INTEGER NOT NULL DEFAULT 0,
+    max_signed_seq INTEGER NOT NULL DEFAULT 0,
+    published BLOB,
+    published_sha256 TEXT,
+    published_at INTEGER,
+    pending BLOB,
+    pending_door TEXT,
+    owner_state TEXT,
+    next_renewal_at INTEGER,
+    retry_at INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    failing_since INTEGER,
+    stale_since INTEGER,
+    last_error TEXT,
+    token_warned INTEGER NOT NULL DEFAULT 0,
+    restore_state TEXT,
+    restore_renewal_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (directory, name)
+);
+CREATE TABLE IF NOT EXISTS doors (
+    door_id TEXT PRIMARY KEY,
+    directory TEXT NOT NULL,
+    name TEXT NOT NULL,
+    secret BLOB,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    state TEXT NOT NULL
+);
 """
 
 GROUP_COLUMNS = (
@@ -269,6 +307,39 @@ GROUP_COLUMNS = (
     "last_own_commit_at",
     "msgs_since_commit",
 )
+
+
+LISTING_COLUMNS = (
+    "directory",
+    "name",
+    "state",
+    "content",
+    "token",
+    "token_expires_at",
+    "owner_domain",
+    "seq",
+    "max_signed_seq",
+    "published",
+    "published_sha256",
+    "published_at",
+    "pending",
+    "pending_door",
+    "owner_state",
+    "next_renewal_at",
+    "retry_at",
+    "attempts",
+    "failing_since",
+    "stale_since",
+    "last_error",
+    "token_warned",
+    "restore_state",
+    "restore_renewal_at",
+    "created_at",
+    "updated_at",
+)
+_LISTING_COUNTERS = frozenset({"seq", "max_signed_seq", "attempts", "token_warned"})
+# Without `secret`: only door_secrets() reads the private keys.
+DOOR_COLUMNS = ("door_id", "directory", "name", "expires_at", "created_at", "state")
 
 
 @dataclass
@@ -898,6 +969,102 @@ class Store:
         )
         self._db.execute("DELETE FROM transcript WHERE group_id = ? AND at < ?", (group_id, before))
         self._add_transcript_bytes(group_id, -int(gone[0]) if gone is not None else 0)
+
+    # -- listings and doors (the owner's side of discovery) -----------------
+
+    def listing(self, directory: str, name: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(LISTING_COLUMNS)} FROM listings "  # noqa: S608
+            "WHERE directory = ? AND name = ?",
+            directory,
+            name,
+        )
+        return None if row is None else dict(zip(LISTING_COLUMNS, row, strict=True))
+
+    def listings(self) -> list[dict[str, Any]]:
+        """Every listing row, the most recently changed first. Rows are
+        never deleted: ``max_signed_seq`` must outlive a withdrawal."""
+        rows = self._all(
+            f"SELECT {', '.join(LISTING_COLUMNS)} FROM listings "  # noqa: S608
+            "ORDER BY updated_at DESC, created_at DESC"
+        )
+        return [dict(zip(LISTING_COLUMNS, r, strict=True)) for r in rows]
+
+    def put_listing(self, row: dict[str, Any]) -> None:
+        """Insert or replace a whole listing row (missing counters are 0)."""
+        self._db.execute(
+            f"INSERT OR REPLACE INTO listings ({', '.join(LISTING_COLUMNS)}) "  # noqa: S608
+            f"VALUES ({', '.join('?' for _ in LISTING_COLUMNS)})",
+            [row.get(c, 0 if c in _LISTING_COUNTERS else None) for c in LISTING_COLUMNS],
+        )
+
+    def update_listing(self, directory: str, name: str, **fields: Any) -> None:
+        for key in fields:
+            if key not in LISTING_COLUMNS or key in ("directory", "name"):
+                msg = f"unknown listing column {key}"
+                raise ValueError(msg)
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        self._db.execute(
+            f"UPDATE listings SET {sets} WHERE directory = ? AND name = ?",  # noqa: S608
+            (*fields.values(), directory, name),
+        )
+
+    def add_door(  # noqa: PLR0913
+        self,
+        *,
+        door_id: str,
+        directory: str,
+        name: str,
+        secret: bytes,
+        expires_at: int,
+        now: int,
+    ) -> None:
+        """A new door, ``registering`` until the relay has it."""
+        self._db.execute(
+            "INSERT INTO doors (door_id, directory, name, secret, expires_at, created_at, state) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'registering')",
+            (door_id, directory, name, secret, expires_at, now),
+        )
+
+    def doors(self, directory: str | None = None, name: str | None = None) -> list[dict[str, Any]]:
+        """Doors (of one listing, or all), the oldest first, without their
+        private keys (see :meth:`door_secrets`)."""
+        rows = self._all(
+            f"SELECT {', '.join(DOOR_COLUMNS)} FROM doors "  # noqa: S608
+            "WHERE (? IS NULL OR directory = ?) AND (? IS NULL OR name = ?) "
+            "ORDER BY created_at, door_id",
+            directory,
+            directory,
+            name,
+            name,
+        )
+        return [dict(zip(DOOR_COLUMNS, r, strict=True)) for r in rows]
+
+    def door_secrets(self) -> list[tuple[str, bytes]]:
+        """Every door's private key that is still kept (encrypted at rest
+        with the rest of this database), for loading them once at start."""
+        rows = self._all("SELECT door_id, secret FROM doors WHERE secret IS NOT NULL")
+        return [(str(r[0]), bytes(r[1])) for r in rows]
+
+    def drop_door_secret(self, door_id: str, state: str) -> None:
+        """Delete a door's private key and move it to ``state``."""
+        self._db.execute(
+            "UPDATE doors SET secret = NULL, state = ? WHERE door_id = ?", (state, door_id)
+        )
+
+    def update_door(self, door_id: str, **fields: Any) -> None:
+        for key in fields:
+            if key not in DOOR_COLUMNS or key == "door_id":
+                msg = f"unknown door column {key}"
+                raise ValueError(msg)
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        self._db.execute(
+            f"UPDATE doors SET {sets} WHERE door_id = ?",  # noqa: S608
+            (*fields.values(), door_id),
+        )
+
+    def delete_door(self, door_id: str) -> None:
+        self._db.execute("DELETE FROM doors WHERE door_id = ?", (door_id,))
 
     # -- invites and approvals ---------------------------------------------
 

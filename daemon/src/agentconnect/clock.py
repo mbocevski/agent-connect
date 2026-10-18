@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 
@@ -38,6 +39,12 @@ class Clock(Protocol):
         doesn't count it as a sleeper."""
         ...
 
+    async def sleep_until(self, unix: float, *, deadline: bool = False) -> None:
+        """Wait until this clock reads ``unix`` (Unix seconds). A timer set
+        against the clock itself, so a clock that moves before the timer
+        starts (a fake one moved by a test) can't delay it."""
+        ...
+
 
 def _millis(moment: datetime) -> int:
     return (moment - _EPOCH) // timedelta(milliseconds=1)
@@ -59,6 +66,9 @@ class SystemClock:
 
     async def sleep(self, seconds: float, *, deadline: bool = False) -> None:
         await asyncio.sleep(max(seconds, 0))
+
+    async def sleep_until(self, unix: float, *, deadline: bool = False) -> None:
+        await asyncio.sleep(max(unix - self.unix_millis() / 1000, 0))
 
 
 def _wake(fut: asyncio.Future[Any]) -> None:
@@ -103,11 +113,17 @@ class FakeClock:
             return len([s for s in self._sleepers if id(s[2]) not in self._deadlines])
 
     async def sleep(self, seconds: float, *, deadline: bool = False) -> None:
+        await self._sleep(lambda now: now + timedelta(seconds=max(seconds, 0)), deadline)
+
+    async def sleep_until(self, unix: float, *, deadline: bool = False) -> None:
+        await self._sleep(lambda _now: _EPOCH + timedelta(seconds=unix), deadline)
+
+    async def _sleep(self, until: Callable[[datetime], datetime], deadline: bool) -> None:
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         with self._lock:
-            entry = (self._now + timedelta(seconds=max(seconds, 0)), loop, fut)
-            if seconds <= 0:
+            entry = (until(self._now), loop, fut)
+            if entry[0] <= self._now:
                 fut.set_result(None)
             else:
                 self._sleepers.append(entry)

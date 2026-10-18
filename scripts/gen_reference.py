@@ -309,7 +309,7 @@ def render_config_keys() -> str:
         rows.append(
             (
                 f"`{key.key}`",
-                _toml_type(fields[key.field].type),
+                key.kind or _toml_type(fields[key.field].type),
                 key.default,
                 f"`{key.env}`" if key.env else "none",
                 key.doc,

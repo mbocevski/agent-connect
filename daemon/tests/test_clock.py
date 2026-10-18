@@ -110,3 +110,21 @@ async def test_a_deadline_sleep_is_not_counted_as_a_sleeper() -> None:
     clock.advance(10)
     await asyncio.gather(deadline, pause)
     assert clock.sleepers == 0
+
+
+async def test_sleep_until_is_set_against_the_clock_itself() -> None:
+    clock = FakeClock()
+    target = unix_seconds(clock) + 10
+    waiter = asyncio.ensure_future(clock.sleep_until(target, deadline=True))
+    clock.advance(4)  # before the timer even started: it still ends at target
+    await asyncio.sleep(0)
+    assert clock.sleepers == 0  # a deadline, not a retry pause
+    clock.advance(5)
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    clock.advance(1)
+    await asyncio.wait_for(waiter, 1)
+    # A time already past returns at once, on either clock.
+    await asyncio.wait_for(clock.sleep_until(target - 1), 1)
+    system = SystemClock()
+    await asyncio.wait_for(system.sleep_until(system.unix_millis() / 1000 - 1), 1)

@@ -28,7 +28,10 @@ def test_exit_codes_table_covers_every_constant() -> None:
 def test_every_config_field_has_a_key_or_is_code_only() -> None:
     fields = {f.name for f in dataclasses.fields(config.Config)}
     keyed = [k.field for k in config.CONFIG_KEYS]
-    assert len(set(keyed)) == len(keyed)
+    # Only the keys of an array of tables share a field; they say their type.
+    single = [k.field for k in config.CONFIG_KEYS if not k.kind]
+    assert len(set(single)) == len(single)
+    assert not set(single) & {k.field for k in config.CONFIG_KEYS if k.kind}
     assert set(keyed) <= fields
     assert fields - set(keyed) == config.CONFIG_FIELDS_WITHOUT_KEY
 
@@ -37,7 +40,19 @@ def test_config_keys_are_section_dot_name_and_documented() -> None:
     for key in config.CONFIG_KEYS:
         section, dot, name = key.key.partition(".")
         assert dot
-        sections = {"relay", "daemon", "policy", "api", "webhook", "sse", "sdk", "a2a", "isolation"}
+        sections = {
+            "relay",
+            "daemon",
+            "policy",
+            "api",
+            "webhook",
+            "sse",
+            "sdk",
+            "a2a",
+            "isolation",
+            "directory",
+            "listing",
+        }
         assert section in sections
         assert name
         assert key.doc

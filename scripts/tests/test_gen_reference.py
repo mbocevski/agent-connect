@@ -139,6 +139,7 @@ def test_real_cli_reference_lists_every_command() -> None:
         "remove",
         "audit",
         "transcript",
+        "listing publish",
         "approvals approve",
         "approvals reject",
         "safety set",

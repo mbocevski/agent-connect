@@ -55,6 +55,24 @@ HELD: dict[str, Any] = {
     "created_at": "int",
     "expires_at": "int",
 }
+# The runtime's listing (`GET /v0/listing`, `listing status`).
+LISTING: dict[str, Any] = {
+    "directory": "str",
+    "name": "str",
+    "url": "str",
+    "state": "str",
+    "seq": "int",
+    "published_at": Opt("int"),
+    "identity": "str",
+    "fingerprint": "str",
+    "door": Opt({"expires_at": "int", "renews_at": Opt("int"), "expiring": "bool"}),
+    "doors_open": "int",
+    "token": {"expires_at": "int", "warn_at": "int"},
+    "owner_domain": Opt("str"),
+    "owner_state": Opt("str"),
+    "last_error": Opt({"code": "str", "at": "int"}),
+    "retrying": Opt({"since": "int", "code": Opt("str")}),
+}
 HELD_DECISION: dict[str, Any] = {"hold_id": "str", "group_id": "str", "status": "str"}
 SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}
 
@@ -164,6 +182,31 @@ SCHEMAS: dict[str, Any] = {
     },
     "leave": {"group_id": "str", "status": "str"},
     "send": {"msg_id": "str", "group_id": "str", "hint": Opt("str")},
+    "listing publish": {
+        "directory": "str",
+        "name": "str",
+        "url": "str",
+        "identity": "str",
+        "fingerprint": "str",
+        "seq": "int",
+        "state": "str",
+        "door_expires_at": Opt("int"),
+        "renews_at": Opt("int"),
+        "token_expires_at": "int",
+        "owner_domain": Opt("str"),
+        "owner_state": Opt("str"),
+        "warnings": [{"code": "str", "message": "str"}],
+    },
+    "listing withdraw": {
+        "directory": "str",
+        "name": "str",
+        "seq": "int",
+        "state": "str",
+        "doors_closed": "int",
+        "doors_close_pending": "int",
+        "forced": "bool",
+    },
+    "listing status": {"listing": Opt(LISTING)},
     "events (one object per line)": {
         "seq": "int",
         "group_id": Opt("str"),
@@ -209,4 +252,16 @@ NOTES: dict[str, str] = {
         "(SPEC 11)."
     ),
     "leave": "`status` is `left` or `leaving`.",
+    "listing publish": (
+        "`state` is `published`. `owner_state` is what the directory reported, for "
+        "information only. A directory that didn't answer is `publish_retrying` (exit 1): "
+        "the daemon keeps sending the same signed listing."
+    ),
+    "listing withdraw": (
+        "`state` is `withdrawn`, or `withdrawn_locally` with `forced` true after "
+        "`--force`: recorded here only, and the directory may still list it. Until the "
+        "directory takes the withdrawal the command fails with `withdraw_pending` "
+        "(exit 1); the doors are closed already and the daemon keeps sending it."
+    ),
+    "listing status": "`listing` is `null` when the runtime has never had a listing.",
 }

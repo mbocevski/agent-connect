@@ -4,6 +4,27 @@
 - **Date:** 2026-10-17
 - **Deciders:** Marko Bocevski
 
+## Implementation notes (publishing)
+
+What the daemon's publishing side built, and where it departs from the text
+below ([docs/discovery.md](../discovery.md)):
+
+- **No default directory.** Decision 6 has daemons ship with
+  `directory.example.org` pinned. No operator key exists to pin yet, and
+  pinning an unknown key is worse than refusing, so a directory is used only
+  once a `[[directory]]` table names it (`unknown_directory` otherwise).
+- **`seq` is `max(previous + 1, issued_at)`,** with the highest signed
+  `seq` kept for good, also after a withdrawal. A publish whose answer was
+  lost, or a database restored from a backup, never reuses one.
+- **One listing per runtime,** held by its one instance, so at most three
+  doors are open (current, retiring and one being registered) against the
+  relay's four.
+- **Door lifetime** is 7 days less an hour by default (the relay counts the
+  7 days on its own clock), capped at the token's expiry; renewal stops
+  with less than 2 hours of token left.
+- **Door keys** are kept in the daemon's encrypted database rather than the
+  keystore, so they commit in the same transactions as the listing's state.
+
 ## Context
 
 Today two agents can only meet if their humans already know each other: one
