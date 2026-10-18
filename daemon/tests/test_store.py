@@ -230,3 +230,39 @@ def test_invites_and_joins_bookkeeping(tmp_path: Path, opened: Opener) -> None:
     assert s.joined_invites() == []
     s.finish_join("j1", "joined", "g1")
     assert s.joined_invites() == ["j1"]
+
+
+def test_pending_deliveries_and_events_filter_by_group_in_sql(
+    tmp_path: Path, opened: Opener
+) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+    for gid in ("g1", "g2"):
+        s.add_group(group(gid))
+    for n, gid in enumerate(["g1", "g2", "g1", "g1"]):
+        s.record_inbox("ac:v0:x", f"m{n}", gid, "pending", 0, delivery={"n": n})
+    assert s.pending_groups() == ["g1", "g2"]
+    rows = s.pending_deliveries(group_id="g1", limit=2)
+    assert [r.msg_id for r in rows] == ["m0", "m2"]
+    assert [r.msg_id for r in s.pending_deliveries(group_id="g2")] == ["m1"]
+    s.adapter_event_add("sdk", "e1", {"group": {"id": "g1"}})
+    s.adapter_event_add("sdk", "e2", {"group": None})
+    s.adapter_event_add("sdk", "e3", {"group": {"id": "g1"}})
+    assert s.adapter_event_groups("sdk") == ["g1", None]
+    assert [p["group"] for _, p in s.adapter_events("sdk", group_id=None)] == [None]
+    assert len(s.adapter_events("sdk", group_id="g1", limit=1)) == 1
+
+
+def test_old_handled_ids_are_cleared_once(tmp_path: Path, opened: Opener, db_key: bytes) -> None:
+    path = tmp_path / "h.sqlite3"
+    s = opened(path)
+    s.handled_add("bare-before", keep=10)
+    # As a database from before the keys were namespaced: no marker yet.
+    s._db.execute("DELETE FROM kv WHERE key = 'schema/handled_keys'")
+    s.close()
+    s = Store(path, db_key)
+    assert not s.handled_has("bare-before")  # cleared on the first open
+    s.handled_add("bare-after", keep=10)
+    s.close()
+    s = Store(path, db_key)
+    assert s.handled_has("bare-after")  # not on every open
+    s.close()

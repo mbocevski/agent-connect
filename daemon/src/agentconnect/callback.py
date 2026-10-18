@@ -58,6 +58,8 @@ from agentconnect.tasks import cancel_and_wait
 LOG = log.get("agentconnect.callback")
 
 DEFAULT_TIMEOUT = 120.0  # seconds a callback may run; agent turns call models
+GRACE_SECS = 5.0  # after the timeout's cancellation, before a handler is abandoned
+STOP_GRACE_SECS = 1.0  # real seconds a stopping runtime waits for a cancelled handler
 
 # One payload in; returning means handled, raising means try again later.
 PayloadCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -67,8 +69,17 @@ class EventQueue(Protocol):
     """Where the adapter keeps events until a callback took them (the store)."""
 
     def adapter_event_add(self, adapter: str, event_id: str, payload: dict[str, Any]) -> bool: ...
-    def adapter_events(self, adapter: str) -> list[tuple[int, dict[str, Any]]]: ...
+    def adapter_events(
+        self, adapter: str, group_id: str | None = None, limit: int = 100
+    ) -> list[tuple[int, dict[str, Any]]]: ...
+    def adapter_event_groups(self, adapter: str) -> list[str | None]: ...
     def adapter_event_done(self, seq: int) -> None: ...
+
+
+class HandlerCancelledError(Exception):
+    """A handler ended with ``CancelledError`` although nothing cancelled it
+    (it awaited a task or future something else cancelled): a failure of
+    that handler, retried like any other, not the end of the delivery."""
 
 
 def _group_of(payload: dict[str, Any]) -> str | None:
@@ -88,8 +99,13 @@ class CallbackAdapter:
         name: str = "sdk",
         timeout: float = DEFAULT_TIMEOUT,
         rng: random.Random | None = None,
+        on_abandon: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.name = name
+        self._on_abandon = on_abandon
+        # At most one handler per group that ignored its cancellation and
+        # was left running.
+        self._abandoned: dict[str | None, asyncio.Future[None]] = {}
         self._on_message, self._on_event = on_message, on_event
         self._clock = clock
         self._timeout = timeout
@@ -149,28 +165,74 @@ class CallbackAdapter:
                 await asyncio.wait_for(self._idle.wait(), within)
         return self._idle.is_set()
 
-    async def _call(self, callback: PayloadCallback, payload: dict[str, Any]) -> None:
-        """Run ``callback`` in a task of its own, bounded by the timeout on the
-        runtime's clock (``TimeoutError``). If the caller is cancelled, the
-        callback is cancelled too and waited for."""
-        task: asyncio.Future[None] = asyncio.ensure_future(callback(payload))
+    def _track(self, task: asyncio.Future[None]) -> None:
         self._handlers.add(task)
         self._idle.clear()
+
+        def finished(done: asyncio.Future[None]) -> None:
+            self._handlers.discard(done)
+            if not self._handlers:
+                self._idle.set()
+            if not done.cancelled():
+                done.exception()  # retrieved: an abandoned one has no awaiter
+
+        task.add_done_callback(finished)
+
+    async def _call(self, callback: PayloadCallback, payload: dict[str, Any]) -> None:
+        """Run ``callback`` in a task of its own, bounded by the timeout on the
+        runtime's clock.
+
+        * It returns: done. It raises: that error. It ends with
+          ``CancelledError`` while this caller isn't being cancelled:
+          :class:`HandlerCancelledError`.
+        * Past the timeout it is cancelled and gets :data:`GRACE_SECS` to
+          stop (``TimeoutError``). One that ignores the cancellation is left
+          running (logged ``handler_ignored_cancel``), and ``on_abandon`` is
+          told, so the redelivery isn't refused as a duplicate in progress;
+          a group keeps at most one such handler and otherwise waits for it.
+        * If this caller is cancelled (the runtime stops), the handler is
+          cancelled too and waited for, at most :data:`STOP_GRACE_SECS`.
+        """
+        group = _group_of(payload)
+        task: asyncio.Future[None] = asyncio.ensure_future(callback(payload))
+        self._track(task)
         timer = asyncio.ensure_future(self._clock.sleep(self._timeout, deadline=True))
+        settled = False
         try:
             done, _ = await asyncio.wait({task, timer}, return_when=asyncio.FIRST_COMPLETED)
-            if task not in done:
-                raise TimeoutError
-            task.result()
-        finally:
+            if task in done:
+                settled = True
+                if task.cancelled():
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise asyncio.CancelledError
+                    raise HandlerCancelledError
+                task.result()
+                return
+            task.cancel()
+            grace = asyncio.ensure_future(self._clock.sleep(GRACE_SECS, deadline=True))
             try:
-                await cancel_and_wait(timer)
+                await asyncio.wait({task, grace}, return_when=asyncio.FIRST_COMPLETED)
             finally:
-                if not task.done():
-                    await cancel_and_wait(task, ignore=(Exception,))
-                self._handlers.discard(task)
-                if not self._handlers:
-                    self._idle.set()
+                grace.cancel()
+            if not task.done():
+                held = self._abandoned.get(group)
+                if held is not None and not held.done():
+                    LOG.warning("handler_ignores_cancel", group=log.hid(group), waiting=True)
+                    await asyncio.wait({task})
+                else:
+                    self._abandoned[group] = task
+                    LOG.warning("handler_ignored_cancel", group=log.hid(group))
+                    if self._on_abandon is not None:
+                        self._on_abandon(payload)
+            settled = True
+            raise TimeoutError
+        finally:
+            timer.cancel()
+            if not settled and not task.done():
+                # This caller is cancelled: the handler goes too.
+                task.cancel()
+                await asyncio.wait({task}, timeout=STOP_GRACE_SECS)
 
     async def deliver(
         self, group: GroupView, sender: Sender, to: list[str], inner: Delivery
@@ -193,8 +255,9 @@ class CallbackAdapter:
         self._wake.set()
 
     def _queued(self, group: str | None) -> list[tuple[int, dict[str, Any]]]:
-        rows = [] if self._queue is None else self._queue.adapter_events(self.name)
-        return [(seq, p) for seq, p in rows if _group_of(p) == group]
+        if self._queue is None:
+            return []
+        return self._queue.adapter_events(self.name, group_id=group)
 
     async def _run_events(self) -> None:
         """Start a worker for every group with queued events."""
@@ -202,15 +265,27 @@ class CallbackAdapter:
             while True:
                 self._wake.clear()
                 await self._open.wait()
-                rows = [] if self._queue is None else self._queue.adapter_events(self.name)
-                for group in dict.fromkeys(_group_of(p) for _, p in rows):
+                groups = [] if self._queue is None else self._queue.adapter_event_groups(self.name)
+                for group in groups:
                     running = self._groups.get(group)
                     if running is None or running.done():
-                        self._groups[group] = asyncio.ensure_future(self._run_group(group))
+                        worker = asyncio.ensure_future(self._run_group(group))
+                        worker.add_done_callback(self._group_done)
+                        self._groups[group] = worker
                 await self._wake.wait()
         finally:
             workers, self._groups = list(self._groups.values()), {}
             await cancel_and_wait(*workers)
+
+    def _group_done(self, worker: asyncio.Future[None]) -> None:
+        """A group's event worker that ended by surprise is logged, and the
+        next wake starts a new one."""
+        if worker.cancelled():
+            return
+        error = worker.exception()
+        if error is not None:
+            LOG.error("event_worker_died", reason=type(error).__name__)
+            self._wake.set()
 
     async def _run_group(self, group: str | None) -> None:
         """One group's events, in order, until none is queued."""

@@ -105,6 +105,7 @@ HOP_MEMORY_SECS = 7 * 24 * 3600
 TRANSFER_TIMEOUT_SECS = 10.0  # owner hand-over before a SAS-mismatch exit
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
+DELIVERY_BATCH = 100  # pending rows a group's delivery worker reads at a time
 # Safety-policy events that reveal what the policy did with a peer's message:
 # recorded for the human (GET /v0/events with the human token, the CLI), never
 # passed to the agent's adapter.
@@ -455,6 +456,14 @@ class Engine:
                 reason = "returned"
             except Exception as e:
                 reason = type(e).__name__
+            except asyncio.CancelledError:
+                # Our own cancellation (stop) ends the worker; a stray one
+                # (user code that awaited something else's cancelled task)
+                # is a failure like any other.
+                current = asyncio.current_task()
+                if current is None or current.cancelling():
+                    raise
+                reason = "CancelledError"
             if not self.running:
                 return
             LOG.error("worker_died", worker=name, reason=reason)
@@ -2058,18 +2067,17 @@ class Engine:
                 for group_id, worker in list(workers.items()):
                     if worker.done():
                         del workers[group_id]
-                        worker.result()
+                        if worker.cancelled():
+                            # Not by us (we'd be cancelled too): restart it.
+                            LOG.error("delivery_worker_died", reason="CancelledError")
+                            woken = True
+                        else:
+                            worker.result()  # a failure ends this worker too
                 if woken:
                     # Clear before reading, so a row recorded after the
                     # read wakes us again.
                     self._delivery_wake.clear()
-                    pending = self.store.pending_deliveries()
-                    groups = [
-                        r.group_id
-                        for r in pending
-                        if r.group_id is not None and r.delivery is not None
-                    ]
-                    for group_id in dict.fromkeys(groups):
+                    for group_id in self.store.pending_groups():
                         if group_id not in workers and not self._gated(group_id):
                             workers[group_id] = asyncio.ensure_future(self._deliver_group(group_id))
                 wake = asyncio.ensure_future(self._delivery_wake.wait())
@@ -2090,11 +2098,7 @@ class Engine:
         while True:
             if self._gated(group_id):
                 return
-            rows = [
-                r
-                for r in self.store.pending_deliveries()
-                if r.group_id == group_id and r.delivery is not None
-            ]
+            rows = self.store.pending_deliveries(group_id, limit=DELIVERY_BATCH)
             delivered, retry = 0, False
             for row in rows:
                 if row.delivery is None:

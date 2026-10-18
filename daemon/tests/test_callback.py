@@ -76,6 +76,12 @@ class Recorder:
         self.events.append(payload)
 
 
+def queued(store: Store) -> list[tuple[int, dict[str, Any]]]:
+    """Every queued event of the adapter, group by group."""
+    groups = store.adapter_event_groups("sdk")
+    return [row for g in groups for row in store.adapter_events("sdk", group_id=g)]
+
+
 def adapter(rec: Recorder, clock: FakeClock, rng: random.Random) -> CallbackAdapter:
     return CallbackAdapter(rec.message, rec.event, clock, rng=rng)
 
@@ -138,7 +144,7 @@ async def test_events_are_queued_durably_and_retried_in_order(
     for _ in range(10):
         await asyncio.sleep(0)
     assert rec.events == []  # not open yet: they wait in the store
-    assert [p["event_id"] for _, p in store.adapter_events("sdk")] == ["e1", "e2"]
+    assert [p["event_id"] for _, p in queued(store)] == ["e1", "e2"]
     rec.fail_ids = {"e1"}
     a.open()
     # g1's event backs off after its failure; the other group's isn't held up.
@@ -148,7 +154,7 @@ async def test_events_are_queued_durably_and_retried_in_order(
     fake_clock.advance(10)
     await until(lambda: len(rec.events) == 2)
     assert [e["event_id"] for e in rec.events] == ["e2", "e1"]
-    await until(lambda: store.adapter_events("sdk") == [])
+    await until(lambda: queued(store) == [])
     # Paused, a new event waits; reopened, it goes.
     a.pause()
     await a.on_event(GROUP, Event("member_left", "g1", {}, "e3"))
@@ -218,17 +224,3 @@ async def test_handler_tasks_are_known_while_they_run(
     assert await a.deliver(GROUP, SENDER, ["*"], delivery()) is DeliveryResult.ACK
     assert inside == [True]
     assert await a.drain(1.0)  # nothing in flight
-
-
-def test_handled_ids_from_before_namespacing_are_cleared(
-    tmp_path: Path, rng: random.Random
-) -> None:
-    key = rng.randbytes(32)
-    s = Store(tmp_path / "h.sqlite3", key)
-    s.handled_add("bare-msg-id", keep=10)  # the old, un-namespaced form
-    s.handled_add('["event","e1"]', keep=10)
-    s.close()
-    s = Store(tmp_path / "h.sqlite3", key)
-    assert not s.handled_has("bare-msg-id")
-    assert s.handled_has('["event","e1"]')
-    s.close()

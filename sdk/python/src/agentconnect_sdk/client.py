@@ -22,6 +22,7 @@ CLI and the human token, which this package never reads and never exposes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
@@ -34,7 +35,7 @@ import httpx
 
 from agentconnect_sdk import _log
 from agentconnect_sdk.dedupe import Deduper
-from agentconnect_sdk.errors import AgentConnectError
+from agentconnect_sdk.errors import AgentConnectError, PayloadError
 from agentconnect_sdk.models import Event, Message, idempotency_key, parse_payload
 from agentconnect_sdk.receiver import WebhookReceiver, iter_sse
 from agentconnect_sdk.settings import (
@@ -396,7 +397,13 @@ class AgentConnect:
         """Embedded: start the runtime (taking the data directory's lock).
         Attach: nothing to start. ``async with`` calls it."""
         if self._host is not None:
-            await self._host.start(self.dispatch)
+            await self._host.start(self.dispatch, self._release_claim)
+
+    def _release_claim(self, payload: dict[str, Any]) -> None:
+        """The runtime gave up on a handler that ignored its timeout: forget
+        its claim, so the redelivery runs instead of being refused as busy."""
+        with contextlib.suppress(PayloadError):
+            self._dedupe.release(idempotency_key(payload))
 
     async def aclose(self) -> None:
         """Embedded: stop the runtime cleanly. Running handlers and queued

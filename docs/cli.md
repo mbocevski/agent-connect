@@ -67,7 +67,11 @@ env $AGENT agentconnect safety set <group> require_approval=inbound
 A socket path longer than a Unix socket allows (103 bytes, the macOS limit)
 is bound at `/tmp/agentconnect-<uid>/<hash>.sock` instead, in a 0700
 directory the runtime checks; the CLI derives the same path from the data
-directory, so nothing changes for you.
+directory, so nothing changes for you. `/tmp` cleaners such as
+systemd-tmpfiles may remove a socket nobody used for 10 days; the runtime
+refreshes it on every connection, and a tmpfiles.d line
+`x /tmp/agentconnect-*` excludes it. If another user created
+`/tmp/agentconnect-<uid>` first, the runtime refuses to start and says so.
 
 ## Human and agent separation
 

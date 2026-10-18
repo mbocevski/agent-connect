@@ -839,6 +839,10 @@ class ApiServer:
         raise ApiError(404, "not_found", "no such endpoint")
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if isinstance(self.address, Path):
+            # Used, so /tmp cleaners don't age it out (sockets.py).
+            with contextlib.suppress(OSError):
+                os.utime(self.address)
         try:
             await self._serve_one(reader, writer)
         finally:

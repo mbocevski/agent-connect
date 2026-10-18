@@ -68,3 +68,25 @@ def test_isolation_refuses_a_socket_path_over_the_limit(tmp_path: Path) -> None:
     )
     with pytest.raises(IsolationError, match=f"{MAX_SOCKET_PATH} bytes"):
         check_config(cfg, 1000, set(), set())
+
+
+def test_a_symlinked_data_dir_maps_to_the_same_short_path(tmp_path: Path) -> None:
+    real = tmp_path / ("r" * 90)
+    real.mkdir()
+    link = tmp_path / "link" / ("l" * 60)
+    link.parent.mkdir()
+    link.symlink_to(real)
+    assert bind_path(link / ("s" * 20)) == bind_path(real / ("s" * 20))
+
+
+def test_a_strict_umask_doesnt_break_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("agentconnect.sockets.SHORT_ROOT", tmp_path)
+    mapped = bind_path(long_path(tmp_path))
+    old = os.umask(0o277)
+    try:
+        prepare_bind_dir(mapped)
+    finally:
+        os.umask(old)
+    assert (mapped.parent.stat().st_mode & 0o777) == 0o700

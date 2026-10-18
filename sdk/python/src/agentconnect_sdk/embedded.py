@@ -50,6 +50,7 @@ ADAPTER_NAME = "sdk"  # the name groups created by an embedded agent are bound t
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 Dispatch = Callable[[dict[str, Any]], Awaitable[Literal["handled", "duplicate", "busy"]]]
+Release = Callable[[dict[str, Any]], None]  # forget a payload's claim (an abandoned handler)
 Wrap = Callable[[CallbackAdapter], Adapter]
 
 
@@ -268,17 +269,19 @@ class EmbeddedHost:
         """The running runtime, for the host's own use (tests, status)."""
         return self._runtime
 
-    async def start(self, dispatch: Dispatch) -> None:
-        """Take the lock, open the keys and databases, start the runtime.
+    async def start(self, dispatch: Dispatch, release: Release | None = None) -> None:
+        r"""Take the lock, open the keys and databases, start the runtime.
         On failure or cancellation nothing stays open. Concurrent calls start
-        one runtime; a start during a shutdown waits for it to finish."""
+        one runtime; a start during a shutdown waits for it to finish.
+        ``release`` forgets the claim on a payload whose handler was
+        abandoned after ignoring its timeout, so the redelivery runs."""
         async with self._starting:
             if self._stopping is not None:
-                await asyncio.shield(self._stopping)
+                await asyncio.wait({self._stopping})
             if self._runtime is None:
-                await self._start(dispatch)
+                await self._start(dispatch, release)
 
-    async def _start(self, dispatch: Dispatch) -> None:
+    async def _start(self, dispatch: Dispatch, release: Release | None) -> None:
         async def on_payload(payload: dict[str, Any]) -> None:
             if await dispatch(payload) == "busy":
                 raise _BusyError
@@ -289,6 +292,7 @@ class EmbeddedHost:
             self._clock,
             name=ADAPTER_NAME,
             timeout=self.config.sdk_handler_timeout,
+            on_abandon=release,
             rng=self._options.backoff_rng,
         )
         registered = adapter if self._wrap is None else self._wrap(adapter)
@@ -339,19 +343,40 @@ class EmbeddedHost:
                 return
             window = self._flush if flush is None else flush
             self._stopping = asyncio.ensure_future(self._shutdown(window))
+        shutdown = self._stopping
         if adapter is not None and adapter.in_handler():
             return
-        await self._stopping
+        try:
+            # wait(), not await: another caller's cancellation of the shared
+            # shutdown is no cancellation of this caller.
+            await asyncio.wait({shutdown})
+        except asyncio.CancelledError:
+            # This caller was cancelled (a second Ctrl-C): cut the wait for
+            # handlers and sends short, but stop before passing it on. A
+            # further cancellation leaves the stop running in the background.
+            shutdown.cancel()
+            await asyncio.wait({shutdown})
+            raise
 
     async def _shutdown(self, window: float) -> None:
+        """Pause, drain, flush, stop. Cancelled, it skips what is left of the
+        drain and the flush; the runtime's stop and the lock's release still
+        run. Afterwards the host reports what is true: stopped, or (if the
+        stop itself was interrupted) still running."""
         runtime, adapter = self._runtime, self._adapter
         try:
-            if adapter is not None:
-                adapter.pause()
-                await adapter.drain(window)
+            try:
+                if adapter is not None:
+                    adapter.pause()
+                    await adapter.drain(window)
+            except asyncio.CancelledError:
+                if runtime is not None:
+                    await runtime.stop(flush=0)  # hurried: no flush, but stopped
+                raise
             if runtime is not None:
                 await runtime.stop(flush=window)
         finally:
-            self._runtime = self._adapter = None
             self._stopping = None
-            self._stopped.set()
+            if runtime is None or not runtime.running:
+                self._runtime = self._adapter = None
+                self._stopped.set()

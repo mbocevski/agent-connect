@@ -6,6 +6,7 @@ path is longer than the platform allows."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import json
 import logging
@@ -234,3 +235,131 @@ async def test_the_cli_ignores_the_daemons_config_with_ac_config_dev_null(
     env = {**base, "AC_CONFIG": "/dev/null"}
     right = await asyncio.to_thread(runner.invoke, app, ["status", "--json"], env=env)
     assert right.exit_code == 0, right.output
+
+
+async def test_cancelling_aclose_while_a_handler_runs_still_stops_everything(
+    cluster: Cluster,
+) -> None:
+    """A second Ctrl-C during shutdown, while a handler is mid-call: the
+    runtime still stops and the lock is released, and a second caller of
+    aclose() waits for the same shutdown without a cancellation of its own."""
+    a, b, gid = await pair(cluster)
+    sdk = sdk_of(b)
+    host = sdk._host
+    assert host is not None
+    host._flush = STOP_FLUSH_SECS
+    entered = asyncio.Event()
+
+    @sdk.on_message
+    async def slow(msg: Message, group: Group) -> None:
+        entered.set()
+        await asyncio.Event().wait()  # a model call that doesn't come back
+
+    a.daemon.send_message(gid, {"text": "x"})
+    await asyncio.wait_for(entered.wait(), WAIT)
+    first = asyncio.ensure_future(sdk.aclose())
+    second = asyncio.ensure_future(sdk.aclose())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not first.done()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await asyncio.wait_for(second, WAIT)  # no CancelledError: it didn't ask for one
+    assert not b.daemon.running
+    assert host.runtime is None
+    assert released(b.config.data_dir)
+    b._serving = None
+
+
+async def two_groups(cluster: Cluster, handler_secs: int = 120) -> tuple[Node, Node, str, str]:
+    a = await cluster.node("a")
+    g1 = a.daemon.create_group("G1", "")
+    g2 = a.daemon.create_group("G2", "")
+    await a.idle()
+    b = await cluster.node("b", host="embedded", sdk_handler_timeout=handler_secs)
+    await cluster.invite(a, b, g1)
+    await cluster.invite(a, b, g2)
+    return a, b, g1, g2
+
+
+async def test_a_handler_raising_cancelled_error_is_a_failure_not_the_end(
+    cluster: Cluster, capfd: pytest.CaptureFixture[str]
+) -> None:
+    a, b, g1, g2 = await two_groups(cluster)
+    sdk = sdk_of(b)
+    seen: list[str] = []
+
+    @sdk.on_message
+    async def handle(msg: Message, _group: Group) -> None:
+        seen.append(msg.raw_text)
+        if msg.raw_text == "boom" and seen.count("boom") == 1:
+            fut = asyncio.get_running_loop().create_future()
+            fut.cancel()
+            await fut  # a shared task something else cancelled
+
+    a.daemon.send_message(g1, {"text": "boom"})
+    await until(lambda: "boom" in seen)
+    a.daemon.send_message(g2, {"text": "other group"})
+    await until(lambda: "other group" in seen)  # delivery goes on elsewhere
+    await b.wait(lambda: b.clock.sleepers > 0)  # g1 backs off, then retries
+    await cluster.advance(300)
+    await until(lambda: seen.count("boom") == 2)
+    logs = capfd.readouterr().err
+    assert "HandlerCancelledError" in logs
+
+
+async def test_a_handler_ignoring_cancellation_is_abandoned_after_the_timeout(
+    cluster: Cluster, capfd: pytest.CaptureFixture[str]
+) -> None:
+    a, b, g1, _ = await two_groups(cluster, handler_secs=10)
+    sdk = sdk_of(b)
+    seen: list[str] = []
+    release = asyncio.Event()
+
+    @sdk.on_message
+    async def handle(msg: Message, _group: Group) -> None:
+        seen.append(msg.raw_text)
+        if msg.raw_text == "stubborn" and seen.count("stubborn") == 1:
+            while not release.is_set():
+                with contextlib.suppress(asyncio.CancelledError):  # ignores the timeout's
+                    await release.wait()
+
+    a.daemon.send_message(g1, {"text": "stubborn"})
+    a.daemon.send_message(g1, {"text": "next"})
+    await until(lambda: "stubborn" in seen)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await cluster.advance(11)  # the timeout: cancelled, but it goes on
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await cluster.advance(10)  # the grace ends: abandoned, the claim released
+    await b.wait(lambda: b.clock.sleepers > 0)
+    await cluster.advance(300)  # the group's backoff: redelivered, not "busy"
+    await until(lambda: seen == ["stubborn", "stubborn", "next"])
+    assert "handler_ignored_cancel" in capfd.readouterr().err
+    release.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+async def test_a_stray_cancelled_error_restarts_a_supervised_worker(
+    cluster: Cluster, capfd: pytest.CaptureFixture[str]
+) -> None:
+    node = await cluster.node("n")
+    calls: list[int] = []
+
+    async def worker() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise asyncio.CancelledError  # not a cancellation of the worker
+        await asyncio.Event().wait()
+
+    probe = asyncio.ensure_future(node.daemon._supervised("probe", worker))
+    await node.wait(lambda: node.clock.sleepers > 0)
+    await cluster.advance(120)
+    await until(lambda: len(calls) == 2)
+    probe.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await probe  # its own cancellation still ends it
+    assert '"reason": "CancelledError"' in capfd.readouterr().err

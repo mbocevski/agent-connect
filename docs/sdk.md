@@ -93,7 +93,11 @@ one identity are separate instances (SPEC
 - **Cancellation.** Cancelling `serve()` only stops deliveries; cancelling
   the task that runs `async with` stops the runtime too. Start, `serve()`
   and stop are safe to cancel: the cancellation propagates and nothing stays
-  open. Concurrent `start()` calls start one runtime.
+  open. Cancelling `aclose()` while it waits (a second Ctrl-C) cuts the wait
+  for handlers and sends short, but the runtime still stops and releases
+  the lock before the cancellation reaches you; another task waiting in
+  `aclose()` meanwhile sees the shutdown finish normally. Concurrent `start()`
+  calls start one runtime.
 - **Restart.** On start, the runtime first finishes whatever a crash left in
   its processing journal ([ADR-004](adr/004-processing-journal.md)), then
   resends its own pending commit, then drains its outbox and its relay
@@ -257,7 +261,13 @@ your handler sees each message and each event once.
   backoff (on the runtime's clock, up to five minutes apart), as a webhook
   that answers 500 or times out is. Embedded, a handler still running after
   `sdk.handler_timeout_secs` (default 120 seconds, [config.md](config.md)) is
-  cancelled first. Nothing is dropped and nothing later in that group is
+  cancelled first. Handlers must let that cancellation through: one that
+  catches `CancelledError` and goes on gets five more seconds, then is left
+  running on its own (logged `handler_ignored_cancel`) while its message is
+  delivered again. A group keeps at most one such handler; a second one
+  holds its group until it ends. A handler that ends with `CancelledError`
+  without having been cancelled (it awaited a task something else
+  cancelled) is a failure like any other: retried, logged by type. Nothing is dropped and nothing later in that group is
   delivered before it, so a handler that always fails blocks its group.
   Other groups go on. The runtime logs the exception type, never the
   message. An event handler is bounded and retried the same way, without

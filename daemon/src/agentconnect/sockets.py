@@ -17,6 +17,16 @@ keeps the protection of a private directory. ``/tmp`` rather than
 ``$TMPDIR``: the CLI must find the same directory from any shell, and macOS
 gives ``$TMPDIR`` long per-session paths.
 
+``/tmp`` cleaners such as systemd-tmpfiles remove entries that weren't used for
+a while (10 days by default). The runtime refreshes the socket's times on
+every connection; an agent nobody connects to for that long can lose its
+socket (the CLI then reports it isn't running until the agent restarts).
+Exclude the directory to avoid that, with a tmpfiles.d line
+``x /tmp/agentconnect-*``.
+
+Another local user can create ``/tmp/agentconnect-<uid>`` first; the runtime
+then refuses to start with a clear error rather than use it.
+
 Separate-OS-user mode needs the socket in its agent directory, where agents'
 users can reach it; there the over-long path is refused at startup instead
 (:func:`agentconnect.isolation.check_config`).
@@ -24,7 +34,6 @@ users can reach it; there the over-long path is refused at startup instead
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import os
 import stat
@@ -49,7 +58,9 @@ def bind_path(path: Path) -> Path:
     """The path the socket configured at ``path`` is bound and reached at."""
     if not too_long(path):
         return path
-    digest = hashlib.sha256(os.fsencode(path.absolute())).hexdigest()[:16]
+    # resolve(): a symlinked or relative spelling of the same directory must
+    # map to the same socket, or the CLI wouldn't find the runtime's.
+    digest = hashlib.sha256(os.fsencode(path.resolve())).hexdigest()[:16]
     return SHORT_ROOT / f"agentconnect-{os.geteuid()}" / f"{digest}.sock"
 
 
@@ -57,8 +68,12 @@ def prepare_bind_dir(socket: Path) -> None:
     """Create the short socket directory (0700) if needed, and check that it
     is a real directory, ours, with no group or other access."""
     directory = socket.parent
-    with contextlib.suppress(FileExistsError):
+    try:
         directory.mkdir(mode=PRIVATE_DIR)
+    except FileExistsError:
+        pass  # checked below; one someone else made is refused
+    else:
+        directory.chmod(PRIVATE_DIR)  # a strict umask mustn't leave it 0500
     st = directory.lstat()
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
         msg = f"{directory} must be a directory, not a symlink or a file"

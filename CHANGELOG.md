@@ -31,9 +31,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   operation and never reads the human token. `async with` and `aclose()`
   give running handlers and queued sends a bounded window (3 s), then stop
   and release the lock, and are safe to cancel; concurrent calls share one
-  start or stop. Called from inside a handler, `aclose()` schedules the
-  shutdown and returns, and `serve()` returns once the runtime has fully
-  stopped. `AgentConnect.attach()` names today's mode against a
+  start or stop; a cancelled `aclose()` still stops the runtime and
+  releases the lock first. Called from inside a handler, `aclose()`
+  schedules the shutdown and returns, and `serve()` returns once the
+  runtime has fully stopped. A handler that ignores the timeout's
+  cancellation is abandoned after a grace and its message redelivered; one
+  that ends with a stray `CancelledError` is retried like any failure. `AgentConnect.attach()` names today's mode against a
   separate daemon; both modes have the same API, errors and framing. See
   `docs/sdk.md`.
 - `agentconnect.runtime.Runtime`, the embeddable runtime (ADR-005): the
@@ -368,7 +371,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - A Unix socket path longer than the platform allows (103 bytes, the macOS
   limit) is bound at `/tmp/agentconnect-<uid>/<hash>.sock`, in a 0700
   directory the runtime creates and checks; the CLI and the SDK derive the
-  same path. Separate-OS-user mode refuses such a path at startup instead.
+  same path, from the resolved path, so a symlinked data directory finds
+  it too. The socket's times are refreshed on every connection, so `/tmp`
+  cleaners don't age it out while it's used. Separate-OS-user mode refuses
+  such a path at startup instead.
 - The multi-node harness runs every scenario on both hosts, the separate
   daemon and the embedded SDK, and the Python suite runs on all cores with
   pytest-xdist (`just test`, `just cov`).
