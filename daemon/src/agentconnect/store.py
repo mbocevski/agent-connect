@@ -539,6 +539,15 @@ def _payload_group(payload: dict[str, Any]) -> str | None:
     return str(group["id"]) if isinstance(group, dict) and "id" in group else None
 
 
+_QUEUE_ROWS = (
+    "SELECT seq, payload FROM adapter_events WHERE adapter = ? "
+    "AND (? IS NULL OR group_id = ?) "
+    "AND seq NOT IN (SELECT value FROM json_each(?)) "
+    "AND (? = 0 OR addressed = 1) "
+    "AND (? IS NULL OR seq < ?) "
+)
+
+
 class Store:
     """Synchronous access to the daemon database (one connection)."""
 
@@ -591,12 +600,23 @@ class Store:
             self._db.execute(
                 "UPDATE adapter_events SET group_id = json_extract(payload, '$.group.id')"
             )
+        # The delivery queue finds the messages that address this agent.
+        if "addressed" not in event_columns:
+            self._db.execute(
+                "ALTER TABLE adapter_events ADD COLUMN addressed INTEGER NOT NULL DEFAULT 0"
+            )
+            self._db.execute(
+                "UPDATE adapter_events SET addressed = 1 "
+                "WHERE json_extract(payload, '$.addressed_to_me') = 1"
+            )
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
             "CREATE UNIQUE INDEX IF NOT EXISTS events_agent_seq ON events (agent_seq);"
             "CREATE INDEX IF NOT EXISTS inbox_pending ON inbox (state, group_id, seq);"
             "CREATE INDEX IF NOT EXISTS adapter_events_group "
             "ON adapter_events (adapter, group_id, seq);"
+            "CREATE INDEX IF NOT EXISTS adapter_events_addressed "
+            "ON adapter_events (adapter, addressed, group_id, seq);"
             "CREATE INDEX IF NOT EXISTS audit_class ON audit (class, seq);"
             "CREATE INDEX IF NOT EXISTS audit_group ON audit (group_id, class, seq);"
             "CREATE INDEX IF NOT EXISTS audit_sender ON audit (group_id, sender, class, seq);"
@@ -1937,15 +1957,29 @@ class Store:
     # -- in-process adapters (agentconnect.callback) --------------------------
 
     def adapter_event_add(
-        self, adapter: str, event_id: str, payload: dict[str, Any], keep: int = 10_000
+        self,
+        adapter: str,
+        event_id: str,
+        payload: dict[str, Any],
+        keep: int = 10_000,
+        *,
+        addressed: bool = False,
     ) -> bool:
         """Queue an event for an in-process adapter; ``False`` if it is
-        queued already. Only the newest ``keep`` per adapter are retained."""
+        queued already. Only the newest ``keep`` per adapter are retained.
+        ``addressed`` marks a message that addresses this agent (the
+        delivery queue finds those directly)."""
         with self.tx() as db:
             cur = db.execute(
-                "INSERT OR IGNORE INTO adapter_events (adapter, event_id, payload, group_id) "
-                "VALUES (?, ?, ?, ?)",
-                (adapter, event_id, json.dumps(payload, sort_keys=True), _payload_group(payload)),
+                "INSERT OR IGNORE INTO adapter_events "
+                "(adapter, event_id, payload, group_id, addressed) VALUES (?, ?, ?, ?, ?)",
+                (
+                    adapter,
+                    event_id,
+                    json.dumps(payload, sort_keys=True),
+                    _payload_group(payload),
+                    int(addressed),
+                ),
             )
             db.execute(
                 "DELETE FROM adapter_events WHERE adapter = ? AND seq NOT IN "
@@ -1979,6 +2013,30 @@ class Store:
 
     def adapter_event_done(self, seq: int) -> None:
         self._db.execute("DELETE FROM adapter_events WHERE seq = ?", (seq,))
+
+    def queue_rows(  # noqa: PLR0913
+        self,
+        adapter: str,
+        *,
+        group_id: str | None,
+        skip: Sequence[int],
+        limit: int,
+        addressed: bool = False,
+        before: int | None = None,
+    ) -> list[tuple[int, dict[str, Any]]]:
+        """Queued items of ``adapter`` (the delivery queue's), oldest first,
+        without the ``skip`` seqs: of ``group_id`` (``None``: every group),
+        only addressed ones with ``addressed``. With ``before``, the newest
+        ``limit`` older than that seq instead, still oldest first."""
+        args = (adapter, group_id, group_id, json.dumps(list(skip)), int(addressed))
+        if before is None:
+            rows = self._all(_QUEUE_ROWS + "ORDER BY seq LIMIT ?", *args, None, None, limit)
+        else:
+            rows = self._all(
+                _QUEUE_ROWS + "ORDER BY seq DESC LIMIT ?", *args, before, before, limit
+            )
+            rows.reverse()
+        return [(int(r[0]), json.loads(r[1])) for r in rows]
 
     def adapter_event_finish(self, adapter: str, seq: int) -> bool:
         """Take one queued item of ``adapter`` off the queue and remember its

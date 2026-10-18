@@ -179,6 +179,8 @@ class Owner:
         self.fail: list[type[Exception]] = []
         self.deliveries: list[list[dict[str, Any]]] = []
         self.acks: list[list[str]] = []
+        self.ack_fail: list[tuple[int, str]] = []  # answers for the next acks
+        self.polls = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -187,16 +189,21 @@ class Owner:
         assert request.headers["authorization"] == "Bearer agent-token"
         path = request.url.path
         if path == "/v0/deliveries":
+            self.polls += 1
             rows = self.deliveries.pop(0) if self.deliveries else []
-            return httpx.Response(200, json={"deliveries": rows, "more": False})
+            lease = f"lease-{self.polls}"
+            return httpx.Response(200, json={"deliveries": rows, "more": False, "lease": lease})
         if path == "/v0/deliveries/ack":
+            if self.ack_fail:
+                status, code = self.ack_fail.pop(0)
+                return httpx.Response(status, json={"code": code, "message": code})
             self.acks.append(json.loads(request.content)["ids"])
             return httpx.Response(200, json={"acked": 1})
         if path == "/v0/groups/nope":
             return httpx.Response(404, json={"code": "not_found", "message": "no such group"})
         if path == "/v0/broken":
             return httpx.Response(500, content=b"not json")
-        return httpx.Response(200, json={"path": path, "groups": []})
+        return httpx.Response(200, json={"path": path, "groups": [], "events": []})
 
 
 @pytest.fixture
@@ -257,15 +264,13 @@ async def test_take_polls_in_steps_and_drops_what_it_returned(owned: Path) -> No
     polls = [r for r in owner.requests if r.url.path == "/v0/deliveries"]
     assert [r.url.params["timeout"] for r in polls] == ["60", "60", "5"]
     owner.deliveries = [[row(1, "m1")], [row(2, "m1"), row(3, "m2")]]
-    taken, _ = await s.take("g", False, 0)
+    taken, _ = await s.take("g", False, 0)  # no MCP request: acknowledged at once
     assert [t.delivery_id for t in taken] == ["1"]
-    await s.ack(["1"])
-    # The owner went away before it saw the ack and hands m1 over again.
+    # Offered again after the owner confirmed the ack: a repeat, left out.
     taken, _ = await s.take(None, False, 0)
     assert [t.payload["msg_id"] for t in taken] == ["m2"]
-    assert owner.acks == [["1"], ["2"]]
-    owner.fail = [httpx.ConnectError]
-    await s.ack([])  # nothing to ack: no request
+    assert sorted(owner.acks) == [["1"], ["2"], ["3"]]
+    await s.result_written("no such request")  # nothing waits: no request
     await s.close()
 
 
@@ -285,8 +290,6 @@ async def test_a_lost_owner_is_reattached_or_reported(owned: Path) -> None:
     with pytest.raises(ToolError) as e:
         await s.groups()
     assert e.value.code == "not_running"
-    owner.fail = [httpx.ConnectError]
-    await s._ack_quietly(["9"])  # an ack the owner never saw is not an error
     await s.close()
     await s.close()
 
@@ -414,3 +417,135 @@ def test_the_command_refuses_a_bad_setup(command: list[str], tmp_path: Path) -> 
     no_relay = CliRunner().invoke(app, ["mcp", "--data-dir", str(free)])
     assert no_relay.exit_code == 2
     assert "no relay is configured" in no_relay.stderr
+
+
+# -- review regressions -------------------------------------------------------------------
+
+
+def returned(result: Any) -> list[str]:
+    assert not result.is_error, result.structured_content
+    return [m["msg_id"] for m in result.structured_content["messages"]]
+
+
+@pytest.mark.parametrize(
+    ("status", "code"), [(503, "busy"), (409, "no_deliveries"), (401, "auth_failed")]
+)
+async def test_a_failed_ack_loses_nothing(owned: Path, status: int, code: str) -> None:
+    """M2: an ack the owner refuses is retried, and the message stays
+    deliverable meanwhile: it is not dropped as a repeat of something that
+    wasn't acknowledged."""
+    owner = Owner()
+    # The owner offers m1, and again once its lease ran out.
+    owner.deliveries = [[row(1, "m1")], [row(2, "m1")]]
+    owner.ack_fail = [(status, code), (status, code)]
+    s = session_for(owned, owner)
+    await s.open()
+    seen = returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=1))
+    await s.result_written(1)  # the ack fails
+    seen += returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=2))
+    assert seen == ["m1", "m1"]  # the retry failed too: offered again, not dropped
+    await s.result_written(2)
+    await call_tool(s, "agentconnect_events", {}, request_id=3)  # retries what failed
+    assert sorted(owner.acks) == [["1"], ["2"]]
+    await s.close()
+
+
+async def test_a_result_that_was_never_written_is_not_acknowledged(owned: Path) -> None:
+    """L5: a wait cancelled or dropped after it took its batch acks nothing;
+    the batch is offered again when its lease runs out."""
+    owner = Owner()
+    owner.deliveries = [[row(1, "m1")], [row(2, "m1")]]
+    s = session_for(owned, owner)
+    await s.open()
+    assert returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=1)) == [
+        "m1"
+    ]
+    # No result_written(1): the answer never reached the client.
+    assert returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=2)) == [
+        "m1"
+    ]
+    assert owner.acks == []
+    await s.result_written(2)
+    assert owner.acks == [["2"]]
+    await s.close()
+
+
+async def test_a_failed_reconnect_is_retried(owned: Path) -> None:
+    """L10: a reconnect that fails leaves no closed client behind."""
+    owner = Owner()
+    s = session_for(owned, owner)
+    await s.open()
+    token = owned / API_TOKEN_FILE
+    token.unlink()
+    owner.fail = [httpx.ConnectError]
+    with pytest.raises(ToolError):
+        await s.groups()
+    token.write_text("agent-token\n", encoding="ascii")
+    assert (await s.groups())["path"] == "/v0/groups"
+    await s.close()
+
+
+def test_the_config_file_names_the_data_directory(tmp_path: Path) -> None:
+    """L2: --config with a daemon's config.toml uses its data_dir."""
+    toml = tmp_path / "daemon.toml"
+    toml.write_text(f'[daemon]\ndata_dir = "{tmp_path / "daemon-data"}"\n', encoding="utf-8")
+    assert configure(None, config=toml, environ=ENV).data_dir == tmp_path / "daemon-data"
+    assert configure("x", config=toml, environ=ENV).data_dir == Path("/data/agentconnect-x")
+    plain = tmp_path / "plain.toml"
+    plain.write_text("[policy]\n", encoding="utf-8")
+    assert configure(None, config=plain, environ=ENV).data_dir == Path("/data/agentconnect-mcp")
+
+
+def test_names_and_ids_are_strict() -> None:
+    """L7, L8, L9: no dot-only ids, a null required argument is missing, and
+    an agent name is a name (no newline)."""
+    send = BY_NAME["agentconnect_send"].schema
+    for group in (".", "..", "_", "-:"):
+        with pytest.raises(ToolError):
+            check_args(send, {"group": group, "text": "t"})
+    assert check_args(send, {"group": "a.b", "text": "t"})["group"] == "a.b"
+    with pytest.raises(ToolError, match="missing argument group"):
+        check_args(send, {"group": None, "text": "t"})
+    for name in ("x\n", "x\x00", "x y", ""):
+        with pytest.raises(ConfigError):
+            configure(name, environ=ENV)
+
+
+async def test_the_attach_client_sends_ids_as_one_segment(owned: Path) -> None:
+    """L7: the attach client checks path segments itself, too."""
+    owner = Owner()
+    backend = AttachBackend(
+        Config(relay_url="", relay_host="", data_dir=owned),
+        "daemon",
+        httpx.MockTransport(owner.handle),
+    )
+    for group in ("..", ".", "a/b", "a?b"):
+        with pytest.raises(ToolError):
+            await backend.send(group, "t", ["*"], None)
+    assert owner.requests == []
+    await backend.close()
+
+
+async def test_a_gone_daemon_is_waited_for_not_taken_over(tmp_path: Path) -> None:
+    """M4: the decision follows the lock as it is now: a free directory whose
+    last holder was a daemon is not taken over; held again, it is attached."""
+    data = tmp_path / "data"
+    lock = DataDirLock(data, "daemon")
+    (data / API_TOKEN_FILE).write_text("agent-token\n", encoding="ascii")
+    owner = Owner()
+    config = Config(relay_url="wss://relay.invalid", relay_host="", data_dir=data)
+    s = Session(config, FakeClock(), transport=httpx.MockTransport(owner.handle))
+    await s.open()
+    assert s.mode == "attach"
+    lock.release()  # the daemon stopped
+    assert DataDirLock.probe(data) == (False, "daemon")
+    owner.fail = [httpx.ConnectError]
+    with pytest.raises(ToolError) as e:
+        await s.groups()
+    assert e.value.code == "not_running"
+    lock = DataDirLock(data, "daemon")  # back
+    assert DataDirLock.probe(data) == (True, "daemon")
+    assert (await s.groups())["path"] == "/v0/groups"
+    await s.close()
+    lock.release()
+    assert DataDirLock.probe(tmp_path / "never") == (False, None)

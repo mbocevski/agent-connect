@@ -17,9 +17,11 @@ both turn a refused operation into :class:`ToolError` with the API's code.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -57,12 +59,32 @@ class OwnerGoneError(Exception):
         self.sent = sent
 
 
+ID_RE = re.compile(r"(?=[A-Za-z0-9_:.-]*[A-Za-z0-9])(?!\.{1,2}\Z)[A-Za-z0-9_:.-]+")
+
+
+def segment(value: str) -> str:
+    """An id as one path segment of the local API: refused unless it is
+    one (no `/`, `?`, `%`, nothing but dots), then quoted anyway."""
+    if ID_RE.fullmatch(value) is None:
+        raise ToolError("bad_request", "not an id")
+    return quote(value, safe="")
+
+
 @dataclass(frozen=True)
 class Pulled:
     """One leased delivery: ``delivery_id`` acknowledges it."""
 
     delivery_id: str
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Pulls:
+    """One take's batch: ``lease`` acknowledges it."""
+
+    lease: str
+    items: list[Pulled]
+    more: bool
 
 
 class Backend(Protocol):
@@ -93,10 +115,8 @@ class Backend(Protocol):
     ) -> dict[str, Any]: ...
     async def knocks(self) -> dict[str, Any]: ...
     async def listing_status(self) -> dict[str, Any]: ...
-    async def take(
-        self, group: str | None, addressed_only: bool, wait_secs: float
-    ) -> tuple[list[Pulled], bool]: ...
-    async def ack(self, delivery_ids: Sequence[str]) -> None: ...
+    async def take(self, group: str | None, addressed_only: bool, wait_secs: float) -> Pulls: ...
+    async def ack(self, lease: str, delivery_ids: Sequence[str]) -> list[str]: ...
     async def close(self) -> None: ...
 
 
@@ -206,18 +226,15 @@ class HostBackend:
     async def listing_status(self) -> dict[str, Any]:
         return await self._run(self._agent.listing_status())
 
-    async def take(
-        self, group: str | None, addressed_only: bool, wait_secs: float
-    ) -> tuple[list[Pulled], bool]:
+    async def take(self, group: str | None, addressed_only: bool, wait_secs: float) -> Pulls:
         if group is not None:
             await self.group_info(group)  # an unknown group is not_found, not silence
-        taken, more = await self.queue.take(
-            group, addressed_only=addressed_only, wait_secs=wait_secs
-        )
-        return [Pulled(str(t.delivery_id), t.payload) for t in taken], more
+        batch = await self.queue.take(group, addressed_only=addressed_only, wait_secs=wait_secs)
+        items = [Pulled(str(t.delivery_id), t.payload) for t in batch.items]
+        return Pulls(batch.lease, items, batch.more)
 
-    async def ack(self, delivery_ids: Sequence[str]) -> None:
-        self.queue.ack(int(d) for d in delivery_ids)
+    async def ack(self, lease: str, delivery_ids: Sequence[str]) -> list[str]:
+        return [str(d) for d in self.queue.ack(lease, [int(d) for d in delivery_ids])]
 
     async def close(self) -> None:
         """Stop the runtime: queued sends get the bounded flush, the lock is
@@ -286,7 +303,7 @@ class AttachBackend:
 
     async def create_invite(self, group: str, max_uses: int, ttl_secs: int) -> dict[str, Any]:
         body = {"max_uses": max_uses, "ttl_secs": ttl_secs}
-        return await self._request("POST", f"/v0/groups/{group}/invites", body)
+        return await self._request("POST", f"/v0/groups/{segment(group)}/invites", body)
 
     async def accept(self, url: str, display_name: str | None) -> dict[str, Any]:
         body: dict[str, Any] = {"url": url}
@@ -300,16 +317,16 @@ class AttachBackend:
         body: dict[str, Any] = {"text": text, "to": list(to)}
         if reply_to is not None:
             body["reply_to"] = list(reply_to)
-        return await self._request("POST", f"/v0/groups/{group}/messages", body)
+        return await self._request("POST", f"/v0/groups/{segment(group)}/messages", body)
 
     async def groups(self) -> dict[str, Any]:
         return await self._request("GET", "/v0/groups")
 
     async def group_info(self, group: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v0/groups/{group}")
+        return await self._request("GET", f"/v0/groups/{segment(group)}")
 
     async def leave(self, group: str) -> dict[str, Any]:
-        return await self._request("POST", f"/v0/groups/{group}/leave")
+        return await self._request("POST", f"/v0/groups/{segment(group)}/leave")
 
     async def events(self, after: int, group: str | None) -> dict[str, Any]:
         params: dict[str, Any] = {"after": after}
@@ -347,9 +364,7 @@ class AttachBackend:
     async def listing_status(self) -> dict[str, Any]:
         return await self._request("GET", "/v0/listing")
 
-    async def take(
-        self, group: str | None, addressed_only: bool, wait_secs: float
-    ) -> tuple[list[Pulled], bool]:
+    async def take(self, group: str | None, addressed_only: bool, wait_secs: float) -> Pulls:
         """Long-poll ``GET /v0/deliveries`` in steps of :data:`POLL_SECS`
         until something comes or ``wait_secs`` is used up."""
         if group is not None:
@@ -366,12 +381,15 @@ class AttachBackend:
             rows = data.get("deliveries") or []
             if rows:
                 pulled = [Pulled(str(r["delivery_id"]), dict(r["message"])) for r in rows]
-                return pulled, bool(data.get("more"))
-        return [], False
+                return Pulls(str(data.get("lease", "")), pulled, bool(data.get("more")))
+        return Pulls("", [], more=False)
 
-    async def ack(self, delivery_ids: Sequence[str]) -> None:
-        if delivery_ids:
-            await self._request("POST", "/v0/deliveries/ack", {"ids": list(delivery_ids)})
+    async def ack(self, lease: str, delivery_ids: Sequence[str]) -> list[str]:
+        if not delivery_ids:
+            return []
+        body = {"lease": lease, "ids": list(delivery_ids)}
+        refused = (await self._request("POST", "/v0/deliveries/ack", body)).get("refused") or []
+        return [d for d in delivery_ids if d not in refused]
 
     async def close(self) -> None:
         await self._http.aclose()

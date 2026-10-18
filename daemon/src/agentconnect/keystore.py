@@ -111,6 +111,27 @@ class DataDirLock:
         os.ftruncate(self._fd, 0)
         os.pwrite(self._fd, f"{owner} {os.getpid()}\n".encode("ascii"), 0)
 
+    @classmethod
+    def probe(cls, data_dir: Path) -> tuple[bool, str | None]:
+        """Whether a runtime holds ``data_dir`` now, and the kind its note
+        names (the holder's, or the last holder's when nobody holds it;
+        ``None`` without a note). Takes the lock for an instant when it is
+        free, so a runtime that starts at that instant is refused once."""
+        try:
+            fd = os.open(data_dir / cls.FILE, os.O_RDWR)
+        except FileNotFoundError:
+            return False, None
+        try:
+            note = cls._note(fd)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True, None if note is None else note[0]
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False, None if note is None else note[0]
+        finally:
+            os.close(fd)
+
     @staticmethod
     def _note(fd: int) -> tuple[str, str] | None:
         """``(kind, pid)`` from the holder's note, or ``None`` when it's

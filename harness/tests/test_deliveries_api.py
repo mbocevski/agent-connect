@@ -12,10 +12,10 @@ import pytest
 
 from agentconnect.deliveries import DeliveryQueue
 from agentconnect.runtime.agent import a2a_text
-from agentconnect.runtime.api import ROUTE_SPECS
+from agentconnect.runtime.api import MAX_AGENT_REQUESTS, MAX_POLLS, ROUTE_SPECS
 from agentconnect.shapes import conforms
 from agentconnect.sockets import bind_path
-from agentconnect.tokens import API_TOKEN_FILE
+from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 
 pytestmark = pytest.mark.hosts("daemon")
@@ -23,8 +23,12 @@ pytestmark = pytest.mark.hosts("daemon")
 SPECS = {f"{s.method} {s.path}": s for s in ROUTE_SPECS}
 
 
-def client(node: Node) -> httpx.AsyncClient:
-    token = (node.config.data_dir / API_TOKEN_FILE).read_text(encoding="ascii").strip()
+def human_client(node: Node) -> httpx.AsyncClient:
+    return client(node, HUMAN_TOKEN_FILE)
+
+
+def client(node: Node, token_file: str = API_TOKEN_FILE) -> httpx.AsyncClient:
+    token = (node.config.data_dir / token_file).read_text(encoding="ascii").strip()
     transport = httpx.AsyncHTTPTransport(uds=str(bind_path(node.config.socket_path)))
     return httpx.AsyncClient(
         transport=transport,
@@ -83,16 +87,22 @@ async def test_a_long_poll_returns_leases_and_acks(cluster: Cluster) -> None:
         # Leased: another caller doesn't get it.
         again = await api.get("/v0/deliveries", params={"group": gid})
         assert again.json()["deliveries"] == []
-        body = {"ids": [item["delivery_id"]]}
+        # Only the lease that took it acknowledges it.
+        guessed = {"lease": "guessed", "ids": [item["delivery_id"]]}
+        refused = (await api.post("/v0/deliveries/ack", json=guessed)).json()
+        assert refused == {"acked": 0, "refused": [item["delivery_id"]]}
+        body = {"lease": data["lease"], "ids": [item["delivery_id"]]}
         assert conforms(body, SPECS["POST /v0/deliveries/ack"].request)
         acked = await api.post("/v0/deliveries/ack", json=body)
-        assert acked.json() == {"acked": 1}
-        assert (await api.post("/v0/deliveries/ack", json=body)).json() == {"acked": 0}
+        assert conforms(acked.json(), SPECS["POST /v0/deliveries/ack"].response)
+        assert acked.json() == {"acked": 1, "refused": []}
+        again = (await api.post("/v0/deliveries/ack", json=body)).json()
+        assert again == {"acked": 0, "refused": [item["delivery_id"]]}
 
         for params in ({"timeout": 61}, {"addressed_only": "yes"}, {"timeout": "-1"}):
             refused = await api.get("/v0/deliveries", params=params)
             assert (refused.status_code, refused.json()["code"]) == (400, "bad_request")
-        for bad in ({"ids": "1"}, {"ids": ["x"]}, {}):
+        for bad in ({"lease": "l", "ids": "1"}, {"lease": "l", "ids": ["x"]}, {"ids": []}):
             refused = await api.post("/v0/deliveries/ack", json=bad)
             assert refused.status_code == 400
 
@@ -135,5 +145,41 @@ async def test_without_a_queue_the_routes_say_so(cluster: Cluster) -> None:
     node = await cluster.node("plain", serve_api=True)
     async with client(node) as api:
         for method, path in (("GET", "/v0/deliveries"), ("POST", "/v0/deliveries/ack")):
-            resp = await api.request(method, path, json={"ids": []} if method == "POST" else None)
+            body = {"lease": "l", "ids": []} if method == "POST" else None
+            resp = await api.request(method, path, json=body)
             assert (resp.status_code, resp.json()["code"]) == (409, "no_deliveries")
+
+
+async def test_long_polls_are_capped_and_the_human_gets_through(cluster: Cluster) -> None:
+    """At most MAX_POLLS polls per token wait; more answer 429 at once, and
+    agent requests never take the capacity kept for the human token."""
+    owner, _peer, _gid, queue = await owner_and_peer(cluster)
+    async with client(owner) as api:
+        polls = [
+            asyncio.ensure_future(api.get("/v0/deliveries", params={"timeout": 60}))
+            for _ in range(MAX_POLLS)
+        ]
+        await until(lambda: queue.waiting == MAX_POLLS)
+        over = await api.get("/v0/deliveries", params={"timeout": 60})
+        assert (over.status_code, over.json()["code"]) == (429, "busy")
+        human = human_client(owner)
+        async with human:
+            assert (await human.get("/v0/approvals")).status_code == 200
+        for poll in polls:
+            poll.cancel()
+        await until(lambda: queue.waiting == 0)
+
+
+async def test_agent_requests_leave_room_for_the_human(cluster: Cluster) -> None:
+    owner, _peer, _gid, _queue = await owner_and_peer(cluster)
+    server = owner.runtime._api
+    assert server is not None
+    server._agent_requests = MAX_AGENT_REQUESTS  # as if that many were in progress
+    try:
+        async with client(owner) as api:
+            refused = await api.get("/v0/groups")
+            assert (refused.status_code, refused.json()["code"]) == (503, "busy")
+        async with human_client(owner) as human:
+            assert (await human.get("/v0/groups")).status_code == 200
+    finally:
+        server._agent_requests = 0

@@ -61,6 +61,9 @@ MAX_BODY = 1 << 20
 MAX_HEADER = 16 << 10
 READ_TIMEOUT = 10.0  # seconds to send a whole request
 MAX_CONNECTIONS = 64
+# Agent-token requests in progress at most: the rest of MAX_CONNECTIONS is
+# kept for the human token, so agent traffic can't lock the human out.
+MAX_AGENT_REQUESTS = 48
 SCOPE = "_scope"  # handler parameter carrying the request's token scope
 ACCEPT = "_accept"  # ... the Accept header
 LAST_EVENT_ID = "_last_event_id"  # ... the Last-Event-ID header
@@ -132,6 +135,7 @@ class SseStream:
 
 
 MAX_POLL_SECS = 60  # the longest one GET /v0/deliveries waits
+MAX_POLLS = 4  # GET /v0/deliveries waiting at once, per token
 
 
 class DeliveryPoll:
@@ -139,8 +143,14 @@ class DeliveryPoll:
     while watching the connection: a caller that goes away leases nothing,
     and a stopping server answers at once (empty)."""
 
-    def __init__(self, queue: DeliveryQueue, stopping: asyncio.Event, **take: Any) -> None:
-        self.queue, self.stopping, self.take = queue, stopping, take
+    def __init__(
+        self,
+        queue: DeliveryQueue,
+        stopping: asyncio.Event,
+        done: Callable[[], None],
+        **take: Any,
+    ) -> None:
+        self.queue, self.stopping, self.done, self.take = queue, stopping, done, take
 
     async def run(self, reader: asyncio.StreamReader) -> dict[str, Any] | None:
         """The answer, or ``None`` if the caller left first."""
@@ -150,20 +160,29 @@ class DeliveryPoll:
             await asyncio.wait({gone, taking}, return_when=asyncio.FIRST_COMPLETED)
             if not taking.done():
                 return None
-            taken, more = taking.result()
+            batch = taking.result()
             if gone.done():
-                self.queue.release(t.delivery_id for t in taken)
+                self.queue.release(batch.lease, [t.delivery_id for t in batch.items])
                 return None
         finally:
+            self.done()
             gone.cancel()
             await cancel_and_wait(taking)
         return {
             "deliveries": [
-                {"delivery_id": str(t.delivery_id), "message": t.payload} for t in taken
+                {"delivery_id": str(t.delivery_id), "message": t.payload} for t in batch.items
             ],
-            "more": more,
+            "lease": batch.lease,
+            "more": batch.more,
             "untrusted": True,
         }
+
+
+@dataclass
+class Connection:
+    """One connection's request: whether it counts as an agent request."""
+
+    agent: bool = False
 
 
 Handler = Callable[[dict[str, str], dict[str, Any]], Awaitable[Any]]
@@ -715,15 +734,18 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "runtime, [adapters/mcp.md](adapters/mcp.md)), oldest first, at most 50, in the "
         "payload shape of the webhook adapter (`untrusted`, `notice`, `addressed_to_me`). "
         "Waits up to `timeout` seconds for one; with `addressed_only`, for one that "
-        "addresses this agent (the answer then holds the other queued messages too, as "
-        "context). The messages are leased to the caller for 120 seconds: no other caller "
-        "gets them meanwhile, and they are queued again unless acknowledged with "
-        "`POST /v0/deliveries/ack`. `more` is true when more are queued. Needs "
+        "addresses this agent, however many others are queued before it (the answer holds "
+        "it and up to 49 queued messages before it, as context). The messages are leased "
+        "to the caller under `lease` for 120 seconds: no other caller gets them meanwhile, "
+        "and they are queued again unless acknowledged with `POST /v0/deliveries/ack`. "
+        "`more` is true when more are queued. At most 4 polls per token wait at once; "
+        "another answers `429 busy`. Needs "
         '`daemon.default_adapter = "mcp"` (the MCP host sets it), else `409 no_deliveries`.',
         query="`group`: only that group. `addressed_only`: `1` or `0` (default 0). "
         "`timeout`: seconds to wait, 0 to 60 (default 0).",
         response={
             "deliveries": [{"delivery_id": "str", "message": "object"}],
+            "lease": "str",
             "more": "bool",
             "untrusted": "bool",
         },
@@ -732,10 +754,13 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/deliveries/ack",
         "_deliveries_ack",
-        "Acknowledge leased deliveries: they leave the queue, and a repeat of one (after "
-        "a crash) is not queued again. `acked` counts those that were still queued.",
-        request={"ids": ["str"]},
-        response={"acked": "int"},
+        "Acknowledge deliveries of a `lease`: they leave the queue, and a repeat of one "
+        "(after a crash) is not queued again. Only the lease that took them may: also "
+        "after its 120 seconds ran out, unless another caller took them since. "
+        "`acked` counts those acknowledged; `refused` lists the ids the lease doesn't "
+        "hold (never leased, leased again, or already acknowledged).",
+        request={"lease": "str", "ids": ["str"]},
+        response={"acked": "int", "refused": ["str"]},
     ),
 )
 
@@ -868,7 +893,13 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "Publish: the directory refused the listing with a code of its own. Knock: it "
         "didn't serve the listing.",
     ),
-    (503, "busy", "Too many open connections."),
+    (
+        503,
+        "busy",
+        "Too many open connections, or too many agent-token requests at once (part of the "
+        "capacity is kept for the human token). Deliveries: `429` when 4 polls of the "
+        "token wait already.",
+    ),
 )
 
 
@@ -927,6 +958,8 @@ class ApiServer:
         self._connections = 0
         self._streams: set[SseStream] = set()
         self._stopping = asyncio.Event()  # long polls answer at once
+        self._polls: dict[str, int] = {}  # long polls waiting, per token scope
+        self._agent_requests = 0  # agent-token requests in progress
         self._idle = asyncio.Event()
         self._idle.set()
         self._port: int | None = None
@@ -1174,19 +1207,32 @@ class ApiServer:
         timeout = _query_int(p, "timeout")
         if timeout > MAX_POLL_SECS:
             raise ApiError(400, "bad_request", f"timeout must be 0..{MAX_POLL_SECS}")
+        queue, scope = self._queue(), p.get(SCOPE, "agent")
+        if self._polls.get(scope, 0) >= MAX_POLLS:
+            msg = f"{MAX_POLLS} polls of this token wait already"
+            raise ApiError(429, "busy", msg)
+        self._polls[scope] = self._polls.get(scope, 0) + 1
+
+        def done() -> None:
+            self._polls[scope] -= 1
+
         return DeliveryPoll(
-            self._queue(),
+            queue,
             self._stopping,
+            done,
             group=p.get("group") or None,
             addressed_only=addressed == "1",
             wait_secs=float(timeout),
         )
 
     async def _deliveries_ack(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        queue = self._queue()
+        lease = _str(b, "lease")
         ids = b.get("ids")
         if not isinstance(ids, list) or not all(isinstance(x, str) and x.isdigit() for x in ids):
             raise ApiError(400, "bad_request", "ids must be a list of delivery ids")
-        return {"acked": self._queue().ack(int(x) for x in ids)}
+        done = {str(d) for d in queue.ack(lease, [int(x) for x in ids])}
+        return {"acked": len(done), "refused": [x for x in ids if x not in done]}
 
     # -- HTTP --------------------------------------------------------------
 
@@ -1207,7 +1253,12 @@ class ApiServer:
         return "human" if is_human else "agent"
 
     async def handle(
-        self, method: str, target: str, headers: dict[str, str], body: bytes
+        self,
+        method: str,
+        target: str,
+        headers: dict[str, str],
+        body: bytes,
+        conn: Connection | None = None,
     ) -> tuple[int, Any]:
         path, _, query = target.partition("?")
         params = dict(
@@ -1222,6 +1273,11 @@ class ApiServer:
             if route.method != method:
                 continue
             scope = self._authorize(headers, route.human)
+            if scope == "agent" and conn is not None:
+                if self._agent_requests >= MAX_AGENT_REQUESTS:
+                    raise ApiError(503, "busy", "too many agent requests")
+                self._agent_requests += 1
+                conn.agent = True
             try:
                 data = json.loads(body) if body else {}
             except ValueError:
@@ -1257,8 +1313,9 @@ class ApiServer:
             return
         self._connections += 1
         self._idle.clear()
+        conn = Connection()
         try:
-            status, payload = await self._request(reader)
+            status, payload = await self._request(reader, conn)
             if isinstance(payload, DeliveryPoll):
                 answer = await payload.run(reader)
                 if answer is None:
@@ -1273,6 +1330,8 @@ class ApiServer:
                 return
             await self._reply(writer, status, payload)
         finally:
+            if conn.agent:
+                self._agent_requests -= 1
             self._connections -= 1
             if self._connections == 0:
                 self._idle.set()
@@ -1289,13 +1348,15 @@ class ApiServer:
         if headers.get("host") not in allowed:
             raise ApiError(403, "forbidden", "unexpected Host header")
 
-    async def _request(self, reader: asyncio.StreamReader) -> tuple[int, Any]:
+    async def _request(
+        self, reader: asyncio.StreamReader, conn: Connection | None = None
+    ) -> tuple[int, Any]:
         status, payload = 500, {"code": "internal", "message": "internal error"}
         try:
             async with asyncio.timeout(READ_TIMEOUT):
                 method, target, headers, body = await self._read(reader)
             self._check_origin(headers)
-            status, payload = await self.handle(method, target, headers, body)
+            status, payload = await self.handle(method, target, headers, body, conn)
         except TimeoutError:
             status, payload = 408, {"code": "timeout", "message": "request not received in time"}
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError):

@@ -5,7 +5,8 @@ clients) starts per session. It runs the AgentConnect runtime in
 its own process when the data directory is free, or attaches to the runtime
 that holds it, so the user has nothing separate to run. Its tools are the
 agent-scope operations only; human decisions stay CLI commands with the
-human token, which this package never reads (docs/adapters/mcp.md).
+human token. No tool exposes it, and an attached session reads ``api-token``
+only (docs/adapters/mcp.md).
 """
 
 from agentconnect.mcp.backend import ToolError

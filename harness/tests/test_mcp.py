@@ -299,6 +299,104 @@ async def test_attaches_to_a_running_daemon(cluster: Cluster) -> None:
     assert refused.data["error"]["code"] == "not_found"
 
 
+# -- review regressions -------------------------------------------------------------
+
+
+def mcp_owner(cluster: Cluster) -> Any:
+    return cluster.node(
+        "owner",
+        auto_approve=True,
+        default_adapter="mcp",
+        make_adapters=lambda _cfg, clock: [DeliveryQueue(clock)],
+        serve_api=True,
+    )
+
+
+async def test_parallel_waits_cannot_lock_the_human_out(cluster: Cluster) -> None:
+    """M3: an attached session's waits are capped, and the human's CLI still
+    gets through while they wait."""
+    alice = await cluster.mcp("alice")
+    second = await cluster.mcp("alice-2", data_dir=alice.data_dir)
+    waits = [
+        second.client.start_request(
+            "tools/call", {"name": "agentconnect_wait", "arguments": {"timeout_s": 300}}
+        )[1]
+        for _ in range(64)
+    ]
+
+    def refused() -> int:
+        return sum(1 for w in waits if w.done() and w.result()["result"].get("isError"))
+
+    await asyncio.wait_for(_until(lambda: alice.queue.waiting + refused() == len(waits)), WAIT)
+    assert alice.queue.waiting <= 4
+    code, out = await asyncio.to_thread(human_cli, alice, "approvals", "--json")
+    assert code == 0, out
+    busy = next(w.result()["result"] for w in waits if w.done())
+    assert busy["structuredContent"]["error"]["code"] == "busy"
+
+
+async def test_takeover_follows_the_current_holder(cluster: Cluster) -> None:
+    """M4: daemon, then an MCP host, then that host ends: the attached
+    session takes over, deciding from the holder now, not the first one."""
+    owner = await mcp_owner(cluster)
+    session = await cluster.mcp("session", data_dir=owner.config.data_dir)
+    assert session.mode == "attach"
+    await owner.stop()
+    host = await cluster.mcp("host", data_dir=owner.config.data_dir)
+    assert host.mode == "host"
+    await session.client.ok("agentconnect_groups", {})  # attached to the new host
+    assert session.mode == "attach"
+    await host.stop()
+    await session.client.ok("agentconnect_groups", {})
+    assert session.mode == "host"
+
+
+def sas_paths(value: Any, path: str = "") -> list[str]:
+    if isinstance(value, dict):
+        found = [f"{path}.{k}" for k in value if k in {"sas", "group_sas"}]
+        return found + [p for k, v in value.items() for p in sas_paths(v, f"{path}.{k}")]
+    if isinstance(value, list):
+        return [p for i, v in enumerate(value) for p in sas_paths(v, f"{path}[{i}]")]
+    return []
+
+
+async def test_no_tool_result_carries_a_short_code(cluster: Cluster) -> None:
+    """L1: comparing the short code is the humans' step; no result has one."""
+    alice, bob, gid = await joined_pair(cluster)
+    await alice.client.ok("agentconnect_send", {"group": gid, "text": "hi"})
+    results = []
+    for who in (alice, bob):
+        results.append(await who.client.ok("agentconnect_events", {}))
+        results.append(await who.client.ok("agentconnect_groups", {}))
+        results.append(await who.client.ok("agentconnect_groups", {"group": gid}))
+    results.append(await bob.client.ok("agentconnect_wait", {"timeout_s": 300}))
+    assert any(e["type"] == "joined" for e in results[3]["events"])
+    assert [p for r in results for p in sas_paths(r)] == []
+
+
+async def test_a_cancelled_attached_wait_leases_nothing(cluster: Cluster) -> None:
+    alice, bob, gid = await joined_pair(cluster)
+    second = await cluster.mcp("alice-2", data_dir=alice.data_dir)
+    request_id, answer = second.client.start_request(
+        "tools/call", {"name": "agentconnect_wait", "arguments": {"timeout_s": 300}}
+    )
+    await asyncio.wait_for(_until(lambda: alice.queue.waiting == 1), WAIT)
+    second.client.cancel(request_id)
+    await asyncio.wait_for(_until(lambda: alice.queue.waiting == 0), WAIT)
+    answer.cancel()
+    sent = await bob.client.ok("agentconnect_send", {"group": gid, "text": "after"})
+    (msg,) = (await alice.client.ok("agentconnect_wait", {"timeout_s": 300}))["messages"]
+    assert msg["msg_id"] == sent["msg_id"]
+
+
+async def test_the_ack_follows_the_written_result(cluster: Cluster) -> None:
+    """L5: a wait's batch is acknowledged once its result is written."""
+    alice, bob, gid = await joined_pair(cluster)
+    await alice.client.ok("agentconnect_send", {"group": gid, "text": "hello"})
+    await bob.client.ok("agentconnect_wait", {"timeout_s": 300})
+    await bob.wait(lambda: not bob.engine.store.adapter_event_groups("mcp"))
+
+
 @pytest.mark.timeout(60)
 async def test_the_command_serves_stdio_and_stops_on_eof_and_sigterm(
     cluster: Cluster, tmp_path: Path

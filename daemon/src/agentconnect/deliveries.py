@@ -15,10 +15,14 @@ answers the runtime ``ACK`` at once, so the relay can drop its copy.
   it, the key is in the runtime's handled ids (:attr:`Runtime.handled`'s
   table), so a later repeat is dropped.
 * **Leases.** :meth:`DeliveryQueue.take` leases what it returns for
-  :data:`LEASE_SECS`; :meth:`DeliveryQueue.ack` takes it off the queue.
-  Another waiter (a second session attached through the local API) doesn't
-  see a leased message. A lease that runs out without an ack (the caller
-  went away) puts the message back.
+  :data:`LEASE_SECS` under a lease token; :meth:`DeliveryQueue.ack` with
+  that token takes it off the queue, and no other token can. Another waiter
+  (a second session attached through the local API) doesn't see a leased
+  message. A lease that runs out without an ack (the caller went away) puts
+  the message back; its holder may still ack it until another take leases it.
+* **Addressed first.** Each row records whether it addresses this agent, so
+  a take with ``addressed_only`` finds the oldest such row directly, however
+  many others are queued before it.
 * **Content only.** Text and task messages are queued. Agent Cards and
   ``control.*`` messages carry no text for the model: they are acknowledged
   and not queued (the runtime keeps the card). Events are not queued
@@ -33,7 +37,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterable
+import secrets
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -57,18 +62,31 @@ QUEUE_KEEP = 10_000  # queued messages kept per runtime, the newest
 MAX_BATCH = 50  # messages one take returns at most
 LEASE_SECS = 120.0  # how long a taken, unacknowledged message stays hidden
 MAX_WAIT_SECS = 300.0  # the longest one take waits
+HOLDER_KEEP_SECS = 3600.0  # how long a lease's holder may still ack after it ran out
 
 
 class QueueStore(Protocol):
     """The part of the runtime's store the queue uses."""
 
     def adapter_event_add(
-        self, adapter: str, event_id: str, payload: dict[str, Any], keep: int = ...
+        self,
+        adapter: str,
+        event_id: str,
+        payload: dict[str, Any],
+        keep: int = ...,
+        *,
+        addressed: bool = ...,
     ) -> bool: ...
-    def adapter_events(
-        self, adapter: str, group_id: str | None = None, limit: int = 100
+    def queue_rows(  # noqa: PLR0913
+        self,
+        adapter: str,
+        *,
+        group_id: str | None,
+        skip: Sequence[int],
+        limit: int,
+        addressed: bool = ...,
+        before: int | None = ...,
     ) -> list[tuple[int, dict[str, Any]]]: ...
-    def adapter_event_groups(self, adapter: str) -> list[str | None]: ...
     def adapter_event_finish(self, adapter: str, seq: int) -> bool: ...
     def handled_has(self, key: str) -> bool: ...
 
@@ -81,6 +99,21 @@ def delivery_key(payload: dict[str, Any]) -> str:
     group_id = group.get("id") if isinstance(group, dict) else None
     identity = sender.get("identity") if isinstance(sender, dict) else None
     return json.dumps(["msg", group_id, identity, payload.get("msg_id")], separators=(",", ":"))
+
+
+@dataclass(frozen=True)
+class _Holder:
+    token: str
+    ends: float  # Unix seconds on the runtime's clock
+
+
+@dataclass(frozen=True)
+class Batch:
+    """What one take leased: ``lease`` acknowledges or releases it."""
+
+    lease: str
+    items: list[Taken]
+    more: bool
 
 
 @dataclass(frozen=True)
@@ -99,7 +132,7 @@ class DeliveryQueue:
         self.name = name
         self._clock = clock
         self._store: QueueStore | None = None
-        self._leases: dict[int, float] = {}  # delivery_id -> when the lease ends
+        self._holders: dict[int, _Holder] = {}  # delivery_id -> its lease
         self._changed = asyncio.Event()
         self._closed = False
         self.waiting = 0  # takes waiting now (status and tests)
@@ -131,7 +164,7 @@ class DeliveryQueue:
         payload = message_payload(group, inner)
         key = delivery_key(payload)
         if not store.handled_has(key) and store.adapter_event_add(
-            self.name, key, payload, QUEUE_KEEP
+            self.name, key, payload, QUEUE_KEEP, addressed=inner.addressed_to_me
         ):
             self._changed.set()
         return DeliveryResult.ACK
@@ -148,23 +181,40 @@ class DeliveryQueue:
     def _now(self) -> float:
         return self._clock.now().timestamp()
 
-    def _available(self, group: str | None, limit: int) -> list[tuple[int, dict[str, Any]]]:
-        """Queued, unleased messages of ``group`` (any group: ``None``),
-        oldest first; at most ``limit`` + 1, to tell whether there are more."""
+    def _leased(self) -> list[int]:
+        """The seqs under a lease that hasn't run out. A record outlives its
+        lease (it names the last holder, who may still ack) until another
+        take leases the message again; old ones are pruned."""
         now = self._now()
-        self._leases = {d: end for d, end in self._leases.items() if end > now}
-        store = self._queue()
-        groups = (
-            [group]
-            if group is not None
-            else [g for g in store.adapter_event_groups(self.name) if g is not None]
+        self._holders = {d: h for d, h in self._holders.items() if h.ends > now - HOLDER_KEEP_SECS}
+        return [d for d, h in self._holders.items() if h.ends > now]
+
+    def _pick(
+        self, group: str | None, limit: int, addressed_only: bool
+    ) -> tuple[list[tuple[int, dict[str, Any]]], bool] | None:
+        """What a take returns now (the rows and whether more are queued),
+        or ``None`` when it has to wait.
+
+        Without ``addressed_only``: the oldest ``limit`` unleased rows.
+        With it, the oldest unleased row that addresses this agent is found
+        directly, however many others are queued before it: the batch is the
+        oldest ``limit`` rows if it is among them, else that row and the
+        ``limit - 1`` rows right before it."""
+        store, skip = self._queue(), self._leased()
+        head = store.queue_rows(self.name, group_id=group, skip=skip, limit=limit + 1)
+        if not head:
+            return None
+        if not addressed_only:
+            return head[:limit], len(head) > limit
+        first = store.queue_rows(self.name, group_id=group, skip=skip, limit=1, addressed=True)
+        if not first:
+            return None
+        if any(seq == first[0][0] for seq, _ in head[:limit]):
+            return head[:limit], len(head) > limit
+        before = store.queue_rows(
+            self.name, group_id=group, skip=skip, limit=limit - 1, before=first[0][0]
         )
-        rows: list[tuple[int, dict[str, Any]]] = []
-        for g in groups:
-            fetched = store.adapter_events(self.name, g, limit=limit + 1 + len(self._leases))
-            rows.extend(r for r in fetched if r[0] not in self._leases)
-        rows.sort(key=lambda r: r[0])
-        return rows[: limit + 1]
+        return [*before, first[0]], True
 
     async def take(
         self,
@@ -174,33 +224,31 @@ class DeliveryQueue:
         wait_secs: float = 0.0,
         limit: int = MAX_BATCH,
         stop: asyncio.Event | None = None,
-    ) -> tuple[list[Taken], bool]:
+    ) -> Batch:
         """Wait (on the runtime's clock, at most ``wait_secs`` seconds, capped
         at :data:`MAX_WAIT_SECS`) until a message of ``group`` (any group:
         ``None``) is queued, or with ``addressed_only`` one that addresses
-        this agent; then lease and return the queued messages of ``group``
-        (addressed or not, oldest first, at most ``limit``) and whether more
-        are queued. Nothing is leased if the caller is cancelled, the runtime
-        stops or ``stop`` is set: the answer is then empty."""
+        this agent; then lease what :meth:`_pick` chose under a new lease
+        token and return it. Nothing is leased if the caller is cancelled,
+        the runtime stops or ``stop`` is set: the batch is then empty."""
         limit = max(1, min(limit, MAX_BATCH))
         deadline = self._now() + max(0.0, min(wait_secs, MAX_WAIT_SECS))
         while True:
             self._changed.clear()  # before checking: no change is missed
             if self._closed:
-                return [], False
-            rows = self._available(group, limit)
-            if rows and (
-                not addressed_only or any(p.get("addressed_to_me") is True for _, p in rows)
-            ):
-                picked = rows[:limit]
-                ends = self._now() + LEASE_SECS
-                for delivery_id, _ in picked:
-                    self._leases[delivery_id] = ends
-                return [Taken(d, p) for d, p in picked], len(rows) > limit
+                return Batch("", [], more=False)
+            picked = self._pick(group, limit, addressed_only)
+            if picked is not None:
+                rows, more = picked
+                holder = _Holder(secrets.token_urlsafe(16), self._now() + LEASE_SECS)
+                for seq, _ in rows:
+                    self._holders[seq] = holder
+                return Batch(holder.token, [Taken(d, p) for d, p in rows], more=more)
             now = self._now()
             if now >= deadline or (stop is not None and stop.is_set()):
-                return [], False
-            await self._nap(min([deadline, *self._leases.values()]), stop)
+                return Batch("", [], more=False)
+            ends = [h.ends for h in self._holders.values() if h.ends > now]
+            await self._nap(min([deadline, *ends]), stop)
 
     async def _nap(self, until: float, stop: asyncio.Event | None) -> None:
         """Until something changes, ``until`` (Unix seconds on the runtime's
@@ -219,18 +267,29 @@ class DeliveryQueue:
             for w in waits:
                 w.cancel()
 
-    def ack(self, delivery_ids: Iterable[int]) -> int:
+    def _held(self, lease: str, delivery_ids: Iterable[int]) -> list[int]:
+        return [
+            d
+            for d in delivery_ids
+            if lease and (h := self._holders.get(d)) is not None and h.token == lease
+        ]
+
+    def ack(self, lease: str, delivery_ids: Iterable[int]) -> list[int]:
         """Take messages off the queue (a tool call returned them) and
-        remember their keys as handled; how many were still queued."""
+        remember their keys as handled. Only the ids ``lease`` holds, or
+        held last if nobody leased them since: an id never leased, or leased
+        again by another caller, is refused. The ids acknowledged."""
         store = self._queue()
-        done = 0
-        for delivery_id in delivery_ids:
-            self._leases.pop(delivery_id, None)
-            done += store.adapter_event_finish(self.name, delivery_id)
+        done = []
+        for delivery_id in self._held(lease, delivery_ids):
+            del self._holders[delivery_id]
+            if store.adapter_event_finish(self.name, delivery_id):
+                done.append(delivery_id)
         return done
 
-    def release(self, delivery_ids: Iterable[int]) -> None:
-        """End leases early: the messages are queued again for any waiter."""
-        for delivery_id in delivery_ids:
-            self._leases.pop(delivery_id, None)
+    def release(self, lease: str, delivery_ids: Iterable[int]) -> None:
+        """End ``lease``'s hold early: the messages are queued again for any
+        waiter. Ids it doesn't hold are left alone."""
+        for delivery_id in self._held(lease, delivery_ids):
+            del self._holders[delivery_id]
         self._changed.set()

@@ -21,6 +21,7 @@ import json
 import os
 import re
 import signal
+import tomllib
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,7 @@ from mcp.server.stdio import stdio_server
 
 from agentconnect import __version__, log
 from agentconnect.mcp.backend import ToolError
-from agentconnect.mcp.session import Session
+from agentconnect.mcp.session import Session, current_request
 from agentconnect.mcp.tools import BY_NAME, HUMAN_ONLY_NOTE, INSTRUCTIONS, TOOLS, Tool, call
 from agentconnect.runtime import (
     Clock,
@@ -52,7 +53,7 @@ SERVER_NAME = "agentconnect"
 DEFAULT_AGENT = "mcp"
 MAX_LINE = 4 << 20  # bytes of one JSON-RPC message from the client
 SIGNALS = (signal.SIGINT, signal.SIGTERM)
-_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # fullmatch: no newline
 
 
 def default_data_dir(agent: str, environ: Mapping[str, str]) -> Path:
@@ -60,6 +61,20 @@ def default_data_dir(agent: str, environ: Mapping[str, str]) -> Path:
     raw = environ.get("XDG_DATA_HOME", "").strip()
     base = Path(raw) if raw else Path(environ.get("HOME", str(Path.home()))) / ".local/share"
     return base / f"agentconnect-{agent}"
+
+
+def _file_data_dir(config: Path | None) -> Path | None:
+    """``daemon.data_dir`` of a config file, if it sets one."""
+    if config is None:
+        return None
+    try:
+        data = tomllib.loads(config.expanduser().read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        msg = f"{config}: {e}"
+        raise ConfigError(msg) from None
+    daemon = data.get("daemon")
+    raw = daemon.get("data_dir") if isinstance(daemon, dict) else None
+    return Path(raw).expanduser() if isinstance(raw, str) and raw else None
 
 
 def configure(  # noqa: PLR0913
@@ -73,14 +88,16 @@ def configure(  # noqa: PLR0913
 ) -> Config:
     """The MCP host's :class:`Config` (ADR-005, Decision 2).
 
-    The data directory is ``data_dir``, else ``AC_DATA_DIR``, else
+    The data directory is ``data_dir``, else ``AC_DATA_DIR``, else the
+    ``config`` file's ``daemon.data_dir`` when no ``agent`` is given (to
+    attach to the daemon that file configures), else
     ``$XDG_DATA_HOME/agentconnect-<agent>`` (``agent`` defaults to ``mcp``).
     An ``AC_DATA_DIR`` that disagrees with an explicit ``agent`` is refused,
     so a variable exported for one agent's CLI can't hand this one another
     agent's identity. Only the TOML file ``config`` is read, never the
     separate daemon's default file; ``AC_*`` variables apply on top."""
-    name = agent or DEFAULT_AGENT
-    if not _NAME.match(name):
+    name = DEFAULT_AGENT if agent is None else agent
+    if not _NAME.fullmatch(name):
         msg = "--agent: 1 to 64 of A-Z a-z 0-9 . _ -, starting with a letter or digit"
         raise ConfigError(msg)
     env_dir = environ.get("AC_DATA_DIR", "")
@@ -94,6 +111,8 @@ def configure(  # noqa: PLR0913
                 f"({default_data_dir(agent, environ)}); unset it, or pass --data-dir"
             )
             raise ConfigError(msg)
+    elif agent is None and (file_dir := _file_data_dir(config)) is not None:
+        where = file_dir
     else:
         where = default_data_dir(name, environ)
     overrides: dict[str, Any] = {"data_dir": where, "default_adapter": "mcp"}
@@ -148,10 +167,14 @@ def _result(data: dict[str, Any], *, error: bool = False) -> types.CallToolResul
     )
 
 
-async def call_tool(session: Session, name: str, args: Mapping[str, Any]) -> types.CallToolResult:
+async def call_tool(
+    session: Session, name: str, args: Mapping[str, Any], request_id: object | None = None
+) -> types.CallToolResult:
     """One ``tools/call``: the tool's result, or an error result with the
     runtime's code (``human_only`` with a pointer to the CLI). A refused
-    call is logged with its code only."""
+    call is logged with its code only. ``request_id`` ties a wait's batch
+    to this request, to be acknowledged once its result is written."""
+    token = current_request.set(request_id)
     try:
         return _result(await call(session, name, args))
     except ToolError as e:
@@ -160,6 +183,8 @@ async def call_tool(session: Session, name: str, args: Mapping[str, Any]) -> typ
         if e.code == "human_only":
             error["hint"] = HUMAN_ONLY_NOTE
         return _result({"error": error}, error=True)
+    finally:
+        current_request.reset(token)
 
 
 def build_server(session: Session) -> Server[Any]:
@@ -169,9 +194,9 @@ def build_server(session: Session) -> Server[Any]:
         return types.ListToolsResult(tools=mcp_tools(session))
 
     async def on_call(
-        _ctx: ServerRequestContext[Any], params: types.CallToolRequestParams
+        ctx: ServerRequestContext[Any], params: types.CallToolRequestParams
     ) -> types.CallToolResult:
-        return await call_tool(session, params.name, params.arguments or {})
+        return await call_tool(session, params.name, params.arguments or {}, ctx.request_id)
 
     return Server(
         SERVER_NAME,
@@ -180,6 +205,30 @@ def build_server(session: Session) -> Server[Any]:
         on_list_tools=list_tools,
         on_call_tool=on_call,
     )
+
+
+class Written:
+    """The server's stdout: once a response line is written and flushed,
+    the session hears of it, and acknowledges the batch of a wait whose
+    result that was (:meth:`Session.result_written`)."""
+
+    def __init__(self, out: anyio.AsyncFile[str], session: Session) -> None:
+        self._out, self._session = out, session
+        self._lines: list[str] = []
+
+    async def write(self, text: str) -> None:
+        await self._out.write(text)
+        if self._session.awaiting_write():
+            self._lines.append(text)
+
+    async def flush(self) -> None:
+        await self._out.flush()
+        lines, self._lines = self._lines, []
+        for line in lines:
+            with contextlib.suppress(ValueError):
+                message = json.loads(line)
+                if isinstance(message, dict) and "result" in message:
+                    self._session.result_written_soon(message.get("id"))
 
 
 class LineReader:
@@ -274,7 +323,7 @@ class McpServer:
             out = io.TextIOWrapper(
                 os.fdopen(self._stdout, "wb", closefd=False), encoding="utf-8", newline="\n"
             )
-            stdout = anyio.wrap_file(out)
+            stdout = cast("anyio.AsyncFile[str]", Written(anyio.wrap_file(out), self.session))
             server = build_server(self.session)
             # The SDK reads the client's lines by iterating `stdin` only.
             stdin = cast("anyio.AsyncFile[str]", self._reader)

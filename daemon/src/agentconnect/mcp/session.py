@@ -3,25 +3,33 @@
 ADR-005, Decision 2: a session that finds the data directory free hosts the
 runtime (:class:`~agentconnect.mcp.backend.HostBackend`); one that finds it
 locked attaches to the holder (:class:`~agentconnect.mcp.backend.AttachBackend`).
-When the holder was another MCP session and goes away, an attached session
-takes the lock over on its next call; ``flock`` lets one session win, and
-the others attach to it. The new owner finishes whatever the old one left
-in its journal (ADR-004). A daemon or an embedded agent that holds the
-directory is supervised by its own host, so an attached session waits for
-it to come back instead of taking its directory.
 
-Deduplication: the runtime delivers at least once, keyed by
-``["msg", group, sender, msg_id]``. A host session records the keys it
-returned in the runtime's handled ids (the encrypted database); this
-session also remembers them in memory, so a message an owner handed over
-right before it went away isn't returned again by the next owner.
+When the holder goes away, the session decides from the lock as it is now,
+on every reconnect: held, it attaches to whoever holds it; free, it takes
+the directory over unless its last holder was a daemon or an embedded agent
+(those are supervised by a host of their own, which brings them back, and a
+session holding the lock would keep them from starting). ``flock`` lets one
+session win; the new owner finishes what the old one left in its journal
+(ADR-004). A reconnect that fails leaves no backend: the next call tries
+again.
+
+Acknowledgement (at least once, never lost): a wait's batch stays leased
+until the session has written the tool result to the client
+(:meth:`Session.result_written`); only then is it acknowledged. A result
+that was never written (the call was cancelled, the client stopped reading)
+acknowledges nothing, and the batch is offered again when its lease runs
+out. An ack the owner refuses or never answers is retried on the next wait,
+events call or close, and until it went through the batch's messages are
+not treated as repeats: offered again, they are returned again.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from collections import OrderedDict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
@@ -41,16 +49,31 @@ from agentconnect.runtime import Clock, Config, DataDirLockedError, Keystore, Op
 
 LOG = log.get("agentconnect.mcp")
 
-REMEMBER = 4096  # keys of returned messages kept in memory
+REMEMBER = 4096  # keys of acknowledged messages kept in memory
+UNWRITTEN_KEEP = 64  # batches whose result isn't written yet, at most
+MAX_WAITS = 2  # agentconnect_wait calls running at once in one session
+SUPERVISED = frozenset({"daemon", "embedded"})  # holders a session never takes over
 # Calls that are safe to repeat when the owner went away mid-request.
 REPEATABLE = frozenset(
     {"groups", "group_info", "events", "knock_inspect", "knocks", "listing_status", "take"}
 )
 
+# The MCP request a tool call serves (set by the server around each call).
+current_request: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "agentconnect_mcp_request", default=None
+)
+
+
+@dataclass
+class _Batch:
+    lease: str
+    ids: list[str]
+    keys: list[str]
+
 
 class Session:
-    """Implements :class:`~agentconnect.mcp.backend.Backend` over whichever
-    backend currently serves this session."""
+    """The agent-scope operations of one MCP session, over whichever backend
+    serves it now."""
 
     def __init__(
         self,
@@ -64,64 +87,81 @@ class Session:
         self.config, self._clock = config, clock
         self._keystore, self._options, self._transport = keystore, options, transport
         self.backend: Backend | None = None
+        self._opened = False
         self._switch = asyncio.Lock()
-        self._returned: OrderedDict[str, None] = OrderedDict()
-        self._keys: dict[str, str] = {}  # delivery_id -> key, until acknowledged
+        self._waits = 0
+        self._acked: OrderedDict[str, None] = OrderedDict()  # keys acknowledged
+        self._unwritten: OrderedDict[object, _Batch] = OrderedDict()
+        self._unacked: list[_Batch] = []  # written, but the ack didn't go through
+        self._acking: set[asyncio.Task[None]] = set()
 
     @property
     def mode(self) -> Literal["host", "attach"]:
-        return self._current().mode
-
-    def _current(self) -> Backend:
-        if self.backend is None:
-            msg = "the session isn't open"
-            raise ToolError("not_running", msg, 503)
-        return self.backend
+        return "attach" if self.backend is None else self.backend.mode
 
     async def open(self) -> None:
         """Host the runtime if the directory is free, else attach. Without a
         relay this session can't host: it attaches, or fails if nothing
         holds the directory."""
-        self.backend = await self._connect()
+        self.backend = await self._connect(startup=True)
+        self._opened = True
         LOG.info("mcp_session", mode=self.backend.mode)
 
-    async def _connect(self, holder: str | None = None, *, take_over: bool = True) -> Backend:
-        if take_over and self.config.relay_url:
+    async def _connect(self, *, startup: bool = False) -> Backend:
+        """A backend for the directory as it is now (see the module doc)."""
+        held, holder = DataDirLock.probe(self.config.data_dir)
+        if not held:
+            if not startup and holder in SUPERVISED:
+                msg = (
+                    f"the {holder} runtime that owns {self.config.data_dir} isn't running; "
+                    "start it again and retry"
+                )
+                raise ToolError("not_running", msg, 503)
+            if not self.config.relay_url:
+                msg = (
+                    f"nothing runs on {self.config.data_dir} and no relay is configured: "
+                    "pass --relay (or set AC_RELAY_URL) so this server can run it"
+                )
+                raise ToolError("bad_config", msg)
             try:
                 return await HostBackend.start(
                     self.config, self._clock, keystore=self._keystore, options=self._options
                 )
             except DataDirLockedError as e:
-                holder = e.holder
-        elif take_over:
-            holder = self._holder_or_fail()
+                holder = e.holder  # another session won the lock meanwhile
         return AttachBackend(self.config, holder, self._transport)
 
-    def _holder_or_fail(self) -> str | None:
-        """Without a relay: who holds the directory (``ToolError`` if nobody)."""
-        try:
-            DataDirLock(self.config.data_dir, "mcp").release()
-        except DataDirLockedError as e:
-            return e.holder
-        msg = (
-            f"nothing runs on {self.config.data_dir} and no relay is configured: "
-            "pass --relay (or set AC_RELAY_URL) so this server can run it"
-        )
-        raise ToolError("bad_config", msg)
+    def _connected(self) -> Backend | None:
+        return self.backend
+
+    async def _backend(self) -> Backend:
+        """The backend, connecting again first if the last reconnect failed."""
+        if self.backend is not None:
+            return self.backend
+        if not self._opened:
+            msg = "the session isn't open"
+            raise ToolError("not_running", msg, 503)
+        async with self._switch:
+            current = self._connected()  # another call may have connected meanwhile
+            if current is None:
+                current = await self._connect()
+                self.backend = current
+                LOG.info("mcp_reconnected", mode=current.mode)
+            return current
 
     async def _recover(self, failed: Backend) -> None:
-        """The holder went away: take over if it was an MCP session, else
-        attach again (to whatever holds the directory now)."""
+        """The holder went away: drop the failed backend, then connect to the
+        directory as it is now. If that fails too, the next call retries."""
         async with self._switch:
             if self.backend is not failed:
                 return  # another call already switched
+            self.backend = None
             await failed.close()
-            holder = failed.holder if isinstance(failed, AttachBackend) else None
-            self.backend = await self._connect(holder, take_over=holder == "mcp")
+            self.backend = await self._connect()
             LOG.info("mcp_reconnected", mode=self.backend.mode)
 
     async def _call(self, op: str, *args: Any, **kwargs: Any) -> Any:
-        backend = self._current()
+        backend = await self._backend()
         try:
             return await getattr(backend, op)(*args, **kwargs)
         except OwnerGoneError as e:
@@ -135,7 +175,7 @@ class Session:
                 raise ToolError("interrupted", msg, 503) from None
             await self._recover(backend)
         try:
-            return await getattr(self._current(), op)(*args, **kwargs)
+            return await getattr(await self._backend(), op)(*args, **kwargs)
         except OwnerGoneError:
             msg = (
                 f"the runtime that owns {self.config.data_dir} isn't answering; "
@@ -167,6 +207,7 @@ class Session:
         return await self._call("leave", group)
 
     async def events(self, after: int, group: str | None) -> dict[str, Any]:
+        await self.retry_acks()
         return await self._call("events", after, group)
 
     async def knock_inspect(self, listing: str, domain_check: bool | None) -> dict[str, Any]:
@@ -199,44 +240,93 @@ class Session:
     async def take(
         self, group: str | None, addressed_only: bool, wait_secs: float
     ) -> tuple[list[Pulled], bool]:
-        """Leased deliveries, without the ones this session returned before
-        (those are acknowledged again, quietly)."""
-        taken, more = await self._call("take", group, addressed_only, wait_secs)
-        fresh: list[Pulled] = []
-        repeats: list[str] = []
-        for item in taken:
-            key = delivery_key(item.payload)
-            if key in self._returned:
-                repeats.append(item.delivery_id)
-            else:
-                self._keys[item.delivery_id] = key
-                fresh.append(item)
-        if repeats:
-            await self._ack_quietly(repeats)
-        return fresh, bool(more)
-
-    async def ack(self, delivery_ids: Sequence[str]) -> None:
-        """The messages are being returned to the model: remember their keys,
-        then acknowledge them. An owner that went away meanwhile hands them
-        over again later, and :meth:`take` drops them then."""
-        for delivery_id in delivery_ids:
-            key = self._keys.pop(delivery_id, None)
-            if key is not None:
-                self._returned[key] = None
-                self._returned.move_to_end(key)
-        while len(self._returned) > REMEMBER:
-            self._returned.popitem(last=False)
-        await self._ack_quietly(delivery_ids)
-
-    async def _ack_quietly(self, delivery_ids: Sequence[str]) -> None:
-        backend = self._current()
+        """A wait's leased batch. At most :data:`MAX_WAITS` run at once per
+        session (another is refused with ``busy``). Messages whose ack went
+        through already are acknowledged again quietly and left out. The
+        batch is acknowledged once its result is written (for the MCP request
+        in :data:`current_request`; without one, at once)."""
+        if self._waits >= MAX_WAITS:
+            msg = f"{MAX_WAITS} agentconnect_wait calls run already in this session"
+            raise ToolError("busy", msg, 429)
+        self._waits += 1
         try:
-            await backend.ack(delivery_ids)
-        except OwnerGoneError:
-            LOG.info("mcp_ack_lost", count=len(delivery_ids))
+            await self.retry_acks()
+            pulls = await self._call("take", group, addressed_only, wait_secs)
+        finally:
+            self._waits -= 1
+        fresh: list[Pulled] = []
+        repeats: list[Pulled] = []
+        for item in pulls.items:
+            key = delivery_key(item.payload)
+            (repeats if key in self._acked else fresh).append(item)
+        if repeats:
+            await self._ack(_Batch(pulls.lease, [r.delivery_id for r in repeats], []))
+        if fresh:
+            batch = _Batch(
+                pulls.lease,
+                [f.delivery_id for f in fresh],
+                [delivery_key(f.payload) for f in fresh],
+            )
+            request = current_request.get()
+            if request is None:
+                await self._ack(batch)
+            else:
+                self._unwritten[request] = batch
+                while len(self._unwritten) > UNWRITTEN_KEEP:
+                    self._unwritten.popitem(last=False)  # its lease runs out
+        return fresh, bool(pulls.more)
+
+    def awaiting_write(self) -> bool:
+        """Whether some batch waits for its result to be written."""
+        return bool(self._unwritten)
+
+    async def result_written(self, request: object) -> None:
+        """The result for ``request`` reached the client's pipe: acknowledge
+        its batch, if it had one."""
+        batch = self._unwritten.pop(request, None)
+        if batch is not None:
+            await self._ack(batch)
+
+    def result_written_soon(self, request: object) -> None:
+        """:meth:`result_written` in a task of its own (from the writer)."""
+        if request not in self._unwritten:
+            return
+        task = asyncio.ensure_future(self.result_written(request))
+        self._acking.add(task)
+        task.add_done_callback(self._acking.discard)
+
+    async def _ack(self, batch: _Batch) -> None:
+        """Acknowledge ``batch``; if the owner refuses or doesn't answer, keep
+        it for :meth:`retry_acks`. Keys count as acknowledged only after the
+        owner confirmed them."""
+        try:
+            backend = await self._backend()
+            done = set(await backend.ack(batch.lease, batch.ids))
+        except (OwnerGoneError, ToolError) as e:
+            LOG.info("mcp_ack_failed", code=getattr(e, "code", "gone"), count=len(batch.ids))
+            self._unacked.append(batch)
+            return
+        for delivery_id, key in zip(batch.ids, batch.keys, strict=False):
+            if delivery_id in done:
+                self._acked[key] = None
+                self._acked.move_to_end(key)
+        while len(self._acked) > REMEMBER:
+            self._acked.popitem(last=False)
+
+    async def retry_acks(self) -> None:
+        """Try again the acks that didn't go through."""
+        pending, self._unacked = self._unacked, []
+        for batch in pending:
+            await self._ack(batch)
 
     async def close(self) -> None:
-        """Stop the runtime (host) or the client (attach)."""
+        """Finish the acks (written results only), then stop the runtime
+        (host) or the client (attach)."""
+        if self._acking:
+            await asyncio.gather(*self._acking, return_exceptions=True)
+        if self.backend is not None:
+            await self.retry_acks()
         backend, self.backend = self.backend, None
+        self._opened = False
         if backend is not None:
             await backend.close()

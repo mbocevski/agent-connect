@@ -1,7 +1,7 @@
 """The MCP server's tools: thin wrappers over the agent-scope operations.
 
 Every tool calls one :class:`~agentconnect.runtime.AgentApi` operation (or
-the delivery queue), through :class:`~agentconnect.mcp.backend.Backend`, so
+the delivery queue), through :class:`~agentconnect.mcp.session.Session`, so
 a tool can do nothing the agent token can't. There is no tool for a human
 decision: approving or rejecting joins, knocks and held messages, marking a
 member verified, reporting a short-code mismatch, removing a member,
@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agentconnect.adapter import notice as adapter_notice
-from agentconnect.mcp.backend import Backend, ToolError
+from agentconnect.mcp.backend import ToolError
+from agentconnect.mcp.session import Session
 
 MAX_NAME = 80  # SPEC 4.2: group names are 1 to 80 characters
 WAIT_DEFAULT_SECS = 60.0
@@ -60,7 +61,9 @@ ACCEPT_NOTE = (
 Args = dict[str, Any]
 Schema = dict[str, Any]
 
-ID_PATTERN = "^[A-Za-z0-9_:.-]+$"  # the local API's path segments
+# One path segment of the local API: at least one letter or digit, and not
+# `.` or `..` (which an HTTP client would resolve).
+ID_PATTERN = "^(?=[A-Za-z0-9_:.-]*[A-Za-z0-9])(?!\\.{1,2}$)[A-Za-z0-9_:.-]+$"
 _GROUP: Schema = {
     "type": "string",
     "minLength": 1,
@@ -138,7 +141,7 @@ def check_args(schema: Schema, args: Mapping[str, Any]) -> Args:
     unknown = sorted(set(args) - set(properties))
     if unknown:
         raise ToolError("bad_request", f"unknown argument {unknown[0]}")
-    missing = [k for k in schema["required"] if k not in args]
+    missing = [k for k in schema["required"] if args.get(k) is None]
     if missing:
         raise ToolError("bad_request", f"missing argument {missing[0]}")
     out: Args = {}
@@ -239,7 +242,7 @@ def untrusted(result: dict[str, Any]) -> dict[str, Any]:
 # -- the tools ----------------------------------------------------------------------
 
 
-Run = Callable[[Backend, Args], Awaitable[dict[str, Any]]]
+Run = Callable[[Session, Args], Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -253,14 +256,14 @@ class Tool:
     hints: dict[str, Any] = field(default_factory=dict)
 
 
-async def _create_group(b: Backend, a: Args) -> dict[str, Any]:
+async def _create_group(b: Session, a: Args) -> dict[str, Any]:
     purpose = str(a["purpose"])
     name = str(a.get("name") or purpose or "AgentConnect chat")[:MAX_NAME]
     made = await b.create_group(name, purpose)
     return {"group_id": made["group_id"], "name": name, "purpose": purpose}
 
 
-async def _invite(b: Backend, a: Args) -> dict[str, Any]:
+async def _invite(b: Session, a: Args) -> dict[str, Any]:
     made = await b.create_invite(str(a["group"]), int(a["max_uses"]), int(a["ttl_secs"]))
     return {
         "url": made["url"],
@@ -271,12 +274,12 @@ async def _invite(b: Backend, a: Args) -> dict[str, Any]:
     }
 
 
-async def _accept(b: Backend, a: Args) -> dict[str, Any]:
+async def _accept(b: Session, a: Args) -> dict[str, Any]:
     made = await b.accept(str(a["url"]), a.get("display_name"))
     return untrusted({**made, "note": ACCEPT_NOTE})
 
 
-async def _send(b: Backend, a: Args) -> dict[str, Any]:
+async def _send(b: Session, a: Args) -> dict[str, Any]:
     reply_to = a.get("reply_to")
     return await b.send(
         str(a["group"]),
@@ -286,38 +289,35 @@ async def _send(b: Backend, a: Args) -> dict[str, Any]:
     )
 
 
-async def _groups(b: Backend, a: Args) -> dict[str, Any]:
+async def _groups(b: Session, a: Args) -> dict[str, Any]:
     if a.get("group") is None:
         return untrusted(await b.groups())
     info = dict(await b.group_info(str(a["group"])))
-    # The short code is compared by the humans, from their own screens
-    # (agentconnect verify): a code read out by a model proves nothing.
-    info.pop("sas", None)
     return untrusted({**info, "short_code": "ask your human to run `agentconnect verify`"})
 
 
-async def _leave(b: Backend, a: Args) -> dict[str, Any]:
+async def _leave(b: Session, a: Args) -> dict[str, Any]:
     return await b.leave(str(a["group"]))
 
 
-async def _events(b: Backend, a: Args) -> dict[str, Any]:
+async def _events(b: Session, a: Args) -> dict[str, Any]:
     rows = (await b.events(int(a["after"]), a.get("group")))["events"]
     after = max([int(e["seq"]) for e in rows], default=int(a["after"]))
     return untrusted({"events": rows, "next_after": after})
 
 
-async def _wait(b: Backend, a: Args) -> dict[str, Any]:
+async def _wait(b: Session, a: Args) -> dict[str, Any]:
+    # The session acknowledges the batch once this result is written.
     taken, more = await b.take(a.get("group"), bool(a["addressed_only"]), float(a["timeout_s"]))
-    await b.ack([t.delivery_id for t in taken])
     messages = [message_view(t.payload) for t in taken]
     return untrusted({"messages": messages, "more": more, "timed_out": not messages})
 
 
-async def _knock_inspect(b: Backend, a: Args) -> dict[str, Any]:
+async def _knock_inspect(b: Session, a: Args) -> dict[str, Any]:
     return untrusted(await b.knock_inspect(str(a["listing"]), a.get("domain_check")))
 
 
-async def _knock(b: Backend, a: Args) -> dict[str, Any]:
+async def _knock(b: Session, a: Args) -> dict[str, Any]:
     made = await b.knock(
         str(a["listing"]),
         listing_sha256=a.get("listing_sha256"),
@@ -328,11 +328,11 @@ async def _knock(b: Backend, a: Args) -> dict[str, Any]:
     return untrusted(made)
 
 
-async def _knocks(b: Backend, _a: Args) -> dict[str, Any]:
+async def _knocks(b: Session, _a: Args) -> dict[str, Any]:
     return untrusted(await b.knocks())
 
 
-async def _listing_status(b: Backend, _a: Args) -> dict[str, Any]:
+async def _listing_status(b: Session, _a: Args) -> dict[str, Any]:
     return await b.listing_status()
 
 
@@ -522,10 +522,25 @@ TOOLS: tuple[Tool, ...] = (
 BY_NAME = {t.name: t for t in TOOLS}
 
 
-async def call(backend: Backend, name: str, args: Mapping[str, Any]) -> dict[str, Any]:
+async def call(backend: Session, name: str, args: Mapping[str, Any]) -> dict[str, Any]:
     """Run tool ``name``; :class:`ToolError` for an unknown tool, bad
     arguments or a refused operation."""
     tool = BY_NAME.get(name)
     if tool is None:
         raise ToolError("unknown_tool", f"no tool named {name}")
-    return await tool.run(backend, check_args(tool.schema, args))
+    return without_codes(await tool.run(backend, check_args(tool.schema, args)))
+
+
+SAS_FIELDS = frozenset({"sas", "group_sas"})
+
+
+def without_codes(value: Any) -> Any:
+    """``value`` without short codes, at any depth (group info, ``joined``
+    and ``epoch_changed`` events): the humans compare the code from their
+    own screens (``agentconnect verify``); a code read out by a model proves
+    nothing (SPEC 11)."""
+    if isinstance(value, dict):
+        return {k: without_codes(v) for k, v in value.items() if k not in SAS_FIELDS}
+    if isinstance(value, list):
+        return [without_codes(v) for v in value]
+    return value
