@@ -50,6 +50,7 @@ a GitHub ruleset on `main`:
 | Markdown lint, offline link check, prose rules | `pre-commit` hook and the CI `lint` job (rumdl, lychee, Vale) |
 | All required CI checks green, branch up to date, every commit verified on GitHub, title OK | `just merge` (`scripts/merge.sh`) |
 | Rust and Python dependency licences on the allowlist | `just lint`, the CI `rust` and `licences` jobs, nightly audit (`cargo deny`, `scripts/check_licences.py`) |
+| Container images (relay, directory) free of fixable HIGH and CRITICAL vulnerabilities | CI `image` job and nightly `image-scan` job (Trivy, `.github/actions/scan-image`); not part of `ci-ok`; accepted CVEs in `.trivyignore.yaml` |
 | PR required, `ci-ok` green and up to date, squash-only, linear history, signed commits, no force-push or deletion | GitHub ruleset (`.github/rulesets/main.json`) |
 
 The required checks are listed in `.github/required-checks.txt`, currently
