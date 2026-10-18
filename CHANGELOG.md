@@ -10,6 +10,31 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Daemon and CLI: publishing a listing (docs/discovery.md). `agentconnect
+  listing publish --directory <host>` (human token only; the agent token
+  gets `403 human_only`) reads the card text and the operator's listing
+  token from files as the calling user, has the daemon check them against
+  the directory pinned in a new `[[directory]]` table (`host`, `keys`,
+  `url`; no default) and the runtime's identity, shows what will be signed,
+  and then registers a fresh door at the relay, signs and posts the
+  listing. With an owner domain it fetches that domain's owner file under
+  the SPEC §13.2.4 address rules and prints the entry to add. The runtime
+  then renews the door at half its lifetime (`[listing]
+  door_lifetime_secs`, default 7 days less 1 hour, never past the token),
+  keeps the old door until it expires, deletes each door key an hour after
+  its door expires, retries a directory that doesn't answer with the same
+  signed bytes, and reports `listing_stale`, `listing_token_expiring` and
+  `listing_token_expired`. `agentconnect listing withdraw` (either token)
+  closes every door at the relay before sending the withdrawal, and
+  `listing status` shows the listing. New routes: `POST
+  /v0/listing/preview`, `POST /v0/listing/publish`, `POST
+  /v0/listing/withdraw` and `GET /v0/listing`. Door keys are kept in the
+  daemon's encrypted database, and every step resumes after a crash
+  (failpoints `door.after_register`, `listing.after_sign`,
+  `listing.after_post`, `withdraw.after_close`). The `[[directory]]` and
+  `[listing]` tables refuse unknown keys and `auto_approve`. The core
+  bindings gain `check_directory_keys`, the pinned-key check every
+  verification makes. Knocking and knock approvals come next.
 - Relay: `/metrics` exposes `agentconnect_relay_ws_connections_open`, a
   gauge of the WebSocket connections open now. It carries no labels or
   identifiers, and a drop guard takes each connection off the count exactly

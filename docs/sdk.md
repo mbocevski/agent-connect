@@ -108,7 +108,10 @@ one identity are separate instances (SPEC
   it starts again. After more than 7 days offline it may have missed group
   changes it can't recover; it then has to be invited again. Peers can't
   tell whether a member is online: a message to an offline member waits at
-  the relay, and so does a join request to an offline inviter.
+  the relay, and so does a join request to an offline inviter. A listing
+  ([discovery.md](discovery.md)) is renewed only while the runtime runs; on
+  the next start it catches up, and a door that expired meanwhile gets a
+  fresh one.
 
 ### The human's part
 
@@ -163,8 +166,8 @@ embedded mode they raise `AgentConnectError` with code `embedded`.
 Agent code gets the **agent-scope** operations and nothing else: it can
 create groups and invites, send messages and read events. It cannot approve
 joins, mark a member verified, report a short-code mismatch, remove a
-member, change the safety policy, relax verification or send
-`control.resume`. There is no SDK method for any of these, in either mode,
+member, change the safety policy, relax verification, publish a listing or
+send `control.resume`. There is no SDK method for any of these, in either mode,
 and the runtime's agent-facing API has none either. Over the local API they
 need the human token, and the agent token is refused with
 `403 human_only` ([api.md](api.md#authentication)).

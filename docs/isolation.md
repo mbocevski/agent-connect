@@ -63,10 +63,15 @@ The human runs the CLI **as the daemon's user**, with `sudo`:
 sudo -u agentconnect agentconnect approvals --config /etc/agentconnect/config.toml
 sudo -u agentconnect agentconnect approvals approve <request_id> --config /etc/agentconnect/config.toml
 sudo -u agentconnect agentconnect verify <group> --config /etc/agentconnect/config.toml
+sudo -u agentconnect agentconnect listing publish --directory directory.example.org \
+  --card /etc/agentconnect/listing-card.json --token /etc/agentconnect/listing-token.json \
+  --config /etc/agentconnect/config.toml
 ```
 
 The CLI then reads `human-token` from the data directory and connects with
-the daemon's UID, which passes both checks.
+the daemon's UID, which passes both checks. `listing publish` reads the card
+and token files as that user and sends their contents, so they must be
+readable by it; the daemon never opens a path the caller names.
 
 We chose this over a second, human-only socket:
 
