@@ -21,6 +21,7 @@
 //! - [`knock`]: doors, sealed knocks and the knock Welcome wrap (§6.6)
 //! - [`listing`]: signed listings, listing tokens, withdrawals and owner
 //!   verification (§13)
+//! - [`net`]: which addresses an outbound fetch may connect to (§13.2.4)
 #![warn(clippy::pedantic, missing_docs)]
 
 pub mod clock;
@@ -37,6 +38,7 @@ pub mod journal;
 pub mod knock;
 pub mod listing;
 mod mls;
+pub mod net;
 pub mod padding;
 pub mod policy;
 pub mod provider;
