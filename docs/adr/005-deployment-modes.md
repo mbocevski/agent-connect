@@ -88,17 +88,31 @@ below ([adapters/mcp.md](../adapters/mcp.md)):
   lets `addressed_only` skip ahead of context messages, which a blocked
   inbox head would not.
 - **Delivery routes.** `GET /v0/deliveries` (a long poll of at most 60
-  seconds) leases what it returns for 120 seconds, and
-  `POST /v0/deliveries/ack` takes a list of ids rather than one id per
-  request. The in-process session uses the same leases, so two sessions never
-  get one message at the same time.
-- **Takeover** happens only when the holder was another MCP session (the lock
-  note now names `mcp`). A daemon or an embedded agent has a supervisor of
-  its own; a session waits for it to come back rather than take its
-  directory, which would keep a restarted daemon from starting.
-- **The attached session** dedupes in memory as well (the last 4096 keys it
-  returned), so a message an owner handed over right before it went away isn't
-  returned again by the next owner.
+  seconds) leases what it returns for 120 seconds under a lease token, and
+  `POST /v0/deliveries/ack` takes the token and a list of ids rather than one
+  id per request; an id the token doesn't hold is refused. The in-process
+  session uses the same leases, so two sessions never get one message at the
+  same time. With `addressed_only` the queue finds the oldest addressed
+  message by an indexed column, so no number of other messages before it can
+  hide it. At most 4 polls per token wait at once (`429 busy`), and agent
+  requests may use 48 of the API's 64 connections, so the human's CLI always
+  gets through.
+- **When to acknowledge.** Decision 3 says a delivery is acknowledged once a
+  tool call returned it to the model. The server acknowledges a wait's batch
+  once it wrote the result to the client's pipe: a call cancelled after it
+  took its batch, or whose result was never written, acknowledges nothing.
+  A failed ack is retried and, until it went through, the batch's messages
+  are not dropped as repeats. A client that drops a written result loses it;
+  MCP has no receipt.
+- **Takeover.** Every reconnect looks at the lock as it is then: held, the
+  session attaches to the holder; free, it takes the directory over, unless
+  the lock note names a daemon or an embedded agent as the last holder. Those
+  have supervisors of their own; a session waits for them to come back rather
+  than take their directory, which would keep a restarted daemon from
+  starting.
+- **The human token.** A hosting session runs the runtime, which creates
+  `human-token` and keeps only its hash (Decision 4); no tool exposes it, and
+  an attached session reads `api-token` only.
 - **Isolation.** `isolation.enabled` is refused, as by the embedded SDK.
 
 ## Context

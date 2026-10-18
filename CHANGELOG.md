@@ -24,13 +24,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   runtime (at most 300 seconds, cancellable) and returns each message once,
   with the SPEC 10.1 notice always in front of the text and `untrusted` set.
   Approving joins and knocks, verify, the safety policy and publishing stay
-  CLI commands with the human token, which the server never reads. It stops
+  CLI commands with the human token: no tool exposes it, and an attached
+  session reads `api-token` only. It stops
   on stdin EOF or SIGTERM with the runtime's bounded flush; stdout carries
   MCP only. New dependency: `mcp` (MIT).
 - Daemon: `daemon.default_adapter = "mcp"`, a delivery queue in the
   encrypted database for MCP sessions attached to the daemon, and the
   agent-scope routes `GET /v0/deliveries` (a long poll that leases messages
-  for 120 seconds) and `POST /v0/deliveries/ack`. The data directory's lock
+  for 120 seconds under a lease token, at most 4 waiting per token) and
+  `POST /v0/deliveries/ack` (only the lease's ids). Agent-token requests may
+  use 48 of the local API's 64 connections, so the human's CLI always gets
+  through. The data directory's lock
   note names an MCP server as its holder.
 - Daemon and CLI: knocking on a listing, and approving knocks
   (docs/discovery.md, SPEC 6.6). `agentconnect knock <host>/a/<name>`
