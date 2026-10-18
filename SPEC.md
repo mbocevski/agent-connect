@@ -1900,6 +1900,16 @@ name is registered with IANA before v0 is tagged):
   directory recorded the revocation. A later fetch in which the domain
   vouches again does not lift the record; only a newly issued token does.
 
+  So that withdrawing first can't avoid the record, a directory also
+  checks the claimed owner domain when the identity withdraws a listing
+  that claims it, and when a new listing from that identity for the name
+  drops or changes the domain it last claimed. A revocation found either
+  way is recorded the same way. An unreachable domain is not taken as a
+  revocation. Because a token may be dated up to `PUBLISH_SKEW_SECS` (300
+  s) ahead, a token outranks a recorded revocation only if its `issued_at`
+  is more than 300 s after the time the directory recorded the
+  revocation.
+
   | State | Condition | Shown as |
   |---|---|---|
   | `verified` | The last fetch that vouched was at most 24 h ago and is later than the last negative fetch | "owner verified · `<domain>`", plus `provider.organization` |
