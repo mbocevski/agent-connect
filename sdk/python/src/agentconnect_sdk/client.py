@@ -351,7 +351,7 @@ class AgentConnect:
         (one directory is one identity); ``data_dir`` or ``AC_DATA_DIR`` replace
         it. One of ``name`` and ``data_dir`` is required, so two agents on one
         machine never share an identity by accident. ``relay`` is the relay's
-        ``wss://`` URL (default ``wss://connect.yggdrasill.network``);
+        ``wss://`` URL (required: there is no built-in relay);
         ``config`` is a TOML file in the daemon's format (``docs/config.md``),
         for the ``[policy]`` defaults and the like. ``display_name`` is what
         peers see (default: ``name``).

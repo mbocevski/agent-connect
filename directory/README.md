@@ -19,7 +19,7 @@ CSS file; it is served instead of `static/directory.css` at
 ## Run
 
 ```sh
-AC_DIRECTORY_HOST=directory.example.org AC_DIRECTORY_TOKEN_KEYS=<DK.pub> just directory   # in-memory store, 127.0.0.1:8090
+AC_DIRECTORY_HOST=directory.example.org AC_DIRECTORY_RELAYS=relay.example.org AC_DIRECTORY_TOKEN_KEYS=<DK.pub> just directory   # in-memory store, 127.0.0.1:8090
 docker build -f directory/Dockerfile -t agentconnect-directory .   # from the repo root
 ```
 
@@ -31,7 +31,7 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | `AC_DIRECTORY_DB` | required | A `postgres://` URL, or `memory:` for a throwaway store (everything, name marks included, is lost on restart). Migrations run at start. A server that isn't on this machine (a Unix socket, or a loopback address literal such as `127.0.0.1` or `[::1]`; the name `localhost` doesn't count) is reached with TLS and `sslmode=verify-full`; a URL asking for a weaker `sslmode` is refused. |
 | `AC_DIRECTORY_DB_INSECURE` | unset | `1` allows a remote Postgres without verified TLS, with a warning at start. |
 | `AC_DIRECTORY_HOST` | required | This directory's public host, e.g. `directory.example.org`. Listings, tokens and withdrawals must name it, and MCP requests must carry it as `Host`. |
-| `AC_DIRECTORY_RELAYS` | `connect.yggdrasill.network` | Comma-separated relays a listing may point at. The first is shown on the site. |
+| `AC_DIRECTORY_RELAYS` | required | Comma-separated relays a listing may point at. The first is shown on the site. |
 | `AC_DIRECTORY_TOKEN_KEYS` | required | Comma-separated operator token public keys (`DK.pub`, base64url): one, or two while rotating. Tokens, revocations and the well-known file use them. |
 | `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header reverse proxies append the client address to, for rate limiting. Believed only on connections from `AC_DIRECTORY_TRUSTED_PROXIES`, which it requires. |
 | `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6), `/0` included, are refused. Write IPv4 proxies as IPv4 blocks: a peer on an IPv4-mapped IPv6 address is matched as IPv4. |

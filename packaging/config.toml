@@ -2,7 +2,7 @@
 # Owner root, group agentconnect, mode 0640. Every key is in docs/config.md.
 
 [relay]
-url = "wss://connect.yggdrasill.network"
+url = "wss://relay.example.org"
 
 [daemon]
 data_dir = "/var/lib/agentconnect"

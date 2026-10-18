@@ -79,7 +79,6 @@ from agentconnect.policy import (
     Settings,
 )
 
-DEFAULT_RELAY_URL = "wss://connect.yggdrasill.network"
 KEYSTORES = ("auto", "keyring", "file")
 
 
@@ -173,12 +172,20 @@ class Config:
         """The safety policy every group starts from (docs/safety.md)."""
         return Settings.of({k.name: getattr(self, f"policy_{k.name}") for k in KNOBS})
 
+    def require_relay(self) -> None:
+        """Raise :class:`ConfigError` unless a relay is configured: there is no
+        built-in default."""
+        if not self.relay_url:
+            msg = "relay.url is required (the relay this agent uses)"
+            raise ConfigError(msg)
+
     @property
     def relay_http(self) -> str:
         """The relay's REST base URL (``http(s)://host[:port]``), derived from
         the WebSocket URL unless ``relay_rest_url`` overrides it."""
         if self.relay_rest_url is not None:
             return self.relay_rest_url.rstrip("/")
+        self.require_relay()
         parts = urlsplit(self.relay_url)
         scheme = "https" if parts.scheme == "wss" else "http"
         return f"{scheme}://{parts.netloc}"
@@ -186,6 +193,7 @@ class Config:
     @property
     def relay_ws(self) -> str:
         """The relay's WebSocket endpoint."""
+        self.require_relay()
         return self.relay_url.rstrip("/") + "/v0/ws"
 
     @property
@@ -262,7 +270,7 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey(
         "relay.url",
         "relay_url",
-        f"`{DEFAULT_RELAY_URL}`",
+        "required",
         "Relay base URL. `wss://`, or `ws://` for a loopback relay only.",
         "AC_RELAY_URL",
     ),
@@ -614,6 +622,22 @@ def _sdk(data: Mapping[str, Any]) -> dict[str, Any]:
     return {"sdk_handler_timeout": timeout}
 
 
+def _resolve_relay(values: dict[str, Any]) -> None:
+    """Validate the relay URL and fill in its host. Both stay empty when no
+    relay is configured (``Config.require_relay`` rejects that where one is needed)."""
+    if values["relay_url"]:
+        values["relay_url"] = _check_relay_url(values["relay_url"])
+    if not values["relay_host"]:
+        # The URL's authority without any userinfo (SPEC 8.1.1).
+        values["relay_host"] = urlsplit(values["relay_url"]).netloc.rpartition("@")[2]
+    if values["relay_host"]:
+        try:
+            values["relay_host"] = ac.canonical_relay_host(values["relay_host"])
+        except ac.AgentConnectError:
+            msg = f"relay host {values['relay_host']!r} is not a valid host[:port]"
+            raise ConfigError(msg) from None
+
+
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
@@ -641,7 +665,7 @@ def load_config(
     webhook = _section(data, "webhook")
     sse = _section(data, "sse")
 
-    relay_url = environ.get("AC_RELAY_URL") or _typed(relay, "url", str, DEFAULT_RELAY_URL)
+    relay_url = environ.get("AC_RELAY_URL") or _typed(relay, "url", str, "")
     data_dir_raw = environ.get("AC_DATA_DIR") or _typed(daemon, "data_dir", str, "")
     socket_raw = _typed(api, "socket", str, "")
     keystore = _typed(daemon, "keystore", str, "auto")
@@ -680,13 +704,5 @@ def load_config(
     elif values["default_adapter"] == "webhook":
         msg = 'default_adapter "webhook" needs webhook.callback_url'
         raise ConfigError(msg)
-    values["relay_url"] = _check_relay_url(values["relay_url"])
-    if not values["relay_host"]:
-        # The URL's authority without any userinfo (SPEC 8.1.1).
-        values["relay_host"] = urlsplit(values["relay_url"]).netloc.rpartition("@")[2]
-    try:
-        values["relay_host"] = ac.canonical_relay_host(values["relay_host"])
-    except ac.AgentConnectError:
-        msg = f"relay host {values['relay_host']!r} is not a valid host[:port]"
-        raise ConfigError(msg) from None
+    _resolve_relay(values)
     return Config(**values)

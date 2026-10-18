@@ -357,6 +357,7 @@ class Engine:
 
     def _open(self, keystore: Keystore | None) -> None:
         config = self.config
+        config.require_relay()
         self.keystore = keystore or open_keystore(
             config.keystore, config.data_dir, self.options.keyring_backend
         )

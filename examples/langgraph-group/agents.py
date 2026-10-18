@@ -95,7 +95,9 @@ def attach(ac: AgentConnect, role: str, respond: Responder) -> None:
 
 
 async def main(role: str) -> None:
-    async with AgentConnect.embedded(name=f"langgraph-{role}") as ac:
+    async with AgentConnect.embedded(
+        name=f"langgraph-{role}", relay="wss://relay.example.org"
+    ) as ac:
         attach(ac, role, langgraph_responder(claude_text_model()))
         await ac.serve()
 

@@ -173,14 +173,15 @@ def daemon_run(
 ) -> None:
     """Run agentconnectd in the foreground (JSON logs on stderr).
 
-    Starts the adapter named by daemon.default_adapter (webhook or sse), and
+    Needs relay.url (AC_RELAY_URL): there is no built-in relay. Starts the
+    adapter named by daemon.default_adapter (webhook or sse), and
     the A2A adapter when a2a.local_agent_url or a2a.facade_port is set. On
     SIGINT or SIGTERM, queued sends get up to 3 seconds to go out while the
     relay is connected; the rest stay in the encrypted outbox for the next
     start.
     """
     with guard(False):
-        cfg = load(config)
+        cfg = load(config, need_relay=True)
     if tcp_port:
         cfg = cfg.with_overrides(api_tcp_port=tcp_port)
     log.configure()

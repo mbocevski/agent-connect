@@ -443,6 +443,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- There is no built-in relay any more: `relay.url` (daemon, CLI, embedded SDK) and
+  `AC_DIRECTORY_RELAYS` (directory) are required.
 - The daemon's protocol engine and local API moved into the
   `agentconnect.runtime` package (ADR-005): `agentconnect.daemon.Daemon` is
   now `agentconnect.runtime.engine.Engine` and `agentconnect.api` is

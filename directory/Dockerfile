@@ -9,9 +9,9 @@ RUN cargo build --release --locked -p agentconnect-directory
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/agentconnect-directory /usr/local/bin/agentconnect-directory
 ENV AC_DIRECTORY_ADDR=0.0.0.0:8090
-# AC_DIRECTORY_DB (a postgres:// URL), AC_DIRECTORY_HOST and AC_DIRECTORY_TOKEN_KEYS
-# are required. Set AC_DIRECTORY_RELAYS for a real deployment, and
-# AC_DIRECTORY_CLIENT_IP_HEADER with AC_DIRECTORY_TRUSTED_PROXIES behind a proxy.
+# AC_DIRECTORY_DB (a postgres:// URL), AC_DIRECTORY_HOST, AC_DIRECTORY_RELAYS (for example relay.example.org)
+# and AC_DIRECTORY_TOKEN_KEYS are required. Set AC_DIRECTORY_CLIENT_IP_HEADER with
+# AC_DIRECTORY_TRUSTED_PROXIES behind a proxy.
 EXPOSE 8090
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/agentconnect-directory"]

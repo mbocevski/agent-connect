@@ -237,12 +237,14 @@ class EmbeddedHost:
         if display_name is not None or (name is not None and config is None):
             overrides["display_name"] = display_name or name
         try:
-            return load_config(
+            cfg = load_config(
                 None if config is None else Path(config).expanduser(),
                 environ,
                 use_file=config is not None,
                 **overrides,
             )
+            cfg.require_relay()
+            return cfg
         except ConfigError as e:
             raise AgentConnectError("bad_config", str(e)) from None
 

@@ -7,8 +7,6 @@ use agentconnect_core::identity::canonical_relay_host;
 
 /// Default listen address.
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8090";
-/// The default relay.
-pub const DEFAULT_RELAY: &str = "connect.yggdrasill.network";
 /// `AC_DIRECTORY_DB` value for a throwaway in-memory store.
 pub const MEMORY_DB: &str = "memory:";
 
@@ -93,7 +91,7 @@ pub struct Config {
     /// SPEC §8.1.1 canonical form. Listings, tokens and withdrawals must
     /// name it.
     pub host: String,
-    /// `AC_DIRECTORY_RELAYS`: comma-separated relay hosts listings may point
+    /// `AC_DIRECTORY_RELAYS` (required): comma-separated relay hosts listings may point
     /// at. The first is shown on the site.
     pub relays: Vec<String>,
     /// `AC_DIRECTORY_TOKEN_KEYS`: comma-separated operator token public keys
@@ -154,7 +152,9 @@ impl Config {
             );
         }
         if relays.is_empty() {
-            relays.push(DEFAULT_RELAY.to_owned());
+            return Err(
+                "AC_DIRECTORY_RELAYS is required (the relays listings may point at)".to_owned(),
+            );
         }
         let token_keys = list(get("AC_DIRECTORY_TOKEN_KEYS"));
         if token_keys.is_empty() || token_keys.len() > 2 {
@@ -236,19 +236,33 @@ mod tests {
     const DB: (&str, &str) = ("AC_DIRECTORY_DB", "memory:");
     const KEYS: (&str, &str) = ("AC_DIRECTORY_TOKEN_KEYS", "k");
     const HOST: (&str, &str) = ("AC_DIRECTORY_HOST", "directory.example.org");
+    const RELAYS: (&str, &str) = ("AC_DIRECTORY_RELAYS", "relay.example.org");
 
     #[test]
     fn defaults() {
-        let c = Config::from_lookup(lookup(&[DB, KEYS, HOST])).unwrap();
+        let c = Config::from_lookup(lookup(&[DB, KEYS, HOST, RELAYS])).unwrap();
         assert_eq!(c.addr.to_string(), DEFAULT_ADDR);
         assert_eq!(c.host, "directory.example.org");
-        assert_eq!(c.relays, [DEFAULT_RELAY]);
+        assert_eq!(c.relays, ["relay.example.org"]);
         assert_eq!(c.token_keys, ["k"]);
         assert!(c.client_ip_header.is_none());
         assert_eq!(c.trusted_proxies, Vec::new());
         assert!(!c.db_insecure);
         assert!(c.stylesheet.is_none());
         assert!(c.metrics_addr.is_none());
+    }
+
+    #[test]
+    fn relays_are_required() {
+        for relays in [None, Some(("AC_DIRECTORY_RELAYS", ""))] {
+            let mut vars = vec![DB, KEYS, HOST];
+            vars.extend(relays);
+            let err = Config::from_lookup(lookup(&vars)).unwrap_err();
+            assert_eq!(
+                err,
+                "AC_DIRECTORY_RELAYS is required (the relays listings may point at)"
+            );
+        }
     }
 
     #[test]
@@ -283,18 +297,21 @@ mod tests {
     #[test]
     fn rejects_bad_values() {
         for bad in [
-            vec![KEYS, HOST],
-            vec![DB, HOST],
-            vec![DB, KEYS],
-            vec![KEYS, HOST, ("AC_DIRECTORY_DB", "sqlite://x")],
-            vec![DB, KEYS, HOST, ("AC_DIRECTORY_ADDR", "nope")],
-            vec![DB, KEYS, ("AC_DIRECTORY_HOST", "a b")],
+            vec![KEYS, HOST, RELAYS],
+            vec![DB, HOST, RELAYS],
+            vec![DB, KEYS, RELAYS],
+            vec![DB, KEYS, HOST],
+            vec![DB, KEYS, HOST, ("AC_DIRECTORY_RELAYS", "")],
+            vec![KEYS, HOST, RELAYS, ("AC_DIRECTORY_DB", "sqlite://x")],
+            vec![DB, KEYS, HOST, RELAYS, ("AC_DIRECTORY_ADDR", "nope")],
+            vec![DB, KEYS, RELAYS, ("AC_DIRECTORY_HOST", "a b")],
             vec![DB, KEYS, HOST, ("AC_DIRECTORY_RELAYS", "x/y")],
-            vec![DB, HOST, ("AC_DIRECTORY_TOKEN_KEYS", "a,b,c")],
+            vec![DB, HOST, RELAYS, ("AC_DIRECTORY_TOKEN_KEYS", "a,b,c")],
             vec![
                 DB,
                 KEYS,
                 HOST,
+                RELAYS,
                 ("AC_DIRECTORY_CLIENT_IP_HEADER", "bad header"),
             ],
             // A client-address header without trusted proxies.
@@ -302,33 +319,56 @@ mod tests {
                 DB,
                 KEYS,
                 HOST,
+                RELAYS,
                 ("AC_DIRECTORY_CLIENT_IP_HEADER", "x-forwarded-for"),
             ],
             vec![
                 DB,
                 KEYS,
                 HOST,
+                RELAYS,
                 ("AC_DIRECTORY_TRUSTED_PROXIES", "10.0.0.0/33"),
             ],
-            vec![DB, KEYS, HOST, ("AC_DIRECTORY_TRUSTED_PROXIES", "nope")],
-            vec![DB, KEYS, HOST, ("AC_DIRECTORY_METRICS_ADDR", "nope")],
             vec![
                 DB,
                 KEYS,
                 HOST,
+                RELAYS,
+                ("AC_DIRECTORY_TRUSTED_PROXIES", "nope"),
+            ],
+            vec![
+                DB,
+                KEYS,
+                HOST,
+                RELAYS,
+                ("AC_DIRECTORY_METRICS_ADDR", "nope"),
+            ],
+            vec![
+                DB,
+                KEYS,
+                HOST,
+                RELAYS,
                 ("AC_DIRECTORY_TRUSTED_PROXIES", "0.0.0.0/0"),
             ],
-            vec![DB, KEYS, HOST, ("AC_DIRECTORY_TRUSTED_PROXIES", "::/0")],
             vec![
                 DB,
                 KEYS,
                 HOST,
+                RELAYS,
+                ("AC_DIRECTORY_TRUSTED_PROXIES", "::/0"),
+            ],
+            vec![
+                DB,
+                KEYS,
+                HOST,
+                RELAYS,
                 ("AC_DIRECTORY_TRUSTED_PROXIES", "10.0.0.0/7"),
             ],
             vec![
                 DB,
                 KEYS,
                 HOST,
+                RELAYS,
                 ("AC_DIRECTORY_TRUSTED_PROXIES", "2001:db8::/31"),
             ],
         ] {
@@ -344,6 +384,7 @@ mod tests {
                 DB,
                 KEYS,
                 HOST,
+                RELAYS,
                 ("AC_DIRECTORY_TRUSTED_PROXIES", v),
             ]))
             .is_ok()
@@ -355,6 +396,7 @@ mod tests {
             DB,
             KEYS,
             HOST,
+            RELAYS,
             ("AC_DIRECTORY_TRUSTED_PROXIES", "0.0.0.0/0"),
             ("AC_DIRECTORY_TRUST_ANY_PROXY", "1"),
         ]));

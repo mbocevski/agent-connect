@@ -12,7 +12,7 @@ from agentconnect.runtime import Config
 from agentconnect_sdk import AgentConnect, AgentConnectError, Deduper
 from agentconnect_sdk.embedded import ADAPTER_NAME, EmbeddedHost, default_data_dir
 
-DEFAULT_RELAY = "wss://connect.yggdrasill.network"
+RELAY = "wss://relay.example.org"
 
 
 def configure(  # noqa: PLR0913
@@ -20,7 +20,7 @@ def configure(  # noqa: PLR0913
     env: dict[str, str] | None = None,
     *,
     data_dir: Path | str | None = None,
-    relay: str | None = None,
+    relay: str | None = RELAY,
     config: Path | None = None,
     display_name: str | None = None,
 ) -> Config:
@@ -38,7 +38,7 @@ def test_one_data_directory_per_name() -> None:
     cfg = configure("my-agent")
     assert cfg.data_dir == Path("/home/u/.local/share/agentconnect-my-agent")
     assert cfg.socket_path == cfg.data_dir / "agentconnectd.sock"
-    assert cfg.relay_url == DEFAULT_RELAY
+    assert cfg.relay_url == RELAY
     assert cfg.default_adapter == ADAPTER_NAME
     assert cfg.display_name == "my-agent"
     xdg = configure("x", {"XDG_DATA_HOME": "/data", "HOME": "/home/u"})
@@ -92,6 +92,14 @@ def test_relay_display_name_and_an_explicit_config_file(tmp_path: Path) -> None:
     assert e.value.code == "bad_config"
 
 
+def test_a_relay_is_required() -> None:
+    with pytest.raises(AgentConnectError, match=r"relay\.url is required") as e:
+        configure(relay=None)
+    assert e.value.code == "bad_config"
+    env = {"HOME": "/home/u", "AC_RELAY_URL": RELAY}
+    assert configure(relay=None, env=env).relay_url == RELAY
+
+
 def test_the_daemons_config_file_is_not_read(tmp_path: Path) -> None:
     home = tmp_path / "home"
     (home / ".config/agentconnect").mkdir(parents=True)
@@ -108,7 +116,7 @@ def test_isolation_is_for_a_separate_daemon_only() -> None:
 
 
 async def test_an_unstarted_embedded_client(tmp_path: Path) -> None:
-    ac = AgentConnect.embedded("bot", data_dir=tmp_path / "bot", dedupe=Deduper())
+    ac = AgentConnect.embedded("bot", data_dir=tmp_path / "bot", relay=RELAY, dedupe=Deduper())
     assert ac.mode == "embedded"
     assert ac.data_dir == tmp_path / "bot"
     with pytest.raises(AgentConnectError, match="isn't running") as e:
