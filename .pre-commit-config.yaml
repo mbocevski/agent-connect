@@ -88,7 +88,7 @@ repos:
         stages: [commit-msg]
         args:
           - --strict
-          - --scopes=spec,core,relay,daemon,a2a,sdk,web,policy,group,ci,docs,deps
+          - --scopes=spec,core,relay,directory,daemon,a2a,sdk,web,policy,group,ci,docs,deps
           - feat
           - fix
           - docs

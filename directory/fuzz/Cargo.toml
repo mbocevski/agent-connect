@@ -1,0 +1,27 @@
+[package]
+name = "agentconnect-directory-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+serde_json = "1"
+
+[dependencies.agentconnect-directory]
+path = ".."
+
+# Detached from the main workspace: fuzzing needs a nightly toolchain and is
+# not part of `just test`. Run with `cargo +nightly fuzz run card_text` from
+# `directory/` (needs `cargo install cargo-fuzz`).
+[workspace]
+
+[[bin]]
+name = "card_text"
+path = "fuzz_targets/card_text.rs"
+test = false
+doc = false
+bench = false

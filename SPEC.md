@@ -1883,12 +1883,32 @@ name is registered with IANA before v0 is tagged):
   longer revoked. A directory MUST withdraw a listing whose owner state
   becomes `revoked` (as it does for a withdrawal: 410 and a feed entry), so
   for a directory a later vouch matters only for a new publish of the
-  name, which then starts with its own owner check. A knocker's daemon,
+  name under a newer token (below), which then starts with its own owner
+  check. A knocker's daemon,
   which checks at knock time, uses the whole rule. "Later" means later in
   the order fetches complete: a
   checker MUST record results in that order and MUST NOT let the times it
   stores reorder them (a clock that steps back or forward doesn't), and a
   stored time after the current time counts as the current time.
+
+  When a directory withdraws a listing because its owner state became
+  `revoked`, it MUST record the revocation against the listing's
+  (directory, name, identity) and keep that record as long as it keeps
+  the name. It MUST refuse any later listing of that name by that
+  identity, whatever its `seq` and whether or not it claims an
+  `owner_domain`, unless the listing's token was issued after the
+  directory recorded the revocation. A later fetch in which the domain
+  vouches again does not lift the record; only a newly issued token does.
+
+  So that withdrawing first can't avoid the record, a directory also
+  checks the claimed owner domain when the identity withdraws a listing
+  that claims it, and when a new listing from that identity for the name
+  drops or changes the domain it last claimed. A revocation found either
+  way is recorded the same way. An unreachable domain is not taken as a
+  revocation. Because a token may be dated up to `PUBLISH_SKEW_SECS` (300
+  s) ahead, a token outranks a recorded revocation only if its `issued_at`
+  is more than 300 s after the time the directory recorded the
+  revocation.
 
   | State | Condition | Shown as |
   |---|---|---|

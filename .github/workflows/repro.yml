@@ -49,11 +49,11 @@ jobs:
         run: |
           echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
           echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home" >> "$GITHUB_ENV"
-      - name: Relay binary
+      - name: Relay and directory binaries
         run: |
-          cargo build --release --locked -p agentconnect-relay
+          cargo build --release --locked -p agentconnect-relay -p agentconnect-directory
           mkdir -p dist
-          cp target/release/agentconnect-relay dist/
+          cp target/release/agentconnect-relay target/release/agentconnect-directory dist/
       - name: Core wheel
         uses: ./.github/actions/core-wheel
       - name: Python packages and sdists
