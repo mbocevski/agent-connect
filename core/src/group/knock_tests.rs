@@ -878,7 +878,7 @@ fn a_pending_add_that_loses_its_epoch_releases_the_key_package() {
     gb.confirm_pending_commit(&s.knocker, &up.msg_id).unwrap();
     match ga.process(&s.owner, &up.commit).unwrap() {
         Event::Commit(c) => assert!(c.discarded_own_pending),
-        e => panic!("{e:?}"),
+        e => panic!("expected a commit, got {}", e.kind()),
     }
     let mut other = s.owner.create_group("g", "p").unwrap();
     other.add_member(&s.owner, &vr, &inv, true).unwrap();
