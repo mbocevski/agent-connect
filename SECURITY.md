@@ -45,9 +45,10 @@ providers seeing plaintext.
   (the base image's OS packages and the bundled binaries). The CI `image` job
   scans the amd64 images on every PR and the nightly `image-scan` job scans
   them again, to catch new CVEs against unchanged images. Both upload SARIF to
-  code scanning (categories `image-relay` and `image-directory`) and fail on
-  HIGH and CRITICAL vulnerabilities that have a fix. Unfixed ones are reported
-  in code scanning only. The image scan is not part of the required `ci-ok`
+  code scanning (categories `image-relay` and `image-directory`) with HIGH
+  and CRITICAL findings only, fixed or not, and fail on those that have a fix.
+  The full all-severity report is a workflow artifact (`trivy-image-relay`,
+  `trivy-image-directory`, kept 30 days). The image scan is not part of the required `ci-ok`
   check, so a vulnerability database outage or a newly published CVE doesn't
   block unrelated merges.
 - Accepted CVEs go in `.trivyignore.yaml` with a statement and an
