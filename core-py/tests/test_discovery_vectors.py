@@ -95,6 +95,29 @@ def test_listings() -> None:
         assert e.value.kind == case.get("kind", "malformed"), case["name"]
 
 
+def test_name_history_high_water_mark() -> None:
+    """SPEC 13.2.2 (review N1): after A -> B and B's withdrawal, A's old
+    token can't bring A back. The record survives a persist round trip."""
+    v = load("listings.json")
+    record = ac.NameRecord()
+    stored: ac.Listing | None = None
+    for step in v["name_history"]:
+        if "withdrawal" in step:
+            record.tombstone(step["withdrawal"].encode())
+            stored = None
+            continue
+        listing = ac.verify_listing(step["listing"].encode())
+        record = ac.NameRecord(high_water=record.high_water, tombstones=record.tombstones)
+        if step["accepted"]:
+            record.admits(listing, stored)
+            record.accept(listing)
+            stored = listing
+        else:
+            with pytest.raises(ac.AgentConnectError) as e:
+                record.admits(listing, stored)
+            assert (str(e.value), e.value.kind) == (step["error"], step["kind"]), step["name"]
+
+
 def test_listing_replacements_and_secrets() -> None:
     """SPEC 13.2.2-13.2.3: seq per identity; secrets for more test data."""
     v = load("listings.json")

@@ -478,6 +478,7 @@ fn trusted(dk: &DirectoryKey) -> TrustedDirectory {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::many_single_char_names)]
 fn listing_vectors() {
     let (seed, rng) = vector_rng("listings.json");
     let d = discovery(&rng);
@@ -761,6 +762,68 @@ fn listing_vectors() {
     out["stored_listing"] = s(stored.bytes()).into();
     out["replacements"] = replacements.into();
     out["tombstones"] = tombstones.into();
+    // SPEC 13.2.2 high-water mark: rotate A to B, B withdraws, A can't
+    // come back under its old token; replayed in order through a
+    // NameRecord, with the stored listing as a directory keeps it.
+    let a = &d.ik;
+    let b = &d.stranger;
+    let (a1, b1) = (listed(a, 7, T0), listed(b, 1, T0 + 3600));
+    let wd = Withdrawal::sign(b, DIRECTORY, "release-planner", 1, T0 + 7200).unwrap();
+    let steps: Vec<(&str, Option<SignedListing>, Option<Withdrawal>)> = vec![
+        ("A publishes", Some(a1.clone()), None),
+        ("B rotates in under a later token", Some(b1), None),
+        ("B withdraws", None, Some(wd)),
+        (
+            "A republishes under its old token",
+            Some(listed(a, 8, T0)),
+            None,
+        ),
+        (
+            "A republishes at the largest seq",
+            Some(listed(a, crate::encoding::MAX_SAFE_INTEGER, T0)),
+            None,
+        ),
+        (
+            "B republishes what it withdrew",
+            Some(listed(b, 1, T0 + 3600)),
+            None,
+        ),
+        (
+            "B publishes a newer seq",
+            Some(listed(b, 2, T0 + 3600)),
+            None,
+        ),
+        (
+            "A under a token issued after B's",
+            Some(listed(a, 1, T0 + 9000)),
+            None,
+        ),
+    ];
+    let mut record = crate::listing::NameRecord::default();
+    let mut stored: Option<SignedListing> = None;
+    let history: Vec<Value> = steps
+        .into_iter()
+        .map(|(name, listing, withdrawal)| {
+            if let Some(w) = withdrawal {
+                record.tombstone(&w);
+                stored = None;
+                return json!({"name": name, "withdrawal": s(&w.to_json().unwrap())});
+            }
+            let l = listing.unwrap();
+            let result = record.admits(&l, stored.as_ref());
+            let out = match &result {
+                Ok(()) => json!({"name": name, "listing": s(l.bytes()), "accepted": true}),
+                Err(e) => json!({"name": name, "listing": s(l.bytes()), "accepted": false,
+                                 "error": e.to_string(), "kind": e.kind().as_str()}),
+            };
+            if result.is_ok() {
+                record.accept(&l);
+                stored = Some(l);
+            }
+            out
+        })
+        .collect();
+    out["name_history"] = history.into();
     out["valid"] = json!({
         "listing": s(l.bytes()),
         "now": T0,

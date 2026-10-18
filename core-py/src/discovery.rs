@@ -389,6 +389,56 @@ impl DirectoryKey {
     }
 }
 
+/// The state a directory or mirror keeps per (directory, name), forever:
+/// the newest token `issued_at` accepted for the name and its identity,
+/// and per identity the highest tombstoned `seq` (SPEC §13.2.2). Persist
+/// the properties and rebuild it with the constructor.
+#[pyclass(module = "agentconnect_core._native")]
+pub(crate) struct NameRecord(listing::NameRecord);
+
+#[pymethods]
+impl NameRecord {
+    #[new]
+    #[pyo3(signature = (*, high_water=None, tombstones=Vec::new()))]
+    fn new(high_water: Option<(u64, String)>, tombstones: Vec<(String, u64)>) -> Self {
+        Self(listing::NameRecord {
+            high_water,
+            tombstones,
+        })
+    }
+
+    /// `(token_issued_at, identity)` of the newest token accepted, or None.
+    #[getter]
+    fn high_water(&self) -> Option<(u64, String)> {
+        self.0.high_water.clone()
+    }
+
+    /// `[(identity, seq)]`: each identity's highest tombstoned `seq`.
+    #[getter]
+    fn tombstones(&self) -> Vec<(String, u64)> {
+        self.0.tombstones.clone()
+    }
+
+    /// Raises `AgentConnectError` (kind `superseded`) unless `listing` may
+    /// be published, given the listing `stored` for the name now.
+    #[pyo3(signature = (listing, stored=None))]
+    fn admits(&self, listing: &Listing, stored: Option<&Listing>) -> PyResult<()> {
+        guarded(|| self.0.admits(&listing.0, stored.map(|s| &s.0)).map_err(err))
+    }
+
+    /// Records an accepted listing (raises the high-water mark).
+    fn accept(&mut self, listing: &Listing) {
+        self.0.accept(&listing.0);
+    }
+
+    /// Records a withdrawal of the name (verified first).
+    fn tombstone(&mut self, withdrawal: &[u8]) -> PyResult<()> {
+        let w = listing::Withdrawal::from_json(withdrawal).map_err(err)?;
+        self.0.tombstone(&w);
+        Ok(())
+    }
+}
+
 /// Signs a withdrawal of `name` on `directory` up to `seq` (JCS bytes).
 #[pyfunction]
 pub(crate) fn sign_withdrawal<'py>(
@@ -1008,6 +1058,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VerifiedKnock>()?;
     m.add_class::<OwnerHistory>()?;
     m.add_class::<KnockLedger>()?;
+    m.add_class::<NameRecord>()?;
     for f in [
         wrap_pyfunction!(verify_listing, m)?,
         wrap_pyfunction!(sign_listing, m)?,

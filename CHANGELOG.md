@@ -46,7 +46,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   parsing. Operator listing tokens checked against pinned directory keys
   (90-day lifetime, not-before, expiry, revocation), token revocations,
   `seq` and tombstones per (directory, name, identity) with
-  `SignedListing::replaces` and `tombstoned_by` for directories,
+  `SignedListing::replaces`, `tombstoned_by` and a `NameRecord` that keeps
+  each name's token high-water mark and
+  tombstones for directories and mirrors, so a superseded key can't take a
+  name back,
   withdrawals, and the owner well-known file with its owner states (a
   negative result is sticky until a later fetch vouches, and a file that
   doesn't parse counts as a failed fetch; `OwnerHistory` in Python). Doors

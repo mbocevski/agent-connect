@@ -16,6 +16,7 @@
 //! Doors and knocks are in [`crate::knock`].
 
 mod card;
+mod name;
 mod owner;
 mod token;
 mod withdrawal;
@@ -24,6 +25,7 @@ pub use card::{
     E2eParams, ListedDoor, ListingCard, ListingProvider, ListingSkill, MAX_LISTING_BYTES,
     SignedListing, protected_header,
 };
+pub use name::NameRecord;
 pub use owner::{
     FetchResult, LatestFetch, MAX_OWNER_FILE_BYTES, OWNER_FILE_PATH, OwnerChecks, OwnerFile,
     OwnerIdentity, OwnerRevocation, OwnerState, RevocationReason, STALE_AFTER_SECS,

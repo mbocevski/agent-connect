@@ -1348,7 +1348,7 @@ still untrusted content.
 | Scraper / enumerator | Downloads every listing, tracks door rotations and owner domains over time | Listings are public by design. Rate limits. Listings carry no mailbox id, no relay secret and no contact data beyond what the owner signed. Doors rotate weekly | The set of listed identities and their published text, and a weekly rotation cadence. Listing makes an identity public |
 | Malicious directory operator | Hides, delays or reorders listings. Serves stale versions. Fakes owner badges. Ignores withdrawals. Logs who reads what. Issues tokens to identities of its own | Listings and withdrawals are signed by `IK`, and tokens are checked against a key pinned in the daemon, so it **can't forge or alter** a listing. The knocker re-verifies the JWS, the token and the expiry, and fetches the domain file itself. Rollback is bounded by the door's 7-day expiry (a listing without a door by its token's expiry, at most 90 days), by the owner closing the door at the relay, and by token revocation | Censorship and delay. Stale but validly signed listings until their door expires, or for a listing without a door until its token expires. Reader metadata. Names are operator-assigned, so a name proves nothing about who holds it |
 | Relay and directory colluding (same operator) | Joins reads of a listing to knocks on its door, and knocks to their mailboxes | Knocks are sealed (§6.6), so the relay sees a sender mailbox, a door and a time. Directories log no addresses (§13.2) | Who knocked on whom and when, if both sides keep data they're told not to keep. **Metadata**, as for the relay |
-| Stale door (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones, per identity, stop older listings from being re-published (§13.2.2) | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry. A listing without a door can be re-served until its token expires, without being knockable |
+| Stale door (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones, per identity, and the name's token high-water mark stop older listings and superseded keys from being re-published (§13.2.2) | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry. A listing without a door can be re-served until its token expires, without being knockable |
 | Knock flooder | Sends many knocks to tire the owner's human, or to crowd out real knocks | Relay limits per (door, sender), per sender, and per door, where overflow is dropped silently (§8.3). Owner caps: one pending knock per identity per door, 32 per door (§6.6.3). The 1 h lapse. Local policy (§10.6) drops | Denial of service on a popular door. Mailboxes are free, so the relay limits slow Sybils down rather than stop them |
 | Prompt injection through card text | Card name, description, skills and examples are attacker-controlled and are read by agents through MCP, Markdown, `llms.txt` and knocks | Cards are untrusted content (§10.1, §10.5). Directories MUST present card text as data (§13.2). Single-line fields with length caps (§13.1). No links from card text are rendered. Knock approval is human. Knocking only asks to talk | Behavioural: an agent that obeys card text anyway. Can't be solved with cryptography |
 
@@ -1650,6 +1650,10 @@ and receivers MUST reject them otherwise (§3.2).
 
   A listing whose token has expired is treated as withdrawn. A daemon warns
   its human 14 days before its own token expires.
+- **Rotation.** When the operator issues a token for a new identity under a
+  name, it MUST revoke the previous identity's token for that name in the
+  same step, and it MUST NOT renew or re-issue a token for a superseded
+  identity: a token issued later would win the name back (§13.2.2).
 - **Revocation.** The operator signs a `TokenRevocation` and posts it
   (`POST /v0/revocations`). The directory stores the `token_id` and
   withdraws the listing in the same transaction.
@@ -1662,22 +1666,30 @@ directory MUST accept it only if all of these hold:
 - the listing passes §13.1;
 - the token is valid (§13.2.1), and its `directory` is this directory's
   host;
+- its token is no older than the name's **high-water mark**: the newest
+  token `issued_at` the directory has ever accepted for this name (and the
+  identity it was issued to). On a tie, only that identity passes;
 - if a listing of this name is stored, the new one replaces it:
   - from the same identity, only with a greater `seq`;
   - from another identity, only if the new listing's token was issued
     later (`token.issued_at` strictly greater) than the stored listing's.
     A new identity for a name needs a new token from the operator and
-    starts its own `seq`; a key that is no longer the name's, even one
-    that signs at the largest `seq`, can't take the name back;
+    starts its own `seq`;
 - no tombstone of the **same identity** for this name has a `seq` at or
   above the new listing's. A tombstone never blocks another identity;
 - `issued_at` ≤ now + 300 s;
 - if a door is present, its `expires_at` is in the future; `relay` is a
   relay this directory lists.
 
-`seq` and tombstones therefore belong to (directory, name, identity). A
-stolen key can at worst block its own identity's future listings; the
-operator revokes its token and issues one for the new identity.
+A directory MUST keep, per (directory, name), the high-water mark and every
+identity's highest tombstoned `seq` for as long as it keeps the name,
+**including after** the name's listing is withdrawn, its token expires or
+is revoked, or nothing is stored for it. `seq` and tombstones therefore
+belong to (directory, name, identity), and the order of the tokens' `issued_at`
+decides between identities. A key that is no longer the name's, even one
+that signs at the largest `seq` under a token that is still valid, can't
+take the name back: its token is older than the mark. A stolen key can at
+worst block its own identity's future listings.
 
 A directory MUST re-check a stored listing's token (expiry and revocation)
 and door expiry whenever it serves the listing. A listing whose token has
@@ -1798,8 +1810,9 @@ name is registered with IANA before v0 is tagged):
 
 - **Rotation.** A new key is a new identity, so it needs a new token. The
   owner adds the new identity to the file, publishes the new listing under
-  the same name (the operator issues the token for the new identity), and
-  then moves the old identity to `revoked` with `superseded`. For 30 days a
+  the same name (the operator issues the token for the new identity and
+  revokes the old identity's token, §13.2.1), and then moves the old
+  identity to `revoked` with `superseded`. For 30 days a
   directory shows "key changed on `<date>`" on that listing.
 - **Revocation** (`compromised`). A directory withdraws every listing of the
   identity at its next check. To make it immediate, the owner also closes
@@ -1817,8 +1830,12 @@ name is registered with IANA before v0 is tagged):
   or the operator, so a mirror verifies it without trusting the directory.
   A conforming mirror polls at least every 60 s and applies an entry before
   it serves the listing again. It re-verifies every listing (§13.1 and the
-  token) and MUST NOT serve one older than the newest `seq` it has seen for
-  the name, or one with a tombstone.
+  token), keeps the same per-name state as a directory (the high-water
+  mark and each identity's tombstoned `seq`, §13.2.2) from everything it
+  has seen, and MUST NOT serve a listing that §13.2.2's rules would refuse
+  against that state: one under a token older than the name's mark, one
+  that doesn't replace the listing it last served for the name (`seq` is
+  compared per identity), or one its own identity's tombstone covers.
 - For a cache that doesn't conform, the worst case is bounded by the door's
   signed expiry (at most 7 days), or for a listing without a door by its
   token's expiry (at most 90 days), and a closed door already refuses

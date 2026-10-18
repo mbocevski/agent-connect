@@ -181,6 +181,11 @@ pub enum ErrorKind {
     WrongDirectory,
     /// A timestamp outside its window (stale or in the future).
     StaleTimestamp,
+    /// A listing a newer one for its name (a later token, a higher `seq` or
+    /// a tombstone) supersedes.
+    Superseded,
+    /// A bounded store that is full; the input is refused, not queued.
+    Busy,
     /// A knock or KeyPackage already seen (a replay).
     Replay,
     /// A KeyPackage already used in an Add.
@@ -213,6 +218,8 @@ impl ErrorKind {
             Self::WrongDoor => "wrong_door",
             Self::WrongDirectory => "wrong_directory",
             Self::StaleTimestamp => "stale_timestamp",
+            Self::Superseded => "superseded",
+            Self::Busy => "busy",
             Self::Replay => "replay",
             Self::KeyPackageReused => "key_package_reused",
             Self::CredentialMismatch => "credential_mismatch",
@@ -241,6 +248,10 @@ fn reason_kind(reason: &str) -> ErrorKind {
             K::StaleTimestamp
         }
         "replayed" => K::Replay,
+        "token older than the name's newest"
+        | "does not replace the stored listing"
+        | "tombstoned" => K::Superseded,
+        "ledger full" => K::Busy,
         "seal does not open" => K::Authentication,
         _ => K::Malformed,
     }
@@ -319,6 +330,8 @@ mod tests {
                 K::StaleTimestamp,
             ),
             (Error::InvalidKnock("replayed"), K::Replay),
+            (Error::InvalidListing("tombstoned"), K::Superseded),
+            (Error::InvalidKnock("ledger full"), K::Busy),
             (Error::InvalidKnock("seal does not open"), K::Authentication),
             (Error::InvalidListing("not canonical JCS"), K::Malformed),
             (Error::InvalidOwnerFile("not I-JSON"), K::Malformed),
@@ -346,6 +359,8 @@ mod tests {
             K::WrongDoor,
             K::WrongDirectory,
             K::StaleTimestamp,
+            K::Superseded,
+            K::Busy,
             K::Replay,
             K::KeyPackageReused,
             K::CredentialMismatch,
@@ -356,6 +371,6 @@ mod tests {
         .into_iter()
         .map(ErrorKind::as_str)
         .collect();
-        assert_eq!(names.len(), 18, "kind names are distinct");
+        assert_eq!(names.len(), 20, "kind names are distinct");
     }
 }
