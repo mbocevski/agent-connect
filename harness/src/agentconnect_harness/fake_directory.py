@@ -13,6 +13,7 @@ Both can misbehave on request: :meth:`Faults.fail` queues an error answer
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -116,6 +117,8 @@ class FakeDirectory:
         return None if data is None else ac.verify_listing(data)
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
+        # A real request yields to the event loop: concurrent callers interleave.
+        await asyncio.sleep(0)
         self.log.append(f"{request.method} {request.url.path}")
         path, body = request.url.path, request.content
         # What was sent, whether or not a fault drops it.

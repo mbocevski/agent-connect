@@ -288,7 +288,19 @@ scenarios are in `harness/tests/`.
     directory is shared, so each scenario lists names of its own. Like the
     relay it uses the system clock: a scenario moves daemon time by less
     than the 300 s a signed request may be off, and a short door lifetime
-    (`options={"door_lifetime_secs": 240}`) covers renewal.
+    (`options={"door_lifetime_secs": 240}`) covers renewal. Knock scenarios
+    (`harness/tests/test_knocks.py`) move it past a knock's hour once the
+    signed requests are done: knocks and Welcomes go over the WebSocket,
+    whose authentication has no timestamp. The core checks the knock
+    deadlines on its own clock, so under the test seed the runtime sets the
+    core's clock to its own for each of those calls.
+- **Test-only core hooks.** Bindings that only tests may call (such as
+  `Client._add_knock_unchecked_for_testing`, the Welcomes a broken knock
+  owner sends) are behind the `test-hooks` cargo feature of `core` and
+  `core-py`. `uv sync` builds the development `agentconnect-core` with it
+  (`[tool.uv.config-settings-package]` in `pyproject.toml`); the release
+  and reproducible wheels are built with maturin without it, and
+  `scripts/check_wheel_hooks.py` fails a wheel that exports one.
 - **Fakes for days-long behaviour.** The daemon tier runs a listing's whole
   life (renewal at half-life, key deletion, token expiry) on the fake clock
   against `agentconnect_harness.fake_directory`: `FakeDirectory` checks
@@ -313,7 +325,7 @@ daemon, so in-process daemons don't affect each other.
 | Layer | Arm | Points | Actions |
 |---|---|---|---|
 | core | `client.failpoints().arm(name, Action, times)` (Rust); `Client._arm_failpoint_for_testing(name, "error"\|"panic", times)` (Python) | `process.before_mls`, `process.after_mls`, `process.after_merge`, `process.before_commit`, `confirm.after_merge`, `confirm.before_commit`, `join.after_stage`, `join.before_commit`, `consume.before_commit` (`agentconnect_core::failpoint::POINTS`) | `error`: a storage error (the daemon retries it); `panic`: a panic. Both fire inside the operation's transaction, so the store rolls back as after a crash at that point. |
-| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register`; `event.after_record` and `event.after_notify` (around telling the adapter about a recorded event); `held_timer.expire` (the safety policy's expiry timer, before it expires held messages); `delivery.after_adapter` (the adapter accepted a message, the inbox doesn't record it yet); publishing a listing: `door.after_register` (the relay has the door, the daemon hasn't recorded it), `listing.after_sign` (signed and stored, not posted), `listing.after_post` (the directory took it, not recorded yet), and `withdraw.after_close` (the doors are closed, the withdrawal not sent) (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
+| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register`; `event.after_record` and `event.after_notify` (around telling the adapter about a recorded event); `held_timer.expire` (the safety policy's expiry timer, before it expires held messages); `delivery.after_adapter` (the adapter accepted a message, the inbox doesn't record it yet); publishing a listing: `door.after_register` (the relay has the door, the daemon hasn't recorded it), `listing.after_sign` (signed and stored, not posted), `listing.after_post` (the directory took it, not recorded yet), and `withdraw.after_close` (the doors are closed, the withdrawal not sent); knocks: `knock.in_tx` and `knock.after_tx` (the owner's record of a received knock: ledger, approval, inbox), `knock_welcome.*` (the knocker's join, at the same five steps as `welcome.*`), `knock_send.after_core` (the core built the knock, it isn't recorded or queued yet), `knock_approve.after_group` (the core created an approval's group, it isn't recorded yet) and `knock_add.after_welcome` (an approved knock's Welcome went out, the approval isn't recorded done) (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
 
 `core/tests/journal.rs` runs every core point with both actions and checks
 that the state is unchanged, the retry succeeds and a second retry gets the

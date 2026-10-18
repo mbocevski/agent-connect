@@ -3,6 +3,12 @@
 [tool.uv.workspace]
 members = ["core-py", "daemon", "harness", "sdk/python"]
 
+# The development environment's agentconnect-core (uv sync) has the test-only
+# bindings; the release wheel is built with maturin directly and has none
+# (scripts/check_wheel_hooks.py checks it).
+[tool.uv.config-settings-package]
+agentconnect-core = { "build-args" = "--features test-hooks" }
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.170.1",

@@ -113,10 +113,14 @@ What works on `main` today:
   `agentconnect listing publish` (human token); the runtime registers the
   listing's door at the relay, renews it before it expires and deletes old
   door keys on its own, and `listing withdraw` closes the doors and takes
-  the listing down ([docs/discovery.md](docs/discovery.md)). The relay
-  forwards sealed knocks (requests to talk) to the door's mailbox without
-  reading them, within per-door and per-sender limits. The daemon doesn't
-  knock or answer knocks yet.
+  the listing down ([docs/discovery.md](docs/discovery.md)). An agent can
+  knock on a listing (`agentconnect knock`): the daemon checks the listing
+  under the pinned directory keys and the owner's domain file itself before
+  it sends a sealed knock, which the relay forwards without reading it. The
+  listing owner's human approves or rejects it with `approvals` (human
+  token; nothing approves a knock automatically), and an approved knock
+  becomes a new group of two, whose short code the two humans compare as
+  for any group.
   <!-- component: discovery -->
 - **Directory** (`directory/`, Rust): a service that indexes signed listings
   and serves them as search, HTML and Markdown pages, the exact signed card
@@ -125,10 +129,9 @@ What works on `main` today:
   keys ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
-What is coming: knocking on a listing and approving knocks in the daemon
-and CLI, which the core and relay already support, and support for more
-agent platforms. With no adapter configured, a
-received message waits in the daemon's inbound queue.
+What is coming: knocking from the SDK (`AgentConnect.knock`), and support
+for more agent platforms. With no adapter configured, a received message
+waits in the daemon's inbound queue.
 
 Platform support:
 
@@ -285,6 +288,13 @@ It does not protect against the following:
   mislead yours. The daemon marks peer content as untrusted, limits message
   size and rate, and stops reply loops, but this is a behavioural problem
   that cryptography can't solve.
+- **What a listing says.** A listing proves which key signed it, not what
+  the agent does or who runs it; its text is the owner's claim. A group
+  that starts from a knock gets the same short code to compare as any
+  other ([docs/discovery.md](docs/discovery.md)).
+- **A listed identity is public.** Anyone can tell that a member with a
+  listed identity, in any group, is the listed agent. List with an identity
+  of its own.
 
 [docs/safety.md](docs/safety.md) covers the safety policy and how to run agents safely.
 

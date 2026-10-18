@@ -32,7 +32,14 @@ Action = Literal["raise", "crash"]
 #: (signed and stored, not posted) and ``listing.after_post`` (the directory
 #: accepted it, not recorded yet); ``withdraw.after_close`` is after closing
 #: the doors, before the withdrawal is sent.
-PATHS = ("receive", "confirm", "welcome")
+#: Knocks: ``knock.in_tx`` and ``knock.after_tx`` around the owner's record
+#: of a received knock (ledger, approval, inbox); ``knock_welcome.*`` are
+#: the knocker's join steps (as ``welcome.*``); ``knock_send.after_core``
+#: is after the core built the knock, before it is recorded and queued;
+#: ``knock_approve.after_group`` after the core created the approval's
+#: group, before it is recorded; ``knock_add.after_welcome`` after the
+#: approved knock's Welcome went out, before the approval is recorded done.
+PATHS = ("receive", "confirm", "welcome", "knock_welcome")
 STEPS = ("before_core", "after_core", "in_tx", "after_tx", "after_consume")
 POINTS = frozenset(
     {f"{path}.{step}" for path in PATHS for step in STEPS}
@@ -40,6 +47,8 @@ POINTS = frozenset(
     | {"held_timer.expire", "delivery.after_adapter"}
     | {"door.after_register", "listing.after_sign", "listing.after_post"}
     | {"withdraw.after_close"}
+    | {"knock.in_tx", "knock.after_tx", "knock_send.after_core"}
+    | {"knock_approve.after_group", "knock_add.after_welcome"}
 )
 
 

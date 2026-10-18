@@ -7,12 +7,14 @@ call it for the agent token, and the embedded SDK calls it in-process, so
 the two paths can't drift apart. Every answer has the shape of the matching
 route's JSON (``docs/api.md``).
 
-There is no human-scope operation here: approving or rejecting joins and
-held messages, marking members verified, reporting a SAS mismatch, removing
-members, changing the safety policy, relaxing ``require_verified`` and
-publishing a listing exist only as local API routes that need the human
-token (SPEC 6.2, 10.4, 11, 13.2.2). Withdrawing the listing is here: it
-only reduces exposure (SPEC 13.2.3).
+There is no human-scope operation here: approving or rejecting joins,
+knocks and held messages, listing or reading knock approvals, marking
+members verified, reporting a SAS mismatch, removing members, changing the
+safety policy, relaxing ``require_verified`` and publishing a listing exist
+only as local API routes that need the human token (SPEC 6.2, 6.6.4, 10.4,
+11, 13.2.2). Withdrawing the listing is here: it only reduces exposure (SPEC
+13.2.3). So is knocking on another agent's listing (SPEC 6.6.2), unless
+``knock.agent_may_knock`` is off; approving a knock never is.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from agentconnect.policy import HUMAN_ONLY_KINDS
-from agentconnect.runtime.engine import HUMAN_EVENTS, Engine, new_msg_id
+from agentconnect.runtime.engine import DaemonError, Engine, new_msg_id
 from agentconnect.runtime.errors import ApiError
 
 
@@ -41,22 +43,30 @@ class AgentApi:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    def _visible(self, group_id: str) -> str:
+        """An approved knock's group is the agent's once the knocker is in
+        (docs/discovery.md): until then it doesn't exist for the agent."""
+        if self._engine.hidden_from_agent(group_id):
+            raise DaemonError("not_found", "no such active group")
+        return group_id
+
     async def status(self) -> dict[str, Any]:
         """The runtime's status. SPEC 10.2: the agent can't learn (and tell
         a peer) what is held of the peers' messages; ``held_messages``
         counts its own held sends only."""
-        info = self._engine.status()
+        info = self._engine.status(human=False)
         info["held_messages"] = len(self._engine.held_messages(direction="out"))
         return info
 
     async def list_groups(self) -> dict[str, Any]:
-        return {"groups": self._engine.list_groups()}
+        groups = self._engine.list_groups()
+        return {"groups": [g for g in groups if not self._engine.hidden_from_agent(g["group_id"])]}
 
     async def create_group(self, name: str, purpose: str = "") -> dict[str, Any]:
         return {"group_id": self._engine.create_group(name, purpose)}
 
     async def group_info(self, group_id: str) -> dict[str, Any]:
-        return self._engine.group_info(group_id)
+        return self._engine.group_info(self._visible(group_id))
 
     async def create_invite(
         self,
@@ -66,7 +76,9 @@ class AgentApi:
         max_uses: int = 1,
         inviter_name: str | None = None,
     ) -> dict[str, Any]:
-        return await self._engine.create_invite(group_id, ttl_secs, max_uses, inviter_name)
+        return await self._engine.create_invite(
+            self._visible(group_id), ttl_secs, max_uses, inviter_name
+        )
 
     async def revoke_invite(self, invite_id: str) -> dict[str, Any]:
         await self._engine.revoke_invite(invite_id)
@@ -83,7 +95,7 @@ class AgentApi:
         the gate; turning it off needs the human (SPEC 10.4)."""
         if not require_verified:
             raise ApiError(403, "human_only", "relaxing verification needs the human token")
-        self._engine.set_policy(group_id, require_verified=True)
+        self._engine.set_policy(self._visible(group_id), require_verified=True)
         return {"require_verified": True}
 
     async def send(  # noqa: PLR0913
@@ -102,6 +114,7 @@ class AgentApi:
         (``control.resume``) are refused."""
         if kind in HUMAN_ONLY_KINDS:
             raise ApiError(403, "human_only", f"{kind} needs the human token")
+        self._visible(group_id)
         if body is None:
             if text is None:
                 raise ApiError(400, "bad_request", "give text or body")
@@ -118,7 +131,7 @@ class AgentApi:
         return {"msg_id": msg_id, "status": status}
 
     async def leave(self, group_id: str) -> dict[str, Any]:
-        return {"status": await self._engine.leave(group_id)}
+        return {"status": await self._engine.leave(self._visible(group_id))}
 
     async def approvals(self) -> dict[str, Any]:
         """No join requests and no held peer messages (their sender, msg_id
@@ -129,7 +142,7 @@ class AgentApi:
 
     async def safety(self, group_id: str) -> dict[str, Any]:
         """The group's safety settings (read only)."""
-        return self._engine.safety_settings(group_id)
+        return self._engine.safety_settings(self._visible(group_id))
 
     async def listing_status(self) -> dict[str, Any]:
         """The runtime's own listing, if it has one (docs/discovery.md)."""
@@ -141,8 +154,45 @@ class AgentApi:
         13.2.3). Publishing is the human's (no method here)."""
         return await self._engine.listings.withdraw()
 
+    async def knock_inspect(
+        self, listing: str, *, domain_check: bool | None = None
+    ) -> dict[str, Any]:
+        """A listing, checked as a knock would check it, with its text marked
+        ``untrusted`` (docs/discovery.md). ``domain_check`` defaults to
+        ``knock.domain_check``."""
+        return await self._engine.knocks.inspect(listing, domain_check)
+
+    async def knock(
+        self,
+        listing: str,
+        *,
+        listing_sha256: str | None = None,
+        display_name: str | None = None,
+        note: str | None = None,
+        domain_check: bool | None = None,
+    ) -> dict[str, Any]:
+        """Knock on a listing: ask its owner's human for a new group (SPEC
+        6.6.2). Only a Welcome answers it (``joined``); otherwise it lapses
+        as "no answer" (``knock_lapsed``). Refused with ``403 human_only``
+        when ``knock.agent_may_knock`` is off."""
+        return await self._engine.knocks.knock(
+            listing,
+            listing_sha256=listing_sha256,
+            display_name=display_name,
+            note=note,
+            domain_check=domain_check,
+        )
+
+    async def knocks(self) -> dict[str, Any]:
+        """This runtime's own knocks (not the ones it received). The listing
+        text in them is its owner's: ``untrusted``."""
+        return {"knocks": self._engine.knocks.knocks(), "untrusted": True}
+
     async def events(self, after: int = 0, group_id: str | None = None) -> dict[str, Any]:
         """Events in order, without the safety policy's own (SPEC 10.2): an
-        agent that heard of a hold could tell the sender."""
-        rows = self._engine.store.events(after, group_id=group_id, exclude=tuple(HUMAN_EVENTS))
+        agent that heard of a hold could tell the sender. Nor the knocks this
+        runtime received: those are the human's. ``seq`` is the agent's own
+        sequence (no gap where an event it doesn't see was recorded), and
+        ``after`` takes it."""
+        rows = self._engine.store.agent_events(after, group_id=group_id)
         return {"events": rows}

@@ -102,7 +102,7 @@ class Runtime:
     def status(self) -> dict[str, Any]:
         """The agent-scope status (what ``GET /v0/status`` answers the agent
         token)."""
-        info = self._engine.status()
+        info = self._engine.status(human=False)
         info["held_messages"] = len(self._engine.held_messages(direction="out"))
         return info
 

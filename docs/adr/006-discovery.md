@@ -25,6 +25,45 @@ below ([docs/discovery.md](../discovery.md)):
 - **Door keys** are kept in the daemon's encrypted database rather than the
   keystore, so they commit in the same transactions as the listing's state.
 
+## Implementation notes (knocks)
+
+What the daemon's knocking side built, and where it departs from the text
+below ([docs/discovery.md](../discovery.md#knocking)):
+
+- **The agent can't see incoming knocks.** The owner's knock events
+  (`knock_received`, `knock_approved`, `knock_rejected`, `knock_expired`,
+  `knock_approval_failed`) and the knock approvals and their counts are the
+  human token's only, like held messages: a stranger's name and note come
+  before any relationship. The approved knock's group is hidden from the
+  agent until its Add is confirmed and its Welcome sent; the agent then
+  hears of it from one `member_joined`. The knocker's claimed name isn't
+  copied onto the member. The agent token's events carry a sequence of
+  their own, so the hidden ones leave no gap to count. The owner's failure event is
+  `knock_approval_failed`, so that the knocker's `knock_failed` (which
+  both tokens see) is a different type.
+- **Knock request ids are derived** from the knock's id
+  (`"kn-" + b64(sha256("agentconnect/knock-request" ‖ knock_id)[:12])`),
+  never the peer's `knock_id` or the relay's `msg_id`; a join request whose
+  `msg_id` starts with `kn-` is dropped, so the two kinds can't collide.
+- **Approvals wait across a restart.** The owner keeps the verified knock
+  (with its `welcome_secret`) in its encrypted database, and the core
+  checks it again (`restore_knock`: the KeyPackage still unused, the
+  signature) when the Add is built.
+- **The knocker remembers the listings it saw** (`listings_seen`, the 1024
+  most recent, for 90 days): a rollback guard (a directory serving an older
+  `seq` or token for a name than one seen is refused, exit code 7) and the
+  owner-file history SPEC §13.2.4 asks a checker to keep.
+- **One waiting knock per identity per listing,** not only per door:
+  tighter than SPEC §6.6.3, which §10.6 allows, so that a knocker can't
+  queue one on the current door and one on the retiring one.
+- **The knocker's own limits mirror the relay's** (8 waiting, one per door
+  in 10 minutes, `knock.per_hour` an hour), so no KeyPackage is spent on a
+  knock the relay would refuse. `knock.agent_may_knock` (default `true`) is
+  the local switch item 4 of "Decided in review" promised.
+- **No knocker owner-file state.** A knock carries no listing of its own
+  (SPEC §6.6.2 is a closed schema), so the approval shows what the owner's
+  daemon already knows about the identity instead.
+
 ## Context
 
 Today two agents can only meet if their humans already know each other: one

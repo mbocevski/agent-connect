@@ -128,11 +128,57 @@ def test_bad_discovery_config_is_refused(
         _load(tmp_path, text)
 
 
-@pytest.mark.parametrize("table", ["directory", "listing"])
+@pytest.mark.parametrize("table", ["directory", "listing", "knock"])
 def test_auto_approve_is_refused_with_its_reason(
     tmp_path: Path, rng: random.Random, table: str
 ) -> None:
     extra = f'host = "d.example"\nkeys = ["{_dk(rng)}"]\n' if table == "directory" else ""
-    header = "[[directory]]" if table == "directory" else "[listing]"
+    header = "[[directory]]" if table == "directory" else f"[{table}]"
     with pytest.raises(ConfigError, match="always need a human"):
         _load(tmp_path, f"{header}\n{extra}auto_approve = true\n")
+
+
+def test_knock_defaults_are_the_specs_limits(tmp_path: Path) -> None:
+    cfg = load_config(tmp_path / "none.toml", {"HOME": str(tmp_path)})
+    assert cfg.knock_agent_may_knock is True
+    assert cfg.knock_domain_check is True
+    assert (cfg.knock_max_outgoing, cfg.knock_per_hour) == (8, 20)
+    assert (cfg.knock_max_pending_per_door, cfg.knock_opened_per_door_per_minute) == (32, 10)
+    assert cfg.knock_failures_per_sender_per_hour == 10
+    assert cfg.knock_ledger_capacity == ac.DEFAULT_LEDGER_CAPACITY
+    assert cfg.auto_approve is False
+
+
+def test_knock_limits_may_be_lowered(tmp_path: Path) -> None:
+    cfg = _load(
+        tmp_path,
+        "[knock]\nagent_may_knock = false\ndomain_check = false\nmax_outgoing = 1\n"
+        "per_hour = 1\nmax_pending_per_door = 1\nopened_per_door_per_minute = 1\n"
+        "failures_per_sender_per_hour = 100\nledger_capacity = 1024\n",
+    )
+    assert (cfg.knock_agent_may_knock, cfg.knock_domain_check) == (False, False)
+    assert (cfg.knock_max_outgoing, cfg.knock_per_hour, cfg.knock_max_pending_per_door) == (1, 1, 1)
+    assert cfg.knock_opened_per_door_per_minute == 1
+    assert cfg.knock_failures_per_sender_per_hour == 100
+    assert cfg.knock_ledger_capacity == 1024
+
+
+@pytest.mark.parametrize(
+    ("line", "match"),
+    [
+        ("max_outgoing = 9", "1..8"),
+        ("max_outgoing = 0", "1..8"),
+        ("per_hour = 21", "1..20"),
+        ("max_pending_per_door = 33", "1..32"),
+        ("opened_per_door_per_minute = 11", "1..10"),
+        ("failures_per_sender_per_hour = 101", "1..100"),
+        ("ledger_capacity = 65537", "1024..65536"),
+        ("ledger_capacity = 1023", "1024..65536"),
+        ("agent_may_knock = 1", "must be bool"),
+        ("max_outgoing = true", "must be int"),
+        ("auto_approve_knocks = true", "unknown key"),
+    ],
+)
+def test_knock_limits_may_only_be_lowered(tmp_path: Path, line: str, match: str) -> None:
+    with pytest.raises(ConfigError, match=match):
+        _load(tmp_path, f"[knock]\n{line}\n")

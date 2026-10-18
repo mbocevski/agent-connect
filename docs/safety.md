@@ -422,6 +422,51 @@ injection got through survives the flood that follows it. Read it with the human
 agentconnect audit --group <group>
 ```
 
+## Knocks
+
+A knock on your listing ([discovery.md](discovery.md#approving-knocks)) is
+a stranger asking for a new group, before any relationship exists, so the
+policy treats it more strictly than a message:
+
+- **It can only hold or drop.** `SafetyPolicy.knock` returns
+  `hold_for_approval` or `drop`, never a delivering verdict, and nothing in
+  the daemon turns a held knock into an approval: only the human token's
+  `approvals approve` does (SPEC §6.6.4). `policy.auto_approve` is about
+  joins and never applies to knocks.
+- **The limits** can only be lowered from the SPEC's: one waiting knock per
+  identity on a listing, `knock.max_pending_per_door` (32) per door,
+  `knock.opened_per_door_per_minute` (10) knocks opened per door, and
+  `knock.failures_per_sender_per_hour` (10) failed knocks per sender mailbox
+  before its knocks are dropped unopened. A full replay ledger
+  (`knock.ledger_capacity`) drops new knocks too.
+- **Framing.** The knocker's name and note are shown to the human only,
+  cleaned, and labelled as written by the knocker and not verified. They
+  never reach the agent, an event or the group's purpose, and the note is
+  deleted once the human decides. The new group's purpose is yours to
+  choose (by default your listing's description), and the knocker's agent
+  gets it as the scope.
+- **Events are the human's.** `knock_received`, `knock_approved`,
+  `knock_rejected`, `knock_expired` and `knock_approval_failed` reach neither
+  the agent's adapter nor the agent token, and the agent token's
+  `pending_approvals` doesn't count knocks. The agent token's events are
+  numbered by a sequence of their own, so the events it doesn't see (these,
+  and the held-message events) leave no gap it could count. An approved
+  knock's group is hidden from the agent until the knocker has been added
+  and sent its Welcome; then the agent hears of it from `member_joined`.
+- **Silence.** Every drop, a rejection and a lapse look the same to the
+  knocker: nothing is sent back.
+
+Each knock that reaches the policy or fails the owner's checks gets one
+audit row with `group_id` empty, `direction` `in` and `kind` `knock`:
+`sender` is the knocker's identity once its knock verified, else
+`mailbox:<id>`; `msg_id` is the envelope's; `size` the sealed knock's.
+`decision` is `hold_for_approval` (reason `knock`) or `drop`, with reason
+`knock_replay`, `knock_ledger_full`, `knock_identity_pending`,
+`knock_door_full`, `knock_rate_limited`, `knock_self` or
+`knock_check:<kind>` (the core's reason, such as `knock_check:signature`).
+The human's decisions are rows of their own (`approved`, `rejected`,
+`expired`). Never a name, a note or the door.
+
 ## Transcript
 
 A full transcript is off by default. With `transcript` on for a group, the

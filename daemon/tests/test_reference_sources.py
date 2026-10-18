@@ -22,7 +22,7 @@ def test_exit_codes_table_covers_every_constant() -> None:
     }
     for code, _name, meaning in cli_support.EXIT_CODES:
         assert meaning
-        assert code in range(7)
+        assert code in range(8)
 
 
 def test_every_config_field_has_a_key_or_is_code_only() -> None:
@@ -52,6 +52,7 @@ def test_config_keys_are_section_dot_name_and_documented() -> None:
             "isolation",
             "directory",
             "listing",
+            "knock",
         }
         assert section in sections
         assert name

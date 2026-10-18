@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS groups (
     epoch INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     last_own_commit_at INTEGER NOT NULL,
-    msgs_since_commit INTEGER NOT NULL DEFAULT 0
+    msgs_since_commit INTEGER NOT NULL DEFAULT 0,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    origin TEXT
 );
 CREATE TABLE IF NOT EXISTS members (
     group_id TEXT NOT NULL,
@@ -291,6 +293,79 @@ CREATE TABLE IF NOT EXISTS doors (
     created_at INTEGER NOT NULL,
     state TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS knock_ledger (
+    knock_id TEXT PRIMARY KEY,
+    kp_ref TEXT NOT NULL,
+    forget_after INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS knock_ledger_until ON knock_ledger (forget_after);
+CREATE TABLE IF NOT EXISTS knock_requests (
+    request_id TEXT PRIMARY KEY,
+    knock_id TEXT NOT NULL UNIQUE,
+    door_id TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    name TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    mailbox_id TEXT NOT NULL,
+    kp_ref TEXT NOT NULL,
+    display_name TEXT,
+    note TEXT,
+    ts INTEGER NOT NULL,
+    lapses_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL,
+    knock BLOB,
+    status TEXT NOT NULL,
+    group_id TEXT,
+    purpose TEXT,
+    decided_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS knock_requests_status ON knock_requests (status, lapses_at);
+CREATE TABLE IF NOT EXISTS knocks (
+    knock_id TEXT PRIMARY KEY,
+    directory TEXT NOT NULL,
+    name TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    door_id TEXT NOT NULL,
+    listing BLOB NOT NULL,
+    listing_sha256 TEXT NOT NULL,
+    owner_domain TEXT,
+    owner_state TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    secret BLOB,
+    msg_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    gives_up_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    sent_once INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    reason TEXT,
+    group_id TEXT,
+    ended_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS listed_peers (
+    group_id TEXT PRIMARY KEY,
+    identity TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    name TEXT NOT NULL,
+    owner_domain TEXT,
+    owner_state TEXT NOT NULL,
+    listing_sha256 TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS listings_seen (
+    directory TEXT NOT NULL,
+    name TEXT NOT NULL,
+    hw_issued_at INTEGER,
+    hw_identity TEXT,
+    last BLOB,
+    last_vouched_at INTEGER,
+    last_negative_at INTEGER,
+    last_negative TEXT,
+    latest_at INTEGER,
+    latest TEXT,
+    seen_at INTEGER NOT NULL,
+    PRIMARY KEY (directory, name)
+);
 """
 
 GROUP_COLUMNS = (
@@ -306,6 +381,8 @@ GROUP_COLUMNS = (
     "created_at",
     "last_own_commit_at",
     "msgs_since_commit",
+    "hidden",
+    "origin",
 )
 
 
@@ -340,6 +417,72 @@ LISTING_COLUMNS = (
 _LISTING_COUNTERS = frozenset({"seq", "max_signed_seq", "attempts", "token_warned"})
 # Without `secret`: only door_secrets() reads the private keys.
 DOOR_COLUMNS = ("door_id", "directory", "name", "expires_at", "created_at", "state")
+# Without `knock` (the welcome_secret and KeyPackage): only knock_secret() reads it.
+KNOCK_REQUEST_COLUMNS = (
+    "request_id",
+    "knock_id",
+    "door_id",
+    "directory",
+    "name",
+    "identity",
+    "mailbox_id",
+    "kp_ref",
+    "display_name",
+    "note",
+    "ts",
+    "lapses_at",
+    "received_at",
+    "status",
+    "group_id",
+    "purpose",
+    "decided_at",
+)
+# Without `secret`: only knock_secret() reads it.
+KNOCK_COLUMNS = (
+    "knock_id",
+    "directory",
+    "name",
+    "identity",
+    "door_id",
+    "listing",
+    "listing_sha256",
+    "owner_domain",
+    "owner_state",
+    "display_name",
+    "msg_id",
+    "ts",
+    "gives_up_at",
+    "created_at",
+    "sent_once",
+    "status",
+    "reason",
+    "group_id",
+    "ended_at",
+)
+LISTED_PEER_COLUMNS = (
+    "group_id",
+    "identity",
+    "directory",
+    "name",
+    "owner_domain",
+    "owner_state",
+    "listing_sha256",
+    "recorded_at",
+)
+SEEN_COLUMNS = (
+    "directory",
+    "name",
+    "hw_issued_at",
+    "hw_identity",
+    "last",
+    "last_vouched_at",
+    "last_negative_at",
+    "last_negative",
+    "latest_at",
+    "latest",
+    "seen_at",
+)
+MAX_LISTINGS_SEEN = 1024
 
 
 @dataclass
@@ -356,6 +499,10 @@ class GroupRow:
     created_at: int
     last_own_commit_at: int
     msgs_since_commit: int
+    # Not the agent's to see (an approved knock's group until the knocker is in).
+    hidden: bool = False
+    # Where the group came from, kept with it: {"kind": "knock", "directory", "name"}.
+    origin: dict[str, Any] | None = None
 
 
 @dataclass
@@ -410,9 +557,17 @@ class Store:
         self._depth = 0
         # Columns added after the first schema (development files).
         columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('events')")}
-        for column, decl in (("event_id", "TEXT"), ("notified", "INTEGER NOT NULL DEFAULT 0")):
+        for column, decl in (
+            ("event_id", "TEXT"),
+            ("notified", "INTEGER NOT NULL DEFAULT 0"),
+            ("agent_seq", "INTEGER"),
+        ):
             if column not in columns:
                 self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {decl}")
+        group_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('groups')")}
+        for column, decl in (("hidden", "INTEGER NOT NULL DEFAULT 0"), ("origin", "TEXT")):
+            if column not in group_columns:
+                self._db.execute(f"ALTER TABLE groups ADD COLUMN {column} {decl}")
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
         if "at" not in feed_columns:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
@@ -437,6 +592,7 @@ class Store:
             )
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
+            "CREATE UNIQUE INDEX IF NOT EXISTS events_agent_seq ON events (agent_seq);"
             "CREATE INDEX IF NOT EXISTS inbox_pending ON inbox (state, group_id, seq);"
             "CREATE INDEX IF NOT EXISTS adapter_events_group "
             "ON adapter_events (adapter, group_id, seq);"
@@ -502,6 +658,8 @@ class Store:
         values = [getattr(row, c) for c in GROUP_COLUMNS]
         values[3] = json.dumps(row.policy)
         values[6] = int(row.out_of_sync)
+        values[12] = int(row.hidden)
+        values[13] = None if row.origin is None else json.dumps(row.origin)
         self._db.execute(
             f"INSERT OR REPLACE INTO groups ({', '.join(GROUP_COLUMNS)}) "  # noqa: S608
             f"VALUES ({', '.join('?' * len(GROUP_COLUMNS))})",
@@ -513,6 +671,8 @@ class Store:
         d = dict(zip(GROUP_COLUMNS, row, strict=True))
         d["policy"] = json.loads(d["policy"])
         d["out_of_sync"] = bool(d["out_of_sync"])
+        d["hidden"] = bool(d["hidden"])
+        d["origin"] = None if d["origin"] is None else json.loads(d["origin"])
         return GroupRow(**d)
 
     def group(self, group_id: str) -> GroupRow | None:
@@ -534,7 +694,11 @@ class Store:
                 msg = f"unknown group column {key}"
                 raise ValueError(msg)
         values = [
-            json.dumps(v) if k == "policy" else int(v) if isinstance(v, bool) else v
+            json.dumps(v)
+            if k == "policy" or (k == "origin" and v is not None)
+            else int(v)
+            if isinstance(v, bool)
+            else v
             for k, v in fields.items()
         ]
         sets = ", ".join(f"{k} = ?" for k in fields)
@@ -542,6 +706,13 @@ class Store:
             f"UPDATE groups SET {sets} WHERE group_id = ?",  # noqa: S608
             (*values, group_id),
         )
+
+    def delete_group(self, group_id: str) -> None:
+        """Forget a group entirely: its row and its data (for a group nobody
+        but this instance was ever in, such as a failed knock approval's)."""
+        with self.tx():
+            self.delete_group_data(group_id)
+            self._db.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
 
     def bump_messages(self, group_id: str) -> None:
         self._db.execute(
@@ -612,7 +783,13 @@ class Store:
         messages are dropped. Audit rows and transcript entries stay until
         their retention ends."""
         with self.tx() as db:
-            for table in ("members", "agent_cards", "group_safety", "task_decisions"):
+            for table in (
+                "members",
+                "agent_cards",
+                "group_safety",
+                "task_decisions",
+                "listed_peers",
+            ):
                 db.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))  # noqa: S608
             db.execute(
                 "UPDATE inbox SET state = 'dropped', delivery = NULL "
@@ -1066,6 +1243,271 @@ class Store:
     def delete_door(self, door_id: str) -> None:
         self._db.execute("DELETE FROM doors WHERE door_id = ?", (door_id,))
 
+    # -- knocks: the owner's ledger and approvals, the knocker's knocks -------
+
+    def ledger_add(self, knock_id: str, kp_ref: str, forget_after: int) -> None:
+        """Remember a knock that passed the owner's checks 1-5 (SPEC 6.6.3
+        step 6), in the transaction that records what happened to it. A row
+        for the same ``knock_id`` can only be one the ledger already forgot
+        (a live one makes the knock a replay), so it is replaced whole."""
+        self._db.execute(
+            "INSERT INTO knock_ledger (knock_id, kp_ref, forget_after) VALUES (?, ?, ?) "
+            "ON CONFLICT(knock_id) DO UPDATE SET "
+            "kp_ref = excluded.kp_ref, forget_after = excluded.forget_after",
+            (knock_id, kp_ref, forget_after),
+        )
+
+    def ledger_rows(self, now: int) -> list[tuple[str, str, int]]:
+        """``(knock_id, kp_ref, forget_after)`` of every knock still remembered at ``now``."""
+        rows = self._all(
+            "SELECT knock_id, kp_ref, forget_after FROM knock_ledger WHERE forget_after >= ? "
+            "ORDER BY forget_after, knock_id",
+            now,
+        )
+        return [(str(r[0]), str(r[1]), int(r[2])) for r in rows]
+
+    def ledger_purge(self, now: int) -> int:
+        """Forget knocks whose ``forget_after`` is before ``now``."""
+        return self._db.execute("DELETE FROM knock_ledger WHERE forget_after < ?", (now,)).rowcount
+
+    def add_knock_request(self, row: dict[str, Any], knock: bytes) -> None:
+        """A knock waiting for the human (``pending``), with its secret."""
+        columns = [c for c in KNOCK_REQUEST_COLUMNS if c in row]
+        self._db.execute(
+            f"INSERT INTO knock_requests ({', '.join(columns)}, knock) "  # noqa: S608
+            f"VALUES ({', '.join('?' for _ in columns)}, ?)",
+            [*(row[c] for c in columns), knock],
+        )
+
+    def knock_request(self, request_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(KNOCK_REQUEST_COLUMNS)} FROM knock_requests "  # noqa: S608
+            "WHERE request_id = ?",
+            request_id,
+        )
+        return None if row is None else dict(zip(KNOCK_REQUEST_COLUMNS, row, strict=True))
+
+    def knock_requests(self, *statuses: str) -> list[dict[str, Any]]:
+        """Knock requests in these states (all, without any), oldest first."""
+        rows = self._all(
+            f"SELECT {', '.join(KNOCK_REQUEST_COLUMNS)} FROM knock_requests "  # noqa: S608
+            "WHERE ? = '[]' OR status IN (SELECT value FROM json_each(?)) "
+            "ORDER BY received_at, request_id",
+            json.dumps(list(statuses)),
+            json.dumps(list(statuses)),
+        )
+        return [dict(zip(KNOCK_REQUEST_COLUMNS, r, strict=True)) for r in rows]
+
+    def knock_request_secret(self, request_id: str) -> bytes | None:
+        """The verified knock (welcome_secret and KeyPackage) of a request, while kept."""
+        row = self._one("SELECT knock FROM knock_requests WHERE request_id = ?", request_id)
+        return None if row is None or row[0] is None else bytes(row[0])
+
+    def knock_request_for_group(self, group_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(KNOCK_REQUEST_COLUMNS)} FROM knock_requests "  # noqa: S608
+            "WHERE group_id = ?",
+            group_id,
+        )
+        return None if row is None else dict(zip(KNOCK_REQUEST_COLUMNS, row, strict=True))
+
+    def open_knock_counts(
+        self, door_id: str, directory: str, name: str, identity: str
+    ) -> tuple[int, int]:
+        """Knocks waiting for the human (``pending``) on ``door_id``, and
+        those of ``identity`` on any door of the listing."""
+        row = self._one(
+            "SELECT COALESCE(SUM(door_id = ?), 0), "
+            "COALESCE(SUM(identity = ? AND directory = ? AND name = ?), 0) "
+            "FROM knock_requests WHERE status = 'pending'",
+            door_id,
+            identity,
+            directory,
+            name,
+        )
+        return (0, 0) if row is None else (int(row[0]), int(row[1]))
+
+    def decide_knock_request(  # noqa: PLR0913
+        self,
+        request_id: str,
+        status: str,
+        now: int,
+        *,
+        expect: tuple[str, ...] = ("pending",),
+        keep_secret: bool = False,
+        keep_name: bool = False,
+        group_id: str | None = None,
+        purpose: str | None = None,
+    ) -> bool:
+        """Move a request from one of ``expect`` to ``status``. Unless kept,
+        the knock's secret goes, and so do the knocker's name and note (the
+        note always goes once a decision is made). False if it was in
+        another state (a concurrent decision won)."""
+        cur = self._db.execute(
+            "UPDATE knock_requests SET status = ?, decided_at = ?, "
+            "knock = CASE WHEN ? THEN knock ELSE NULL END, "
+            "display_name = CASE WHEN ? THEN display_name ELSE NULL END, note = NULL, "
+            "group_id = COALESCE(?, group_id), purpose = COALESCE(?, purpose) "
+            "WHERE request_id = ? AND status IN (SELECT value FROM json_each(?))",
+            (
+                status,
+                now,
+                int(keep_secret),
+                int(keep_name),
+                group_id,
+                purpose,
+                request_id,
+                json.dumps(list(expect)),
+            ),
+        )
+        return cur.rowcount == 1
+
+    def purge_knock_requests(self, before: int) -> None:
+        """Forget decided requests decided before ``before``."""
+        self._db.execute(
+            "DELETE FROM knock_requests WHERE status NOT IN ('pending', 'approving') "
+            "AND decided_at < ?",
+            (before,),
+        )
+
+    def add_knock(self, row: dict[str, Any], secret: bytes) -> None:
+        """A knock this runtime sent (``queued``), with its secret."""
+        columns = [c for c in KNOCK_COLUMNS if c in row]
+        self._db.execute(
+            f"INSERT INTO knocks ({', '.join(columns)}, secret) "  # noqa: S608
+            f"VALUES ({', '.join('?' for _ in columns)}, ?)",
+            [*(row[c] for c in columns), secret],
+        )
+
+    def knock(self, knock_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(KNOCK_COLUMNS)} FROM knocks WHERE knock_id = ?",  # noqa: S608
+            knock_id,
+        )
+        return None if row is None else dict(zip(KNOCK_COLUMNS, row, strict=True))
+
+    def knocks(self, *statuses: str) -> list[dict[str, Any]]:
+        """This runtime's knocks in these states (all, without any), oldest first."""
+        rows = self._all(
+            f"SELECT {', '.join(KNOCK_COLUMNS)} FROM knocks "  # noqa: S608
+            "WHERE ? = '[]' OR status IN (SELECT value FROM json_each(?)) "
+            "ORDER BY created_at, knock_id",
+            json.dumps(list(statuses)),
+            json.dumps(list(statuses)),
+        )
+        return [dict(zip(KNOCK_COLUMNS, r, strict=True)) for r in rows]
+
+    def knock_secret(self, knock_id: str) -> bytes | None:
+        """A sent knock's secret (welcome_secret and KeyPackage), while kept."""
+        row = self._one("SELECT secret FROM knocks WHERE knock_id = ?", knock_id)
+        return None if row is None or row[0] is None else bytes(row[0])
+
+    def knocks_since(self, since: int, door_id: str | None = None) -> int:
+        """Knocks created at or after ``since`` (on ``door_id``, or any)."""
+        row = self._one(
+            "SELECT COUNT(*) FROM knocks WHERE created_at >= ? AND (? IS NULL OR door_id = ?)",
+            since,
+            door_id,
+            door_id,
+        )
+        return 0 if row is None else int(row[0])
+
+    def update_knock(self, knock_id: str, **fields: Any) -> None:
+        for key in fields:
+            if key not in KNOCK_COLUMNS or key == "knock_id":
+                msg = f"unknown knock column {key}"
+                raise ValueError(msg)
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        self._db.execute(
+            f"UPDATE knocks SET {sets} WHERE knock_id = ?",  # noqa: S608
+            (*fields.values(), knock_id),
+        )
+
+    def end_knock(
+        self,
+        knock_id: str,
+        status: str,
+        now: int,
+        *,
+        reason: str | None = None,
+        group_id: str | None = None,
+    ) -> bool:
+        """A knock is over: joined, lapsed or failed. Its secret goes. False
+        if it had ended already."""
+        cur = self._db.execute(
+            "UPDATE knocks SET status = ?, secret = NULL, reason = ?, ended_at = ?, "
+            "group_id = COALESCE(?, group_id) "
+            "WHERE knock_id = ? AND status IN ('queued', 'sent')",
+            (status, reason, now, group_id, knock_id),
+        )
+        return cur.rowcount == 1
+
+    def knock_joined(self, knock_id: str, group_id: str, now: int) -> None:
+        """The knock's Welcome was joined: its secret goes. Recorded whatever
+        the knock's state was (a journalled join is finished even if a lapse
+        was recorded meanwhile)."""
+        self._db.execute(
+            "UPDATE knocks SET status = 'joined', secret = NULL, reason = NULL, "
+            "group_id = ?, ended_at = ? WHERE knock_id = ?",
+            (group_id, now, knock_id),
+        )
+
+    def purge_knocks(self, before: int) -> None:
+        """Forget knocks that ended before ``before``."""
+        self._db.execute("DELETE FROM knocks WHERE ended_at < ?", (before,))
+
+    def add_listed_peer(self, row: dict[str, Any]) -> None:
+        self._db.execute(
+            f"INSERT OR REPLACE INTO listed_peers ({', '.join(LISTED_PEER_COLUMNS)}) "  # noqa: S608
+            f"VALUES ({', '.join('?' for _ in LISTED_PEER_COLUMNS)})",
+            [row[c] for c in LISTED_PEER_COLUMNS],
+        )
+
+    def listed_peer(self, group_id: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(LISTED_PEER_COLUMNS)} FROM listed_peers "  # noqa: S608
+            "WHERE group_id = ?",
+            group_id,
+        )
+        return None if row is None else dict(zip(LISTED_PEER_COLUMNS, row, strict=True))
+
+    def listing_seen(self, directory: str, name: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(SEEN_COLUMNS)} FROM listings_seen "  # noqa: S608
+            "WHERE directory = ? AND name = ?",
+            directory,
+            name,
+        )
+        return None if row is None else dict(zip(SEEN_COLUMNS, row, strict=True))
+
+    def put_listing_seen(self, row: dict[str, Any], *, keep_since: int) -> None:
+        """Record a listing this runtime saw. The listings it knocked on (a
+        knock row is kept a week after it ends) or is in a group with are
+        kept; of the others (inspected only) the :data:`MAX_LISTINGS_SEEN`
+        most recent, none seen before ``keep_since``. So inspecting many
+        listings can't push out the rollback mark of one that matters."""
+        unpinned = (
+            "NOT EXISTS (SELECT 1 FROM knocks k WHERE k.directory = listings_seen.directory "
+            "AND k.name = listings_seen.name) AND NOT EXISTS (SELECT 1 FROM listed_peers p "
+            "WHERE p.directory = listings_seen.directory AND p.name = listings_seen.name)"
+        )
+        with self.tx() as db:
+            db.execute(
+                f"INSERT OR REPLACE INTO listings_seen ({', '.join(SEEN_COLUMNS)}) "  # noqa: S608
+                f"VALUES ({', '.join('?' for _ in SEEN_COLUMNS)})",
+                [row.get(c) for c in SEEN_COLUMNS],
+            )
+            db.execute(
+                f"DELETE FROM listings_seen WHERE seen_at < ? AND {unpinned}",  # noqa: S608
+                (keep_since,),
+            )
+            db.execute(
+                f"DELETE FROM listings_seen WHERE {unpinned} AND rowid NOT IN "  # noqa: S608
+                f"(SELECT rowid FROM listings_seen WHERE {unpinned} "
+                "ORDER BY seen_at DESC, rowid DESC LIMIT ?)",
+                (MAX_LISTINGS_SEEN,),
+            )
+
     # -- invites and approvals ---------------------------------------------
 
     def add_invite(  # noqa: PLR0913
@@ -1356,22 +1798,75 @@ class Store:
 
     # -- events -------------------------------------------------------------
 
-    def add_event(
+    def add_event(  # noqa: PLR0913
         self,
         group_id: str | None,
         kind: str,
         data: dict[str, Any],
         now: int,
         event_id: str,
+        *,
+        agent: bool = True,
     ) -> bool:
         """Record an event, not yet notified. ``False`` if an event with this
-        id is already recorded (the same cause, regenerated after a crash)."""
+        id is already recorded (the same cause, regenerated after a crash).
+        An event the agent may see (``agent``) also gets the next number of
+        the agent's own sequence, so the events it may not see leave no gap
+        in what it reads."""
         cur = self._db.execute(
-            "INSERT OR IGNORE INTO events (group_id, type, data, at, event_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (group_id, kind, json.dumps(data), now, event_id),
+            "INSERT OR IGNORE INTO events (group_id, type, data, at, event_id, agent_seq) "
+            "VALUES (?, ?, ?, ?, ?, CASE WHEN ? THEN "
+            "(SELECT COALESCE(MAX(agent_seq), 0) + 1 FROM events) END)",
+            (group_id, kind, json.dumps(data), now, event_id, int(agent)),
         )
         return cur.rowcount == 1
+
+    def number_agent_events(self, hidden: frozenset[str]) -> None:
+        """Once, for a database from before the agent's own sequence: number
+        the events the agent may see (every type but ``hidden``) in order."""
+        if self.kv_get("schema/agent_seq") == "1":
+            return
+        with self.tx():
+            rows = self._all(
+                "SELECT seq FROM events WHERE agent_seq IS NULL "
+                "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq",
+                json.dumps(sorted(hidden)),
+            )
+            start = self._one("SELECT COALESCE(MAX(agent_seq), 0) FROM events")
+            n = int(start[0]) if start is not None else 0
+            for (seq,) in rows:
+                n += 1
+                self._db.execute("UPDATE events SET agent_seq = ? WHERE seq = ?", (n, seq))
+            self.kv_set("schema/agent_seq", "1")
+
+    def release_agent_events(self, group_id: str, hidden: frozenset[str]) -> list[dict[str, Any]]:
+        """A group became the agent's to see: its events so far that the agent
+        may see (every type but ``hidden``) get the next numbers of the
+        agent's sequence, in order, and are to be told to the adapter again.
+        Returns them."""
+        rows = self._all(
+            "SELECT seq FROM events WHERE group_id = ? AND agent_seq IS NULL "
+            "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq",
+            group_id,
+            json.dumps(sorted(hidden)),
+        )
+        for (seq,) in rows:
+            self._db.execute(
+                "UPDATE events SET notified = 0, agent_seq = "
+                "(SELECT COALESCE(MAX(agent_seq), 0) + 1 FROM events) WHERE seq = ?",
+                (seq,),
+            )
+        out = self._all(
+            "SELECT seq, group_id, type, data, at, event_id FROM events "
+            "WHERE seq IN (SELECT value FROM json_each(?)) ORDER BY seq",
+            json.dumps([int(r[0]) for r in rows]),
+        )
+        return [self._event(r) for r in out]
+
+    def agent_visible(self, event_id: str) -> bool:
+        """Whether the agent may see this event (it has an agent sequence number)."""
+        row = self._one("SELECT agent_seq FROM events WHERE event_id = ?", event_id)
+        return row is not None and row[0] is not None
 
     # -- SSE feed -----------------------------------------------------------
 
@@ -1523,21 +2018,31 @@ class Store:
         }
 
     def events(
-        self,
-        after: int = 0,
-        limit: int = 200,
-        group_id: str | None = None,
-        exclude: Sequence[str] = (),
+        self, after: int = 0, limit: int = 200, group_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Events after ``after``, oldest first; ``exclude`` leaves out types."""
+        """Every event after ``after`` (the human's view), oldest first."""
         rows = self._all(
             "SELECT seq, group_id, type, data, at, event_id FROM events WHERE seq > ? "
-            "AND (? IS NULL OR group_id = ?) "
-            "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq LIMIT ?",
+            "AND (? IS NULL OR group_id = ?) ORDER BY seq LIMIT ?",
             after,
             group_id,
             group_id,
-            json.dumps(list(exclude)),
+            limit,
+        )
+        return [self._event(r) for r in rows]
+
+    def agent_events(
+        self, after: int = 0, limit: int = 200, group_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The events the agent may see, by the agent's own sequence: ``seq``
+        is that number, gap-free, so nothing tells it how many events it
+        doesn't see."""
+        rows = self._all(
+            "SELECT agent_seq, group_id, type, data, at, event_id FROM events "
+            "WHERE agent_seq > ? AND (? IS NULL OR group_id = ?) ORDER BY agent_seq LIMIT ?",
+            after,
+            group_id,
+            group_id,
             limit,
         )
         return [self._event(r) for r in rows]
