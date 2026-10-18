@@ -44,6 +44,7 @@ from typing import Any
 
 from agentconnect import log
 from agentconnect.cli_json import APPROVAL, HELD, KNOCK_INSPECT, KNOCK_SUMMARY, KNOCKS, LISTING
+from agentconnect.deliveries import DeliveryQueue
 from agentconnect.isolation import PeerGate
 from agentconnect.runtime.agent import AgentApi, a2a_text
 from agentconnect.runtime.engine import Engine
@@ -51,6 +52,7 @@ from agentconnect.runtime.errors import ApiError, error_reply
 from agentconnect.shapes import Opt
 from agentconnect.sockets import bind_path, prepare_bind_dir
 from agentconnect.sse import SseAdapter, Subscription
+from agentconnect.tasks import cancel_and_wait
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE, TokenDigest
 
 LOG = log.get("agentconnect.api")
@@ -127,6 +129,41 @@ class SseStream:
             gone.cancel()
             stopped.cancel()
             await _close(writer)
+
+
+MAX_POLL_SECS = 60  # the longest one GET /v0/deliveries waits
+
+
+class DeliveryPoll:
+    """A handler result that waits for deliveries (``GET /v0/deliveries``)
+    while watching the connection: a caller that goes away leases nothing,
+    and a stopping server answers at once (empty)."""
+
+    def __init__(self, queue: DeliveryQueue, stopping: asyncio.Event, **take: Any) -> None:
+        self.queue, self.stopping, self.take = queue, stopping, take
+
+    async def run(self, reader: asyncio.StreamReader) -> dict[str, Any] | None:
+        """The answer, or ``None`` if the caller left first."""
+        gone = asyncio.ensure_future(reader.read(1))  # EOF: the client left
+        taking = asyncio.ensure_future(self.queue.take(stop=self.stopping, **self.take))
+        try:
+            await asyncio.wait({gone, taking}, return_when=asyncio.FIRST_COMPLETED)
+            if not taking.done():
+                return None
+            taken, more = taking.result()
+            if gone.done():
+                self.queue.release(t.delivery_id for t in taken)
+                return None
+        finally:
+            gone.cancel()
+            await cancel_and_wait(taking)
+        return {
+            "deliveries": [
+                {"delivery_id": str(t.delivery_id), "message": t.payload} for t in taken
+            ],
+            "more": more,
+            "untrusted": True,
+        }
 
 
 Handler = Callable[[dict[str, str], dict[str, Any]], Awaitable[Any]]
@@ -670,6 +707,36 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
             ]
         },
     ),
+    RouteSpec(
+        "GET",
+        "/v0/deliveries",
+        "_deliveries",
+        "Messages waiting for an agent that pulls them (an MCP session attached to this "
+        "runtime, [adapters/mcp.md](adapters/mcp.md)), oldest first, at most 50, in the "
+        "payload shape of the webhook adapter (`untrusted`, `notice`, `addressed_to_me`). "
+        "Waits up to `timeout` seconds for one; with `addressed_only`, for one that "
+        "addresses this agent (the answer then holds the other queued messages too, as "
+        "context). The messages are leased to the caller for 120 seconds: no other caller "
+        "gets them meanwhile, and they are queued again unless acknowledged with "
+        "`POST /v0/deliveries/ack`. `more` is true when more are queued. Needs "
+        '`daemon.default_adapter = "mcp"` (the MCP host sets it), else `409 no_deliveries`.',
+        query="`group`: only that group. `addressed_only`: `1` or `0` (default 0). "
+        "`timeout`: seconds to wait, 0 to 60 (default 0).",
+        response={
+            "deliveries": [{"delivery_id": "str", "message": "object"}],
+            "more": "bool",
+            "untrusted": "bool",
+        },
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/deliveries/ack",
+        "_deliveries_ack",
+        "Acknowledge leased deliveries: they leave the queue, and a repeat of one (after "
+        "a crash) is not queued again. `acked` counts those that were still queued.",
+        request={"ids": ["str"]},
+        response={"acked": "int"},
+    ),
 )
 
 # Every error the server can answer with: status, code, meaning.
@@ -747,6 +814,11 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (405, "method_not_allowed", "The path exists but not for this method."),
     (408, "timeout", "The request was not received within 10 seconds."),
     (409, "stale_epoch", "The group changed since the epoch you passed."),
+    (
+        409,
+        "no_deliveries",
+        "Deliveries: this runtime has no delivery queue (`daemon.default_adapter` isn't `mcp`).",
+    ),
     (
         409,
         "expired",
@@ -854,6 +926,7 @@ class ApiServer:
         self._server: asyncio.Server | None = None
         self._connections = 0
         self._streams: set[SseStream] = set()
+        self._stopping = asyncio.Event()  # long polls answer at once
         self._idle = asyncio.Event()
         self._idle.set()
         self._port: int | None = None
@@ -1088,6 +1161,33 @@ class ApiServer:
             raise ApiError(404, "not_found", "no such group")
         return SseStream(hub, hub.subscribe(group, p.get(LAST_EVENT_ID)))
 
+    def _queue(self) -> DeliveryQueue:
+        queue = self.daemon.adapters.get("mcp")
+        if not isinstance(queue, DeliveryQueue):
+            raise ApiError(409, "no_deliveries", 'set daemon.default_adapter = "mcp"')
+        return queue
+
+    async def _deliveries(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        addressed = p.get("addressed_only", "0") or "0"
+        if addressed not in ("0", "1"):
+            raise ApiError(400, "bad_request", "addressed_only must be 0 or 1")
+        timeout = _query_int(p, "timeout")
+        if timeout > MAX_POLL_SECS:
+            raise ApiError(400, "bad_request", f"timeout must be 0..{MAX_POLL_SECS}")
+        return DeliveryPoll(
+            self._queue(),
+            self._stopping,
+            group=p.get("group") or None,
+            addressed_only=addressed == "1",
+            wait_secs=float(timeout),
+        )
+
+    async def _deliveries_ack(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        ids = b.get("ids")
+        if not isinstance(ids, list) or not all(isinstance(x, str) and x.isdigit() for x in ids):
+            raise ApiError(400, "bad_request", "ids must be a list of delivery ids")
+        return {"acked": self._queue().ack(int(x) for x in ids)}
+
     # -- HTTP --------------------------------------------------------------
 
     def _authorize(self, headers: dict[str, str], human: bool) -> str:
@@ -1159,6 +1259,11 @@ class ApiServer:
         self._idle.clear()
         try:
             status, payload = await self._request(reader)
+            if isinstance(payload, DeliveryPoll):
+                answer = await payload.run(reader)
+                if answer is None:
+                    return
+                payload = answer
             if isinstance(payload, SseStream):
                 self._streams.add(payload)
                 try:
@@ -1269,6 +1374,7 @@ class ApiServer:
         LOG.info("api_listening", transport="tcp" if cfg.api_tcp_port else "unix")
 
     async def stop(self) -> None:
+        self._stopping.set()
         for stream in list(self._streams):
             stream.stop()
         if self._server is not None:

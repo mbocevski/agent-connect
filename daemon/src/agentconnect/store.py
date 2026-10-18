@@ -31,6 +31,7 @@ import agentconnect_core as ac
 from agentconnect.keystore import private_file
 
 SqlParam = None | int | float | str | bytes
+HANDLED_KEEP = 50_000  # ids an in-process agent finished with (Runtime.handled, the MCP host)
 
 
 class _Cursor:
@@ -1978,6 +1979,19 @@ class Store:
 
     def adapter_event_done(self, seq: int) -> None:
         self._db.execute("DELETE FROM adapter_events WHERE seq = ?", (seq,))
+
+    def adapter_event_finish(self, adapter: str, seq: int) -> bool:
+        """Take one queued item of ``adapter`` off the queue and remember its
+        id as handled, in one transaction; ``False`` if it isn't queued."""
+        with self.tx() as db:
+            row = db.execute(
+                "SELECT event_id FROM adapter_events WHERE seq = ? AND adapter = ?", (seq, adapter)
+            ).fetchone()
+            if row is None:
+                return False
+            db.execute("DELETE FROM adapter_events WHERE seq = ?", (seq,))
+            self.handled_add(str(row[0]), HANDLED_KEEP)
+        return True
 
     # -- ids an in-process agent's handlers finished with ---------------------
 
