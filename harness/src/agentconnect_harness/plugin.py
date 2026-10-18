@@ -1,7 +1,9 @@
 """pytest fixtures for multi-node tests (registered in the root conftest).
 
 * ``relay``: the real relay binary on a random port (one per session);
-* ``cluster``: daemons with recording adapters on a shared FakeClock;
+* ``cluster``: runtimes with recording adapters on a shared FakeClock,
+  once per host (``daemon``, ``embedded``); ``@pytest.mark.hosts(...)``
+  keeps a scenario to some;
 * ``sockdir``: a short temp directory for API sockets;
 * ``group``: ``await group(n, mode)`` -> ``(nodes, group_id)``;
 * ``invite``: ``await invite(inviter, joiner, group_id)``;
@@ -22,7 +24,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from agentconnect_harness.cluster import Cluster, Node
+from agentconnect_harness.cluster import HOSTS, Cluster, Node
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import RelayProcess, run_relay
 
@@ -33,10 +35,26 @@ from agentconnect_harness.relay import RelayProcess, run_relay
 HARNESS_TIMEOUT_SECS = 30
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    kept: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
     for item in items:
         if "harness" in item.path.parts and item.get_closest_marker("timeout") is None:
             item.add_marker(pytest.mark.timeout(HARNESS_TIMEOUT_SECS))
+        (kept if _runs_on_its_host(item) else deselected).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = kept
+
+
+def _runs_on_its_host(item: pytest.Item) -> bool:
+    """``@pytest.mark.hosts("daemon")`` keeps a scenario to the hosts named
+    (one that is about a host itself, such as ``agentconnect daemon run``)."""
+    marker = item.get_closest_marker("hosts")
+    callspec = getattr(item, "callspec", None)
+    if marker is None or callspec is None or "cluster" not in callspec.params:
+        return True
+    return callspec.params["cluster"] in marker.args
 
 
 @pytest.fixture(scope="session")
@@ -45,11 +63,12 @@ def relay(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RelayProcess]:
         yield r
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(params=HOSTS)
 async def cluster(
-    relay: RelayProcess, tmp_path: Path, rng: random.Random
+    request: pytest.FixtureRequest, relay: RelayProcess, tmp_path: Path, rng: random.Random
 ) -> AsyncIterator[Cluster]:
-    c = Cluster(relay, tmp_path, rng)
+    """Runs each scenario once per host: ``daemon`` and ``embedded``."""
+    c = Cluster(relay, tmp_path, rng, host=str(request.param))
     try:
         yield c
     finally:

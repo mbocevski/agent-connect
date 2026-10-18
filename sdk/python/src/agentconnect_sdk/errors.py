@@ -30,3 +30,12 @@ class ReplayError(SignatureError):
 
 class PayloadError(ValueError):
     """A webhook or stream payload is not the shape the daemon sends."""
+
+
+class DataDirLockedError(AgentConnectError):
+    """Another runtime (a separate daemon, or another embedded agent) owns
+    the embedded agent's data directory. One runtime per identity: use
+    another ``name`` or ``data_dir``, or stop the other one."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__("locked", message)

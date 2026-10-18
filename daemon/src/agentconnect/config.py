@@ -598,14 +598,18 @@ def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
+    *,
+    use_file: bool = True,
     **overrides: Any,
 ) -> Config:
-    """Read the TOML file (if present), then apply env and keyword overrides."""
+    """Read the TOML file (if present), then apply env and keyword overrides.
+    ``use_file=False`` reads no file at all (the embedded SDK, which never
+    picks up the separate daemon's ``config.toml`` by accident)."""
     if path is None:
         env_path = environ.get("AC_CONFIG", "")
         path = Path(env_path) if env_path else default_config_path(environ)
     data: dict[str, Any] = {}
-    if path.exists():
+    if use_file and path.exists():
         try:
             data = tomllib.loads(path.read_text(encoding="utf-8"))
         except tomllib.TOMLDecodeError as e:

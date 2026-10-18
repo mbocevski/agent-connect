@@ -1,8 +1,18 @@
 """N in-process runtimes against one real relay, each behind its own proxy.
 
-Every node is a :class:`~agentconnect.runtime.Runtime` with the node's
-adapters, as ``agentconnectd`` hosts it (ADR-005); scenarios drive its
-engine (``node.daemon``).
+Every node is a :class:`~agentconnect.runtime.Runtime`, hosted the way one
+of the two hosts hosts it (ADR-005):
+
+* ``daemon``: what ``agentconnectd`` runs, the runtime with the node's
+  adapters;
+* ``embedded``: what ``AgentConnect.embedded`` runs, the SDK's
+  :class:`~agentconnect_sdk.embedded.EmbeddedHost` with its in-process
+  callback adapter, its stored deduplication and the SDK's dispatch to user
+  handlers. The node's recording adapter sits in front of the callback
+  adapter (:class:`EmbeddedTap`), so a scenario sees the same recording in
+  both hosts, and :attr:`Node.handled` records what reached user code.
+
+The ``cluster`` fixture runs every scenario once per host.
 
 All nodes share one :class:`FakeClock` (starting at the real current time,
 so signed REST timestamps and invite expiries agree with the relay's system
@@ -17,9 +27,19 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
-from agentconnect.adapter import Adapter, RecordingAdapter
+from agentconnect.adapter import (
+    Adapter,
+    Delivery,
+    DeliveryResult,
+    Event,
+    GroupView,
+    OutboundSend,
+    RecordingAdapter,
+    Sender,
+)
+from agentconnect.callback import CallbackAdapter
 from agentconnect.clock import Clock, FakeClock
 from agentconnect.config import Config
 from agentconnect.identity import Seeded
@@ -27,11 +47,66 @@ from agentconnect.keystore import FileKeystore
 from agentconnect.runtime import Runtime
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import Engine, Options
+from agentconnect.tasks import cancel_and_wait
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import RelayProcess
+from agentconnect_sdk import AgentConnect, Group, Message
+from agentconnect_sdk import Event as SdkEvent
+from agentconnect_sdk.embedded import EmbeddedHost
 
 WAIT = 8.0  # real-time guard for every wait; nothing sleeps
+HOSTS = ("daemon", "embedded")
+
+
+class EmbeddedTap(RecordingAdapter):
+    """The embedded host's callback adapter with a recording in front: it
+    records what the runtime handed over and passes everything on. Each
+    start of the node attaches the new host's adapter (:meth:`attach`)."""
+
+    def __init__(self, name: str = "recording", card: dict[str, Any] | None = None) -> None:
+        super().__init__(name, card)
+        self.inner: CallbackAdapter | None = None
+
+    def attach(self, inner: CallbackAdapter) -> Adapter:
+        self.inner = inner
+        return self
+
+    def _callback(self) -> CallbackAdapter:
+        if self.inner is None:
+            msg = "no embedded host attached"
+            raise RuntimeError(msg)
+        return self.inner
+
+    def bind_store(self, store: Any) -> None:
+        self._callback().bind_store(store)
+
+    @override
+    async def deliver(
+        self, group: GroupView, sender: Sender, to: list[str], inner: Delivery
+    ) -> DeliveryResult:
+        if self.retry_next > 0:
+            self.retry_next -= 1
+            self._poke()
+            return DeliveryResult.RETRY
+        result = await self._callback().deliver(group, sender, to, inner)
+        if result is DeliveryResult.ACK:
+            self.deliveries.append(inner)
+        self._poke()
+        return result
+
+    @override
+    async def on_event(self, group: GroupView | None, event: Event) -> None:
+        await self._callback().on_event(group, event)
+        await super().on_event(group, event)
+
+    @override
+    async def on_outbound(self, send: OutboundSend) -> None:
+        self.send = send
+        await self._callback().on_outbound(send)
+
+    async def close(self) -> None:
+        await self._callback().close()
 
 
 @dataclass
@@ -42,44 +117,103 @@ class Node:
     adapter: RecordingAdapter
     clock: FakeClock
     seed: int
+    host: str = "daemon"
+    # Serve the local API as the hosts do (scenarios usually build their own).
+    serve_api: bool = False
     starts: int = 0
     make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None
     runtime: Runtime = field(init=False)
     # The node's protocol engine (the runtime's), which scenarios drive.
     daemon: Engine = field(init=False)
+    # Embedded host only: the SDK client, and what reached its handlers.
+    sdk: AgentConnect | None = None
+    handled: list[Message | SdkEvent] = field(default_factory=list)
+    _serving: asyncio.Task[None] | None = None
 
-    def _make(self) -> Runtime:
-        """A runtime on this node's state, constructed but not started (it
-        holds the lock and the databases until stopped). Scenarios build
-        their own API servers, so it serves none."""
+    def _options(self) -> Options:
         # A fresh seed per start: a restarted runtime must not replay the
         # randomness (keys, msg_ids) of its previous run.
         self.starts += 1
         seed = self.seed + self.starts
+        return Options(testing=Seeded(seed), backoff_rng=random.Random(seed))  # noqa: S311
+
+    def recorder(self, card: dict[str, Any] | None = None) -> RecordingAdapter:
+        """A fresh recording adapter for this node's host (set it as
+        ``adapter`` and restart), e.g. to send an Agent Card."""
+        return recorder(self.host, card)
+
+    def _make(self) -> Runtime:
+        """A runtime on this node's state, constructed but not started (it
+        holds the lock and the databases until stopped)."""
         return Runtime(
             self.config,
             adapters=[self.adapter, *self._extra_adapters()],
             clock=self.clock,
             keystore=FileKeystore(self.config.data_dir / "keys"),
-            options=Options(testing=Seeded(seed), backoff_rng=random.Random(seed)),  # noqa: S311
-            serve_api=False,
+            options=self._options(),
+            serve_api=self.serve_api,
         )
 
     def _extra_adapters(self) -> list[Adapter]:
-        # Fresh per start: a restarted daemon gets a fresh adapter.
+        # Fresh per start: a restarted runtime gets a fresh adapter.
         if self.make_adapters is None:
             return []
         return self.make_adapters(self.config, self.clock)
 
     async def start(self) -> None:
-        self.runtime = self._make()
-        await self.runtime.start()
+        await self._stop_serving()
+        if self.host == "embedded":
+            await self._start_embedded(FileKeystore(self.config.data_dir / "keys"))
+        else:
+            self.runtime = self._make()
+            await self.runtime.start()
         self.daemon = self.runtime._engine
         await self.connected()
 
+    async def _start_embedded(self, keystore: FileKeystore) -> None:
+        tap = self.adapter
+        if not isinstance(tap, EmbeddedTap):
+            msg = "an embedded node records through an EmbeddedTap"
+            raise TypeError(msg)
+        host = EmbeddedHost(
+            self.config,
+            extra_adapters=self._extra_adapters(),
+            wrap=tap.attach,
+            clock=self.clock,
+            keystore=keystore,
+            options=self._options(),
+            serve_api=self.serve_api,
+            flush=0,
+        )
+        sdk = AgentConnect.hosted(host)
+
+        async def record(item: Message | SdkEvent, _group: Group | None) -> None:
+            self.handled.append(item)
+
+        sdk.on_message(record)
+        sdk.on_task(record)
+        sdk.on_event(record)
+        await sdk.start()
+        if host.runtime is None:  # pragma: no cover - start sets it
+            msg = "the embedded runtime did not start"
+            raise RuntimeError(msg)
+        self.sdk, self.runtime = sdk, host.runtime
+        ready = asyncio.Event()
+        self._serving = asyncio.ensure_future(sdk.serve(ready=ready))
+        await asyncio.wait_for(ready.wait(), WAIT)
+
+    async def _stop_serving(self) -> None:
+        if self._serving is not None:
+            serving, self._serving = self._serving, None
+            await cancel_and_wait(serving)
+
     async def stop(self) -> None:
         """Stop without any flush (a crash, for the journal)."""
-        await self.runtime.stop(flush=0)
+        await self._stop_serving()
+        if self.sdk is not None:
+            await self.sdk.aclose()
+        else:
+            await self.runtime.stop(flush=0)
         if self.daemon.running:  # a scenario swapped in an engine of its own
             await self.daemon.stop()
 
@@ -115,8 +249,8 @@ class Node:
 
 
 async def serve_api(node: Node, sockdir: Path) -> ApiServer:
-    """Serve ``node``'s daemon on a Unix socket in ``sockdir``. Its tokens are
-    in ``node.config.data_dir`` (``api-token``, ``human-token``)."""
+    """Serve ``node``'s runtime on a Unix socket in ``sockdir``. Its tokens
+    are in ``node.config.data_dir`` (``api-token``, ``human-token``)."""
     node.config = node.config.with_overrides(api_socket=sockdir / f"{node.name}.sock")
     node.daemon.config = node.config
     server = ApiServer(node.daemon)
@@ -135,6 +269,10 @@ def api_token(server: ApiServer, scope: str) -> str:
     return path.read_text(encoding="ascii").strip()
 
 
+def recorder(host: str, card: dict[str, Any] | None = None) -> RecordingAdapter:
+    return EmbeddedTap(card=card) if host == "embedded" else RecordingAdapter(card=card)
+
+
 def status(node: Node, group_id: str) -> str | None:
     """The group's local status on ``node`` (``None`` if unknown)."""
     g = node.daemon.store.group(group_id)
@@ -142,15 +280,21 @@ def status(node: Node, group_id: str) -> str | None:
 
 
 class Cluster:
-    def __init__(self, relay: RelayProcess, tmp: Path, rng: random.Random) -> None:
+    def __init__(
+        self, relay: RelayProcess, tmp: Path, rng: random.Random, host: str = "daemon"
+    ) -> None:
+        if host not in HOSTS:
+            msg = f"unknown host {host}"
+            raise ValueError(msg)
         self.relay = relay
         self.tmp = tmp
         self.rng = rng
+        self.host = host
         now = datetime.now(UTC).replace(microsecond=0)
         self.clock = FakeClock(now)
         self.nodes: list[Node] = []
 
-    async def node(
+    async def node(  # noqa: PLR0913
         self,
         name: str | None = None,
         auto_approve: bool = True,
@@ -158,15 +302,21 @@ class Cluster:
         *,
         default_adapter: str = "recording",
         make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None,
+        host: str | None = None,
+        serve_api: bool = False,
+        data_dir: Path | None = None,
         **overrides: Any,
     ) -> Node:
-        """A started daemon. ``identity_of`` makes it a replica (another
-        instance of that node's identity). ``adapter`` builds the node's
-        adapter from its data directory, instead of a recording adapter."""
+        """A started node. ``identity_of`` makes it a replica (another
+        instance of that node's identity). ``make_adapters`` adds adapters
+        built from its config. ``host`` overrides the cluster's host;
+        ``serve_api`` serves the local API on the node's socket, in
+        ``data_dir`` (default ``<tmp>/<name>``) unless ``api_socket`` says
+        otherwise."""
         name = name or f"n{len(self.nodes)}"
         proxy = RelayProxy(self.relay.ws_url)
         await proxy.start()
-        data_dir = self.tmp / name
+        data_dir = data_dir or self.tmp / name
         if identity_of is not None:
             secret = identity_of.daemon.keystore.get("identity")
             if secret is None:
@@ -184,13 +334,16 @@ class Cluster:
             auto_approve=auto_approve,
             **overrides,
         )
+        chosen = host or self.host
         node = Node(
             name,
             config,
             proxy,
-            RecordingAdapter(),
+            recorder(chosen),
             self.clock,
             self.rng.getrandbits(63),
+            host=chosen,
+            serve_api=serve_api,
             make_adapters=make_adapters,
         )
         await node.start()

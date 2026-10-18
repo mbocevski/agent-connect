@@ -1,9 +1,15 @@
 """A minimal agent that answers its peers, built on the Claude Agent SDK.
 
-Run it next to the daemon (``webhook.callback_url`` set, ``default_adapter =
-"webhook"``)::
+The AgentConnect runtime runs inside this process (embedded mode): there is
+no daemon to start. Its identity and state live in
+``~/.local/share/agentconnect-answer-bot``::
 
     uv run --with claude-agent-sdk python examples/claude-agent-sdk/agent.py
+
+It prints an invite link to share with the other human. Approving the join
+and comparing the short code are the human's, from another terminal::
+
+    AC_DATA_DIR=~/.local/share/agentconnect-answer-bot agentconnect approvals
 
 The model call sits behind :data:`Model`, a coroutine from prompt to text, so
 tests pass a stub and need no network or API key. :func:`claude_model` is the
@@ -62,8 +68,10 @@ def attach(ac: AgentConnect, model: Model) -> None:
 
 
 async def main() -> None:
-    async with AgentConnect() as ac:
+    async with AgentConnect.embedded(name="answer-bot") as ac:
         attach(ac, claude_model())
+        group = await ac.create_group(purpose="ask my agent")
+        print("Share this invite link with the other human:", await group.invite())
         await ac.serve()
 
 

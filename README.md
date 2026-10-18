@@ -13,10 +13,16 @@ it to work with agents they don't control.
 
 ## How it works
 
-Each agent talks to a local daemon, `agentconnectd`. Every conversation is an
+Each agent has an AgentConnect runtime on its own machine, which holds its
+keys and does all the cryptography. The runtime runs either as a separate
+daemon, `agentconnectd`, which suits A2A servers and always-on setups and is
+reachable while the service runs, or embedded in a Python agent's own process
+through the SDK, reachable while that process runs
+([ADR-005](docs/adr/005-deployment-modes.md)). While an agent is offline, the
+relay keeps its messages for up to 7 days. Every conversation is an
 [MLS](https://www.rfc-editor.org/rfc/rfc9420) group, and a conversation
-between two agents is a group of two. The daemons do all the cryptography.
-The relay orders and forwards their messages and never holds a key.
+between two agents is a group of two. The relay orders and forwards their
+messages and never holds a key.
 
 ```text
  Alice's agent                                         Bob's agent
@@ -61,14 +67,18 @@ What works on `main` today:
 - **Relay** (`relay/`, Rust): the MLS Delivery Service, per-instance
   mailboxes, the invite registry and an invite landing page without
   JavaScript.
-- **Daemon** (`daemon/`, Python): identity and keys, the relay connection,
-  durable inbound and outbound queues, and the local control API.
+- **Runtime and daemon** (`daemon/`, Python): identity and keys, the relay
+  connection, durable inbound and outbound queues, the safety policy and the
+  local control API, in one runtime that `agentconnectd` hosts or an agent
+  embeds.
 - **CLI** (`agentconnect`): runs the daemon and covers the invite lifecycle:
   create and accept invites, approve joins, compare the short code, send a
   test message and read events ([docs/cli.md](docs/cli.md)).
-- **Headless agents**: a webhook adapter and an event stream hand messages
-  to your agent, and the Python SDK (`sdk/python/`) receives them, verifies
-  signatures, removes duplicates and sends replies
+- **Headless agents**: the Python SDK (`sdk/python/`) runs the runtime
+  inside the agent's process (`AgentConnect.embedded`), with no daemon to
+  start, and hands messages to the agent's handlers directly. It can also
+  attach to a separate daemon through its webhook adapter or event stream.
+  Either way it removes duplicates and sends replies
   ([docs/sdk.md](docs/sdk.md)).
 - **A2A adapter** (in the daemon): hands group messages to a local A2A v1.0
   server agent and sends its answers back, and serves a local A2A facade so
@@ -176,6 +186,29 @@ agentconnect status
 
 The blocks marked `runnable` run as a test against a local relay and two
 daemons (`harness/tests/test_readme.py`).
+
+### In a Python agent, without a daemon
+
+A headless agent can run the runtime in its own process instead
+([docs/sdk.md](docs/sdk.md)). Its identity lives in
+`~/.local/share/agentconnect-<name>`, and the human runs the same
+`approvals`, `verify` and `safety` commands against it with
+`AC_DATA_DIR` set to that directory while the agent runs.
+
+```python
+from agentconnect_sdk import AgentConnect
+
+async with AgentConnect.embedded(name="release-bot", relay="ws://127.0.0.1:8080") as ac:
+    group = await ac.create_group(purpose="Plan the v0.1 release")
+    print(await group.invite())  # share with the other human
+
+    @ac.on_message
+    async def handle(msg, group):
+        if msg.addressed_to_me:
+            await group.reply(msg, f"got: {msg.raw_text}")
+
+    await ac.serve()
+```
 
 ## Security model
 

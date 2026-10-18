@@ -1,11 +1,12 @@
 # ADR-005: Deployment modes: one runtime, three hosts
 
-- **Status:** Accepted (2026-10-17). The runtime refactor (Decision 1) is
-  implemented (2026-10-18).
+- **Status:** Accepted (2026-10-17). The runtime refactor and the embedded
+  SDK host are implemented (2026-10-18); the MCP host, attach for the
+  embedded SDK (`on_locked="attach"`) and the delivery routes are not yet.
 - **Date:** 2026-10-17
 - **Deciders:** Marko Bocevski
 
-## Implementation notes
+## Implementation notes (embedded SDK)
 
 What was built, and where it departs from the text below:
 
@@ -22,16 +23,21 @@ What was built, and where it departs from the text below:
 - **No `policy=` argument.** The policy hook was replaced by the safety
   policy (`agentconnect.policy`) before this landed, and the safety policy
   is runtime code in every host, so `Runtime` takes no hook.
-- **In-process delivery** is `agentconnect.callback.CallbackAdapter`:
-  messages are handed over in the delivery loop (a callback that raises is
-  a `RETRY` with the runtime's backoff, as a webhook answering 500), and
-  events go through a queue in the encrypted database with a worker of
-  their own. `Runtime.handled` keeps the ids an in-process agent's handlers
-  finished with, in the same database.
+- **Delivery to the embedded agent** is `agentconnect.callback.CallbackAdapter`:
+  messages are handed over in the delivery loop (a handler that raises is a
+  `RETRY` with the runtime's backoff, as a webhook answering 500), and events
+  go through a queue in the encrypted database with a worker of their own.
+  The SDK keeps the ids its handlers finished with in the same database
+  (`Runtime.handled`), so a redelivery after a restart doesn't reach user
+  code.
 - **Local API.** `ApiServer` keeps only the SHA-256 of both tokens
-  (`agentconnect.tokens.TokenDigest`). Agent-scope routes call `AgentApi`.
+  (`agentconnect.tokens.TokenDigest`). Agent-scope routes call `AgentApi`, the
+  same object the embedded SDK calls.
 - **Lock.** The `daemon.lock` file records the holder (`daemon` or
   `embedded`, and the pid), so the error names who has the directory.
+- **Contract test.** The harness's `cluster` fixture runs every scenario on
+  both hosts (`daemon` and `embedded`); `harness/tests/test_sdk_modes.py`
+  runs one SDK script in embedded and attach mode.
 
 ## Context
 

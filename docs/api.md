@@ -36,9 +36,12 @@ sandbox.
 
 The runtime reads each token file once when it starts and keeps only the
 token's SHA-256, which it compares in constant time; the CLI reads the file
-per command. The agent-token routes call the runtime's agent-scope
-operations (`AgentApi`), the same object any host of the runtime gives its
-agents, which has no human-scope operation.
+per command. The same API, with the same two tokens, is served by every host
+of the runtime: the separate daemon, and an agent that embeds the runtime
+through the SDK ([sdk.md](sdk.md)), whose socket is in its own data
+directory. The embedded SDK calls the agent-scope operations in-process,
+through the same code the agent-token routes use, and has no path to the
+human-token routes.
 
 In the separate-OS-user mode ([isolation.md](isolation.md)) the socket is
 opened to an agent group, a connection from a UID that isn't listed is

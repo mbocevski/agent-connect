@@ -22,7 +22,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "pytest-xdist", specifier = ">=3.8" },
     { name = "ruff", specifier = ">=0.17.1" },
     { name = "ty", specifier = "==0.0.89" },
 ]
@@ -117,11 +117,15 @@ name = "agentconnect-sdk"
 version = "0.0.0"
 source = { editable = "sdk/python" }
 dependencies = [
+    { name = "agentconnect" },
     { name = "httpx" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "httpx", specifier = ">=0.28.1" }]
+requires-dist = [
+    { name = "agentconnect", editable = "daemon" },
+    { name = "httpx", specifier = ">=0.28.1" },
+]
 
 [[package]]
 name = "aiologic"

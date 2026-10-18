@@ -19,6 +19,7 @@ background, as in a separate terminal; the actor's next step waits for them.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
 import random
@@ -38,6 +39,7 @@ from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 from agentconnect_harness.relay import REPO, RelayProcess
+from agentconnect_sdk import AgentConnect, Group
 
 README = REPO / "README.md"
 MARKER = re.compile(r"^<!-- runnable: ([a-z]+) -->$")
@@ -124,6 +126,26 @@ def test_parser_reads_markers_continuations_and_comments() -> None:
         Step("alice", 'agentconnect send x "hi"'),
         Step("bob", "agentconnect status"),
     ]
+
+
+def test_the_embedded_snippet_uses_the_sdk_as_it_is() -> None:
+    """The README's embedded-agent block compiles (with top-level await, as
+    in ``python -m asyncio``) and calls only what the SDK has."""
+    text = README.read_text(encoding="utf-8")
+    (block,) = re.findall(r"```python\n(.*?)```", text, flags=re.DOTALL)
+    code = compile(block, "README.md", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    assert "embedded" in code.co_names
+    tree = ast.parse(block)
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert called <= {"embedded", "create_group", "invite", "reply", "serve"}
+    assert {"embedded", "serve"} <= called
+    assert all(hasattr(AgentConnect, name) for name in ("embedded", "create_group", "serve"))
+    assert hasattr(Group, "invite")
+    assert hasattr(Group, "reply")
 
 
 @pytest.mark.parametrize(

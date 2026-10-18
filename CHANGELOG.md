@@ -10,13 +10,33 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Embedded SDK mode (ADR-005): `AgentConnect.embedded(name="my-agent")`
+  runs the AgentConnect runtime inside the agent's own process and asyncio
+  loop, so a headless agent needs no separate daemon, and its keys live only
+  in that process. Messages and events reach the handlers through an
+  in-process adapter (`agentconnect.callback.CallbackAdapter`) with the
+  webhook's semantics: a handler that raises is retried with backoff, in
+  order, and logged without the message. The ids handlers finished with are
+  kept in the runtime's encrypted database, so a redelivery after a crash or
+  restart doesn't reach user code. The data directory is
+  `$XDG_DATA_HOME/agentconnect-<name>` (or `data_dir=`, `AC_DATA_DIR`), one
+  per identity, and starting fails with `DataDirLockedError` when a daemon
+  or another embedded agent holds it. The embedded runtime serves the same
+  local API socket, so the human runs `agentconnect approvals`, `verify`
+  and `safety set` against it with `AC_DATA_DIR`; the SDK offers no human
+  operation and never reads the human token. `async with` and `aclose()`
+  give queued sends a bounded flush, then stop and release the lock, and
+  are safe to cancel. `AgentConnect.attach()` names today's mode against a
+  separate daemon; both modes have the same API, errors and framing. See
+  `docs/sdk.md`.
 - `agentconnect.runtime.Runtime`, the embeddable runtime (ADR-005): the
   engine, the local API, an `AdapterRegistry` and `AgentApi`, the
-  agent-scope operations that the local API's agent-token routes call.
-  `agentconnectd` is now a thin host over it (`agentconnect.daemon.serve`),
-  and on SIGINT or SIGTERM it gives queued sends up to 3 seconds to go out.
-  `agentconnect.callback.CallbackAdapter` hands messages and events to Python
-  callbacks in-process, with the webhook adapter's retry rules.
+  agent-scope operations that the local API's agent-token routes and the
+  embedded SDK both call. `agentconnectd` is now a thin host over it
+  (`agentconnect.daemon.serve`), and on SIGINT or SIGTERM it gives queued
+  sends up to 3 seconds to go out. `agentconnect.callback.CallbackAdapter`
+  hands messages and events to Python callbacks in-process, with the
+  webhook adapter's retry rules.
 - The daemon failpoint `delivery.after_adapter`, between an adapter's ack
   and the inbox recording it.
 - Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon
@@ -333,7 +353,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (read once at start, compared in constant time), not their values.
 - The data-directory lock records its holder, so a second runtime's error
   says whether a daemon or an embedded agent has the directory, and its pid.
-- The multi-node harness runs its nodes as `Runtime`s, as the hosts do.
+- `agentconnect-sdk` depends on `agentconnect` (the runtime and the CLI).
+- The multi-node harness runs every scenario on both hosts, the separate
+  daemon and the embedded SDK, and the Python suite runs on all cores with
+  pytest-xdist (`just test`, `just cov`).
 - The default relay is now `wss://connect.yggdrasill.network`, and the
   planned A2A extension URI in SPEC §13 is
   `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't

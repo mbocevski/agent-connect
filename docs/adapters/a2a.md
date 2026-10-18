@@ -12,9 +12,9 @@ It works in two directions:
 - **Facade.** A local A2A client talks to a group through an A2A server on
   `127.0.0.1`, as if the group were one A2A agent.
 
-The code is in `daemon/src/agentconnect/a2a_adapter/`. `agentconnectd`, the
-separate-daemon host of the AgentConnect runtime, registers it from the
-`[a2a]` configuration.
+The code is in `daemon/src/agentconnect/a2a_adapter/`. It is configured for
+the separate daemon; a Python agent that embeds the runtime through the SDK
+gets its messages in-process instead ([sdk.md](../sdk.md)).
 
 ## Setup
 

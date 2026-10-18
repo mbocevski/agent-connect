@@ -8,6 +8,12 @@ agentconnect daemon run [--config PATH] [--tcp-port N]   # foreground, JSON logs
 agentconnect status [--json]                             # reads the local API
 ```
 
+Everything protocol-related is in the runtime, `agentconnect.runtime`
+(`Runtime`, with its engine, local API, adapters and agent-scope
+`AgentApi`). `agentconnectd` (`agentconnect.daemon`) is one host of it; the
+Python SDK's embedded mode (`AgentConnect.embedded`, [docs/sdk.md](../docs/sdk.md))
+is the other. Both run the same checks, and both serve the local API below.
+
 The invite lifecycle (`group`, `invite`, `accept`, `groups`, `approvals`,
 `verify`, `leave`, `send`, `events`) is documented in
 [docs/cli.md](../docs/cli.md), with the `--json` schemas and exit codes.
@@ -72,6 +78,6 @@ event a stable `event_id`; deduplicate by them. Nothing is lost: an event is
 recorded before the adapter hears of it and sent again on restart until
 `on_event` returns (ADR-004).
 The webhook adapter ([docs/adapters/webhook.md](../docs/adapters/webhook.md)) and the SSE adapter (`GET /v0/events`, [docs/api.md](../docs/api.md#event-stream)) serve headless agents.
-`RecordingAdapter` is the in-memory adapter used by tests. Every message in
+`CallbackAdapter` (`agentconnect.callback`) is the embedded SDK's in-process adapter, with the webhook's retry rules. `RecordingAdapter` is the in-memory adapter used by tests. Every message in
 and out goes through the safety policy (`agentconnect.policy`) before any
 adapter sees it ([docs/safety.md](../docs/safety.md)).

@@ -244,10 +244,20 @@ scenarios are in `harness/tests/`.
 - **Recording adapter.** `agentconnect.adapter.RecordingAdapter` records
   every delivery (with its untrusted framing) and every event, and can
   return `retry` on demand.
+- **Both hosts, one suite.** Every node is a `Runtime` (ADR-005), and the
+  `cluster` fixture runs each scenario twice: on the `daemon` host (what
+  `agentconnectd` runs) and on the `embedded` host (what
+  `AgentConnect.embedded` runs: the SDK's embedded host with its in-process
+  callback adapter, stored deduplication and dispatch to handlers). On the
+  embedded host the node's recording adapter sits in front of the callback
+  adapter, so a scenario's assertions hold on both, and `node.handled`
+  records what reached user code; `node.sdk` is the SDK client. A scenario
+  that is about one host itself carries `@pytest.mark.hosts("daemon")`.
 - **Fixtures:**
   - `cluster`: `await cluster.node(name, auto_approve=..., identity_of=...)`
-    starts a daemon; `identity_of` makes a replica of another node's
-    identity.
+    starts a node; `identity_of` makes a replica of another node's
+    identity, `host=` picks a host for one node, and `serve_api=True`
+    serves its local API as the hosts do.
   - `group(n, mode)`: `n` members fully joined and settled; `mode` is
     `"distinct"` (one identity each) or `"replicas"` (instances of one
     identity).
@@ -264,8 +274,8 @@ scenarios are in `harness/tests/`.
 - **Seeded.** Each daemon's core randomness and backoff jitter come from the
   `rng` fixture (so from `AC_TEST_SEED`), with a fresh derived seed on every
   restart so a restarted daemon never replays its previous keys.
-- **Budget.** Each scenario takes well under 2 s; the whole harness takes a
-  few seconds.
+- **Budget.** Each scenario takes well under 2 s; the whole harness, both
+  hosts, takes a few seconds across the xdist workers.
 
 ## Failpoints (crash consistency)
 

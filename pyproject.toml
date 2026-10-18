@@ -80,6 +80,7 @@ timeout = 10
 markers = [
     "quarantine: known-flaky test; excluded from gating runs (see TESTING.md)",
     "multiuser: needs root and a second OS user; integration tier only (AC_RUN_MULTIUSER=1)",
+    "hosts(*names): run a harness scenario on these runtime hosts only (daemon, embedded)",
 ]
 
 [tool.coverage.run]

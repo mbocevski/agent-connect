@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from agentconnect.adapter import RecordingAdapter
 from agentconnect.runtime.engine import UPDATE_AFTER_MESSAGES, UPDATE_AFTER_SECS, DaemonError
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
@@ -69,12 +68,12 @@ async def test_require_verified_holds_deliveries(group: GroupFixture) -> None:
 
 async def test_agent_cards_are_exchanged(cluster: Cluster) -> None:
     a = await cluster.node("a")
-    a.adapter = RecordingAdapter(card={"name": "Alice agent", "skills": []})
+    a.adapter = a.recorder(card={"name": "Alice agent", "skills": []})
     await a.restart()
     gid = a.daemon.create_group("Cards", "Swap cards")
     await a.idle()
     b = await cluster.node("b")
-    b.adapter = RecordingAdapter(card={"name": "Bob agent"})
+    b.adapter = b.recorder(card={"name": "Bob agent"})
     await b.restart()
     await cluster.invite(a, b, gid)
     await a.wait(lambda: a.me in b.daemon.store.cards(gid) and b.me in a.daemon.store.cards(gid))
@@ -91,7 +90,7 @@ async def test_cards_wait_for_the_verification_gate(cluster: Cluster) -> None:
     a.daemon.set_policy(gid, require_verified=True)
     await a.idle()
     b = await cluster.node("b")
-    b.adapter = RecordingAdapter(card={"name": "Mallory pretending"})
+    b.adapter = b.recorder(card={"name": "Mallory pretending"})
     await b.restart()
     await cluster.invite(a, b, gid)
     # b's card has reached a, but a's human hasn't verified b: neither the

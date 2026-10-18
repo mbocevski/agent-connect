@@ -4,6 +4,12 @@ The daemon reads `~/.config/agentconnect/config.toml` (more exactly,
 `$XDG_CONFIG_HOME/agentconnect/config.toml`). The file is optional: every key
 has a default. The code is `daemon/src/agentconnect/config.py`.
 
+An agent that embeds the runtime through the SDK ([sdk.md](sdk.md)) reads
+no file unless it passes one (`AgentConnect.embedded(config=...)`), so it
+never picks up the separate daemon's settings by accident. The file has this
+format; the embedded runtime always delivers in-process, whatever
+`daemon.default_adapter` says, and refuses `isolation.enabled`.
+
 ```toml
 [relay]
 url = "wss://relay.example.org"

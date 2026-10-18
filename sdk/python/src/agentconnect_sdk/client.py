@@ -1,10 +1,22 @@
-"""The SDK client: talk to the local daemon, receive its deliveries.
+"""The SDK client: run the runtime in-process, or talk to a separate daemon.
 
-Security model: the client holds the daemon's **agent-scope** ``api-token``
-and nothing more. It can create groups and invites, send messages and read
-events. It cannot approve joins, mark members verified, relax verification or
-send ``control.resume``: those need the human token, which this package never
-reads and an agent must never be given.
+Two modes, one API (ADR-005):
+
+* :meth:`AgentConnect.embedded` (the default to reach for): the runtime runs
+  inside this process, on this asyncio loop. Deliveries are direct
+  callbacks; there is no daemon to install, start or supervise, and the
+  keys live only in this process.
+* :meth:`AgentConnect.attach` (or ``AgentConnect()``): talk to a separate
+  daemon over its local API, and receive its webhook or SSE stream.
+
+Both modes have the same at-least-once delivery with ``msg_id`` /
+``event_id`` deduplication, and the same untrusted framing.
+
+Security model: agent code gets the **agent-scope** operations and nothing
+more. It can create groups and invites, send messages and read events. It
+cannot approve joins, mark members verified, relax verification, change the
+safety policy or send ``control.resume``: those are the human's, through the
+CLI and the human token, which this package never reads and never exposes.
 """
 
 from __future__ import annotations
@@ -16,7 +28,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, TypeVar, override
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, override
 
 import httpx
 
@@ -33,6 +45,9 @@ from agentconnect_sdk.settings import (
     read_secret,
 )
 from agentconnect_sdk.signature import DEFAULT_TOLERANCE, WebhookVerifier
+
+if TYPE_CHECKING:
+    from agentconnect_sdk.embedded import EmbeddedHost
 
 MAX_NAME = 80  # SPEC 4.2: group names are 1 to 80 characters
 RECONNECT_DELAY = 2.0
@@ -53,6 +68,22 @@ class TaskState:
     CANCELED = "TASK_STATE_CANCELED"
     FAILED = "TASK_STATE_FAILED"
     REJECTED = "TASK_STATE_REJECTED"
+
+
+class Operations(Protocol):
+    """The agent-scope operations, the same in both modes. Each answer has
+    the shape of the matching local API route (``docs/api.md``)."""
+
+    async def status(self) -> dict[str, Any]: ...
+    async def create_group(self, name: str, purpose: str) -> dict[str, Any]: ...
+    async def list_groups(self) -> dict[str, Any]: ...
+    async def group_info(self, group_id: str) -> dict[str, Any]: ...
+    async def create_invite(
+        self, group_id: str, max_uses: int, ttl_secs: int
+    ) -> dict[str, Any]: ...
+    async def send(self, group_id: str, message: dict[str, Any]) -> dict[str, Any]: ...
+    async def leave(self, group_id: str) -> dict[str, Any]: ...
+    async def accept(self, url: str, display_name: str | None) -> dict[str, Any]: ...
 
 
 def _parts(content: str | Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -83,17 +114,13 @@ class Group:
         return f"Group({self.id!r})"
 
     async def info(self) -> dict[str, Any]:
-        """The daemon's view: members, policy, trust state, short code."""
-        return await self._client._request("GET", f"/v0/groups/{self.id}")
+        """The runtime's view: members, policy, trust state, short code."""
+        return await self._client._ops.group_info(self.id)
 
     async def invite(self, max_uses: int = 1, ttl_secs: int = 86_400) -> str:
         """Create an invite link. Share it with the other human; whoever
         redeems it still needs your human's approval."""
-        reply = await self._client._request(
-            "POST",
-            f"/v0/groups/{self.id}/invites",
-            {"max_uses": max_uses, "ttl_secs": ttl_secs},
-        )
+        reply = await self._client._ops.create_invite(self.id, max_uses, ttl_secs)
         return str(reply["url"])
 
     async def send(
@@ -113,7 +140,7 @@ class Group:
         """Answer ``msg``: to the whole group, with its sender as the only
         ``addressee`` (SPEC section 9.3), so everyone sees the answer and only
         the sender is triggered. ``reply_to`` carries ``msg.msg_id``, so the
-        daemon sets ``hop`` (SPEC section 10.3) and the loop guard can stop a
+        runtime sets ``hop`` (SPEC section 10.3) and the loop guard can stop a
         runaway exchange."""
         body = _agent_message(self.id, content)
         return await self._answer(msg, "a2a.message", body)
@@ -167,7 +194,7 @@ class Group:
         return await self._answer(msg, "a2a.task_artifact", body)
 
     async def leave(self) -> str:
-        reply = await self._client._request("POST", f"/v0/groups/{self.id}/leave")
+        reply = await self._client._ops.leave(self.id)
         return str(reply["status"])
 
     async def _answer(self, msg: Message, kind: str, body: dict[str, Any]) -> str:
@@ -182,21 +209,59 @@ class Group:
         *,
         addressee: Sequence[str] | None = None,
     ) -> str:
-        payload: dict[str, Any] = {"kind": kind, "body": body, "to": list(to)}
+        message: dict[str, Any] = {"kind": kind, "body": body, "to": list(to)}
         if reply_to:
-            payload["reply_to"] = list(reply_to)
+            message["reply_to"] = list(reply_to)
         if addressee is not None:
-            payload["addressee"] = list(addressee)
-        reply = await self._client._request("POST", f"/v0/groups/{self.id}/messages", payload)
+            message["addressee"] = list(addressee)
+        reply = await self._client._ops.send(self.id, message)
         return str(reply["msg_id"])
 
 
-class AgentConnect:
-    """A headless agent's connection to its local daemon.
+class _HttpOperations:
+    """The operations over a separate daemon's local API (attach mode)."""
 
-    ``AgentConnect()`` finds the daemon the way the CLI does (config file,
-    ``AC_DATA_DIR``) and reads ``api-token`` from its data directory. Pass
-    ``data_dir``, ``socket``, ``tcp_port`` or ``token`` to point elsewhere.
+    def __init__(self, client: AgentConnect) -> None:
+        self._client = client
+
+    async def status(self) -> dict[str, Any]:
+        return await self._client._request("GET", "/v0/status")
+
+    async def create_group(self, name: str, purpose: str) -> dict[str, Any]:
+        return await self._client._request("POST", "/v0/groups", {"name": name, "purpose": purpose})
+
+    async def list_groups(self) -> dict[str, Any]:
+        return await self._client._request("GET", "/v0/groups")
+
+    async def group_info(self, group_id: str) -> dict[str, Any]:
+        return await self._client._request("GET", f"/v0/groups/{group_id}")
+
+    async def create_invite(self, group_id: str, max_uses: int, ttl_secs: int) -> dict[str, Any]:
+        body = {"max_uses": max_uses, "ttl_secs": ttl_secs}
+        return await self._client._request("POST", f"/v0/groups/{group_id}/invites", body)
+
+    async def send(self, group_id: str, message: dict[str, Any]) -> dict[str, Any]:
+        return await self._client._request("POST", f"/v0/groups/{group_id}/messages", message)
+
+    async def leave(self, group_id: str) -> dict[str, Any]:
+        return await self._client._request("POST", f"/v0/groups/{group_id}/leave")
+
+    async def accept(self, url: str, display_name: str | None) -> dict[str, Any]:
+        body: dict[str, Any] = {"url": url}
+        if display_name is not None:
+            body["display_name"] = display_name
+        return await self._client._request("POST", "/v0/invites/accept", body)
+
+
+class AgentConnect:
+    """A headless agent's connection to AgentConnect.
+
+    ``AgentConnect.embedded(name="my-agent")`` runs the runtime in this
+    process; see :meth:`embedded`. ``AgentConnect()`` (or
+    :meth:`attach`) talks to a separate daemon instead: it finds the daemon
+    the way the CLI does (config file, ``AC_DATA_DIR``) and reads
+    ``api-token`` from its data directory. Pass ``data_dir``, ``socket``,
+    ``tcp_port`` or ``token`` to point elsewhere.
     """
 
     def __init__(  # noqa: PLR0913
@@ -214,6 +279,7 @@ class AgentConnect:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         tolerance: float = DEFAULT_TOLERANCE,
     ) -> None:
+        self._setup(dedupe or Deduper(), clock, sleep, tolerance)
         self._settings: Settings = load_settings(data_dir, config_path, os.environ)
         self._token = token or read_secret(self._settings.data_dir / API_TOKEN_FILE, "api-token")
         self._secret = webhook_secret
@@ -221,10 +287,21 @@ class AgentConnect:
         if transport is None and port == 0:
             transport = httpx.AsyncHTTPTransport(uds=str(socket or self._settings.socket))
         self._base = f"http://127.0.0.1:{port}" if port else "http://agentconnectd"
-        self._http = httpx.AsyncClient(
+        self._http: httpx.AsyncClient | None = httpx.AsyncClient(
             transport=transport, base_url=self._base, timeout=30, trust_env=False
         )
-        self._dedupe = dedupe or Deduper()
+        self._ops: Operations = _HttpOperations(self)
+        self._host: EmbeddedHost | None = None
+        self.data_dir: Path = self._settings.data_dir
+
+    def _setup(
+        self,
+        dedupe: Deduper,
+        clock: Callable[[], float],
+        sleep: Callable[[float], Awaitable[None]],
+        tolerance: float,
+    ) -> None:
+        self._dedupe = dedupe
         self._clock, self._sleep, self._tolerance = clock, sleep, tolerance
         self._verifier: WebhookVerifier | None = None
         self._message_handlers: list[MessageHandler] = []
@@ -232,22 +309,125 @@ class AgentConnect:
         self._event_handlers: list[EventHandler] = []
         self.last_event_id: str | None = None
 
+    @classmethod
+    def attach(  # noqa: PLR0913
+        cls,
+        *,
+        data_dir: Path | None = None,
+        socket: Path | None = None,
+        tcp_port: int | None = None,
+        token: str | None = None,
+        webhook_secret: str | None = None,
+        config_path: Path | None = None,
+        dedupe: Deduper | None = None,
+    ) -> AgentConnect:
+        """Attach to a separate daemon (``agentconnect daemon run``) configured
+        with the webhook or SSE adapter. The same as ``AgentConnect(...)``."""
+        return cls(
+            data_dir=data_dir,
+            socket=socket,
+            tcp_port=tcp_port,
+            token=token,
+            webhook_secret=webhook_secret,
+            config_path=config_path,
+            dedupe=dedupe,
+        )
+
+    @classmethod
+    def embedded(  # noqa: PLR0913
+        cls,
+        name: str | None = None,
+        *,
+        data_dir: Path | str | None = None,
+        relay: str | None = None,
+        config: Path | str | None = None,
+        display_name: str | None = None,
+        dedupe: Deduper | None = None,
+    ) -> AgentConnect:
+        """Run the runtime inside this process (ADR-005's embedded mode).
+
+        ``name`` picks the data directory, ``$XDG_DATA_HOME/agentconnect-<name>``
+        (one directory is one identity); ``data_dir`` or ``AC_DATA_DIR`` replace
+        it. One of ``name`` and ``data_dir`` is required, so two agents on one
+        machine never share an identity by accident. ``relay`` is the relay's
+        ``wss://`` URL (default ``wss://connect.yggdrasill.network``);
+        ``config`` is a TOML file in the daemon's format (``docs/config.md``),
+        for the ``[policy]`` defaults and the like. ``display_name`` is what
+        peers see (default: ``name``).
+
+        Nothing starts until ``async with`` (or :meth:`start`). Starting
+        takes the data directory's lock: :class:`DataDirLockedError` if a
+        separate daemon or another embedded agent already runs on it. The
+        runtime serves the local API socket in the data directory, so the
+        human runs ``AC_DATA_DIR=<data_dir> agentconnect approvals`` (and
+        ``verify``, ``safety set``) against it from a terminal. Deliveries
+        start with :meth:`serve`."""
+        from agentconnect_sdk.embedded import EmbeddedHost  # noqa: PLC0415
+
+        host = EmbeddedHost(
+            EmbeddedHost.configure(
+                name,
+                data_dir=data_dir,
+                relay=relay,
+                config=config,
+                display_name=display_name,
+                environ=os.environ,
+            )
+        )
+        return cls.hosted(host, dedupe=dedupe)
+
+    @classmethod
+    def hosted(cls, host: EmbeddedHost, *, dedupe: Deduper | None = None) -> AgentConnect:
+        """A client over an :class:`~agentconnect_sdk.embedded.EmbeddedHost`
+        you built yourself; :meth:`embedded` is the usual way."""
+        self = cls.__new__(cls)
+        self._setup(dedupe or host.deduper(), time.time, asyncio.sleep, DEFAULT_TOLERANCE)
+        self._http = None
+        self._ops = host.operations()
+        self._host = host
+        self.data_dir = host.data_dir
+        return self
+
+    @property
+    def mode(self) -> Literal["embedded", "attach"]:
+        return "attach" if self._host is None else "embedded"
+
+    async def start(self) -> None:
+        """Embedded: start the runtime (taking the data directory's lock).
+        Attach: nothing to start. ``async with`` calls it."""
+        if self._host is not None:
+            await self._host.start(self.dispatch)
+
     async def aclose(self) -> None:
-        await self._http.aclose()
+        """Embedded: stop the runtime cleanly (queued sends get a few seconds
+        to go out, then the relay link closes and the lock is released).
+        Attach: close the HTTP client."""
+        if self._host is not None:
+            await self._host.stop()
+        if self._http is not None:
+            await self._http.aclose()
 
     async def __aenter__(self) -> AgentConnect:
+        await self.start()
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
         await self.aclose()
 
-    # -- requests -------------------------------------------------------------
+    # -- requests (attach mode) -----------------------------------------------
+
+    def _attached(self) -> httpx.AsyncClient:
+        if self._http is None:
+            msg = "only a client attached to a separate daemon has this"
+            raise AgentConnectError("embedded", msg)
+        return self._http
 
     async def _request(
         self, method: str, path: str, body: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        http = self._attached()
         try:
-            resp = await self._http.request(
+            resp = await http.request(
                 method, path, json=body, headers={"authorization": f"Bearer {self._token}"}
             )
         except httpx.TransportError:
@@ -259,31 +439,30 @@ class AgentConnect:
             )
         return data
 
+    # -- operations -------------------------------------------------------------
+
     async def status(self) -> dict[str, Any]:
-        return await self._request("GET", "/v0/status")
+        return await self._ops.status()
 
     async def create_group(self, purpose: str = "", name: str | None = None) -> Group:
         """Create a group you own. ``purpose`` is what joiners are told."""
         shown = (name or purpose or "AgentConnect chat")[:MAX_NAME]
-        reply = await self._request("POST", "/v0/groups", {"name": shown, "purpose": purpose})
+        reply = await self._ops.create_group(shown, purpose)
         return Group(self, str(reply["group_id"]))
 
     def group(self, group_id: str) -> Group:
         return Group(self, group_id)
 
     async def groups(self) -> list[dict[str, Any]]:
-        """The daemon's groups: ``group_id``, ``name``, ``status``, ``epoch``,
+        """The groups: ``group_id``, ``name``, ``status``, ``epoch``,
         ``members``, ``out_of_sync``."""
-        reply = await self._request("GET", "/v0/groups")
+        reply = await self._ops.list_groups()
         return [g for g in reply["groups"] if isinstance(g, dict)]
 
     async def accept(self, url: str, display_name: str | None = None) -> dict[str, Any]:
         """Redeem an invite link. The inviter's human still has to approve;
         the group appears in :meth:`groups` once they do."""
-        body: dict[str, Any] = {"url": url}
-        if display_name is not None:
-            body["display_name"] = display_name
-        return await self._request("POST", "/v0/invites/accept", body)
+        return await self._ops.accept(url, display_name)
 
     # -- handlers -------------------------------------------------------------
 
@@ -303,7 +482,7 @@ class AgentConnect:
         return handler
 
     def on_event(self, handler: EventHandler) -> EventHandler:
-        """Register ``async def handler(event, group)`` for daemon events
+        """Register ``async def handler(event, group)`` for runtime events
         (``member_joined``, ``epoch_changed``, ``loop_guard``, ...). ``group``
         is ``None`` for events about no group."""
         self._event_handlers.append(handler)
@@ -345,6 +524,7 @@ class AgentConnect:
 
     def _webhook_verifier(self) -> WebhookVerifier:
         if self._verifier is None:
+            self._attached()
             secret = self._secret or read_secret(
                 self._settings.data_dir / WEBHOOK_SECRET_FILE, "webhook-secret"
             )
@@ -352,8 +532,8 @@ class AgentConnect:
         return self._verifier
 
     async def receive(self, headers: Mapping[str, str], body: bytes) -> str:
-        """For your own web framework: verify the signature headers, then
-        dispatch. Raises :class:`SignatureError` (answer 401),
+        """For your own web framework (attach mode): verify the signature
+        headers, then dispatch. Raises :class:`SignatureError` (answer 401),
         :class:`PayloadError` (400) or the handler's exception (answer 500).
         Returns ``handled``, ``duplicate`` or ``busy`` (answer 503 for
         ``busy``, 2xx otherwise)."""
@@ -365,8 +545,10 @@ class AgentConnect:
         return await self.dispatch(payload)
 
     def webhook_receiver(self, host: str = "127.0.0.1", port: int | None = None) -> WebhookReceiver:
-        """The built-in webhook server; ``await receiver.start()``. ``port``
-        defaults to the port of the daemon's ``webhook.callback_url``."""
+        """The built-in webhook server (attach mode); ``await
+        receiver.start()``. ``port`` defaults to the port of the daemon's
+        ``webhook.callback_url``."""
+        self._attached()
         chosen = port if port is not None else self._settings.callback_port
         if chosen is None:
             msg = "no port: pass port= or set webhook.callback_url in the daemon config"
@@ -374,17 +556,18 @@ class AgentConnect:
         return WebhookReceiver(self.dispatch, self._webhook_verifier(), host, chosen)
 
     async def stream(self, group_id: str | None = None, last_event_id: str | None = None) -> None:
-        """Consume the daemon's SSE feed once, until it ends. Each frame goes
-        through :meth:`dispatch`; ``self.last_event_id`` tracks the resume
-        point. Handler exceptions propagate (the frame is not acked: resume
-        from ``last_event_id`` redelivers it)."""
+        """Consume the daemon's SSE feed once, until it ends (attach mode).
+        Each frame goes through :meth:`dispatch`; ``self.last_event_id``
+        tracks the resume point. Handler exceptions propagate (the frame is
+        not acked: resume from ``last_event_id`` redelivers it)."""
+        http = self._attached()
         headers = {"authorization": f"Bearer {self._token}", "accept": "text/event-stream"}
         resume = last_event_id or self.last_event_id
         if resume is not None and resume != "":
             headers["last-event-id"] = resume
         params = {} if group_id is None or group_id == "" else {"group": group_id}
         try:
-            async with self._http.stream(
+            async with http.stream(
                 "GET", "/v0/events", params=params, headers=headers, timeout=None
             ) as resp:
                 if resp.status_code != httpx.codes.OK:
@@ -412,13 +595,22 @@ class AgentConnect:
         group: str | None = None,
         ready: asyncio.Event | None = None,
     ) -> None:
-        """Run until cancelled, delivering to the registered handlers.
+        """Run until cancelled (or, embedded, until :meth:`aclose`),
+        delivering to the registered handlers. ``ready`` is set once
+        deliveries flow.
 
-        ``webhook``: serve the daemon's callback (needs ``webhook-secret``).
-        ``sse``: read the daemon's event stream, reconnecting with
-        ``Last-Event-ID``. ``auto``: ``webhook`` when the daemon config has a
-        ``webhook.callback_url``, else ``sse``. ``ready`` is set once
-        listening or connected."""
+        Embedded: the runtime hands messages and events to the handlers
+        directly; ``mode`` must be ``auto``. Attach: ``webhook`` serves the
+        daemon's callback (needs ``webhook-secret``), ``sse`` reads the
+        daemon's event stream, reconnecting with ``Last-Event-ID``, and
+        ``auto`` picks ``webhook`` when the daemon config has a
+        ``webhook.callback_url``, else ``sse``."""
+        if self._host is not None:
+            if mode != "auto":
+                msg = "an embedded runtime delivers in-process; mode must be auto"
+                raise AgentConnectError("bad_config", msg)
+            await self._host.serve(ready)
+            return
         chosen = mode
         if chosen == "auto":
             chosen = "sse" if self._settings.callback_url is None else "webhook"

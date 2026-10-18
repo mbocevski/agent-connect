@@ -14,7 +14,7 @@ import pytest
 
 from agentconnect.adapter import RecordingAdapter
 from agentconnect.clock import FakeClock
-from agentconnect.config import Config
+from agentconnect.config import Config, load_config
 from agentconnect.identity import Seeded
 from agentconnect.keystore import DataDirLock, FileKeystore
 from agentconnect.relay import RelayError
@@ -95,6 +95,14 @@ def test_a_token_digest_matches_without_keeping_the_token(tmp_path: Path) -> Non
     assert not digest.matches(token + "x")
     assert token not in repr(digest)
     assert not hasattr(digest, "__dict__")  # nothing but the hash in it
+
+
+def test_the_embedded_config_reads_no_file_unless_asked(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[daemon]\ndisplay_name = "from-file"\n', encoding="utf-8")
+    env = {"AC_CONFIG": str(cfg), "HOME": str(tmp_path)}
+    assert load_config(None, env).display_name == "from-file"
+    assert load_config(None, env, use_file=False).display_name == "agent"
 
 
 async def test_a_runtime_starts_once_and_stops_idempotently(

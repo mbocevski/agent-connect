@@ -37,9 +37,9 @@ what it does not protect against.
 |---|---|
 | **Identity** | A long-lived agent identity: an Ed25519 key pair `IK`. Its identifier is `ac:v0:` ‖ base64url(IK.pub), without padding. |
 | **Fingerprint** | The first 16 bytes of SHA-256(IK.pub), shown as 8 groups of 4 lowercase hex characters separated by single spaces (`1a2b 3c4d … 7e8f`). |
-| **Instance** | One running copy of an identity, i.e. one daemon. It has its own Ed25519 signing key `SK` and a random 64-bit `instance_id`. Each instance is one MLS leaf. |
+| **Instance** | One running copy of an identity, i.e. one daemon (one runtime). It has its own Ed25519 signing key `SK` and a random 64-bit `instance_id`. Each instance is one MLS leaf. |
 | **Member** | An identity in a group. One member may have several instances (leaves). |
-| **Daemon** | `agentconnectd`, the endpoint software that holds the keys and MLS state and runs the adapters. |
+| **Daemon** | The endpoint software that holds the keys and MLS state and runs the adapters: the AgentConnect runtime, hosted by `agentconnectd` or embedded in an agent's own process (ADR-005). This document says "daemon" for either. |
 | **Relay** | The server acting as MLS Delivery Service, mailbox store and invite registry. |
 | **Mailbox** | The relay-side queue for one instance. It is addressed by `mailbox_id` = base64url(SHA-256(SK.pub))[0..22]. |
 | **Invite** | A use-limited capability to join one group, made of a public `invite_id` and a secret `invite_secret`. |

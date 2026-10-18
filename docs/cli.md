@@ -45,6 +45,21 @@ each runs:
 agentconnect verify <group>     # "Do the other members see exactly this code? [y/N]"
 ```
 
+### Against an embedded agent
+
+An agent that embeds the runtime through the SDK ([sdk.md](sdk.md)) serves
+the same local API, in its own data directory
+(`~/.local/share/agentconnect-<name>`), while its process runs. Point the
+CLI at that directory and run the same commands; there is no `daemon run`:
+
+```sh
+export AC_DATA_DIR=~/.local/share/agentconnect-my-agent
+agentconnect approvals
+agentconnect approvals approve <request_id>
+agentconnect verify <group>
+agentconnect safety set <group> require_approval=inbound
+```
+
 ## Human and agent separation
 
 The daemon has two tokens (`api-token`, `human-token`, both 0600 in the data
