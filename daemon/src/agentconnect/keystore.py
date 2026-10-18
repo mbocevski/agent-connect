@@ -78,6 +78,11 @@ class DataDirLockedError(RuntimeError):
         self.holder = holder
 
 
+class DataDirAccessError(OSError):
+    """This OS user can't open the data directory's lock (another user's,
+    such as a daemon in separate-OS-user mode)."""
+
+
 LOCK_HOLDERS = {"daemon": "a daemon", "embedded": "an embedded agent", "mcp": "an MCP server"}
 
 
@@ -121,6 +126,9 @@ class DataDirLock:
             fd = os.open(data_dir / cls.FILE, os.O_RDWR)
         except FileNotFoundError:
             return False, None
+        except PermissionError:
+            msg = f"{data_dir} is not accessible to this user"
+            raise DataDirAccessError(msg) from None
         try:
             note = cls._note(fd)
             try:

@@ -62,7 +62,10 @@ MAX_HEADER = 16 << 10
 READ_TIMEOUT = 10.0  # seconds to send a whole request
 MAX_CONNECTIONS = 64
 # Agent-token requests in progress at most: the rest of MAX_CONNECTIONS is
-# kept for the human token, so agent traffic can't lock the human out.
+# kept for the human token, so authenticated agent requests (long polls
+# included) can't take every connection. The cap applies after
+# authentication: connections that never send a whole request still count
+# against MAX_CONNECTIONS until READ_TIMEOUT.
 MAX_AGENT_REQUESTS = 48
 SCOPE = "_scope"  # handler parameter carrying the request's token scope
 ACCEPT = "_accept"  # ... the Accept header
@@ -765,6 +768,16 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         request={"lease": "str", "ids": ["str"]},
         response={"acked": "int", "refused": ["str"]},
     ),
+    RouteSpec(
+        "POST",
+        "/v0/deliveries/release",
+        "_deliveries_release",
+        "Give back deliveries of a `lease` that won't be returned (the caller's tool "
+        "call was cancelled): they are queued again at once. Ids the lease doesn't hold "
+        "are left alone.",
+        request={"lease": "str", "ids": ["str"]},
+        response={"released": "bool"},
+    ),
 )
 
 # Every error the server can answer with: status, code, meaning.
@@ -1233,6 +1246,15 @@ class ApiServer:
             addressed_only=addressed == "1",
             wait_secs=float(timeout),
         )
+
+    async def _deliveries_release(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        queue = self._queue()
+        lease = _str(b, "lease")
+        ids = b.get("ids")
+        if not isinstance(ids, list) or not all(isinstance(x, str) and x.isdigit() for x in ids):
+            raise ApiError(400, "bad_request", "ids must be a list of delivery ids")
+        queue.release(lease, [int(x) for x in ids])
+        return {"released": True}
 
     async def _deliveries_ack(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
         queue = self._queue()

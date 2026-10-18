@@ -175,16 +175,24 @@ async def call_tool(
     call is logged with its code only. ``request_id`` ties a wait's batch
     to this request, to be acknowledged once its result is written."""
     token = current_request.set(request_id)
+    finished = False
     try:
-        return _result(await call(session, name, args))
+        result = _result(await call(session, name, args))
+        finished = True
+        return result
     except ToolError as e:
         LOG.info("mcp_tool_refused", tool=name if name in BY_NAME else "unknown", code=e.code)
         error: dict[str, Any] = {"code": e.code, "message": str(e)}
         if e.code == "human_only":
             error["hint"] = HUMAN_ONLY_NOTE
+        finished = True
         return _result({"error": error}, error=True)
     finally:
         current_request.reset(token)
+        if not finished and request_id is not None:
+            # Cancelled (or failed) after a take: no result will be written,
+            # so the batch goes back at once.
+            await session.abandon(request_id)
 
 
 def build_server(session: Session) -> Server[Any]:
@@ -205,6 +213,16 @@ def build_server(session: Session) -> Server[Any]:
         on_list_tools=list_tools,
         on_call_tool=on_call,
     )
+
+
+def _msg_ids(message: dict[str, Any]) -> list[str]:
+    """The ``msg_id`` values a written tool result returned to the client."""
+    result = message.get("result")
+    content = result.get("structuredContent") if isinstance(result, dict) else None
+    messages = content.get("messages") if isinstance(content, dict) else None
+    if not isinstance(messages, list):
+        return []
+    return [str(m.get("msg_id")) for m in messages if isinstance(m, dict)]
 
 
 class Written:
@@ -228,7 +246,7 @@ class Written:
             with contextlib.suppress(ValueError):
                 message = json.loads(line)
                 if isinstance(message, dict) and "result" in message:
-                    self._session.result_written_soon(message.get("id"))
+                    self._session.result_written_soon(message.get("id"), _msg_ids(message))
 
 
 class LineReader:

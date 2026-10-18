@@ -29,14 +29,14 @@ import asyncio
 import contextvars
 from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
 
 from agentconnect import log
-from agentconnect.deliveries import delivery_key
-from agentconnect.keystore import DataDirLock
+from agentconnect.deliveries import LEASE_SECS, delivery_key
+from agentconnect.keystore import DataDirAccessError, DataDirLock
 from agentconnect.mcp.backend import (
     AttachBackend,
     Backend,
@@ -51,6 +51,7 @@ LOG = log.get("agentconnect.mcp")
 
 REMEMBER = 4096  # keys of acknowledged messages kept in memory
 UNWRITTEN_KEEP = 64  # batches whose result isn't written yet, at most
+UNACKED_KEEP = 8  # batches whose ack failed, kept for a retry, at most
 MAX_WAITS = 2  # agentconnect_wait calls running at once in one session
 SUPERVISED = frozenset({"daemon", "embedded"})  # holders a session never takes over
 # Calls that are safe to repeat when the owner went away mid-request.
@@ -69,6 +70,8 @@ class _Batch:
     lease: str
     ids: list[str]
     keys: list[str]
+    msg_ids: list[str] = field(default_factory=list)  # what its result returns
+    taken_at: float = 0.0  # Unix seconds on the session's clock
 
 
 class Session:
@@ -109,7 +112,10 @@ class Session:
 
     async def _connect(self, *, startup: bool = False) -> Backend:
         """A backend for the directory as it is now (see the module doc)."""
-        held, holder = DataDirLock.probe(self.config.data_dir)
+        try:
+            held, holder = DataDirLock.probe(self.config.data_dir)
+        except DataDirAccessError as e:
+            raise ToolError("data_dir_not_accessible", str(e), 403) from None
         if not held:
             if not startup and holder in SUPERVISED:
                 msg = (
@@ -259,18 +265,24 @@ class Session:
         for item in pulls.items:
             key = delivery_key(item.payload)
             (repeats if key in self._acked else fresh).append(item)
+        now = self._now()
         if repeats:
-            await self._ack(_Batch(pulls.lease, [r.delivery_id for r in repeats], []))
+            await self._ack(_Batch(pulls.lease, [r.delivery_id for r in repeats], [], [], now))
         if fresh:
             batch = _Batch(
                 pulls.lease,
                 [f.delivery_id for f in fresh],
                 [delivery_key(f.payload) for f in fresh],
+                [str(f.payload.get("msg_id")) for f in fresh],
+                now,
             )
             request = current_request.get()
             if request is None:
                 await self._ack(batch)
             else:
+                # A batch still kept under this id never had its result
+                # written (the client reused the id): it goes back now.
+                await self.abandon(request)
                 self._unwritten[request] = batch
                 while len(self._unwritten) > UNWRITTEN_KEEP:
                     self._unwritten.popitem(last=False)  # its lease runs out
@@ -280,44 +292,71 @@ class Session:
         """Whether some batch waits for its result to be written."""
         return bool(self._unwritten)
 
-    async def result_written(self, request: object) -> None:
-        """The result for ``request`` reached the client's pipe: acknowledge
-        its batch, if it had one."""
-        batch = self._unwritten.pop(request, None)
-        if batch is not None:
+    def _now(self) -> float:
+        return self._clock.now().timestamp()
+
+    async def result_written(self, request: object, msg_ids: Sequence[str]) -> None:
+        """A result for ``request`` returning ``msg_ids`` reached the client's
+        pipe: acknowledge the batch kept under that id, if that result is the
+        one that returned it. Another answer with the same id (a client that
+        reused it) acknowledges nothing."""
+        batch = self._unwritten.get(request)
+        if batch is not None and list(msg_ids) == batch.msg_ids:
+            del self._unwritten[request]
             await self._ack(batch)
 
-    def result_written_soon(self, request: object) -> None:
+    def result_written_soon(self, request: object, msg_ids: Sequence[str]) -> None:
         """:meth:`result_written` in a task of its own (from the writer)."""
         if request not in self._unwritten:
             return
-        task = asyncio.ensure_future(self.result_written(request))
+        task = asyncio.ensure_future(self.result_written(request, msg_ids))
         self._acking.add(task)
         task.add_done_callback(self._acking.discard)
 
-    async def _ack(self, batch: _Batch) -> None:
+    async def abandon(self, request: object) -> None:
+        """The batch kept under ``request`` won't be written (the call was
+        cancelled, or the client reused the id): release its lease, so its
+        messages are offered again at once."""
+        batch = self._unwritten.pop(request, None)
+        if batch is None:
+            return
+        try:
+            backend = await self._backend()
+            await backend.release(batch.lease, batch.ids)
+        except (OwnerGoneError, ToolError) as e:
+            LOG.info("mcp_release_failed", code=getattr(e, "code", "gone"))
+
+    async def _ack(self, batch: _Batch) -> bool:
         """Acknowledge ``batch``; if the owner refuses or doesn't answer, keep
-        it for :meth:`retry_acks`. Keys count as acknowledged only after the
-        owner confirmed them."""
+        it for :meth:`retry_acks` (the newest :data:`UNACKED_KEEP`). Keys
+        count as acknowledged only after the owner confirmed them."""
         try:
             backend = await self._backend()
             done = set(await backend.ack(batch.lease, batch.ids))
         except (OwnerGoneError, ToolError) as e:
             LOG.info("mcp_ack_failed", code=getattr(e, "code", "gone"), count=len(batch.ids))
             self._unacked.append(batch)
-            return
+            del self._unacked[:-UNACKED_KEEP]
+            return False
         for delivery_id, key in zip(batch.ids, batch.keys, strict=False):
             if delivery_id in done:
                 self._acked[key] = None
                 self._acked.move_to_end(key)
         while len(self._acked) > REMEMBER:
             self._acked.popitem(last=False)
+        return True
 
     async def retry_acks(self) -> None:
-        """Try again the acks that didn't go through."""
-        pending, self._unacked = self._unacked, []
-        for batch in pending:
-            await self._ack(batch)
+        """Try again the acks that didn't go through, oldest first, until one
+        fails again. A batch older than its lease is dropped instead: its
+        messages are offered again anyway."""
+        fresh_since = self._now() - LEASE_SECS
+        pending = [b for b in self._unacked if b.taken_at >= fresh_since]
+        self._unacked = []
+        for n, batch in enumerate(pending):
+            if not await self._ack(batch):
+                self._unacked = [*self._unacked[:-1], *pending[n + 1 :], batch][-UNACKED_KEEP:]
+                return
 
     async def close(self) -> None:
         """Finish the acks (written results only), then stop the runtime
@@ -325,6 +364,8 @@ class Session:
         if self._acking:
             await asyncio.gather(*self._acking, return_exceptions=True)
         if self.backend is not None:
+            for request in list(self._unwritten):
+                await self.abandon(request)
             await self.retry_acks()
         backend, self.backend = self.backend, None
         self._opened = False

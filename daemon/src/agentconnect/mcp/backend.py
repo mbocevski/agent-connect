@@ -59,12 +59,13 @@ class OwnerGoneError(Exception):
         self.sent = sent
 
 
-ID_RE = re.compile(r"(?=[A-Za-z0-9_:.-]*[A-Za-z0-9])(?!\.{1,2}\Z)[A-Za-z0-9_:.-]+")
+ID_RE = re.compile(r"(?=[A-Za-z0-9_-]*[A-Za-z0-9])[A-Za-z0-9_-]+")  # base64url, not all - _
 
 
 def segment(value: str) -> str:
-    """An id as one path segment of the local API: refused unless it is
-    one (no `/`, `?`, `%`, nothing but dots), then quoted anyway."""
+    """An id as one path segment of the local API: group and message ids
+    are base64url, so anything else (`/`, `?`, `%`, `:`, `.`) is refused;
+    quoted anyway."""
     if ID_RE.fullmatch(value) is None:
         raise ToolError("bad_request", "not an id")
     return quote(value, safe="")
@@ -117,6 +118,7 @@ class Backend(Protocol):
     async def listing_status(self) -> dict[str, Any]: ...
     async def take(self, group: str | None, addressed_only: bool, wait_secs: float) -> Pulls: ...
     async def ack(self, lease: str, delivery_ids: Sequence[str]) -> list[str]: ...
+    async def release(self, lease: str, delivery_ids: Sequence[str]) -> None: ...
     async def close(self) -> None: ...
 
 
@@ -235,6 +237,9 @@ class HostBackend:
 
     async def ack(self, lease: str, delivery_ids: Sequence[str]) -> list[str]:
         return [str(d) for d in self.queue.ack(lease, [int(d) for d in delivery_ids])]
+
+    async def release(self, lease: str, delivery_ids: Sequence[str]) -> None:
+        self.queue.release(lease, [int(d) for d in delivery_ids])
 
     async def close(self) -> None:
         """Stop the runtime: queued sends get the bounded flush, the lock is
@@ -390,6 +395,11 @@ class AttachBackend:
         body = {"lease": lease, "ids": list(delivery_ids)}
         refused = (await self._request("POST", "/v0/deliveries/ack", body)).get("refused") or []
         return [d for d in delivery_ids if d not in refused]
+
+    async def release(self, lease: str, delivery_ids: Sequence[str]) -> None:
+        if delivery_ids:
+            body = {"lease": lease, "ids": list(delivery_ids)}
+            await self._request("POST", "/v0/deliveries/release", body)
 
     async def close(self) -> None:
         await self._http.aclose()

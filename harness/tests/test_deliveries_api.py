@@ -183,3 +183,20 @@ async def test_agent_requests_leave_room_for_the_human(cluster: Cluster) -> None
             assert (await human.get("/v0/groups")).status_code == 200
     finally:
         server._agent_requests = 0
+
+
+async def test_a_released_lease_is_queued_again(cluster: Cluster) -> None:
+    owner, peer, gid, _queue = await owner_and_peer(cluster)
+    send(peer, gid, "back")
+    async with client(owner) as api:
+        data = (await api.get("/v0/deliveries", params={"timeout": 60})).json()
+        ids = [d["delivery_id"] for d in data["deliveries"]]
+        assert (await api.get("/v0/deliveries")).json()["deliveries"] == []
+        body = {"lease": data["lease"], "ids": ids}
+        assert conforms(body, SPECS["POST /v0/deliveries/release"].request)
+        resp = await api.post("/v0/deliveries/release", json=body)
+        assert conforms(resp.json(), SPECS["POST /v0/deliveries/release"].response)
+        again = (await api.get("/v0/deliveries")).json()
+        assert [d["delivery_id"] for d in again["deliveries"]] == ids
+        bad = await api.post("/v0/deliveries/release", json={"lease": "l", "ids": "1"})
+        assert bad.status_code == 400

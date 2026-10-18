@@ -61,9 +61,9 @@ ACCEPT_NOTE = (
 Args = dict[str, Any]
 Schema = dict[str, Any]
 
-# One path segment of the local API: at least one letter or digit, and not
-# `.` or `..` (which an HTTP client would resolve).
-ID_PATTERN = "^(?=[A-Za-z0-9_:.-]*[A-Za-z0-9])(?!\\.{1,2}$)[A-Za-z0-9_:.-]+$"
+# Group and message ids are base64url: one path segment of the local API,
+# with at least one letter or digit.
+ID_PATTERN = "^(?=[A-Za-z0-9_-]*[A-Za-z0-9])[A-Za-z0-9_-]+$"
 _GROUP: Schema = {
     "type": "string",
     "minLength": 1,

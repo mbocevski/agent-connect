@@ -16,13 +16,15 @@ import pytest
 from typer.testing import CliRunner
 
 import agentconnect.mcp as mcp_package
+import agentconnect.mcp.tools as tools_module
 from agentconnect.cli import app
 from agentconnect.clock import FakeClock
 from agentconnect.config import Config, ConfigError
+from agentconnect.deliveries import LEASE_SECS
 from agentconnect.isolation import IsolationError
 from agentconnect.keystore import DataDirLock
 from agentconnect.mcp import StdioFds, ToolError, claim_stdio, configure, default_data_dir
-from agentconnect.mcp.backend import AttachBackend, OwnerGoneError, Pulled
+from agentconnect.mcp.backend import AttachBackend, OwnerGoneError, Pulled, segment
 from agentconnect.mcp.server import LineReader, call_tool, mcp_tools
 from agentconnect.mcp.session import Session
 from agentconnect.mcp.tools import BY_NAME, TOOLS, check_args, message_view
@@ -270,7 +272,7 @@ async def test_take_polls_in_steps_and_drops_what_it_returned(owned: Path) -> No
     taken, _ = await s.take(None, False, 0)
     assert [t.payload["msg_id"] for t in taken] == ["m2"]
     assert sorted(owner.acks) == [["1"], ["2"], ["3"]]
-    await s.result_written("no such request")  # nothing waits: no request
+    await s.result_written("no such request", [])  # nothing waits: no request
     await s.close()
 
 
@@ -441,10 +443,10 @@ async def test_a_failed_ack_loses_nothing(owned: Path, status: int, code: str) -
     s = session_for(owned, owner)
     await s.open()
     seen = returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=1))
-    await s.result_written(1)  # the ack fails
+    await s.result_written(1, ["m1"])  # the ack fails
     seen += returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=2))
     assert seen == ["m1", "m1"]  # the retry failed too: offered again, not dropped
-    await s.result_written(2)
+    await s.result_written(2, ["m1"])
     await call_tool(s, "agentconnect_events", {}, request_id=3)  # retries what failed
     assert sorted(owner.acks) == [["1"], ["2"]]
     await s.close()
@@ -465,7 +467,7 @@ async def test_a_result_that_was_never_written_is_not_acknowledged(owned: Path) 
         "m1"
     ]
     assert owner.acks == []
-    await s.result_written(2)
+    await s.result_written(2, ["m1"])
     assert owner.acks == [["2"]]
     await s.close()
 
@@ -503,7 +505,7 @@ def test_names_and_ids_are_strict() -> None:
     for group in (".", "..", "_", "-:"):
         with pytest.raises(ToolError):
             check_args(send, {"group": group, "text": "t"})
-    assert check_args(send, {"group": "a.b", "text": "t"})["group"] == "a.b"
+    assert check_args(send, {"group": "a-b_9", "text": "t"})["group"] == "a-b_9"
     with pytest.raises(ToolError, match="missing argument group"):
         check_args(send, {"group": None, "text": "t"})
     for name in ("x\n", "x\x00", "x y", ""):
@@ -549,3 +551,100 @@ async def test_a_gone_daemon_is_waited_for_not_taken_over(tmp_path: Path) -> Non
     await s.close()
     lock.release()
     assert DataDirLock.probe(tmp_path / "never") == (False, None)
+
+
+# -- verification follow-ups -----------------------------------------------------------
+
+
+def acks_sent(owner: Owner) -> int:
+    return sum(1 for r in owner.requests if r.url.path == "/v0/deliveries/ack")
+
+
+async def test_failed_acks_are_bounded(owned: Path) -> None:
+    """N1: an owner that refuses every ack gets at most one retry per call,
+    the kept batches are capped, and a batch older than its lease is
+    dropped (its messages are offered again anyway)."""
+    owner = Owner()
+    owner.deliveries = [[row(n, f"m{n}")] for n in range(1, 11)]
+    owner.ack_fail = [(503, "busy")] * 1000
+    s = session_for(owned, owner)
+    await s.open()
+    for n in range(1, 11):
+        seen = returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=n))
+        await s.result_written(n, seen)
+    assert acks_sent(owner) <= 20
+    assert len(s._unacked) <= 8
+    clock = s._clock
+    assert isinstance(clock, FakeClock)
+    clock.advance(LEASE_SECS + 1)
+    before = acks_sent(owner)
+    await call_tool(s, "agentconnect_events", {}, request_id=99)
+    assert acks_sent(owner) == before  # nothing old enough is retried
+    assert s._unacked == []
+    await s.close()
+
+
+async def test_a_stale_batch_is_never_acked_by_another_result(owned: Path) -> None:
+    """N3: a batch whose result was never written isn't acknowledged when a
+    later response reuses its request id."""
+    owner = Owner()
+    owner.deliveries = [[row(1, "m1")], [row(2, "m2")]]
+    s = session_for(owned, owner)
+    await s.open()
+    assert returned(await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=7)) == [
+        "m1"
+    ]
+    # The answer for request 7 was dropped; the client reuses the id.
+    await s.result_written(7, [])  # e.g. a tools/list answer with id 7
+    assert owner.acks == []
+    second = await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=7)
+    assert returned(second) == ["m2"]
+    released = [json.loads(r.content) for r in owner.requests if r.url.path.endswith("/release")]
+    assert released == [{"lease": "lease-1", "ids": ["1"]}]  # the stale one came back
+    await s.result_written(7, ["m2"])
+    assert owner.acks == [["2"]]
+    await s.close()
+
+
+async def test_a_wait_cancelled_after_its_take_releases_its_batch(
+    owned: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N3: cancelled between the take and the result, the batch goes back at
+    once, not after its lease."""
+    owner = Owner()
+    owner.deliveries = [[row(1, "m1")]]
+    s = session_for(owned, owner)
+    await s.open()
+
+    def cancelled(_payload: dict[str, Any]) -> dict[str, Any]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tools_module, "message_view", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=3)
+    released = [json.loads(r.content) for r in owner.requests if r.url.path.endswith("/release")]
+    assert released == [{"lease": "lease-1", "ids": ["1"]}]
+    assert not s.awaiting_write()
+    await s.close()
+
+
+async def test_ids_have_no_colon(owned: Path) -> None:
+    """N4: ids are base64url; a colon would be quoted in attach mode and not
+    found, so it is refused in both modes."""
+    send = BY_NAME["agentconnect_send"].schema
+    with pytest.raises(ToolError):
+        check_args(send, {"group": "a:b", "text": "t"})
+    with pytest.raises(ToolError):
+        segment("a:b")
+    assert segment("aZ-_9") == "aZ-_9"
+
+
+async def test_an_unreadable_data_directory_is_a_clear_error(tmp_path: Path) -> None:
+    """N5: a lock file this user can't open is an error, not a traceback."""
+    data = tmp_path / "data"
+    DataDirLock(data, "daemon").release()
+    (data / "daemon.lock").chmod(0)
+    config = Config(relay_url="wss://relay.invalid", relay_host="", data_dir=data)
+    with pytest.raises(ToolError) as e:
+        await Session(config, FakeClock()).open()
+    assert e.value.code == "data_dir_not_accessible"
