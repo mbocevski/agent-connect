@@ -836,6 +836,19 @@ impl Client {
         Ok((PyBytes::new(py, &sealed), discovery::PendingKnock(knock)))
     }
 
+    /// Deletes a lapsed (or joined) knock's KeyPackage private keys
+    /// (SPEC §6.6.6). Drop the `PendingKnock` and its stored copy too.
+    fn forget_knock(&self, py: Python<'_>, pending: &discovery::PendingKnock) -> PyResult<()> {
+        let k = pending.0.clone();
+        py.detach(|| with_client!(self, |c, _g| c.forget_knock(&k)))
+    }
+
+    /// Deletes the private keys of a KeyPackage this instance made (TLS
+    /// bytes) that will never be used.
+    fn delete_key_package(&self, py: Python<'_>, key_package: &[u8]) -> PyResult<()> {
+        py.detach(|| with_client!(self, |c, _g| c.delete_key_package(key_package)))
+    }
+
     /// The owner's checks 4–5 (SPEC §6.6.3) on an opened knock: the
     /// KeyPackage (including that it is unused) and the signature.
     fn verify_knock(

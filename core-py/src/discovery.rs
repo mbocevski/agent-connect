@@ -929,6 +929,19 @@ impl VerifiedKnock {
         PyBytes::new(py, self.0.key_package_ref())
     }
 
+    /// Until when the owner must remember this knock (`ts + 3900`).
+    #[getter]
+    fn forget_after(&self) -> u64 {
+        self.0.forget_after()
+    }
+
+    /// SPEC §6.6.3 step 6: raises `AgentConnectError` with kind `replay`
+    /// if `ledger` has seen this knock's id or KeyPackage, else records
+    /// them. Call it for every verified knock before anything else.
+    fn remember_in(&self, ledger: &mut KnockLedger) -> PyResult<()> {
+        guarded(|| self.0.remember_in(&mut ledger.0).map_err(err))
+    }
+
     /// Wraps a Welcome for this knock (SPEC §6.6.4 step 4).
     fn wrap_welcome<'py>(&self, py: Python<'py>, welcome: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         guarded(|| {
@@ -942,6 +955,29 @@ impl VerifiedKnock {
 
     fn __repr__(&self) -> String {
         format!("{:?}", self.0)
+    }
+}
+
+/// An in-memory record of the knocks an owner has seen (SPEC §6.6.3 step
+/// 6). A daemon that must survive restarts stores `knock_id`,
+/// `key_package_ref` and `forget_after` of each `VerifiedKnock` itself.
+#[pyclass(module = "agentconnect_core._native")]
+pub(crate) struct KnockLedger(knock::MemoryKnockLedger);
+
+#[pymethods]
+impl KnockLedger {
+    #[new]
+    fn new() -> Self {
+        Self(knock::MemoryKnockLedger::default())
+    }
+
+    /// Forgets entries whose knocks can no longer pass check 3 at `now`.
+    fn purge(&mut self, now: u64) {
+        self.0.purge(now);
+    }
+
+    fn __len__(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -971,6 +1007,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PendingKnock>()?;
     m.add_class::<VerifiedKnock>()?;
     m.add_class::<OwnerHistory>()?;
+    m.add_class::<KnockLedger>()?;
     for f in [
         wrap_pyfunction!(verify_listing, m)?,
         wrap_pyfunction!(sign_listing, m)?,

@@ -213,6 +213,38 @@ def test_a_negative_owner_result_is_sticky() -> None:
     assert ac.owner_state("example.com", t, skipped=True) == "unchecked"
 
 
+def test_a_replayed_knock_is_dropped(rng: random.Random) -> None:
+    """Review M4 (knock_probe.py): a rejected knock verified again when the
+    relay redelivered it within the hour."""
+    knocker, owner = make_client(rng), make_client(rng)
+    door = ac.Door.generate(T0 + 3600)
+    ledger = ac.KnockLedger()
+    sealed, _ = knocker.create_knock(door.id, door.public_key, "bob", "hi")
+    first = owner.verify_knock(door.open_knock(door.id, sealed, T0))
+    first.remember_in(ledger)  # then the human rejects it
+    again = owner.verify_knock(door.open_knock(door.id, sealed, T0 + 3000))
+    with pytest.raises(ac.AgentConnectError) as e:
+        again.remember_in(ledger)
+    assert e.value.kind == "replay"
+    assert first.forget_after == T0 + 3900
+    assert len(ledger) == 2
+    ledger.purge(first.forget_after + 1)
+    assert len(ledger) == 0
+
+
+def test_a_door_key_that_does_not_seal_is_refused(rng: random.Random) -> None:
+    """Review L1 (knock_probe.py): 1216 bytes that aren't a valid key."""
+    knocker = make_client(rng)
+    door = ac.Door.generate(T0 + 3600)
+    for key in (rng.randbytes(1216), bytes(1216)):
+        with pytest.raises(ac.AgentConnectError, match="does not seal"):
+            knocker.create_knock(door.id, key, "bob")
+    sealed, pending = knocker.create_knock(door.id, door.public_key, "bob")
+    assert sealed
+    knocker.forget_knock(pending)
+    knocker.delete_key_package(door.open_knock(door.id, sealed, T0).key_package)
+
+
 def test_errors_carry_a_stable_kind(rng: random.Random) -> None:
     """Callers branch on `.kind`, never on the message."""
     knocker = make_client(rng)

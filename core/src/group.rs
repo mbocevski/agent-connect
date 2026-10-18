@@ -450,6 +450,36 @@ impl<S: Store> Client<S> {
         Ok((key_package, kp_ref, info))
     }
 
+    /// Deletes the private keys of a KeyPackage this instance made, given
+    /// its TLS bytes: for a knock that lapsed (SPEC §6.6.6) or any other
+    /// KeyPackage that will never be used. Deleting one that isn't stored
+    /// is not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`], or an MLS error computing its reference.
+    pub fn delete_key_package(&self, key_package: &[u8]) -> Result<()> {
+        use openmls_traits::storage::StorageProvider as _;
+        let kp_ref = openmls::ciphersuite::hash_ref::make_key_package_ref(
+            key_package,
+            CS,
+            self.provider.crypto(),
+        )
+        .map_err(mls)?;
+        let tx = Tx::begin(self.store())?;
+        self.provider
+            .storage()
+            .delete_key_package(&kp_ref)
+            .map_err(storage)?;
+        tx.commit()
+    }
+
+    /// The memory store, for tests that count what it holds.
+    #[cfg(test)]
+    pub(crate) fn store_for_testing(&self) -> &S {
+        self.store()
+    }
+
     /// Records `kp_ref` as used, as merging an Add of it would.
     #[cfg(test)]
     pub(crate) fn mark_key_package_used_for_testing(&self, kp_ref: &[u8]) -> Result<()> {

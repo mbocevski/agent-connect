@@ -294,3 +294,27 @@ def test_knocks() -> None:
     other[0] ^= 1
     with pytest.raises(ac.AgentConnectError, match="authentication"):
         ac.unwrap_knock_welcome(knock_id, bytes(other), wrapped)
+
+
+def test_knock_credentials() -> None:
+    """Checks 4-5 against shared data: the vectors' KeyPackages expire, so
+    the leaf key is checked directly (SPEC 6.6.3)."""
+    v = load("knocks.json")
+    d = v["door"]
+    door = ac.Door._derive_for_testing(b64d(d["id"]), bytes.fromhex(d["ikm"]), d["expires_at"])
+    good = v["valid"]
+    opened = door.open_knock(b64d(d["id"]), b64d(good["sealed"]), good["now"])
+    # Checks 4-5 on keys that aren't the KeyPackage's: the knock opens, and
+    # the mailbox or the signature doesn't match its leaf key.
+    for case in v["credential_mismatch"]:
+        o = door.open_knock(b64d(d["id"]), b64d(case["sealed"]), case["now"])
+        if case["fails"] == "mailbox_id":
+            assert ac.mailbox_id(b64d(good["sig_key"])) != o.mailbox_id, case["name"]
+            assert ed25519_ok(b64d(good["sig_key"]), o.signing_input, o.sig)
+        else:
+            assert not ed25519_ok(b64d(good["sig_key"]), o.signing_input, o.sig), case["name"]
+    # The same KeyPackage under another knock_id is a replay by KeyPackageRef.
+    ru = v["reused_key_package"]
+    o = door.open_knock(b64d(d["id"]), b64d(ru["sealed"]), ru["now"])
+    assert o.key_package == opened.key_package
+    assert o.knock_id != opened.knock_id

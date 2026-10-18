@@ -540,7 +540,9 @@ SealedKnock = enc(1120) ‖ HPKE.Seal(door.key, info = "agentconnect/v0/knock" �
   relay. The relay sees a sender mailbox, a `door_id`, a size and a time.
 - `welcome_secret` plays the invite secret's role for the Welcome wrap.
   Only B and the door's owner know it.
-- A knocker MUST check that `door.key` is exactly 1216 bytes before sealing.
+- A knocker MUST check that `door.key` is exactly 1216 bytes, and that HPKE
+  accepts it as a key of the suite, before it builds the KeyPackage: a knock
+  that fails MUST leave no KeyPackage private keys behind.
 - An instance has at most 8 pending knocks.
 - B sends the sealed knock as `{"t": "knock", "door_id", "env"}` (§8.2).
   Knocking is not a human-only action: an agent MAY start one. Approving
@@ -563,9 +565,14 @@ this order:
    KeyPackage extensions, not last resort, **unused** (§6.2, "KeyPackage
    reuse"), and `mailbox_id` derived from its leaf `signature_key` (§2).
 5. Verify `sig` under that leaf `signature_key` (strict Ed25519).
-6. Deduplicate: at most one pending approval per KeyPackageRef (as in
-   §6.2), at most one per `knock_id`, and at most one per knocker identity
-   per door.
+6. Drop replays and deduplicate. The owner MUST remember the `knock_id`
+   and the KeyPackageRef of **every** knock that passes steps 1–5, whatever
+   happens to it next (queued, approved, rejected, dropped by a limit or by
+   local policy, lapsed), until `ts + 3600 + 300`, and MUST silently drop a
+   knock whose `knock_id` or KeyPackageRef it remembers. The relay sees
+   every sealed knock and could otherwise redeliver one the human already
+   rejected, for as long as its `ts` passes step 3. On top of that: at most
+   one pending approval per knocker identity per door.
 7. Apply the local limits: at most 32 pending knocks per door; the rest are
    dropped. Local policy (§10.6) may only tighten these limits.
 8. Queue a **human** approval. It shows the listing name, the knocker's
@@ -628,7 +635,7 @@ a substitute for comparing the SAS.
 | On sending | `accepted`, `door_not_open` or `rate_limited` (§8.3). `accepted` also covers per-door overflow and a full owner queue. |
 | While pending | Nothing: no delivery receipt, no visible ack, no reject frame. |
 | On approval | A Welcome arrives. |
-| At `ts + 3600 + 300` with no Welcome | "No answer." B deletes the knock's `welcome_secret` and KeyPackage and reports the knock as lapsed, never as rejected. |
+| At `ts + 3600 + 300` with no Welcome | "No answer." B deletes the knock's `welcome_secret` and its KeyPackage's private keys and reports the knock as lapsed, never as rejected. |
 
 Until the deadline, every outcome other than approval produces the same
 observation, so a rejection is indistinguishable from a timeout, an

@@ -24,3 +24,17 @@ path = "fuzz_targets/listing_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "knock_open"
+path = "fuzz_targets/knock_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "owner_file"
+path = "fuzz_targets/owner_file.rs"
+test = false
+doc = false
+bench = false

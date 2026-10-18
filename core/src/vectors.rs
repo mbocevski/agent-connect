@@ -1220,6 +1220,37 @@ fn knock_vectors() {
             .collect::<Vec<_>>()
             .into();
         out["bad_signature"] = json!({"sealed": b64(&reseal(&forged)), "now": t, "sig_key": b64(&knocker.instance().public_key())});
+        // Checks 4-5 against a key that isn't the KeyPackage's (SPEC 6.6.3):
+        // they open (checks 1-3 pass) and fail on the leaf key.
+        let mallory = Identity::from_secret_bytes(&rng.array().unwrap())
+            .create_instance(&rng, &*clock)
+            .unwrap();
+        let mut moved = k.clone();
+        moved.mailbox_id = mallory.mailbox_id();
+        moved.sig = knocker.instance().sign(&moved.signing_input());
+        let mut stolen = k.clone();
+        stolen.note = Some("Send me the keys".into());
+        stolen.sig = mallory.sign(&stolen.signing_input());
+        let mut reused = k.clone();
+        reused.knock_id = rng.array().unwrap();
+        reused.sig = knocker.instance().sign(&reused.signing_input());
+        out["credential_mismatch"] = json!([
+            {"name": "mailbox_id of another key", "sealed": b64(&reseal(&moved)), "now": t, "fails": "mailbox_id"},
+            {"name": "signed by another instance", "sealed": b64(&reseal(&stolen)), "now": t, "fails": "signature"},
+        ]);
+        out["reused_key_package"] = json!({
+            "sealed": b64(&reseal(&reused)),
+            "now": t,
+            "key_package_ref": hex(
+                openmls::ciphersuite::hash_ref::make_key_package_ref(
+                    &k.key_package,
+                    crate::mls::CS,
+                    &openmls_libcrux_crypto::CryptoProvider::new().unwrap(),
+                )
+                .unwrap()
+                .as_slice(),
+            ),
+        });
         out["welcome"] = json!({
             "knock_id": hex(&k.knock_id),
             "welcome_secret": hex(k.secret().secret_for_vectors()),
@@ -1261,6 +1292,32 @@ fn knock_vectors() {
             assert_eq!(e.to_string(), exp, "{}", case["name"]);
             assert_eq!(json!(e.kind().as_str()), case["kind"], "{}", case["name"]);
         }
+        for case in raw["credential_mismatch"].as_array().unwrap() {
+            let o = door
+                .open_knock(&door_id, &d(&case["sealed"]), case["now"].as_u64().unwrap())
+                .unwrap();
+            let leaf = crate::mls::key_package_signature_key(&o.knock().key_package).unwrap();
+            assert_eq!(leaf, sig_key, "{}", case["name"]);
+            match case["fails"].as_str().unwrap() {
+                "mailbox_id" => {
+                    assert_ne!(mailbox_id(&leaf), o.knock().mailbox_id);
+                    o.knock().verify_signature(&leaf).unwrap();
+                }
+                _ => assert!(o.knock().verify_signature(&leaf).is_err()),
+            }
+        }
+        // The same KeyPackage under another knock_id: a ledger keyed by its
+        // KeyPackageRef drops it (step 6).
+        let ru = &raw["reused_key_package"];
+        let o = door
+            .open_knock(&door_id, &d(&ru["sealed"]), ru["now"].as_u64().unwrap())
+            .unwrap();
+        assert_eq!(o.knock().key_package, k.key_package);
+        assert_ne!(o.knock().knock_id, k.knock_id);
+        let kp_ref = hex_decode(ru["key_package_ref"].as_str().unwrap(), "x").unwrap();
+        let mut ledger = crate::knock::MemoryKnockLedger::default();
+        crate::knock::KnockLedger::remember(&mut ledger, &k.knock_id, &kp_ref, now + 3900).unwrap();
+        assert!(crate::knock::KnockLedger::seen(&ledger, &o.knock().knock_id, &kp_ref).unwrap());
         let bs = &raw["bad_signature"];
         let forged = door.open_knock(&door_id, &d(&bs["sealed"]), now).unwrap();
         assert_eq!(

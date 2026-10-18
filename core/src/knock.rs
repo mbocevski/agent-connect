@@ -40,6 +40,9 @@ const KNOCK_WELCOME_LABEL: &[u8] = b"agentconnect/v0/knock-welcome";
 
 /// Length of a door's HPKE public key (SPEC §6.6.1): the v0 suite's 1216.
 pub const DOOR_KEY_LEN: usize = HPKE_PUBLIC_KEY_LEN;
+/// Length of a door's HPKE private key in the v0 suite (the 32-byte
+/// `MLKEM768-X25519` seed).
+pub const DOOR_PRIVATE_KEY_LEN: usize = 32;
 /// Length of `enc` at the start of a `SealedKnock`: the suite's KEM
 /// ciphertext, 1120 bytes.
 pub const KNOCK_ENC_LEN: usize = KEM_CIPHERTEXT_LEN;
@@ -97,7 +100,7 @@ impl Door {
         let pair = crypto
             .derive_hpke_keypair(CS.hpke_config(), ikm)
             .map_err(|_| Error::Internal("door key derivation"))?;
-        if pair.public.len() != DOOR_KEY_LEN {
+        if pair.public.len() != DOOR_KEY_LEN || pair.private.len() != DOOR_PRIVATE_KEY_LEN {
             return Err(Error::HpkeKeyLength);
         }
         Ok(Self {
@@ -158,24 +161,53 @@ impl Door {
         out
     }
 
-    /// Restores a door from [`Door::to_secret_bytes`].
+    /// Restores a door from [`Door::to_secret_bytes`]. The bytes must be
+    /// exactly the layout, and the private key must open what is sealed to
+    /// the public key, so a corrupted store fails here instead of dropping
+    /// every knock later.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidKnock`] if the bytes are too short for the layout.
+    /// [`Error::InvalidKnock`]: `"door bytes"` for the wrong length,
+    /// `"door key pair mismatch"` for keys that don't belong together.
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() <= 24 + DOOR_KEY_LEN {
+        if bytes.len() != 24 + DOOR_KEY_LEN + DOOR_PRIVATE_KEY_LEN {
             return Err(bad("door bytes"));
         }
         let (id, rest) = bytes.split_at(16);
         let (exp, rest) = rest.split_at(8);
         let (public, private) = rest.split_at(DOOR_KEY_LEN);
-        Ok(Self {
+        let door = Self {
             id: id.try_into().map_err(|_| bad("door bytes"))?,
             expires_at: u64::from_be_bytes(exp.try_into().map_err(|_| bad("door bytes"))?),
             public: public.to_vec(),
             private: Zeroizing::new(private.to_vec()),
-        })
+        };
+        door.check_key_pair()?;
+        Ok(door)
+    }
+
+    /// Seals a probe to the public key and opens it with the private key.
+    fn check_key_pair(&self) -> Result<()> {
+        const PROBE: &[u8] = b"agentconnect/v0/door-key-check";
+        let sealed =
+            seal(&self.id, &self.public, PROBE).map_err(|_| bad("door key pair mismatch"))?;
+        let (enc, ct) = sealed.split_at(KNOCK_ENC_LEN);
+        let crypto = CryptoProvider::new().map_err(|_| Error::Rng)?;
+        let input = HpkeCiphertext {
+            kem_output: enc.to_vec().into(),
+            ciphertext: ct.to_vec().into(),
+        };
+        match crypto.hpke_open(
+            CS.hpke_config(),
+            &input,
+            &self.private,
+            &knock_info(&self.id),
+            b"",
+        ) {
+            Ok(p) if p == PROBE => Ok(()),
+            _ => Err(bad("door key pair mismatch")),
+        }
     }
 
     /// The owner's checks 1–3 (SPEC §6.6.3) on a knock that arrived in an
@@ -543,6 +575,109 @@ impl VerifiedKnock {
     }
 }
 
+impl VerifiedKnock {
+    /// Until when the owner must remember this knock: `ts + 3600 + 300`,
+    /// after which check 3 drops any copy anyway.
+    #[must_use]
+    pub fn forget_after(&self) -> u64 {
+        self.knock.gives_up_at()
+    }
+
+    /// SPEC §6.6.3 step 6, replay part: if `ledger` has seen this knock's
+    /// `knock_id` or `KeyPackageRef`, the knock is a replay; otherwise both
+    /// are recorded until [`VerifiedKnock::forget_after`]. Call it for every
+    /// knock that passed checks 1–5, before anything else happens to it
+    /// (queued, approved, rejected, dropped by a limit or by policy), so a
+    /// knock a human rejected can't be put in front of them again.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidKnock`] `"replayed"` (kind `replay`): drop it
+    /// silently. A ledger error.
+    pub fn remember_in(&self, ledger: &mut impl KnockLedger) -> Result<()> {
+        let id = self.knock.knock_id;
+        if ledger.seen(&id, &self.key_package_ref)? {
+            return Err(bad("replayed"));
+        }
+        ledger.remember(&id, &self.key_package_ref, self.forget_after())
+    }
+}
+
+/// What an owner remembers about the knocks it has seen (SPEC §6.6.3 step
+/// 6): every `knock_id` and `KeyPackageRef` until its knock's
+/// `forget_after`. The daemon backs it with its encrypted store;
+/// [`MemoryKnockLedger`] is an in-memory one.
+pub trait KnockLedger {
+    /// Whether `knock_id` or `key_package_ref` is remembered.
+    ///
+    /// # Errors
+    ///
+    /// The backing store's error.
+    fn seen(&self, knock_id: &[u8; 16], key_package_ref: &[u8]) -> Result<bool>;
+
+    /// Remembers both until `forget_after` (Unix seconds).
+    ///
+    /// # Errors
+    ///
+    /// The backing store's error.
+    fn remember(
+        &mut self,
+        knock_id: &[u8; 16],
+        key_package_ref: &[u8],
+        forget_after: u64,
+    ) -> Result<()>;
+}
+
+/// An in-memory [`KnockLedger`]. It doesn't survive a restart: a daemon
+/// that keeps knocks across restarts persists the same entries itself.
+#[derive(Debug, Default)]
+pub struct MemoryKnockLedger {
+    entries: std::collections::HashMap<Vec<u8>, u64>,
+}
+
+impl MemoryKnockLedger {
+    fn key(tag: u8, value: &[u8]) -> Vec<u8> {
+        [&[tag][..], value].concat()
+    }
+
+    /// Forgets every entry whose `forget_after` is before `now`.
+    pub fn purge(&mut self, now: u64) {
+        self.entries.retain(|_, until| *until >= now);
+    }
+
+    /// How many entries (two per knock) it holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether it holds nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl KnockLedger for MemoryKnockLedger {
+    fn seen(&self, knock_id: &[u8; 16], key_package_ref: &[u8]) -> Result<bool> {
+        Ok(self.entries.contains_key(&Self::key(0, knock_id))
+            || self.entries.contains_key(&Self::key(1, key_package_ref)))
+    }
+
+    fn remember(
+        &mut self,
+        knock_id: &[u8; 16],
+        key_package_ref: &[u8],
+        forget_after: u64,
+    ) -> Result<()> {
+        for k in [Self::key(0, knock_id), Self::key(1, key_package_ref)] {
+            let until = self.entries.entry(k).or_insert(forget_after);
+            *until = (*until).max(forget_after);
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Debug for VerifiedKnock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VerifiedKnock")
@@ -578,6 +713,10 @@ impl<S: Store> Client<S> {
         }
         check_display_name(display_name)?;
         check_note(note)?;
+        // Validate the door key fully before a KeyPackage is stored: HPKE
+        // refuses keys of the right length that aren't valid, and a failed
+        // knock must leave nothing behind.
+        seal(door_id, door_key, b"").map_err(|_| bad("door key does not seal"))?;
         let mut knock = Knock {
             door_id: *door_id,
             knock_id: self.rng().array()?,
@@ -590,8 +729,26 @@ impl<S: Store> Client<S> {
             sig: [0; 64],
         };
         knock.sig = self.instance().sign(&knock.signing_input());
-        let sealed = seal(door_id, door_key, &knock.to_json())?;
-        Ok((sealed, knock))
+        match seal(door_id, door_key, &knock.to_json()) {
+            Ok(sealed) => Ok((sealed, knock)),
+            Err(e) => {
+                // Not expected after the probe; still leave nothing behind.
+                self.delete_key_package(&knock.key_package)?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Knocker side, SPEC §6.6.6: at `gives_up_at`, or after joining,
+    /// deletes the private keys of the knock's KeyPackage. The caller drops
+    /// the [`Knock`] (which zeroizes its `welcome_secret`) and its stored
+    /// copy.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`], or an MLS error.
+    pub fn forget_knock(&self, knock: &Knock) -> Result<()> {
+        self.delete_key_package(&knock.key_package)
     }
 
     /// Owner side, SPEC §6.6.3 checks 4–5: the KeyPackage passes §6.2 step
@@ -974,6 +1131,110 @@ pub(crate) mod tests {
         assert_eq!(
             s.owner.verify_knock(opened).err(),
             Some(Error::KeyPackageReused)
+        );
+    }
+
+    /// Review M4 (`knock_probe.py`): the relay could redeliver a knock the
+    /// human had rejected, and every check passed again.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn a_knock_seen_before_is_a_replay() {
+        let s = setup("knock-replay");
+        let t = now(&s.clock);
+        let (sealed, k) = knock(&s);
+        let mut ledger = MemoryKnockLedger::default();
+        let v = s
+            .owner
+            .verify_knock(s.door.open_knock(s.door.id(), &sealed, t).unwrap())
+            .unwrap();
+        v.remember_in(&mut ledger).unwrap();
+        assert_eq!(v.forget_after(), k.ts + 3600 + 300);
+        // The same sealed bytes, later inside the window.
+        let again = s
+            .owner
+            .verify_knock(s.door.open_knock(s.door.id(), &sealed, t + 3000).unwrap())
+            .unwrap();
+        let e = again.remember_in(&mut ledger).unwrap_err();
+        assert_eq!(e, bad("replayed"));
+        assert_eq!(e.kind(), crate::ErrorKind::Replay);
+        // The same KeyPackage under a fresh knock_id and signature.
+        let mut renamed = k.clone();
+        renamed.knock_id = Rng::for_test("knock-replay-id").array().unwrap();
+        renamed.sig = s.knocker.instance().sign(&renamed.signing_input());
+        let sealed2 = seal(s.door.id(), s.door.public_key(), &renamed.to_json()).unwrap();
+        let v2 = s
+            .owner
+            .verify_knock(s.door.open_knock(s.door.id(), &sealed2, t).unwrap())
+            .unwrap();
+        assert_eq!(v2.remember_in(&mut ledger), Err(bad("replayed")));
+        // A different knock is fresh.
+        let (sealed3, _) = knock(&s);
+        let v3 = s
+            .owner
+            .verify_knock(s.door.open_knock(s.door.id(), &sealed3, t).unwrap())
+            .unwrap();
+        v3.remember_in(&mut ledger).unwrap();
+        // After the knock can no longer pass check 3, it is forgotten.
+        assert_eq!(ledger.len(), 4);
+        ledger.purge(v.forget_after());
+        assert_eq!(ledger.len(), 4);
+        ledger.purge(v.forget_after() + 1);
+        assert_eq!(ledger.len(), 0);
+        assert!(ledger.is_empty());
+    }
+
+    /// Review L1: a door key that HPKE can't seal to used to leave a
+    /// KeyPackage's private keys in the store.
+    #[test]
+    fn a_door_key_that_does_not_seal_leaves_nothing_behind() {
+        let s = setup("knock-bad-key");
+        let mut junk = vec![0u8; DOOR_KEY_LEN];
+        Rng::for_test("knock-bad-key-bytes")
+            .fill(&mut junk)
+            .unwrap();
+        let before = s.knocker.store_for_testing().mls_value_count();
+        let e = s
+            .knocker
+            .create_knock(s.door.id(), &junk, "bob", None)
+            .unwrap_err();
+        assert_eq!(e, bad("door key does not seal"));
+        assert_eq!(s.knocker.store_for_testing().mls_value_count(), before);
+        // A knock that lapses gives its KeyPackage's keys back.
+        let (_, k) = knock(&s);
+        let with = s.knocker.store_for_testing().mls_value_count();
+        assert!(with > before);
+        s.knocker.forget_knock(&k).unwrap();
+        assert_eq!(s.knocker.store_for_testing().mls_value_count(), before);
+        // Forgetting twice is harmless.
+        s.knocker.forget_knock(&k).unwrap();
+    }
+
+    /// Review L6: a stored door must be exactly the layout, and its private
+    /// key must belong to its public key.
+    #[test]
+    fn stored_doors_are_checked_on_load() {
+        let s = setup("door-load");
+        let bytes = s.door.to_secret_bytes();
+        assert_eq!(bytes.len(), 24 + DOOR_KEY_LEN + DOOR_PRIVATE_KEY_LEN);
+        Door::from_secret_bytes(&bytes).unwrap();
+        let mut long = bytes.to_vec();
+        long.push(0);
+        assert_eq!(
+            Door::from_secret_bytes(&long).err(),
+            Some(bad("door bytes"))
+        );
+        assert_eq!(
+            Door::from_secret_bytes(&bytes[..bytes.len() - 1]).err(),
+            Some(bad("door bytes"))
+        );
+        // Another door's private key under this door's public key.
+        let other = Door::generate(&Rng::for_test("door-load-other"), s.door.expires_at()).unwrap();
+        let mut mixed = bytes.to_vec();
+        let split = 24 + DOOR_KEY_LEN;
+        mixed[split..].copy_from_slice(&other.to_secret_bytes()[split..]);
+        assert_eq!(
+            Door::from_secret_bytes(&mixed).err(),
+            Some(bad("door key pair mismatch"))
         );
     }
 
