@@ -348,6 +348,61 @@ pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()>
     Ok(())
 }
 
+/// [`authorize`] on the facts of a commit as written in
+/// `testdata/group-policy.json`: a JSON object with `committer`, `adds`,
+/// `removes` (`identity`, `self_proposed`), `leaves_after`,
+/// `identities_before` and `identities_after`. Its `new_policy` names a
+/// policy of the file; the caller resolves it and passes it as
+/// `new_policy`. **Tests only** (the shared vectors, from Rust and through
+/// the bindings): a member's facts come from the commit itself.
+///
+/// # Errors
+///
+/// [`Error::Malformed`] for facts that don't have this shape, or the error
+/// [`authorize`] returns.
+#[doc(hidden)]
+pub fn authorize_facts_for_testing(
+    in_force: &GroupPolicy,
+    new_policy: Option<GroupPolicy>,
+    facts: &[u8],
+) -> Result<()> {
+    let bad = || Error::Malformed("commit facts");
+    let f: serde_json::Value = serde_json::from_slice(facts).map_err(|_| bad())?;
+    let text = |v: &serde_json::Value| v.as_str().map(str::to_owned).ok_or_else(bad);
+    let texts = |key: &str| -> Result<Vec<String>> {
+        f[key]
+            .as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(text)
+            .collect()
+    };
+    let removes = f["removes"]
+        .as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|r| {
+            Ok(Removal {
+                identity: text(&r["identity"])?,
+                self_proposed: r["self_proposed"].as_bool().ok_or_else(bad)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let facts = CommitFacts {
+        committer: text(&f["committer"])?,
+        adds: texts("adds")?,
+        removes,
+        new_policy,
+        identities_before: texts("identities_before")?.into_iter().collect(),
+        members_after: f["leaves_after"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(bad)?,
+        identities_after: texts("identities_after")?.into_iter().collect(),
+    };
+    authorize(in_force, &facts)
+}
+
 fn authorize_policy_change(
     old: &GroupPolicy,
     new: &GroupPolicy,
@@ -994,6 +1049,46 @@ mod tests {
         f.identities_before = all.clone();
         f.identities_after = all;
         authorize(&p, &f).unwrap();
+    }
+
+    /// The vectors' facts format: malformed facts are an error, not a
+    /// verdict.
+    #[test]
+    fn facts_for_testing_must_have_the_vector_shape() {
+        let id = ids(2);
+        let p = GroupPolicy::default_for(&id[0]);
+        let good = serde_json::json!({
+            "committer": id[0], "adds": [id[1]], "removes": [],
+            "leaves_after": 2, "identities_before": [id[0]],
+            "identities_after": [id[0], id[1]],
+        });
+        authorize_facts_for_testing(&p, None, good.to_string().as_bytes()).unwrap();
+        let mut leave = good.clone();
+        leave["committer"] = id[1].clone().into();
+        leave["adds"] = serde_json::json!([]);
+        leave["removes"] = serde_json::json!([{"identity": id[0], "self_proposed": true}]);
+        leave["identities_after"] = serde_json::json!([id[1]]);
+        assert_eq!(
+            authorize_facts_for_testing(&p, None, leave.to_string().as_bytes()),
+            Err(Error::Unauthorized(OWNER_MUST_TRANSFER))
+        );
+        let malformed = Err(Error::Malformed("commit facts"));
+        for (key, value) in [
+            ("committer", serde_json::json!(1)),
+            ("adds", serde_json::json!("x")),
+            ("removes", serde_json::json!([{"identity": id[0]}])),
+            ("leaves_after", serde_json::json!(-1)),
+            ("identities_after", serde_json::json!([1])),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert_eq!(
+                authorize_facts_for_testing(&p, None, bad.to_string().as_bytes()),
+                malformed,
+                "{key}"
+            );
+        }
+        assert_eq!(authorize_facts_for_testing(&p, None, b"{"), malformed);
     }
 
     /// D4 compatibility: a policy written before `floor_pinned` existed

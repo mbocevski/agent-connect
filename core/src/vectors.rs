@@ -1703,8 +1703,8 @@ fn knock_vectors() {
 use std::collections::BTreeMap;
 
 use crate::policy::{
-    CommitFacts, Floor, GroupPolicy, InvitePermission, LoopGuard, MAX_AGENT_TURNS, MAX_GROUP_SIZE,
-    OWNER_MUST_TRANSFER, Removal, RemovePermission, authorize,
+    Floor, GroupPolicy, InvitePermission, LoopGuard, MAX_AGENT_TURNS, MAX_GROUP_SIZE,
+    OWNER_MUST_TRANSFER, RemovePermission, authorize_facts_for_testing,
 };
 
 /// `group-policy.json`: the expected errors.
@@ -1737,13 +1737,6 @@ fn facts(
     })
 }
 
-fn strings(v: &Value) -> impl Iterator<Item = String> + '_ {
-    v.as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s.as_str().unwrap().to_owned())
-}
-
 /// Checks a `group-policy.json` value against the core. A case marked
 /// `pending` names a SPEC rule the core doesn't implement yet; it must not
 /// pass, so the mark is dropped together with the change that implements it.
@@ -1774,34 +1767,19 @@ fn check_group_policy(v: &Value) {
     for c in v["authorization"].as_array().unwrap() {
         let name = c["name"].as_str().unwrap();
         let f = &c["facts"];
-        let usize_of = |key: &str| usize::try_from(f[key].as_u64().unwrap()).unwrap();
         let got = (|| {
             let in_force = policy(&c["policy"])?;
             let new_policy = match &f["new_policy"] {
                 Value::Null => None,
                 n => Some(policy(n)?),
             };
-            let facts = CommitFacts {
-                committer: f["committer"].as_str().unwrap().to_owned(),
-                adds: strings(&f["adds"]).collect(),
-                removes: f["removes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|r| Removal {
-                        identity: r["identity"].as_str().unwrap().to_owned(),
-                        self_proposed: r["self_proposed"].as_bool().unwrap(),
-                    })
-                    .collect(),
-                new_policy,
-                identities_before: strings(&f["identities_before"]).collect(),
-                members_after: usize_of("leaves_after"),
-                identities_after: strings(&f["identities_after"]).collect(),
-            };
-            Some(match authorize(&in_force, &facts) {
-                Ok(()) => "ok".to_owned(),
-                Err(e) => e.to_string(),
-            })
+            let facts = serde_json::to_vec(f).unwrap();
+            Some(
+                match authorize_facts_for_testing(&in_force, new_policy, &facts) {
+                    Ok(()) => "ok".to_owned(),
+                    Err(e) => e.to_string(),
+                },
+            )
         })();
         let want = c["result"].as_str().unwrap();
         if c.get("pending").is_some() {

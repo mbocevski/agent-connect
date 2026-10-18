@@ -35,6 +35,20 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `Client._commit_unchecked_for_testing` (feature `test-hooks`, not in the
   release wheel; `scripts/check_wheel_hooks.py` checks it) builds commits
   without the core's checks, for tests that honest members reject them.
+  Two instances of the owner that propose a leave at once no longer split
+  the group: every member stores both, and the next commit leaves out the
+  leave of the owner instance with the lowest leaf, so every member,
+  both leavers included, agrees on `pending_leaves` and processes the
+  commit (SPEC 9.2). Removing a member whose leave is pending carries its
+  leave, reported as `left`. `check_policy_change` reasons about the
+  commit `set_policy` would build, pending leaves included, and refuses
+  while a commit or this instance's own leave is pending; every commit of
+  an instance whose own leave is pending is refused with `not permitted`.
+  A commit's GroupContextExtensions must carry the policy's canonical
+  encoding; a policy written before `floor_pinned` is still read from a
+  stored context or a Welcome. The Python suite runs every authorization
+  case of `testdata/group-policy.json` (test-only
+  `_native._authorize_for_testing`).
 - MCP adapter: `agentconnect mcp`, a stdio MCP server that an agent tool
   (Gemini CLI, Cursor and other MCP clients) starts per session
   (docs/adapters/mcp.md, ADR-005). It runs the runtime in its own process on

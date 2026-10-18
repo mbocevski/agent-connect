@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
-use openmls::group::{MlsGroup, ProcessedWelcome, StagedCommit};
+use openmls::group::{MlsGroup, ProcessedWelcome, QueuedProposal, StagedCommit};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::{
     BasicCredential, ContentType, CredentialWithKey, GroupId, KeyPackage, LeafNodeIndex,
@@ -40,6 +40,10 @@ use crate::provider::{Provider, Store};
 use crate::records::{self, OwnCommits, PendingRecord, PreviousMembers, wire_hash};
 use crate::rng::Rng;
 use crate::sas::Sas;
+
+/// Why an instance whose own leave is pending may not commit: the commit
+/// would carry its own removal.
+pub(crate) const OWN_LEAVE_PENDING: &str = "this instance's own leave is pending";
 
 /// One instance's MLS state: storage, randomness, its signing key and a
 /// clock. Groups are loaded from and written through to its store.
@@ -143,7 +147,10 @@ pub struct CommitSummary {
     pub previous_policy: Option<GroupPolicy>,
     /// The policy the commit ended with, when `policy_changed`. With
     /// `previous_policy` it gives role changes from the summary alone, the
-    /// same on a journal replay as the first time (ADR-004).
+    /// same on a journal replay as the first time (ADR-004). A summary
+    /// journalled before these fields existed reads back with
+    /// `policy_changed` true and both `None`: the change happened, but
+    /// what it was isn't known.
     #[serde(default)]
     pub policy: Option<GroupPolicy>,
     /// Whether this commit (another member's, at the epoch of this
@@ -1143,10 +1150,21 @@ pub fn peek_header(bytes: &[u8]) -> Result<MessageHeader> {
     })
 }
 
+/// Whether `q` is the leave (own Remove proposal) of `leaf`.
+fn is_leave_of(q: &QueuedProposal, leaf: u32) -> bool {
+    matches!(
+        (q.proposal(), q.sender()),
+        (Proposal::Remove(r), Sender::Member(s)) if r.removed() == *s && s.u32() == leaf
+    )
+}
+
 /// Builds, stages and checks a commit; `$build` maps the commit builder.
+/// The commit carries every stored proposal (the pending leaves) but the
+/// owner leave [`Group::kept_owner_leaf`] leaves out.
 macro_rules! commit {
     ($self:ident, $client:ident, $wrap:expr, |$b:ident| $build:expr) => {{
         $self.ready()?;
+        let kept = $self.leaves_for_commit()?;
         $self.handshake_padding($client)?;
         let signer = $client.signer();
         let $b = $self.mls.commit_builder();
@@ -1157,7 +1175,7 @@ macro_rules! commit {
                 $client.provider.rand(),
                 $client.provider.crypto(),
                 &signer,
-                |_| true,
+                |q| !kept.is_some_and(|leaf| is_leave_of(q, leaf)),
             )
             .map_err(mls)?
             .stage_commit(&$client.provider)
@@ -1279,39 +1297,54 @@ impl Group {
         self.atomically(client, |g| g.set_policy_inner(client, policy))
     }
 
-    /// Whether [`Group::set_policy`] with `policy` would pass this
-    /// instance's checks now, without building a commit: the policy's
-    /// limits and SPEC §9.2 for a commit that carries only this
-    /// GroupContextExtensions proposal, as every receiver checks it. The
-    /// group is not changed. A pending commit or leave proposal is not
-    /// taken into account; `set_policy` itself checks again.
+    /// What [`Group::set_policy`] with `policy` would answer now, without
+    /// building a commit: the policy's limits, then the checks of any
+    /// commit of this instance (a member, no commit pending, its own leave
+    /// not pending), then SPEC §9.2 for the commit `set_policy` would build,
+    /// as every receiver checks it. That commit carries this
+    /// GroupContextExtensions proposal and the pending leaves
+    /// ([`Group::pending_leaves`]). The group is not changed.
     ///
     /// # Errors
     ///
-    /// [`Error::NotMember`], a policy validation error, or the
-    /// [`Error::Unauthorized`] that `set_policy` would return.
+    /// A policy validation error, [`Error::NotMember`],
+    /// [`Error::CommitPending`], [`Error::NotPermitted`] while this
+    /// instance's own leave is pending, or the [`Error::Unauthorized`] that
+    /// `set_policy` would return.
     pub fn check_policy_change<S: Store>(
         &self,
         client: &Client<S>,
         policy: &GroupPolicy,
     ) -> Result<()> {
-        if !self.mls.is_active() {
-            return Err(Error::NotMember);
-        }
         policy.validate()?;
+        self.ready()?;
+        self.leaves_for_commit()?;
         let current = self.policy()?;
         let members = self.members()?;
-        let identities: BTreeSet<String> = members.iter().map(|m| m.identity.clone()).collect();
+        let leaving = self.pending_leave_leaves()?;
+        let identities_before: BTreeSet<String> =
+            members.iter().map(|m| m.identity.clone()).collect();
+        let staying: Vec<&MemberInfo> = members
+            .iter()
+            .filter(|m| !leaving.contains(&m.leaf_index))
+            .collect();
         authorize(
             &current,
             &CommitFacts {
                 committer: client.instance.identity().to_owned(),
                 adds: Vec::new(),
-                removes: Vec::new(),
+                removes: members
+                    .iter()
+                    .filter(|m| leaving.contains(&m.leaf_index))
+                    .map(|m| Removal {
+                        identity: m.identity.clone(),
+                        self_proposed: true,
+                    })
+                    .collect(),
                 new_policy: Some(policy.clone()),
-                identities_before: identities.clone(),
-                members_after: members.len(),
-                identities_after: identities,
+                identities_before,
+                members_after: staying.len(),
+                identities_after: staying.iter().map(|m| m.identity.clone()).collect(),
             },
         )
     }
@@ -1658,7 +1691,7 @@ impl Group {
         if self.member_info(leaving)?.identity != owner {
             return Ok(false);
         }
-        let mut gone = self.pending_leave_leaves();
+        let mut gone = self.stored_leave_leaves();
         gone.insert(leaving.u32());
         Ok(!self
             .members()?
@@ -1666,9 +1699,23 @@ impl Group {
             .any(|m| m.identity == owner && !gone.contains(&m.leaf_index)))
     }
 
+    /// Whether `leaving` is the owner's only instance in the group (pending
+    /// leaves not counted): the receiver's check on a leave proposal
+    /// (SPEC §9.2). It depends on the membership alone, never on which
+    /// other leaves arrived first, so every member decides the same way.
+    fn owner_sole_instance(&self, leaving: LeafNodeIndex) -> Result<bool> {
+        let owner = self.policy()?.owner;
+        let leaving = self.member_info(leaving)?;
+        Ok(leaving.identity == owner
+            && self
+                .members()?
+                .iter()
+                .all(|m| m.identity != owner || m.leaf_index == leaving.leaf_index))
+    }
+
     /// The leaves whose own Remove proposal (a leave) is stored in this
     /// epoch.
-    fn pending_leave_leaves(&self) -> BTreeSet<u32> {
+    fn stored_leave_leaves(&self) -> BTreeSet<u32> {
         self.mls
             .pending_proposals()
             .filter_map(|q| match (q.proposal(), q.sender()) {
@@ -1678,17 +1725,68 @@ impl Group {
             .collect()
     }
 
-    /// The members whose leave is pending in this epoch (SPEC §9.2): every
-    /// stored leave proposal, this instance's own included, once per leaf
-    /// and in leaf order. Every commit this instance builds carries them
-    /// all. Proposals don't outlive their epoch: another member's commit
-    /// that doesn't carry them drops them.
+    /// The owner instance whose stored leave the next commit leaves out:
+    /// when every instance of the owner has a leave stored (instances that
+    /// proposed at once, each before seeing the other's), the one with the
+    /// lowest leaf index stays, so the owner keeps an instance (SPEC §9.2).
+    /// Every member that stored the same proposals picks the same one,
+    /// whatever order they arrived in.
+    fn kept_owner_leaf(&self, stored: &BTreeSet<u32>) -> Result<Option<u32>> {
+        let owner = self.policy()?.owner;
+        let owner_leaves: Vec<u32> = self
+            .members()?
+            .iter()
+            .filter(|m| m.identity == owner)
+            .map(|m| m.leaf_index)
+            .collect();
+        Ok(
+            if !owner_leaves.is_empty() && owner_leaves.iter().all(|l| stored.contains(l)) {
+                owner_leaves.into_iter().min()
+            } else {
+                None
+            },
+        )
+    }
+
+    /// The leaves whose stored leave the next commit carries: every stored
+    /// leave but the one [`Group::kept_owner_leaf`] leaves out.
+    fn pending_leave_leaves(&self) -> Result<BTreeSet<u32>> {
+        let mut leaving = self.stored_leave_leaves();
+        if let Some(kept) = self.kept_owner_leaf(&leaving)? {
+            leaving.remove(&kept);
+        }
+        Ok(leaving)
+    }
+
+    /// Before any commit of this instance: which stored leave to leave out
+    /// of it, and a refusal if the commit would carry this instance's own
+    /// leave (no member commits its own removal).
+    fn leaves_for_commit(&self) -> Result<Option<u32>> {
+        let stored = self.stored_leave_leaves();
+        let kept = self.kept_owner_leaf(&stored)?;
+        let own = self.own_leaf_index();
+        if stored.contains(&own) && kept != Some(own) {
+            return Err(Error::NotPermitted(OWN_LEAVE_PENDING));
+        }
+        Ok(kept)
+    }
+
+    /// The members whose leave is pending in this epoch (SPEC §9.2), in
+    /// leaf order: the leaves the next commit of any member carries, this
+    /// instance's own included. That is every stored leave proposal, except
+    /// that when every instance of the owner has proposed a leave (at once,
+    /// each before seeing the others'), the instance with the lowest leaf
+    /// index stays and its leave is left out. Members that stored the same
+    /// proposals get the same list, in whatever order they arrived.
+    /// Proposals don't outlive their epoch: a commit that doesn't carry a
+    /// leave drops it, and that member proposes again if it still means to
+    /// leave.
     ///
     /// # Errors
     ///
     /// A validation error if a stored leaf is broken.
     pub fn pending_leaves(&self) -> Result<Vec<MemberInfo>> {
-        self.pending_leave_leaves()
+        self.pending_leave_leaves()?
             .into_iter()
             .map(|leaf| self.member_info(LeafNodeIndex::new(leaf)))
             .collect()
@@ -1826,6 +1924,12 @@ impl Group {
                     let ctx = check_group_context(gce.extensions())?;
                     if ctx.meta_bytes != current.meta_bytes {
                         return Err(Error::Unauthorized("ac_group_meta is immutable"));
+                    }
+                    // One accepted encoding per policy in a commit. Older
+                    // encodings (no `floor_pinned`) are only read where they
+                    // already are: a stored context or a Welcome.
+                    if ctx.policy.to_json()? != ctx.policy_bytes {
+                        return Err(Error::InvalidGroupContext("policy not in canonical form"));
                     }
                     new_ctx = Some(ctx);
                 }
@@ -2048,7 +2152,7 @@ impl Group {
         // SPEC §9.1 counts identities, before the commit and after it; the
         // commit also carries the leaves pending in this epoch.
         let members = self.members()?;
-        let leaving = self.pending_leave_leaves();
+        let leaving = self.pending_leave_leaves()?;
         let before: BTreeSet<&str> = members.iter().map(|m| m.identity.as_str()).collect();
         let mut after: BTreeSet<&str> = members
             .iter()
@@ -2174,9 +2278,16 @@ impl Group {
         if leaves.is_empty() {
             return Err(Error::UnknownMember);
         }
+        // A leaf whose leave is pending goes by that proposal, which the
+        // commit carries anyway, so every member reports it as a leave.
+        let leaving = self.pending_leave_leaves()?;
+        let leaves: Vec<LeafNodeIndex> = leaves
+            .into_iter()
+            .filter(|l| !leaving.contains(&l.u32()))
+            .collect();
         let policy = self.policy()?;
         let me = client.instance.identity();
-        if identity != me && !policy.may_remove(me) {
+        if identity != me && !leaves.is_empty() && !policy.may_remove(me) {
             return Err(Error::NotPermitted("this identity may not remove members"));
         }
         commit!(self, client, None, |b| b.propose_removals(leaves))
@@ -2206,6 +2317,13 @@ impl Group {
                     .ok_or(Error::UnknownMember)
             })
             .collect::<Result<Vec<_>>>()?;
+        // A leaf whose leave is pending goes by that proposal (see
+        // `remove_inner`); only the others need the permission.
+        let leaving = self.pending_leave_leaves()?;
+        let targets: Vec<&MemberInfo> = targets
+            .into_iter()
+            .filter(|m| !leaving.contains(&m.leaf_index))
+            .collect();
         let policy = self.policy()?;
         let me = client.instance.identity();
         if targets.iter().any(|m| m.identity != me) {
@@ -2216,8 +2334,11 @@ impl Group {
                 return Err(Error::NotPermitted("only the owner may remove the owner"));
             }
         }
-        commit!(self, client, None, |b| b
-            .propose_removals(wanted.iter().map(|l| LeafNodeIndex::new(*l))))
+        let by_value: Vec<LeafNodeIndex> = targets
+            .iter()
+            .map(|m| LeafNodeIndex::new(m.leaf_index))
+            .collect();
+        commit!(self, client, None, |b| b.propose_removals(by_value))
     }
 
     /// Builds, sends and merges a commit with these proposals, skipping
@@ -2361,7 +2482,7 @@ impl Group {
         &mut self,
         client: &Client<S>,
     ) -> Result<CommitOut> {
-        if self.mls.pending_proposals().next().is_none() {
+        if self.pending_leave_leaves()?.is_empty() {
             return Err(Error::NotPermitted("no pending proposals"));
         }
         commit!(self, client, None, |b| b)
@@ -2598,7 +2719,7 @@ impl Group {
                     return Err(Error::Unauthorized("only leave proposals are accepted"));
                 };
                 let member = self.member_info(index)?;
-                if self.owner_left_without(index)? {
+                if self.owner_sole_instance(index)? {
                     return Err(Error::Unauthorized(OWNER_MUST_TRANSFER));
                 }
                 self.mls

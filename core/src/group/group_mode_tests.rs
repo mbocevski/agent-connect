@@ -664,6 +664,192 @@ fn leaves_are_pending_until_committed_and_then_reported_as_left() {
     assert_eq!(s.left, NONE);
 }
 
+/// A1 and A2 (the owner's two instances) and B. A1 and A2 each propose a
+/// leave before seeing the other's.
+fn owner_replicas_both_leaving(label: &str, clock: &Arc<FakeClock>) -> (Members, Vec<u8>, Vec<u8>) {
+    let a = identity(&format!("{label}-a"));
+    let mut m = Members::new(instance_of(&a, &format!("{label}-a1"), clock), None);
+    m.join(0, instance_of(&a, &format!("{label}-a2"), clock));
+    m.join(0, client(&format!("{label}-b"), clock));
+    let p1 = m.gs[0].propose_leave(&m.cs[0]).unwrap();
+    let p2 = m.gs[1].propose_leave(&m.cs[1]).unwrap();
+    (m, p1, p2)
+}
+
+fn leave_leaves(m: &Members, i: usize) -> Vec<u32> {
+    m.gs[i]
+        .pending_leaves()
+        .unwrap()
+        .iter()
+        .map(|x| x.leaf_index)
+        .collect()
+}
+
+/// Review F1: two instances of the owner propose a leave at once. Every
+/// member stores both proposals (each is valid on its own), and every
+/// member agrees on the leaves the next commit carries, whatever order the
+/// proposals arrive in: all but the owner instance with the lowest leaf
+/// (A1), so the owner keeps an instance.
+#[test]
+fn review_concurrent_owner_replica_leaves_split_pending_leaves() {
+    let clock = Arc::new(FakeClock::default());
+    // (member, proposal) in delivery order: p1 first, then p2 first.
+    let orders: [&[(usize, usize)]; 3] = [
+        &[(2, 1), (1, 1), (2, 2), (0, 2)],
+        &[(2, 2), (0, 2), (2, 1), (1, 1)],
+        &[(1, 1), (0, 2), (2, 2), (2, 1)],
+    ];
+    for (n, order) in orders.iter().enumerate() {
+        let (mut m, p1, p2) = owner_replicas_both_leaving(&format!("rvs{n}"), &clock);
+        for &(i, p) in *order {
+            let bytes = if p == 1 { &p1 } else { &p2 };
+            assert!(
+                matches!(
+                    m.gs[i].process(&m.cs[i], bytes),
+                    Ok(Event::LeaveProposed(_))
+                ),
+                "order {n}: member {i} <- p{p}"
+            );
+        }
+        let a2 = m.gs[1].own_leaf_index();
+        for i in 0..3 {
+            assert_eq!(leave_leaves(&m, i), vec![a2], "order {n}: member {i}");
+        }
+    }
+}
+
+/// Review F1, then the commit: B commits the pending leaves; every member,
+/// both leavers included, processes it. A2 is gone, A1 stays as the owner's
+/// instance, and A1 and B share the epoch and SAS. A1's leave was not
+/// carried: it can't leave again until it transfers ownership.
+#[test]
+fn review_concurrent_owner_replica_leaves_then_commit() {
+    let clock = Arc::new(FakeClock::default());
+    for (n, p1_first) in [true, false].into_iter().enumerate() {
+        let (mut m, p1, p2) = owner_replicas_both_leaving(&format!("rvc{n}"), &clock);
+        let (first, second) = if p1_first { (&p1, &p2) } else { (&p2, &p1) };
+        for bytes in [first, second] {
+            for i in 0..3 {
+                // Each leaver gets only the other's proposal.
+                let own = (i == 0 && bytes == &p1) || (i == 1 && bytes == &p2);
+                if !own {
+                    m.gs[i].process(&m.cs[i], bytes).unwrap();
+                }
+            }
+        }
+        let a2 = m.gs[0].members().unwrap()[1].clone();
+        let out = m.gs[2].commit_pending_proposals(&m.cs[2]).unwrap();
+        let s = m.apply(2, &out);
+        assert_eq!(s.left, vec![a2.clone()], "order {n}");
+        assert_eq!(s.removed, vec![a2], "order {n}");
+        assert!(!m.gs[1].is_active(), "order {n}");
+        assert!(m.gs[0].is_active(), "order {n}");
+        assert_eq!(
+            (m.gs[0].epoch(), m.gs[0].sas()),
+            (m.gs[2].epoch(), m.gs[2].sas())
+        );
+        assert_eq!(
+            m.gs[0].propose_leave(&m.cs[0]),
+            Err(Error::NotPermitted(OWNER_MUST_TRANSFER))
+        );
+    }
+}
+
+/// Review F1: B commits after seeing only A1's leave; A2's arrives in the
+/// next epoch and is stale. The commit carries A1's leave only, and A2
+/// (which stored A1's proposal before the commit reached it) processes it.
+#[test]
+fn a_commit_between_two_owner_replica_leaves_converges() {
+    let clock = Arc::new(FakeClock::default());
+    let (mut m, p1, p2) = owner_replicas_both_leaving("rvm", &clock);
+    m.gs[2].process(&m.cs[2], &p1).unwrap();
+    let out = m.gs[2].commit_pending_proposals(&m.cs[2]).unwrap();
+    m.gs[1].process(&m.cs[1], &p1).unwrap();
+    m.gs[0].process(&m.cs[0], &p2).unwrap();
+    let s = m.apply(2, &out);
+    assert_eq!(s.left.len(), 1);
+    assert!(!m.gs[0].is_active());
+    assert!(m.gs[1].is_active());
+    assert_eq!(m.gs[2].process(&m.cs[2], &p2), Err(Error::WrongEpoch));
+    assert_eq!(
+        (m.gs[1].sas(), m.gs[1].epoch()),
+        (m.gs[2].sas(), m.gs[2].epoch())
+    );
+}
+
+/// Review F1, the malicious committer: a commit that carries both owner
+/// replicas' leaves removes the owner's last instance and is rejected.
+#[test]
+fn a_commit_carrying_every_owner_replica_leave_is_rejected() {
+    let clock = Arc::new(FakeClock::default());
+    let (mut m, p1, p2) = owner_replicas_both_leaving("rvx", &clock);
+    m.gs[2].process(&m.cs[2], &p1).unwrap();
+    m.gs[2].process(&m.cs[2], &p2).unwrap();
+    m.gs[1].process(&m.cs[1], &p1).unwrap();
+    m.gs[0].process(&m.cs[0], &p2).unwrap();
+    // commit_unchecked carries every stored proposal.
+    m.rejected(
+        2,
+        &[],
+        &[],
+        None,
+        None,
+        &Error::Unauthorized(OWNER_MUST_TRANSFER),
+    );
+}
+
+/// Review F4: removing a member whose leave is pending carries its own
+/// proposal, so every member reports a leave (`left`), for `remove` and
+/// `remove_instances` alike, and a plain member may commit it this way.
+#[test]
+fn removing_a_leaving_member_reports_a_leave() {
+    let clock = Arc::new(FakeClock::default());
+    for how in 0..3 {
+        let mut m = Members::of(&["rl-a", "rl-b", "rl-c", "rl-d"], &clock);
+        let p = m.gs[2].propose_leave(&m.cs[2]).unwrap();
+        for i in [0, 1, 3] {
+            m.gs[i].process(&m.cs[i], &p).unwrap();
+        }
+        let c = m.gs[0].members().unwrap()[2].clone();
+        let (by, out) = match how {
+            0 => (0, m.gs[0].remove(&m.cs[0], &c.identity).unwrap()),
+            1 => (
+                0,
+                m.gs[0].remove_instances(&m.cs[0], &[c.leaf_index]).unwrap(),
+            ),
+            _ => (
+                1,
+                m.gs[1].remove_instances(&m.cs[1], &[c.leaf_index]).unwrap(),
+            ),
+        };
+        let s = m.apply(by, &out);
+        assert_eq!(s.left, vec![c.clone()], "{how}");
+        assert_eq!(s.removed, vec![c], "{how}");
+        // The others' removal still needs the permission.
+        if how == 0 {
+            let d = m.gs[0].members().unwrap()[2].clone();
+            assert_eq!(
+                m.gs[1].remove_instances(&m.cs[1], &[d.leaf_index]),
+                Err(Error::NotPermitted("this identity may not remove members"))
+            );
+        }
+    }
+    // A leaving member together with a member that isn't leaving: one
+    // leave, one removal.
+    let mut m = Members::of(&["rl2-a", "rl2-b", "rl2-c", "rl2-d"], &clock);
+    let p = m.gs[2].propose_leave(&m.cs[2]).unwrap();
+    for i in [0, 1, 3] {
+        m.gs[i].process(&m.cs[i], &p).unwrap();
+    }
+    let ms = m.gs[0].members().unwrap();
+    let out = m.gs[0]
+        .remove_instances(&m.cs[0], &[ms[2].leaf_index, ms[3].leaf_index])
+        .unwrap();
+    let s = m.apply(0, &out);
+    assert_eq!(s.left, vec![ms[2].clone()]);
+    assert_eq!(s.removed.len(), 2);
+}
+
 /// The owner's add of a third identity in a commit that also carries the
 /// second identity's last leave keeps two identities, so no switch.
 #[test]
@@ -798,6 +984,102 @@ fn check_policy_change_agrees_with_set_policy() {
     );
 }
 
+/// F2: with a leave pending, `set_policy` carries it (as every commit
+/// does), and the dry run reasons about the same commit: an owner transfer
+/// to the leaver is refused, a `max_members` that fits only after the
+/// leave is accepted. The leaver's own dry run fails as its `set_policy`
+/// does, and so does a dry run while a commit is pending.
+#[test]
+fn check_policy_change_agrees_with_set_policy_while_leaves_are_pending() {
+    let clock = Arc::new(FakeClock::default());
+    let mut m = Members::of(&["dryl-a", "dryl-b", "dryl-c", "dryl-d"], &clock);
+    let base = GroupPolicy {
+        admins: vec![m.id(1)],
+        ..m.policy()
+    };
+    m.set_policy(0, &base);
+    let p = m.gs[2].propose_leave(&m.cs[2]).unwrap();
+    for i in [0, 1, 3] {
+        assert!(matches!(
+            m.gs[i].process(&m.cs[i], &p),
+            Ok(Event::LeaveProposed(_))
+        ));
+    }
+    let candidates = [
+        base.clone(),
+        GroupPolicy {
+            owner: m.id(2),
+            ..base.clone()
+        },
+        GroupPolicy {
+            owner: m.id(3),
+            ..base.clone()
+        },
+        GroupPolicy {
+            max_members: 3,
+            ..base.clone()
+        },
+        GroupPolicy {
+            max_members: 2,
+            ..base.clone()
+        },
+        GroupPolicy {
+            floor: Floor::Moderated,
+            floor_moderator: Some(m.id(1)),
+            ..base.clone()
+        },
+        GroupPolicy {
+            require_verified: true,
+            ..base.clone()
+        },
+    ];
+    let mut outcomes = BTreeSet::new();
+    for i in 0..4 {
+        for p in &candidates {
+            let dry = m.gs[i].check_policy_change(&m.cs[i], p);
+            let real = m.gs[i].set_policy(&m.cs[i], p).map(|_| ());
+            if real.is_ok() {
+                m.gs[i].discard_pending_commit(&m.cs[i]).unwrap();
+            }
+            assert_eq!(dry, real, "member {i}: {p:?}");
+            assert!(!m.gs[i].has_pending_commit());
+            outcomes.insert(format!("{dry:?}"));
+        }
+    }
+    assert!(outcomes.len() >= 4, "{outcomes:?}");
+    // The two cases the review found, by name.
+    let to_leaver = GroupPolicy {
+        owner: m.id(2),
+        ..base.clone()
+    };
+    assert_eq!(
+        m.gs[0].check_policy_change(&m.cs[0], &to_leaver),
+        Err(Error::Unauthorized("new owner is not a member"))
+    );
+    let fits_after = GroupPolicy {
+        max_members: 3,
+        ..base.clone()
+    };
+    assert_eq!(m.gs[0].check_policy_change(&m.cs[0], &fits_after), Ok(()));
+    // The leaver itself can't commit while its leave is pending.
+    assert_eq!(
+        m.gs[2].check_policy_change(&m.cs[2], &base),
+        Err(Error::NotPermitted(OWN_LEAVE_PENDING))
+    );
+    // Nor can anyone while a commit of its own is pending.
+    let out = m.gs[0].update(&m.cs[0]).unwrap();
+    assert_eq!(
+        m.gs[0].check_policy_change(&m.cs[0], &base),
+        Err(Error::CommitPending)
+    );
+    assert_eq!(
+        m.gs[0].set_policy(&m.cs[0], &base).map(|_| ()),
+        Err(Error::CommitPending)
+    );
+    m.gs[0].discard_pending_commit(&m.cs[0]).unwrap();
+    drop(out);
+}
+
 /// D15: the policy at creation is validated and must name the creator as
 /// owner; it is in force from epoch 0 and every joiner sees it.
 #[test]
@@ -851,29 +1133,101 @@ fn a_group_is_created_with_a_policy() {
     );
 }
 
+/// A group "g"/"p" of `owner` alone whose context holds `policy` as these
+/// exact bytes, as a group created before `floor_pinned` existed would.
+fn group_with_policy_bytes(owner: C, policy: &[u8]) -> Members {
+    let meta = GroupMeta {
+        v: 0,
+        name: "g".into(),
+        purpose: "p".into(),
+        created_at: owner.now(),
+        created_by: owner.instance().identity().to_owned(),
+    };
+    let exts = group_context_extensions(&meta.to_json().unwrap(), policy).unwrap();
+    let id: [u8; 16] = owner.rng().array().unwrap();
+    let mls = MlsGroup::builder()
+        .with_group_id(GroupId::from_slice(&id))
+        .ciphersuite(CS)
+        .with_wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)
+        .use_ratchet_tree_extension(true)
+        .with_capabilities(capabilities())
+        .with_leaf_node_extensions(leaf_extensions(owner.instance.cert()).unwrap())
+        .unwrap()
+        .with_group_context_extensions(exts)
+        .build(&owner.provider, &owner.signer(), owner.credential())
+        .unwrap();
+    Members {
+        cs: vec![owner],
+        gs: vec![Group { mls }],
+        forked: BTreeSet::new(),
+    }
+}
+
+/// `policy` encoded as it was before `floor_pinned` existed: no such key.
+fn legacy_bytes(policy: &GroupPolicy) -> String {
+    let old = String::from_utf8(policy.to_json().unwrap())
+        .unwrap()
+        .replace(&format!(r#""floor_pinned":{},"#, policy.floor_pinned), "");
+    assert!(!old.contains("floor_pinned"));
+    old
+}
+
 /// D4 compatibility: a group whose context still holds a policy written
-/// before `floor_pinned` (the key absent) reads as unpinned and switches;
-/// re-encoding the same policy with the key is not a policy change.
+/// before `floor_pinned` (the key absent) reads as unpinned, for its
+/// members and for joiners (from the Welcome), and switches its floor with
+/// a third identity. New policy commits carry the canonical encoding.
 #[test]
 fn a_policy_without_floor_pinned_in_the_group_context_reads_as_unpinned() {
     let clock = Arc::new(FakeClock::default());
-    let mut m = Members::of(&["old-a", "old-b"], &clock);
-    let policy = m.policy();
-    let old = String::from_utf8(policy.to_json().unwrap())
-        .unwrap()
-        .replace(r#""floor_pinned":false,"#, "");
-    assert!(!old.contains("floor_pinned"));
-    let out = m.gs[0]
-        .commit_unchecked(&m.cs[0], &[], &[], None, Some(old.as_bytes()))
-        .unwrap();
-    match m.gs[1].process(&m.cs[1], &out.commit).unwrap() {
-        Event::Commit(s) => assert!(!s.policy_changed),
-        other => panic!("{}", other.kind()),
-    }
-    m.converged();
+    let a = client("old-a", &clock);
+    let policy = GroupPolicy::default_for(a.instance().identity());
+    let old = legacy_bytes(&policy);
+    let mut m = group_with_policy_bytes(a, old.as_bytes());
+    assert_eq!(m.policy(), policy);
+    m.join(0, client("old-b", &clock));
     assert_eq!(m.gs[1].policy().unwrap(), policy);
     assert!(!m.gs[1].policy().unwrap().floor_pinned);
     let s = m.join(0, client("old-c", &clock));
     assert!(s.policy_changed);
+    assert_eq!(s.previous_policy, Some(policy.clone()));
     assert_eq!(m.policy().floor, Floor::Mention);
+    // The switch wrote the canonical encoding.
+    let ctx = check_group_context(m.gs[2].mls.extensions()).unwrap();
+    assert_eq!(ctx.policy.to_json().unwrap(), ctx.policy_bytes);
+}
+
+/// F3: each policy has exactly one encoding a commit may carry. A
+/// GroupContextExtensions whose policy bytes parse to the current policy
+/// but aren't its canonical encoding (a key left out: `floor_pinned`,
+/// `floor_moderator`) is rejected, even from the owner and even as a
+/// no-op.
+#[test]
+fn a_commit_with_a_non_canonical_policy_encoding_is_rejected() {
+    let clock = Arc::new(FakeClock::default());
+    let labels = ["enc-a", "enc-b", "enc-c"];
+    let canonical =
+        String::from_utf8(Members::of(&labels, &clock).policy().to_json().unwrap()).unwrap();
+    for (from, bytes) in [
+        (2, canonical.replace(r#""floor_pinned":false,"#, "")),
+        (0, canonical.replace(r#""floor_pinned":false,"#, "")),
+        (2, canonical.replace(r#""floor_moderator":null,"#, "")),
+        (
+            0,
+            canonical
+                .replace(r#""floor_moderator":null,"#, "")
+                .replace(r#""floor_pinned":false,"#, "")
+                .replace(r#""require_verified":false"#, r#""require_verified":true"#),
+        ),
+    ] {
+        let mut m = Members::of(&labels, &clock);
+        assert!(GroupPolicy::from_json(bytes.as_bytes()).is_ok(), "{bytes}");
+        m.rejected_raw(
+            from,
+            &[],
+            &[],
+            None,
+            Some(bytes.as_bytes()),
+            &Error::InvalidGroupContext("policy not in canonical form"),
+        );
+    }
 }
