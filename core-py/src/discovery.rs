@@ -179,6 +179,35 @@ impl Listing {
         guarded(|| self.0.check_publish(now).map_err(err))
     }
 
+    /// The card text the human approved (`ListingContent`), canonical JCS.
+    #[getter]
+    fn content<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| {
+            Ok(PyBytes::new(
+                py,
+                &self.0.card().content().to_json().map_err(err)?,
+            ))
+        })
+    }
+
+    /// The automatic renewal (SPEC §6.6.1, §13.2.2): re-signed by
+    /// `identity` with only `seq` (greater), `issued_at` and the door (or
+    /// none) changed.
+    fn renew(
+        &self,
+        identity: &Identity,
+        seq: u64,
+        issued_at: u64,
+        door: Option<&Door>,
+    ) -> PyResult<Listing> {
+        guarded(|| {
+            self.0
+                .renew(&identity.0, seq, issued_at, door.map(|d| d.0.listed()))
+                .map(Listing)
+                .map_err(err)
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Listing({}, seq {})",
@@ -219,6 +248,72 @@ pub(crate) fn canonical_card<'py>(
         let card = listing::ListingCard::from_unsigned_json(card_json).map_err(err)?;
         Ok(PyBytes::new(py, &card.to_unsigned_json().map_err(err)?))
     })
+}
+
+/// Validates the card text a human approves (`ListingContent`: no params,
+/// no interface, no signature) and returns its canonical form.
+#[pyfunction]
+pub(crate) fn canonical_listing_content<'py>(
+    py: Python<'py>,
+    content_json: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    guarded(|| {
+        let c = listing::ListingContent::from_json(content_json).map_err(err)?;
+        Ok(PyBytes::new(py, &c.to_json().map_err(err)?))
+    })
+}
+
+/// Signs a listing of the approved text `content_json` for the token
+/// `token_json`, whose `name` it takes. `owner_domain` defaults to the
+/// token's pin. Publishing is a human decision.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+#[pyo3(signature = (content_json, identity, *, directory, relay, seq, issued_at, token_json, door=None, owner_domain=None, extension_description=None))]
+pub(crate) fn sign_listing_content(
+    content_json: &[u8],
+    identity: &Identity,
+    directory: &str,
+    relay: &str,
+    seq: u64,
+    issued_at: u64,
+    token_json: &[u8],
+    door: Option<&Door>,
+    owner_domain: Option<String>,
+    extension_description: Option<String>,
+) -> PyResult<Listing> {
+    guarded(|| {
+        let content = listing::ListingContent::from_json(content_json).map_err(err)?;
+        let token = listing::ListingToken::from_json(token_json).map_err(err)?;
+        let params = listing::E2eParams {
+            identity: identity.0.id(),
+            name: token.grant.name.clone(),
+            directory: directory.to_owned(),
+            relay: relay.to_owned(),
+            seq,
+            issued_at,
+            door: door.map(|d| d.0.listed()),
+            owner_domain: owner_domain.or_else(|| token.grant.owner_domain.clone()),
+            token,
+        };
+        listing::ListingCard::new(content, params, extension_description)
+            .and_then(|c| c.sign(&identity.0))
+            .map(Listing)
+            .map_err(err)
+    })
+}
+
+/// Whether an outbound fetch may connect to `ip` (SPEC §13.2.4): public
+/// unicast only. A string that isn't an IP address raises.
+#[pyfunction]
+pub(crate) fn is_public_address(ip: &str) -> PyResult<bool> {
+    let addr: std::net::IpAddr = ip.parse().map_err(|_| bad_arg("not an IP address"))?;
+    Ok(core::net::is_public_ip(addr))
+}
+
+/// Whether `s` is a listing name (SPEC §13.1.1).
+#[pyfunction]
+pub(crate) fn is_listing_name(s: &str) -> bool {
+    listing::is_listing_name(s)
 }
 
 fn token_dict<'py>(py: Python<'py>, t: &listing::ListingToken) -> PyResult<Bound<'py, PyDict>> {
@@ -685,7 +780,7 @@ pub(crate) fn owner_file_url(domain: &str) -> PyResult<String> {
 
 /// The owner's door (SPEC §6.6.1). Holds the private key.
 #[pyclass(frozen, module = "agentconnect_core._native")]
-pub(crate) struct Door(knock::Door);
+pub(crate) struct Door(pub(crate) knock::Door);
 
 #[pymethods]
 impl Door {
@@ -864,6 +959,12 @@ impl PendingKnock {
         self.0.gives_up_at()
     }
 
+    /// The KeyPackageRef of the knock's KeyPackage, as the owner computes it.
+    #[getter]
+    fn key_package_ref<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, &self.0.key_package_ref().map_err(err)?)))
+    }
+
     /// Opens a knock-wrapped Welcome (SPEC §6.6.4).
     fn unwrap_welcome<'py>(
         &self,
@@ -958,6 +1059,14 @@ impl VerifiedKnock {
     /// them. Call it for every verified knock before anything else.
     fn remember_in(&self, ledger: &mut KnockLedger) -> PyResult<()> {
         guarded(|| self.0.remember_in(&mut ledger.0).map_err(err))
+    }
+
+    /// The knock's JCS form for the owner's encrypted store while the
+    /// approval waits; `Client.restore_knock` rebuilds it. **Contains the
+    /// `welcome_secret`**: delete it once the Welcome is sent, or on reject
+    /// or lapse.
+    fn to_secret_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.0.to_secret_bytes())
     }
 
     /// Wraps a Welcome for this knock (SPEC §6.6.4 step 4).
@@ -1067,6 +1176,13 @@ pub(crate) fn unwrap_knock_welcome<'py>(
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("E2E_EXTENSION_URI", listing::E2E_EXTENSION_URI)?;
+    m.add("MAX_LISTING_BYTES", listing::MAX_LISTING_BYTES)?;
+    m.add("MAX_OWNER_FILE_BYTES", listing::MAX_OWNER_FILE_BYTES)?;
+    m.add("MAX_DOOR_LIFETIME_SECS", listing::MAX_DOOR_LIFETIME_SECS)?;
+    m.add("DOOR_GRACE_SECS", knock::DOOR_GRACE_SECS)?;
+    m.add("KNOCK_LIFETIME_SECS", knock::KNOCK_LIFETIME_SECS)?;
+    m.add("KNOCK_FUTURE_SECS", knock::KNOCK_FUTURE_SECS)?;
+    m.add("DEFAULT_LEDGER_CAPACITY", knock::DEFAULT_LEDGER_CAPACITY)?;
     m.add_class::<Listing>()?;
     m.add_class::<DirectoryKey>()?;
     m.add_class::<Door>()?;
@@ -1080,6 +1196,10 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(verify_listing, m)?,
         wrap_pyfunction!(sign_listing, m)?,
         wrap_pyfunction!(canonical_card, m)?,
+        wrap_pyfunction!(canonical_listing_content, m)?,
+        wrap_pyfunction!(sign_listing_content, m)?,
+        wrap_pyfunction!(is_public_address, m)?,
+        wrap_pyfunction!(is_listing_name, m)?,
         wrap_pyfunction!(verify_listing_token, m)?,
         wrap_pyfunction!(check_token_binding, m)?,
         wrap_pyfunction!(verify_token_revocation, m)?,

@@ -22,8 +22,8 @@ mod token;
 mod withdrawal;
 
 pub use card::{
-    E2eParams, ListedDoor, ListingCard, ListingProvider, ListingSkill, MAX_LISTING_BYTES,
-    SignedListing, protected_header,
+    E2eParams, ListedDoor, ListingCard, ListingContent, ListingProvider, ListingSkill,
+    MAX_LISTING_BYTES, SignedListing, protected_header,
 };
 pub use name::NameRecord;
 pub use owner::{
