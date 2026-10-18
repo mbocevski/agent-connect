@@ -457,6 +457,52 @@ async fn font_requests_that_are_not_plain_font_files_are_404() {
 }
 
 #[tokio::test]
+async fn llms_txt_says_so_when_nothing_is_listed() {
+    let h = Harness::new();
+    assert!(
+        h.get("/llms.txt")
+            .await
+            .text()
+            .contains("Nothing is listed yet.")
+    );
+}
+
+#[tokio::test]
+async fn a_listing_without_a_door_reports_it_closed() {
+    let h = Harness::new();
+    let mut s = h.spec("no-door", &identity());
+    s.door_expires_at = None;
+    h.publish(&s).await;
+    let card = &h.get("/search?q=no-door").await.json()["results"][0];
+    assert_eq!(card["door"], serde_json::json!({"state": "closed"}));
+}
+
+#[tokio::test]
+async fn a_rotated_key_is_reported_as_changed_in_the_json() {
+    let h = Harness::new();
+    let mut s = h.spec("rotated-json", &identity());
+    h.publish(&s).await;
+    assert!(h.get("/search?q=rotated-json").await.json()["results"][0]["key_changed_at"].is_null());
+    s.agent = identity();
+    s.seq = 1;
+    s.token_issued_at = h.now();
+    h.publish(&s).await;
+    let card = &h.get("/search?q=rotated-json").await.json()["results"][0];
+    assert!(card["key_changed_at"].is_u64(), "{card}");
+}
+
+#[tokio::test]
+async fn an_operator_font_dir_must_be_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("fonts.txt");
+    std::fs::write(&file, b"x").unwrap();
+    assert!(agentconnect_directory::http::resolve_font_dir(&file).is_err());
+    assert!(agentconnect_directory::http::resolve_font_dir(&dir.path().join("missing")).is_err());
+    let ok = agentconnect_directory::http::resolve_font_dir(dir.path()).unwrap();
+    assert_eq!(ok, std::fs::canonicalize(dir.path()).unwrap());
+}
+
+#[tokio::test]
 async fn an_oversized_or_unreadable_font_is_404() {
     use std::os::unix::fs::PermissionsExt;
     let (h, dir) = font_harness();

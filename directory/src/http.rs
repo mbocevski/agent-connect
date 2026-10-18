@@ -420,6 +420,22 @@ async fn stylesheet<S: Store>(State(app): State<Shared<S>>) -> Response {
     )
 }
 
+/// The font directory as the router will use it: canonical, and a directory.
+///
+/// # Errors
+/// The path does not exist or is not a directory.
+pub fn resolve_font_dir(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::fs::canonicalize(path)?;
+    if dir.is_dir() {
+        Ok(dir)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AC_DIRECTORY_FONT_DIR is not a directory",
+        ))
+    }
+}
+
 /// The font media type of a file name, chosen by extension only.
 fn font_type(file: &str) -> Option<&'static str> {
     let (_, ext) = file.rsplit_once('.')?;
@@ -760,6 +776,12 @@ pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_accept_ranges_are_ignored() {
+        assert!(wants_markdown(&accept("text/markdown,, ,")));
+        assert!(!wants_markdown(&accept(",,")));
+    }
 
     fn accept(v: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

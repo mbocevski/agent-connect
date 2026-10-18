@@ -489,6 +489,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn database_errors_keep_only_their_kind() {
+        for (e, kind) in [
+            (sqlx::Error::PoolTimedOut, "pool timed out"),
+            (sqlx::Error::PoolClosed, "pool closed"),
+            (sqlx::Error::RowNotFound, "row not found"),
+            (
+                sqlx::Error::Io(std::io::Error::other("secret-host")),
+                "io error",
+            ),
+            (
+                sqlx::Error::Protocol("secret-value".to_owned()),
+                "query failed",
+            ),
+        ] {
+            let shown = StoreError::from(e).to_string();
+            assert!(shown.contains(kind), "{shown}");
+            assert!(!shown.contains("secret"), "{shown}");
+        }
+    }
+
+    #[test]
     fn names_round_trip() {
         for c in [
             OwnerCheck::Vouched,

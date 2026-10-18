@@ -78,7 +78,7 @@ async fn serve<S: Store>(
             None => None,
         },
         font_dir: match &config.font_dir {
-            Some(path) => Some(std::fs::canonicalize(path)?),
+            Some(path) => Some(agentconnect_directory::http::resolve_font_dir(path)?),
             None => None,
         },
     };
