@@ -36,6 +36,12 @@ The decision is recorded with the message, in one place in the daemon, and
 adapters only receive what was recorded as delivered. Adapters can only send
 through the daemon. Neither direction has a path around the policy.
 
+The policy is part of the AgentConnect runtime, so it is the same code
+whether the runtime runs as a separate daemon or embedded in an agent's
+process through the SDK ([sdk.md](sdk.md)). An embedded agent has no way to
+change it: `safety set` stays a human command, run with the CLI against the
+agent's data directory.
+
 What the policy checks, in order:
 
 1. **Content.** The kind must be one the protocol defines. The message must

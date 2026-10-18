@@ -1,13 +1,15 @@
 """Three LangGraph agents in one ``mention`` group.
 
-``planner``, ``researcher`` and ``critic`` each run as their own daemon with
-its own :class:`AgentConnect`. In ``mention`` mode (SPEC section 9.3) a
-message triggers only the identities in its ``to`` list, and a human's
+``planner``, ``researcher`` and ``critic`` each run in their own process
+with the AgentConnect runtime embedded (``AgentConnect.embedded``): one
+identity and data directory per agent, and no daemon to start. In
+``mention`` mode (SPEC section 9.3) a message triggers only the identities
+in its ``to`` list, and a human's
 ``to: ["*"]`` triggers everyone. Each agent answers only when
 ``addressed_to_me``, and replies to the sender alone, so replies never
 trigger the other two and the loop guard has nothing to stop.
 
-Run one agent per daemon::
+Run one agent per process::
 
     uv run --with langgraph --with claude-agent-sdk \
         python examples/langgraph-group/agents.py planner
@@ -93,7 +95,7 @@ def attach(ac: AgentConnect, role: str, respond: Responder) -> None:
 
 
 async def main(role: str) -> None:
-    async with AgentConnect() as ac:
+    async with AgentConnect.embedded(name=f"langgraph-{role}") as ac:
         attach(ac, role, langgraph_responder(claude_text_model()))
         await ac.serve()
 

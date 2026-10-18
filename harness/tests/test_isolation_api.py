@@ -19,9 +19,9 @@ from typing import Any
 import httpx
 import pytest
 
-from agentconnect.api import ApiServer
 from agentconnect.isolation import AGENT_DIR_MODE, PeerCred, PeerGate
-from agentconnect_harness.cluster import Cluster
+from agentconnect.runtime.api import ApiServer
+from agentconnect_harness.cluster import Cluster, api_token
 
 pytestmark = pytest.mark.skipif(os.geteuid() == 0, reason="the mode refuses to run as root")
 
@@ -64,13 +64,13 @@ async def test_peer_uid_and_human_uid_gates(
         assert sock.parent == agent_dir
         assert stat.S_IMODE(os.stat(str(sock)).st_mode) == 0o660
         # Agents read the agent token from the agent directory; never the human token.
-        assert (agent_dir / "api-token").read_text() == server.tokens["agent"]
+        assert (agent_dir / "api-token").read_text() == api_token(server, "agent")
         assert not (agent_dir / "human-token").exists()
         transport = httpx.AsyncHTTPTransport(uds=str(sock))
 
         async def call(uid: int, scope: str, method: str, path: str) -> tuple[int, Any]:
             peer["uid"] = uid
-            headers = {"authorization": f"Bearer {server.tokens[scope]}"}
+            headers = {"authorization": f"Bearer {api_token(server, scope)}"}
             async with httpx.AsyncClient(transport=transport, base_url="http://ac") as c:
                 resp = await c.request(method, path, headers=headers, json={})
             return resp.status_code, resp.json()

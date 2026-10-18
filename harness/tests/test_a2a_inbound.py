@@ -12,8 +12,8 @@ from a2a.types import Message, Part, Role, TaskState, TaskStatus, TaskStatusUpda
 
 from agentconnect.a2a_adapter import convert
 from agentconnect.adapter import Delivery
-from agentconnect.daemon import DaemonError
 from agentconnect.limits import SENDER_PER_MINUTE
+from agentconnect.runtime.engine import DaemonError
 from agentconnect_harness.a2a_agents import (
     AgentServer,
     HelloWorldExecutor,

@@ -13,7 +13,6 @@ from agentconnect.adapter import (
     RecordingAdapter,
     Sender,
 )
-from agentconnect.daemon import addressed_to_me, canonical
 from agentconnect.identity import (
     Seeded,
     load_db_key,
@@ -22,6 +21,7 @@ from agentconnect.identity import (
     open_core_client,
 )
 from agentconnect.keystore import FileKeystore
+from agentconnect.runtime.engine import addressed_to_me, canonical
 
 
 def test_identity_instance_and_db_key_persist(tmp_path: Path, test_seed: int) -> None:

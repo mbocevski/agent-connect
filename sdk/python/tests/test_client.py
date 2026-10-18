@@ -461,3 +461,43 @@ def test_a_webhook_receiver_needs_a_port(agent: AgentConnect) -> None:
     with pytest.raises(AgentConnectError) as info:
         agent.webhook_receiver()
     assert info.value.code == "bad_config"
+
+
+async def test_a_peer_chosen_msg_id_never_shadows_an_event_or_another_sender(
+    agent: AgentConnect, make_payload: Payload, make_event: Payload
+) -> None:
+    """SPEC 8.3: senders choose their own msg_ids. A peer that sends a
+    message whose msg_id equals the event_id of an event its commit will
+    cause must not suppress that event, nor another sender's message."""
+    seen: list[str] = []
+
+    @agent.on_message
+    async def on_message(msg: Message, _group: Group) -> None:
+        seen.append(f"message from {msg.sender.identity}")
+
+    @agent.on_event
+    async def on_event(event: Event, _group: Group | None) -> None:
+        seen.append(f"event {event.type}")
+
+    other = {
+        "identity": "ac:v0:other",
+        "instance_id": "i2",
+        "display_name": None,
+        "verified": False,
+    }
+    assert await agent.dispatch(make_payload(msg_id="X")) == "handled"
+    assert await agent.dispatch(make_event(event_id="X", event="member_joined")) == "handled"
+    assert await agent.dispatch(make_payload(msg_id="X", sender=other)) == "handled"
+    assert (
+        await agent.dispatch(
+            make_payload(msg_id="X", group={**make_payload()["group"], "id": "g2"})
+        )
+        == "handled"
+    )
+    assert await agent.dispatch(make_payload(msg_id="X")) == "duplicate"
+    assert seen == [
+        "message from ac:v0:peer",
+        "event member_joined",
+        "message from ac:v0:other",
+        "message from ac:v0:peer",
+    ]

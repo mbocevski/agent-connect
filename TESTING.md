@@ -14,6 +14,8 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 
 `just test` must stay under 60 seconds on a laptop. If it gets slower, move
 the slow test to a higher tier or make it faster. Do not raise the budget.
+The Python suite runs on every core (`pytest -n auto`, pytest-xdist); each
+worker starts its own relay, and every worker uses the controller's seed.
 
 ## Where tests live
 
@@ -150,7 +152,7 @@ nightly workflow runs lychee with network access to check external links.
 | CLI commands, options, defaults, help | the typer app (`agentconnect.cli.app`), introspected |
 | Exit codes | `agentconnect.cli_support.EXIT_CODES` |
 | `--json` shapes | `agentconnect.cli_json.SCHEMAS` |
-| Local API routes and errors | `ROUTE_SPECS` and `API_ERRORS` in `agentconnect.api`; the server is built from the same table |
+| Local API routes and errors | `ROUTE_SPECS` and `API_ERRORS` in `agentconnect.runtime.api`; the server is built from the same table |
 | Config keys and environment overrides | `CONFIG_KEYS` in `agentconnect.config` and the `Config` dataclass |
 
 Tests keep the sources honest:
@@ -243,10 +245,27 @@ scenarios are in `harness/tests/`.
 - **Recording adapter.** `agentconnect.adapter.RecordingAdapter` records
   every delivery (with its untrusted framing) and every event, and can
   return `retry` on demand.
+- **Both hosts, one suite.** Every node is a `Runtime` (ADR-005), and the
+  `cluster` fixture runs each scenario twice: on the `daemon` host (what
+  `agentconnectd` runs) and on the `embedded` host (what
+  `AgentConnect.embedded` runs: the SDK's embedded host with its in-process
+  callback adapter, stored deduplication and dispatch to handlers). On the
+  embedded host the node's recording adapter sits in front of the callback
+  adapter, so a scenario's assertions hold on both, and `node.handled`
+  records what reached user code; `node.sdk` is the SDK client. A scenario
+  that is about one host itself carries `@pytest.mark.hosts("daemon")`.
+- **Waits.** `node.wait(predicate)` wakes on a change pulse from any node of
+  the cluster, since predicates often read another node's state, and it
+  clears the pulses before checking, so no change is missed. A handler's own
+  state (a list an SDK handler appends to) has no pulse: poll it with a loop
+  of `asyncio.sleep(0)` under `asyncio.wait_for`. `FakeClock.sleepers` counts
+  pauses before a retry, not deadlines (`sleep(..., deadline=True)`, such as
+  the handler timeout), so "the runtime is backing off" stays readable.
 - **Fixtures:**
   - `cluster`: `await cluster.node(name, auto_approve=..., identity_of=...)`
-    starts a daemon; `identity_of` makes a replica of another node's
-    identity.
+    starts a node; `identity_of` makes a replica of another node's
+    identity, `host=` picks a host for one node, and `serve_api=True`
+    serves its local API as the hosts do.
   - `group(n, mode)`: `n` members fully joined and settled; `mode` is
     `"distinct"` (one identity each) or `"replicas"` (instances of one
     identity).
@@ -263,8 +282,8 @@ scenarios are in `harness/tests/`.
 - **Seeded.** Each daemon's core randomness and backoff jitter come from the
   `rng` fixture (so from `AC_TEST_SEED`), with a fresh derived seed on every
   restart so a restarted daemon never replays its previous keys.
-- **Budget.** Each scenario takes well under 2 s; the whole harness takes a
-  few seconds.
+- **Budget.** Each scenario takes well under 2 s; the whole harness, both
+  hosts, takes a few seconds across the xdist workers.
 
 ## Failpoints (crash consistency)
 
@@ -277,7 +296,7 @@ daemon, so in-process daemons don't affect each other.
 | Layer | Arm | Points | Actions |
 |---|---|---|---|
 | core | `client.failpoints().arm(name, Action, times)` (Rust); `Client._arm_failpoint_for_testing(name, "error"\|"panic", times)` (Python) | `process.before_mls`, `process.after_mls`, `process.after_merge`, `process.before_commit`, `confirm.after_merge`, `confirm.before_commit`, `join.after_stage`, `join.before_commit`, `consume.before_commit` (`agentconnect_core::failpoint::POINTS`) | `error`: a storage error (the daemon retries it); `panic`: a panic. Both fire inside the operation's transaction, so the store rolls back as after a crash at that point. |
-| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register`; `event.after_record` and `event.after_notify` (around telling the adapter about a recorded event); `held_timer.expire` (the safety policy's expiry timer, before it expires held messages) (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
+| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register`; `event.after_record` and `event.after_notify` (around telling the adapter about a recorded event); `held_timer.expire` (the safety policy's expiry timer, before it expires held messages); `delivery.after_adapter` (the adapter accepted a message, the inbox doesn't record it yet) (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
 
 `core/tests/journal.rs` runs every core point with both actions and checks
 that the state is unchanged, the retry succeeds and a second retry gets the

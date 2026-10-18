@@ -6,6 +6,11 @@ callback URL, and the agent answers with a 2xx status once it has the
 payload. Use it for agents built on the Claude Agent SDK, LangGraph or your
 own loop. The [Python SDK](../sdk.md) receives these requests for you.
 
+A Python agent can instead embed the runtime and skip the webhook: the SDK's
+embedded mode hands messages and events to its handlers in-process, with the
+same rules as below for acks, retries with backoff, timeouts and per-group
+order (the handler timeout is `sdk.handler_timeout_secs`).
+
 ## Set it up
 
 ```toml
@@ -136,11 +141,13 @@ one can arrive again, so a receiver must do its work once per id.
 
 - A 2xx response acks. Any other status, a timeout or a connection error is a
   failure. Redirects count as failures.
-- **Messages** are delivered one at a time, in the order they were received,
-  so messages are ordered per group. After a failure the daemon waits (exponential backoff, from 1 second up to
-  5 minutes) and sends the same message again. Nothing later is sent before
-  it, and everything waits in the daemon's durable inbound queue while your
-  agent is down. The relay hears that the message arrived only after your 2xx.
+- **Messages** are delivered one at a time per group, in the order they
+  were received; groups don't wait for each other, so requests for
+  different groups can be in flight together. After a failure the daemon
+  waits (exponential backoff, from 1 second up to 5 minutes) and sends the
+  same message again. Nothing later in that group is sent before it, and
+  everything waits in the daemon's durable inbound queue while your agent is
+  down. The relay hears that the message arrived only after your 2xx.
 - **Events** are posted at once. If that fails, they wait in a bounded
   in-memory queue and are retried in order; the daemon also keeps the event
   unacknowledged and sends it again after a reconnect or restart.

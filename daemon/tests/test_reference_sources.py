@@ -6,7 +6,8 @@ import dataclasses
 import inspect
 import re
 
-from agentconnect import api, cli_json, cli_support, config
+from agentconnect import cli_json, cli_support, config
+from agentconnect.runtime import api, errors
 from agentconnect.shapes import Opt, conforms
 
 
@@ -36,7 +37,8 @@ def test_config_keys_are_section_dot_name_and_documented() -> None:
     for key in config.CONFIG_KEYS:
         section, dot, name = key.key.partition(".")
         assert dot
-        assert section in {"relay", "daemon", "policy", "api", "webhook", "sse", "a2a", "isolation"}
+        sections = {"relay", "daemon", "policy", "api", "webhook", "sse", "sdk", "a2a", "isolation"}
+        assert section in sections
         assert name
         assert key.doc
         assert key.default
@@ -63,7 +65,7 @@ def test_every_route_spec_has_a_handler_and_is_unique() -> None:
 
 def test_error_table_lists_every_status_the_server_maps() -> None:
     documented = {(status, code) for status, code, _ in api.API_ERRORS}
-    for code, status in api.ERROR_STATUS.items():
+    for code, status in errors.ERROR_STATUS.items():
         assert (status, code) in documented
     for status, code, meaning in api.API_ERRORS:
         assert meaning

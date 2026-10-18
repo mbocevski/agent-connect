@@ -303,8 +303,10 @@ class RecordingAdapter:
 
     async def wait_for(self, predicate: Callable[[], bool], within: float = 5.0) -> None:
         async def loop() -> None:
-            while not predicate():
-                self._changed.clear()
+            while True:
+                self._changed.clear()  # before checking: no poke is lost
+                if predicate():
+                    return
                 await self._changed.wait()
 
         await asyncio.wait_for(loop(), within)

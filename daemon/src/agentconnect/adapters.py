@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from agentconnect.adapter import Adapter
-from agentconnect.api import load_token
 from agentconnect.clock import Clock
 from agentconnect.config import Config
 from agentconnect.sse import SseAdapter
+from agentconnect.tokens import load_token
 from agentconnect.webhook import SECRET_FILE, WebhookAdapter
 
 

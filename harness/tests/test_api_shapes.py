@@ -12,9 +12,9 @@ from typing import Any
 import httpx
 import pytest_asyncio
 
-from agentconnect.api import ROUTE_SPECS, ApiServer, RouteSpec
+from agentconnect.runtime.api import ROUTE_SPECS, ApiServer, RouteSpec
 from agentconnect.shapes import conforms
-from agentconnect_harness.cluster import Cluster, Node
+from agentconnect_harness.cluster import Cluster, Node, api_token
 
 
 class Recorder:
@@ -39,7 +39,7 @@ class Recorder:
         spec = self.spec_for(method, path)
         if body is not None:
             assert conforms(body, spec.request), (spec.path, body)
-        headers = {"authorization": f"Bearer {self.server.tokens[scope]}"}
+        headers = {"authorization": f"Bearer {api_token(self.server, scope)}"}
         async with httpx.AsyncClient(transport=self.transport, base_url="http://ac") as c:
             resp = await c.request(method, path, json=body, headers=headers)
         assert resp.status_code == 200, resp.text

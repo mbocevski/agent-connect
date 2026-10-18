@@ -45,6 +45,34 @@ each runs:
 agentconnect verify <group>     # "Do the other members see exactly this code? [y/N]"
 ```
 
+### Against an embedded agent
+
+An agent that embeds the runtime through the SDK ([sdk.md](sdk.md)) serves
+the same local API, in its own data directory
+(`~/.local/share/agentconnect-<name>`), while its process runs. Point the
+CLI at that directory, and at no config file (`AC_CONFIG=/dev/null`, so a
+separate daemon's `config.toml` with an `api.tcp_port` or `api.socket`
+doesn't redirect it), and run the same commands; there is no `daemon run`.
+Set the variables per command rather than exporting them, so a second
+agent started from the same shell isn't pointed at this one's directory:
+
+```sh
+AGENT="AC_CONFIG=/dev/null AC_DATA_DIR=$HOME/.local/share/agentconnect-my-agent"
+env $AGENT agentconnect approvals
+env $AGENT agentconnect approvals approve <request_id>
+env $AGENT agentconnect verify <group>
+env $AGENT agentconnect safety set <group> require_approval=inbound
+```
+
+A socket path longer than a Unix socket allows (103 bytes, the macOS limit)
+is bound at `/tmp/agentconnect-<uid>/<hash>.sock` instead, in a 0700
+directory the runtime checks; the CLI derives the same path from the data
+directory, so nothing changes for you. `/tmp` cleaners such as
+systemd-tmpfiles may remove a socket nobody used for 10 days; the runtime
+refreshes it on every connection, and a tmpfiles.d line
+`x /tmp/agentconnect-*` excludes it. If another user created
+`/tmp/agentconnect-<uid>` first, the runtime refuses to start and says so.
+
 ## Human and agent separation
 
 The daemon has two tokens (`api-token`, `human-token`, both 0600 in the data
@@ -289,7 +317,7 @@ Uses the **human token**: a person makes this decision.
 
 Run agentconnectd in the foreground (JSON logs on stderr).
 
-Starts the adapter named by daemon.default_adapter (webhook or sse), and the A2A adapter when a2a.local_agent_url or a2a.facade_port is set.
+Starts the adapter named by daemon.default_adapter (webhook or sse), and the A2A adapter when a2a.local_agent_url or a2a.facade_port is set. On SIGINT or SIGTERM, queued sends get up to 3 seconds to go out while the relay is connected; the rest stay in the encrypted outbox for the next start.
 
 ```text
 agentconnect daemon run [OPTIONS]

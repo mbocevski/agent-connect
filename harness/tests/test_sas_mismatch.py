@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 
-from agentconnect.api import ApiError, ApiServer
-from agentconnect.daemon import TRANSFER_TIMEOUT_SECS, DaemonError
-from agentconnect_harness.cluster import Cluster, Node, status
+from agentconnect.runtime.api import ApiError, ApiServer
+from agentconnect.runtime.engine import TRANSFER_TIMEOUT_SECS, DaemonError
+from agentconnect_harness.cluster import Cluster, Node, api_token, status
 from agentconnect_harness.proxy import RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -101,8 +101,8 @@ async def test_a_sole_owner_just_deletes(cluster: Cluster) -> None:
 async def test_the_api_operation_is_human_only(group: GroupFixture) -> None:
     (a, _b), gid = await group(2)
     server = ApiServer(a.daemon)
-    agent = {"authorization": f"Bearer {server.tokens['agent']}"}
-    human = {"authorization": f"Bearer {server.tokens['human']}"}
+    agent = {"authorization": f"Bearer {api_token(server, 'agent')}"}
+    human = {"authorization": f"Bearer {api_token(server, 'human')}"}
     path = f"/v0/groups/{gid}/sas/mismatch"
     with pytest.raises(ApiError, match="human token"):
         await server.handle("POST", path, agent, b"{}")

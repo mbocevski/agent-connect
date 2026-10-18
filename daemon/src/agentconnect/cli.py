@@ -1,6 +1,6 @@
 """`agentconnect` command-line interface.
 
-A thin layer over the daemon's local API (``agentconnect.api``): it parses
+A thin layer over the daemon's local API (``agentconnect.runtime.api``): it parses
 arguments, calls the daemon, and renders the answer. Protocol decisions live
 in the daemon. Every command takes ``--json`` for a stable machine-readable
 shape (docs/cli.md); errors are then ``{"error": {"code", "message"}}`` on
@@ -16,10 +16,8 @@ human.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import math
-import signal
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,6 +26,7 @@ import typer
 
 import agentconnect_core
 from agentconnect import __version__, cli_support, log
+from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient
 from agentconnect.cli_support import (
     COMPARE_REMINDER,
@@ -54,8 +53,7 @@ from agentconnect.cli_support import (
     resolve_group,
     unverified_hint,
 )
-from agentconnect.config import Config
-from agentconnect.isolation import IsolationError, PeerGate
+from agentconnect.isolation import IsolationError
 
 # Pretty tracebacks with locals would print envelopes, plaintext and secrets.
 app = typer.Typer(
@@ -166,36 +164,6 @@ def status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
         typer.echo(f"held         {info.get('held_messages', 0)} message(s) waiting for approval")
 
 
-async def _run(cfg: Config, ready: asyncio.Event | None = None) -> None:
-    from agentconnect.adapters import build_adapters  # noqa: PLC0415
-    from agentconnect.api import ApiServer  # noqa: PLC0415
-    from agentconnect.clock import SystemClock  # noqa: PLC0415
-    from agentconnect.daemon import Daemon  # noqa: PLC0415
-
-    # Separate-OS-user mode: refuse a loose setup before any key is opened.
-    gate = PeerGate.from_config(cfg)
-    clock = SystemClock()
-    daemon = Daemon(cfg, build_adapters(cfg, clock), clock=clock)
-    api = ApiServer(daemon, gate)
-    await daemon.start()
-    await api.start()
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, stop.set)
-    if ready is not None:
-        ready.set()
-    try:
-        await stop.wait()
-    finally:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(NotImplementedError):
-                loop.remove_signal_handler(sig)
-        await api.stop()
-        await daemon.stop()
-
-
 @daemon_app.command("run")
 def daemon_run(
     config: ConfigOpt = None,
@@ -206,7 +174,10 @@ def daemon_run(
     """Run agentconnectd in the foreground (JSON logs on stderr).
 
     Starts the adapter named by daemon.default_adapter (webhook or sse), and
-    the A2A adapter when a2a.local_agent_url or a2a.facade_port is set.
+    the A2A adapter when a2a.local_agent_url or a2a.facade_port is set. On
+    SIGINT or SIGTERM, queued sends get up to 3 seconds to go out while the
+    relay is connected; the rest stay in the encrypted outbox for the next
+    start.
     """
     with guard(False):
         cfg = load(config)
@@ -215,7 +186,7 @@ def daemon_run(
     log.configure()
     with guard(False):
         try:
-            asyncio.run(_run(cfg))
+            asyncio.run(daemon_host.serve(cfg))
         except IsolationError as e:
             raise CliError("isolation", f"refusing to start: {e}", EXIT_USAGE) from None
 

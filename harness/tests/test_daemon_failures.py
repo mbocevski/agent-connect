@@ -19,10 +19,10 @@ from agentconnect.adapter import (
     OutboundSend,
     Sender,
 )
-from agentconnect.daemon import Daemon, DaemonError, new_msg_id
 from agentconnect.keystore import FileKeystore
 from agentconnect.relay import RelayError
-from agentconnect_harness.cluster import Cluster, Node, status
+from agentconnect.runtime.engine import DaemonError, Engine, new_msg_id
+from agentconnect_harness.cluster import WAIT, Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -167,10 +167,13 @@ async def test_welcome_failures_and_parked_messages(
     # d receives a group message before its Welcome: it is parked and
     # processed once the join completes.
     d = await cluster.node("d")
-    malicious_relay(d).hold_welcome_until_application()
+    holding = malicious_relay(d).hold_welcome_until_application()
     epoch = a.epoch(gid)
     await d.daemon.accept_invite(invite["url"])
     await b.wait(lambda: b.epoch(gid) == epoch + 1)
+    # Only once the Welcome is held: sent sooner, the message could overtake
+    # it and leave it held for good.
+    await asyncio.wait_for(holding.wait(), WAIT)
     b.daemon.send_message(gid, {"text": "early"}, to=["*"])
     assert await d.wait_texts(gid, 1) == ["early"]
 
@@ -239,7 +242,7 @@ async def test_broken_adapters_do_not_stop_the_daemon(
     (a, b), gid = await group(2)
     broken = BrokenAdapter()
     await b.daemon.stop()
-    b.daemon = Daemon(
+    b.daemon = Engine(
         b.config.with_overrides(default_adapter="broken"),
         [broken],
         clock=b.clock,
@@ -261,7 +264,7 @@ async def test_broken_adapters_do_not_stop_the_daemon(
 async def test_daemon_without_adapters(cluster: Cluster) -> None:
     n = await cluster.node("bare")
     await n.daemon.stop()
-    n.daemon = Daemon(
+    n.daemon = Engine(
         n.config, [], clock=n.clock, keystore=FileKeystore(n.config.data_dir / "keys")
     )
     await n.daemon.start()

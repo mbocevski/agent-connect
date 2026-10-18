@@ -146,7 +146,7 @@ def test_real_cli_reference_lists_every_command() -> None:
 
 
 def test_api_reference_lists_every_route() -> None:
-    from agentconnect import api  # noqa: PLC0415
+    from agentconnect.runtime import api  # noqa: PLC0415
 
     text = gen.render_api_routes()
     for spec in api.ROUTE_SPECS:

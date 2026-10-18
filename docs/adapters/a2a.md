@@ -12,7 +12,9 @@ It works in two directions:
 - **Facade.** A local A2A client talks to a group through an A2A server on
   `127.0.0.1`, as if the group were one A2A agent.
 
-The code is in `daemon/src/agentconnect/a2a_adapter/`.
+The code is in `daemon/src/agentconnect/a2a_adapter/`. It is configured for
+the separate daemon; a Python agent that embeds the runtime through the SDK
+gets its messages in-process instead ([sdk.md](../sdk.md)).
 
 ## Setup
 
@@ -270,8 +272,9 @@ A delivery is acknowledged once the agent sent its first event. Until then:
 | The agent is unreachable, times out or returns an HTTP error | retry (with the daemon's backoff) |
 | The agent returns an A2A error | acknowledged and dropped, so one bad message doesn't hold up the queue |
 
-The daemon's delivery queue is shared by all groups, so while the agent is
-unreachable, later deliveries wait.
+Deliveries are in order within each group, and groups don't wait for each
+other: while the agent is unreachable, later deliveries in that group wait,
+and other groups' calls go on.
 
 Stopping the daemon cancels calls to the agent that are still running,
 stops the facade and closes `a2a-seen.db`, even if the daemon is

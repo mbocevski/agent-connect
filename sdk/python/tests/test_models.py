@@ -147,8 +147,9 @@ def test_malformed_event_and_non_objects_are_refused(make_event: Payload) -> Non
 
 
 def test_idempotency_key(make_payload: Payload, make_event: Payload) -> None:
-    assert idempotency_key(make_payload(msg_id="m1")) == "m1"
-    assert idempotency_key(make_event(event_id="e1")) == "e1"
+    assert idempotency_key(make_payload(msg_id="m1")) == '["msg","g1","ac:v0:peer","m1"]'
+    assert idempotency_key(make_event(event_id="e1")) == '["event","e1"]'
+    assert idempotency_key(make_event(event_id="m1")) != idempotency_key(make_payload(msg_id="m1"))
     with pytest.raises(PayloadError):
         idempotency_key({"event": "x"})
     with pytest.raises(PayloadError):

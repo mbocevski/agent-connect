@@ -10,6 +10,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.17.1",
     # ty is pre-1.0: pin exactly and bump deliberately (Dependabot PRs).
     "ty==0.0.89",
@@ -20,7 +21,7 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "ASYNC", "PT", "N", "PL"]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "ASYNC", "PT", "N", "PL", "TID251"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
@@ -30,8 +31,22 @@ known-first-party = [
     "agentconnect_sdk",
 ]
 
+# ADR-005: hosts (the CLI, agentconnectd, the SDK) use the runtime through
+# its package root only. The runtime itself, tests, the harness and the
+# reference generator may reach into it.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"agentconnect.runtime.agent".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.api".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.engine".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.errors".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.registry".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.runtime".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["S101", "S603", "S607", "PLR2004"]
+"**/tests/**" = ["S101", "S603", "S607", "PLR2004", "TID251"]
+"daemon/src/agentconnect/runtime/**" = ["TID251"]
+"harness/**" = ["TID251"]
+"scripts/**" = ["TID251"]
 
 [tool.ty.environment]
 python-version = "3.12"
@@ -65,6 +80,7 @@ timeout = 10
 markers = [
     "quarantine: known-flaky test; excluded from gating runs (see TESTING.md)",
     "multiuser: needs root and a second OS user; integration tier only (AC_RUN_MULTIUSER=1)",
+    "hosts(*names): run a harness scenario on these runtime hosts only (daemon, embedded)",
 ]
 
 [tool.coverage.run]

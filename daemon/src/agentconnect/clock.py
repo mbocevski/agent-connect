@@ -31,8 +31,11 @@ class Clock(Protocol):
         """Whole milliseconds since the Unix epoch."""
         ...
 
-    async def sleep(self, seconds: float) -> None:
-        """Wait until ``seconds`` of this clock's time have passed."""
+    async def sleep(self, seconds: float, *, deadline: bool = False) -> None:
+        """Wait until ``seconds`` of this clock's time have passed.
+        ``deadline=True`` marks a timer that bounds other work (a handler
+        timeout) rather than a pause before the next attempt; a fake clock
+        doesn't count it as a sleeper."""
         ...
 
 
@@ -54,7 +57,7 @@ class SystemClock:
     def unix_millis(self) -> int:
         return _millis(self.now())
 
-    async def sleep(self, seconds: float) -> None:
+    async def sleep(self, seconds: float, *, deadline: bool = False) -> None:
         await asyncio.sleep(max(seconds, 0))
 
 
@@ -75,6 +78,7 @@ class FakeClock:
         self._lock = threading.Lock()
         self._now = self._checked(start)
         self._sleepers: list[tuple[datetime, asyncio.AbstractEventLoop, asyncio.Future[Any]]] = []
+        self._deadlines: set[int] = set()  # ids of the futures of deadline sleeps
 
     @staticmethod
     def _checked(moment: datetime) -> datetime:
@@ -92,11 +96,13 @@ class FakeClock:
 
     @property
     def sleepers(self) -> int:
-        """How many :meth:`sleep` calls are waiting."""
+        """How many :meth:`sleep` calls are waiting, not counting deadlines
+        (timers that bound other work, such as a handler timeout): tests
+        read this as "the runtime is waiting to retry"."""
         with self._lock:
-            return len(self._sleepers)
+            return len([s for s in self._sleepers if id(s[2]) not in self._deadlines])
 
-    async def sleep(self, seconds: float) -> None:
+    async def sleep(self, seconds: float, *, deadline: bool = False) -> None:
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         with self._lock:
@@ -105,12 +111,15 @@ class FakeClock:
                 fut.set_result(None)
             else:
                 self._sleepers.append(entry)
+                if deadline:
+                    self._deadlines.add(id(fut))
         try:
             await fut
         finally:
             with self._lock:
                 if entry in self._sleepers:
                     self._sleepers.remove(entry)
+                self._deadlines.discard(id(fut))
 
     def _release_due(self) -> None:
         # Called with the lock held.

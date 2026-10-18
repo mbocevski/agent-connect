@@ -242,6 +242,17 @@ CREATE TABLE IF NOT EXISTS transcript (
     inner TEXT NOT NULL,
     size INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS adapter_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    adapter TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE (adapter, event_id)
+);
+CREATE TABLE IF NOT EXISTS handled (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE
+);
 """
 
 GROUP_COLUMNS = (
@@ -304,6 +315,11 @@ class InboxRow:
     state: str
 
 
+def _payload_group(payload: dict[str, Any]) -> str | None:
+    group = payload.get("group")
+    return str(group["id"]) if isinstance(group, dict) and "id" in group else None
+
+
 class Store:
     """Synchronous access to the daemon database (one connection)."""
 
@@ -329,8 +345,30 @@ class Store:
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
         if "at" not in feed_columns:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
+        # Handled-id keys were bare ids before they were namespaced
+        # (["msg", group, sender, msg_id] / ["event", event_id]). An old
+        # row can't be migrated (it lacks the group and the sender) and,
+        # being peer-chosen, could equal a new key and hide a delivery; so
+        # old rows are cleared, once. At worst one delivery reaches its
+        # handler again, which at-least-once allows.
+        if self.kv_get("schema/handled_keys") != "namespaced":
+            with self.tx():
+                self._db.execute("DELETE FROM handled WHERE key NOT LIKE '[%'")
+                self.kv_set("schema/handled_keys", "namespaced")
+        # The in-process adapter's event queue is read per group.
+        event_columns = {
+            r[0] for r in self._all("SELECT name FROM pragma_table_info('adapter_events')")
+        }
+        if "group_id" not in event_columns:
+            self._db.execute("ALTER TABLE adapter_events ADD COLUMN group_id TEXT")
+            self._db.execute(
+                "UPDATE adapter_events SET group_id = json_extract(payload, '$.group.id')"
+            )
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
+            "CREATE INDEX IF NOT EXISTS inbox_pending ON inbox (state, group_id, seq);"
+            "CREATE INDEX IF NOT EXISTS adapter_events_group "
+            "ON adapter_events (adapter, group_id, seq);"
             "CREATE INDEX IF NOT EXISTS audit_class ON audit (class, seq);"
             "CREATE INDEX IF NOT EXISTS audit_group ON audit (group_id, class, seq);"
             "CREATE INDEX IF NOT EXISTS audit_sender ON audit (group_id, sender, class, seq);"
@@ -1116,15 +1154,29 @@ class Store:
     def forget_hops(self, before: int) -> None:
         self._db.execute("DELETE FROM hops WHERE at < ?", (before,))
 
-    def pending_deliveries(self) -> list[InboxRow]:
+    def pending_deliveries(self, group_id: str | None = None, limit: int = -1) -> list[InboxRow]:
+        """Pending inbox rows, oldest first; with ``group_id`` only that
+        group's that can be handed over, at most ``limit`` of them (-1: all)."""
         rows = self._all(
             "SELECT seq, sender, msg_id, group_id, delivery, state FROM inbox "
-            "WHERE state = 'pending' ORDER BY seq"
+            "WHERE state = 'pending' AND (? IS NULL OR (group_id = ? AND delivery IS NOT NULL)) "
+            "ORDER BY seq LIMIT ?",
+            group_id,
+            group_id,
+            limit,
         )
         return [
             InboxRow(r[0], r[1], r[2], r[3], None if r[4] is None else json.loads(r[4]), r[5])
             for r in rows
         ]
+
+    def pending_groups(self) -> list[str]:
+        """The groups with pending deliveries that can be handed over."""
+        rows = self._all(
+            "SELECT group_id FROM inbox WHERE state = 'pending' AND group_id IS NOT NULL "
+            "AND delivery IS NOT NULL GROUP BY group_id ORDER BY MIN(seq)"
+        )
+        return [str(r[0]) for r in rows]
 
     def set_inbox_state(self, seq: int, state: str) -> None:
         # A delivered row no longer needs its plaintext.
@@ -1218,6 +1270,64 @@ class Store:
     def feed_last(self) -> int:
         row = self._one("SELECT seq FROM sqlite_sequence WHERE name = 'feed'")
         return 0 if row is None else int(row[0])
+
+    # -- in-process adapters (agentconnect.callback) --------------------------
+
+    def adapter_event_add(
+        self, adapter: str, event_id: str, payload: dict[str, Any], keep: int = 10_000
+    ) -> bool:
+        """Queue an event for an in-process adapter; ``False`` if it is
+        queued already. Only the newest ``keep`` per adapter are retained."""
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT OR IGNORE INTO adapter_events (adapter, event_id, payload, group_id) "
+                "VALUES (?, ?, ?, ?)",
+                (adapter, event_id, json.dumps(payload, sort_keys=True), _payload_group(payload)),
+            )
+            db.execute(
+                "DELETE FROM adapter_events WHERE adapter = ? AND seq NOT IN "
+                "(SELECT seq FROM adapter_events WHERE adapter = ? ORDER BY seq DESC LIMIT ?)",
+                (adapter, adapter, keep),
+            )
+        return cur.rowcount == 1
+
+    def adapter_events(
+        self, adapter: str, group_id: str | None = None, limit: int = 100
+    ) -> list[tuple[int, dict[str, Any]]]:
+        """Queued events of ``adapter`` for ``group_id`` (``None``: events
+        about no group), oldest first, at most ``limit``."""
+        rows = self._all(
+            "SELECT seq, payload FROM adapter_events WHERE adapter = ? AND group_id IS ? "
+            "ORDER BY seq LIMIT ?",
+            adapter,
+            group_id,
+            limit,
+        )
+        return [(int(r[0]), json.loads(r[1])) for r in rows]
+
+    def adapter_event_groups(self, adapter: str) -> list[str | None]:
+        """The groups (``None``: no group) with queued events for ``adapter``."""
+        rows = self._all(
+            "SELECT group_id FROM adapter_events WHERE adapter = ? "
+            "GROUP BY group_id ORDER BY MIN(seq)",
+            adapter,
+        )
+        return [None if r[0] is None else str(r[0]) for r in rows]
+
+    def adapter_event_done(self, seq: int) -> None:
+        self._db.execute("DELETE FROM adapter_events WHERE seq = ?", (seq,))
+
+    # -- ids an in-process agent's handlers finished with ---------------------
+
+    def handled_has(self, key: str) -> bool:
+        return self._one("SELECT 1 FROM handled WHERE key = ?", key) is not None
+
+    def handled_add(self, key: str, keep: int) -> None:
+        """Remember ``key``; only the newest ``keep`` keys are retained."""
+        with self.tx() as db:
+            cur = db.execute("INSERT OR IGNORE INTO handled (key) VALUES (?)", (key,))
+            if cur.rowcount == 1:
+                db.execute("DELETE FROM handled WHERE seq <= ?", (int(cur.lastrowid or 0) - keep,))
 
     def unnotified_events(self) -> list[dict[str, Any]]:
         """Recorded events the adapter has not accepted yet, oldest first."""

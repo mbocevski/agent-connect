@@ -16,6 +16,7 @@ import os
 import random
 import secrets
 from collections.abc import Mapping
+from typing import Any
 
 import pytest
 from hypothesis import HealthCheck, settings
@@ -69,7 +70,19 @@ _register_hypothesis_profiles()
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # Under pytest-xdist every worker takes the controller's seed, so one
+    # run has one seed whichever worker ran a test.
+    workerinput = getattr(config, "workerinput", None)
+    if isinstance(workerinput, dict) and SEED_ENV in workerinput:
+        config.stash[_SEED_KEY] = int(workerinput[SEED_ENV])
+        return
     config.stash[_SEED_KEY] = resolve_seed(os.environ)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node: Any) -> None:
+    """pytest-xdist: hand the run seed to a worker before it starts."""
+    node.workerinput[SEED_ENV] = node.config.stash[_SEED_KEY]
 
 
 def pytest_report_header(config: pytest.Config) -> str:

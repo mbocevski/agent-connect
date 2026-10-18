@@ -131,3 +131,20 @@ async def test_a2a_close_lets_the_caller_be_cancelled_and_still_releases(tmp_pat
 
     await stuck_closing(adapter.aclose, install)
     assert adapter._seen_store is None
+
+
+async def test_a_task_that_stops_itself_with_others_is_skipped() -> None:
+    """A worker that ends up cancelling its own group (a handler stopping
+    its host) doesn't wait for itself, which would never return."""
+    other = asyncio.ensure_future(asyncio.Event().wait())
+    me: list[asyncio.Task[Any]] = []
+
+    async def stopper() -> str:
+        task = asyncio.current_task()
+        assert task is not None
+        me.append(task)
+        await cancel_and_wait(task, other)
+        return "returned"
+
+    assert await asyncio.wait_for(stopper(), 5) == "returned"
+    assert other.cancelled()

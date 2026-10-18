@@ -13,7 +13,7 @@ docs = ["docs/cli.md"]
 
 [[rule]]
 name = "local-api"
-code = ["daemon/src/agentconnect/api.py"]
+code = ["daemon/src/agentconnect/runtime/api.py"]
 docs = ["docs/api.md"]
 
 [[rule]]
@@ -39,6 +39,16 @@ code = [
     "daemon/src/agentconnect/schemas.py",
 ]
 docs = ["docs/safety.md"]
+
+[[rule]]
+name = "runtime-hosts"
+code = [
+    "daemon/src/agentconnect/runtime/runtime.py",
+    "daemon/src/agentconnect/runtime/agent.py",
+    "daemon/src/agentconnect/callback.py",
+    "daemon/src/agentconnect/daemon/*.py",
+]
+docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
 
 [[rule]]
 name = "python-sdk"

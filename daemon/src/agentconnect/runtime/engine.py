@@ -86,11 +86,12 @@ from agentconnect.relay import (
     b64,
     unb64,
 )
+from agentconnect.runtime.registry import AdapterRegistry
 from agentconnect.schemas import normalize
 from agentconnect.store import GroupRow, OutboxRow, Store
 from agentconnect.tasks import cancel_and_wait
 
-LOG = log.get("agentconnect.daemon")
+LOG = log.get("agentconnect.engine")
 
 UPDATE_AFTER_SECS = 24 * 3600  # SPEC §3.1 update cadence
 UPDATE_AFTER_MESSAGES = 1000
@@ -104,6 +105,7 @@ HOP_MEMORY_SECS = 7 * 24 * 3600
 TRANSFER_TIMEOUT_SECS = 10.0  # owner hand-over before a SAS-mismatch exit
 REBUILD_WAIT_SECS = 60.0
 MAX_COMMIT_ATTEMPTS = 8
+DELIVERY_BATCH = 100  # pending rows a group's delivery worker reads at a time
 # Safety-policy events that reveal what the policy did with a peer's message:
 # recorded for the human (GET /v0/events with the human token, the CLI), never
 # passed to the agent's adapter.
@@ -315,15 +317,18 @@ class Options:
     testing: Seeded | None = None
     backoff_rng: random.Random | None = None
     keyring_backend: Any = None
+    # Who holds the data-directory lock, as told to a second runtime.
+    lock_owner: str = "daemon"
 
 
-class Daemon:
-    """One daemon: one identity, one instance, one relay connection."""
+class Engine:
+    """The protocol engine of one runtime: one identity, one instance, one
+    relay connection. Hosts use it through :class:`agentconnect.runtime.Runtime`."""
 
     def __init__(
         self,
         config: Config,
-        adapters: Iterable[Adapter] = (),
+        adapters: Iterable[Adapter] | AdapterRegistry = (),
         *,
         clock: Clock | None = None,
         keystore: Keystore | None = None,
@@ -331,7 +336,9 @@ class Daemon:
     ) -> None:
         self.config = config
         self.clock: Clock = clock or SystemClock()
-        self.adapters: dict[str, Adapter] = {a.name: a for a in adapters}
+        self.adapters = (
+            adapters if isinstance(adapters, AdapterRegistry) else AdapterRegistry(adapters)
+        )
         self.options = options or Options()
         self.failpoints = Failpoints()  # inert unless a test arms one
         # Set while one journal entry's effects are being recorded (_apply).
@@ -341,7 +348,7 @@ class Daemon:
         self._cause: tuple[str, int] | None = None
         self._registering: set[str] = set()
         # Before touching keys or databases: one daemon per data directory.
-        self._lock = DataDirLock(config.data_dir)
+        self._lock = DataDirLock(config.data_dir, self.options.lock_owner)
         try:
             self._open(keystore)
         except BaseException:
@@ -381,7 +388,6 @@ class Daemon:
         self._leaving: set[str] = set()
         self._proposed_leaves: dict[str, set[str]] = {}
         self._tasks: list[asyncio.Task[None]] = []
-        self._delivery_backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         # Every message in and out goes through it (agentconnect.policy).
         self.safety = SafetyPolicy(
             config.safety_defaults(),
@@ -400,6 +406,7 @@ class Daemon:
         self._drain_frame = False
         self._drain = DrainBudget()
         self.running = False
+        self._closed = False
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -415,6 +422,7 @@ class Daemon:
         return unix_seconds(self.clock)
 
     async def start(self) -> None:
+        self.adapters.close()
         self._recover()
         # First thing the inbound worker does: finish what a crash left in
         # the core's journal.
@@ -448,6 +456,14 @@ class Daemon:
                 reason = "returned"
             except Exception as e:
                 reason = type(e).__name__
+            except asyncio.CancelledError:
+                # Our own cancellation (stop) ends the worker; a stray one
+                # (user code that awaited something else's cancelled task)
+                # is a failure like any other.
+                current = asyncio.current_task()
+                if current is None or current.cancelling():
+                    raise
+                reason = "CancelledError"
             if not self.running:
                 return
             LOG.error("worker_died", worker=name, reason=reason)
@@ -455,24 +471,43 @@ class Daemon:
 
     async def stop(self) -> None:
         """Stop the workers and close the databases (also used to simulate a
-        crash in tests: nothing is flushed that isn't already durable)."""
+        crash in tests: nothing is flushed that isn't already durable).
+
+        Every step runs even if the caller is cancelled meanwhile; that
+        cancellation propagates once the lock is released."""
+        if self._closed:
+            return
         self.running = False
-        await self.link.stop()
         try:
-            # If whoever stops us is cancelled meanwhile, that cancellation
-            # propagates, after the cleanup below.
-            await cancel_and_wait(*self._tasks, ignore=(Exception, SimulatedCrash))
+            await self.link.stop()
         finally:
-            self._tasks.clear()
-            for adapter in self.adapters.values():
-                # Optional hook: adapters with workers or connections release them.
-                close = getattr(adapter, "close", None)
-                if close is not None:
-                    with contextlib.suppress(Exception):
-                        await close()
+            try:
+                await cancel_and_wait(*self._tasks, ignore=(Exception, SimulatedCrash))
+            finally:
+                self._tasks.clear()
+                try:
+                    for adapter in self.adapters.values():
+                        # Optional hook: adapters with workers or connections release them.
+                        close = getattr(adapter, "close", None)
+                        if close is not None:
+                            with contextlib.suppress(Exception):
+                                await close()
+                finally:
+                    self.close()
+
+    def close(self) -> None:
+        """Close the databases and release the data directory, without
+        stopping anything (for an engine that never started, or after
+        :meth:`stop`)."""
+        if self._closed:
+            return
+        self._closed = True
+        self.running = False
+        try:
             self.store.close()
             # Drop the core client so its SQLite connections close.
             del self.client
+        finally:
             self._lock.release()
             LOG.info("daemon_stopped")
 
@@ -519,8 +554,11 @@ class Daemon:
         """Wait (with a real-time guard) until ``predicate`` holds."""
 
         async def loop() -> None:
-            while not predicate():
+            while True:
+                # Clear before checking: a pulse after the check isn't lost.
                 self._changed.clear()
+                if predicate():
+                    return
                 await self._changed.wait()
 
         await asyncio.wait_for(loop(), within)
@@ -578,7 +616,7 @@ class Daemon:
             g = self.store.group(group_id)
             if g is not None:
                 name = g.adapter
-        return self.adapters.get(name) or next(iter(self.adapters.values()), None)
+        return self.adapters.bound(name)
 
     async def emit(
         self, group_id: str | None, kind: str, *, cause: str | None = None, **data: Any
@@ -2016,11 +2054,54 @@ class Daemon:
             self.store.set_display_name(delivery.group_id, identity, name[:80])
 
     async def _delivery(self) -> None:
+        """Hand pending inbox rows to the adapters: one worker per group with
+        deliverable rows, so a slow or failing adapter call holds up its own
+        group only, and strict order within each group. A worker's crash or
+        failure ends this worker too (the supervisor restarts it)."""
+        workers: dict[str, asyncio.Task[None]] = {}
+        woken = True
+        try:
+            while True:
+                # Reap first: a worker that just found its group empty must not
+                # keep a row that arrived since from getting a new worker.
+                for group_id, worker in list(workers.items()):
+                    if worker.done():
+                        del workers[group_id]
+                        if worker.cancelled():
+                            # Not by us (we'd be cancelled too): restart it.
+                            LOG.error("delivery_worker_died", reason="CancelledError")
+                            woken = True
+                        else:
+                            worker.result()  # a failure ends this worker too
+                if woken:
+                    # Clear before reading, so a row recorded after the
+                    # read wakes us again.
+                    self._delivery_wake.clear()
+                    for group_id in self.store.pending_groups():
+                        if group_id not in workers and not self._gated(group_id):
+                            workers[group_id] = asyncio.ensure_future(self._deliver_group(group_id))
+                wake = asyncio.ensure_future(self._delivery_wake.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {wake, *workers.values()}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    wake.cancel()
+                woken = wake in done
+        finally:
+            await cancel_and_wait(*workers.values(), ignore=(Exception, SimulatedCrash))
+
+    async def _deliver_group(self, group_id: str) -> None:
+        """One group's pending deliveries, in order, until none is left that
+        can be delivered now; a ``RETRY`` waits out the group's backoff."""
+        backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         while True:
-            self._delivery_wake.clear()
-            retry = False
-            for row in self.store.pending_deliveries():
-                if row.delivery is None or self._gated(row.group_id):
+            if self._gated(group_id):
+                return
+            rows = self.store.pending_deliveries(group_id, limit=DELIVERY_BATCH)
+            delivered, retry = 0, False
+            for row in rows:
+                if row.delivery is None:
                     continue
                 stored = Delivery.from_json(row.delivery)
                 # Trust can change between reception and delivery (a human
@@ -2048,17 +2129,19 @@ class Daemon:
                     LOG.warning("adapter_deliver_failed")
                     result = DeliveryResult.RETRY
                 if result is DeliveryResult.ACK:
+                    self.failpoints.hit("delivery.after_adapter")
                     self.store.set_inbox_state(row.seq, "done")
-                    self._delivery_backoff.reset()
+                    backoff.reset()
                     await self._ack(row.msg_id)
+                    delivered += 1
                     self._pulse()
                 else:
                     retry = True
                     break
             if retry:
-                await self._sleep(self._delivery_backoff.next())
-                continue
-            await self._delivery_wake.wait()
+                await self._sleep(backoff.next())
+            elif delivered == 0:
+                return  # nothing left, or only rows that can't go out yet
 
     # -- outbox ---------------------------------------------------------------
 
