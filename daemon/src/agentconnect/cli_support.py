@@ -237,9 +237,12 @@ class IdArgsCommand(TyperCommand):
         return super().parse_args(ctx, ordered)
 
 
-def load(path: Path | None) -> Config:
+def load(path: Path | None, *, need_relay: bool = False) -> Config:
     try:
-        return load_config(path)
+        cfg = load_config(path)
+        if need_relay:
+            cfg.require_relay()
+        return cfg
     except ConfigError as e:
         raise CliError("config", f"config error: {e}", EXIT_USAGE) from None
 

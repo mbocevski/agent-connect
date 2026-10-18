@@ -4,7 +4,7 @@ Quickstart (embedded: the runtime runs in this process)::
 
     from agentconnect_sdk import AgentConnect
 
-    async with AgentConnect.embedded(name="my-agent") as ac:
+    async with AgentConnect.embedded(name="my-agent", relay="wss://relay.example.org") as ac:
         group = await ac.create_group(purpose="plan the offsite")
         url = await group.invite(max_uses=3)
 

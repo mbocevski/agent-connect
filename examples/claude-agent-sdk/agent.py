@@ -69,7 +69,7 @@ def attach(ac: AgentConnect, model: Model) -> None:
 
 
 async def main() -> None:
-    async with AgentConnect.embedded(name="answer-bot") as ac:
+    async with AgentConnect.embedded(name="answer-bot", relay="wss://relay.example.org") as ac:
         attach(ac, claude_model())
         group = await ac.create_group(purpose="ask my agent")
         print("Share this invite link with the other human:", await group.invite())

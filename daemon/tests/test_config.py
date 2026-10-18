@@ -5,7 +5,6 @@ import pytest
 
 from agentconnect.a2a_adapter import A2AOptions
 from agentconnect.config import (
-    DEFAULT_RELAY_URL,
     ConfigError,
     default_config_path,
     default_data_dir,
@@ -22,10 +21,11 @@ def write(tmp_path: Path, text: str) -> Path:
 def test_defaults_follow_xdg(tmp_path: Path) -> None:
     env = {"HOME": str(tmp_path)}
     cfg = load_config(environ=env)
-    assert cfg.relay_url == DEFAULT_RELAY_URL
-    assert cfg.relay_host == "connect.yggdrasill.network"
-    assert cfg.relay_http == "https://connect.yggdrasill.network"
-    assert cfg.relay_ws == "wss://connect.yggdrasill.network/v0/ws"
+    assert cfg.relay_url == ""
+    assert cfg.relay_host == ""
+    for attempt in (cfg.require_relay, lambda: cfg.relay_ws, lambda: cfg.relay_http):
+        with pytest.raises(ConfigError, match=r"relay\.url is required"):
+            attempt()
     assert cfg.data_dir == tmp_path / ".local/share/agentconnect"
     assert cfg.socket_path == cfg.data_dir / "agentconnectd.sock"
     assert not cfg.auto_approve
@@ -34,6 +34,14 @@ def test_defaults_follow_xdg(tmp_path: Path) -> None:
     xdg = {"XDG_DATA_HOME": str(tmp_path / "d"), "XDG_CONFIG_HOME": str(tmp_path / "c")}
     assert default_data_dir(xdg) == tmp_path / "d/agentconnect"
     assert default_config_path(xdg) == tmp_path / "c/agentconnect/config.toml"
+
+
+def test_relay_url_from_the_environment(tmp_path: Path) -> None:
+    cfg = load_config(environ={"HOME": str(tmp_path), "AC_RELAY_URL": "wss://relay.example.org"})
+    cfg.require_relay()
+    assert cfg.relay_host == "relay.example.org"
+    assert cfg.relay_http == "https://relay.example.org"
+    assert cfg.relay_ws == "wss://relay.example.org/v0/ws"
 
 
 def test_file_values_and_overrides(tmp_path: Path) -> None:

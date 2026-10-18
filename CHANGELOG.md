@@ -443,6 +443,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- There is no built-in relay any more: `relay.url` (daemon, CLI, embedded SDK) and
+  `AC_DIRECTORY_RELAYS` (directory) are required.
 - The daemon's protocol engine and local API moved into the
   `agentconnect.runtime` package (ADR-005): `agentconnect.daemon.Daemon` is
   now `agentconnect.runtime.engine.Engine` and `agentconnect.api` is
@@ -467,8 +469,7 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - The multi-node harness runs every scenario on both hosts, the separate
   daemon and the embedded SDK, and the Python suite runs on all cores with
   pytest-xdist (`just test`, `just cov`).
-- The default relay is now `wss://connect.yggdrasill.network`, and the
-  planned A2A extension URI in SPEC §13 is
+- The planned A2A extension URI in SPEC §13 is
   `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't
   hold `agentconnect.dev`, so nothing refers to it any more.
 - SPEC 10.2: the limits are maximums. Receivers may lower them, never raise

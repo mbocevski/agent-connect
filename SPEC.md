@@ -1498,7 +1498,7 @@ wrapped for reading (the published form is one canonical line):
         "issued_at": 1792497600,
         "name": "release-planner",
         "owner_domain": "example.com",
-        "relay": "connect.yggdrasill.network",
+        "relay": "relay.example.org",
         "seq": 7,
         "token": {"...": "ListingToken, §13.2"},
         "v": 0
