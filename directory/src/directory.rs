@@ -7,15 +7,16 @@ use std::sync::Arc;
 use agentconnect_core::clock::Clock;
 use agentconnect_core::encoding::{b64, hex};
 use agentconnect_core::identity::{fingerprint, parse_identity};
-use agentconnect_core::listing::{MAX_LISTING_BYTES, SignedListing};
+use agentconnect_core::listing::{MAX_LISTING_BYTES, NameRecord, SignedListing};
 
 use crate::card::Card;
 use crate::metrics::Metrics;
 use crate::owner::{OwnerFetcher, OwnerState, RECHECK_EVERY_SECS, owner_state, record_fetch};
 use crate::ratelimit::{Class, Limits, RateLimiter};
 use crate::store::{
-    FeedEntry, GoneKind, ListingRecord, OwnerCheck, OwnerStatus, PublishGuard, PublishOutcome,
-    RevokeOutcome, SearchDoc, SearchQuery, Store, WithdrawOutcome, WithdrawalRecord,
+    FeedEntry, GoneKind, ListingRecord, NameState, OwnerCheck, OwnerStatus, PublishGuard,
+    PublishOutcome, RevokeOutcome, SearchDoc, SearchQuery, Store, WithdrawOutcome,
+    WithdrawalRecord,
 };
 use crate::verify::{OwnerVerdict, Rejection, TokenKey, Verifier};
 
@@ -72,6 +73,14 @@ fn internal(e: &dyn std::fmt::Display) -> DirError {
     DirError::INTERNAL
 }
 
+/// The core's `NameRecord` for a name's stored state.
+fn name_record(state: &NameState) -> NameRecord {
+    NameRecord {
+        high_water: state.high_water.clone(),
+        tombstones: state.tombstones.clone(),
+    }
+}
+
 /// The refusal for a core [`Rejection`]: the code comes from the core's
 /// error kind (`malformed` uses `malformed_code`), the detail is the core's
 /// reason.
@@ -82,6 +91,7 @@ fn rejected(r: &Rejection, malformed_code: &'static str) -> DirError {
         K::UnknownKey => (403, "unknown_key"),
         K::Expired | K::NotYetValid | K::TokenMismatch => (403, "bad_token"),
         K::Revoked => (403, "token_revoked"),
+        K::Superseded => (409, "name_held"),
         K::DoorExpired => (400, "bad_door"),
         K::WrongDirectory => (400, "wrong_directory"),
         K::StaleTimestamp => (400, "stale_ts"),
@@ -94,19 +104,6 @@ fn rejected(r: &Rejection, malformed_code: &'static str) -> DirError {
         kind: Some(r.kind.as_str()),
     }
 }
-
-/// `seq` isn't above this identity's listed or withdrawn `seq`.
-const STALE_SEQ: DirError = DirError::new(
-    409,
-    "stale_seq",
-    "seq must be above every seq this identity listed or withdrew for the name",
-);
-/// Another identity holds the name under a token issued no earlier.
-const NAME_HELD: DirError = DirError::new(
-    409,
-    "name_held",
-    "another identity holds the name; a new identity needs a later token",
-);
 
 /// The door as a page shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,7 +443,6 @@ impl<S: Store> Directory<S> {
             owner: OwnerStatus::PENDING,
             door_expires_at: p.door.as_ref().map(|d| d.expires_at),
             token_expires_at: token.grant.expires_at,
-            token_issued_at: token.grant.issued_at,
             published_at: now,
             key_changed_at: None,
             bytes: bytes.to_vec(),
@@ -501,30 +497,26 @@ impl<S: Store> Directory<S> {
         }
         for _ in 0..3 {
             let stored = self.store.get(&p.name).await.map_err(|e| internal(&e))?;
-            if let Some(s) = stored.as_ref().filter(|s| s.sha256 != record.sha256)
-                && let Ok(old) = self.verifier.listing(&s.bytes)
-                && !listing.replaces(&old)
-            {
-                return Err(if old.params().identity == p.identity {
-                    STALE_SEQ
-                } else {
-                    NAME_HELD
-                });
-            }
-            let tomb = self
+            let state = self
                 .store
-                .tombstone_for(&p.name, &p.identity)
+                .name_state(&p.name)
                 .await
                 .map_err(|e| internal(&e))?;
-            if tomb
-                .as_ref()
-                .is_some_and(|t| listing.tombstoned_by(&t.identity, t.seq))
-            {
-                return Err(STALE_SEQ);
+            let mut name = name_record(&state);
+            // The same bytes again are idempotent; anything else must be
+            // admitted by the core's name rules.
+            if stored.as_ref().is_none_or(|s| s.sha256 != record.sha256) {
+                let old = stored
+                    .as_ref()
+                    .and_then(|s| self.verifier.listing(&s.bytes).ok());
+                name.admits(listing, old.as_ref())
+                    .map_err(|e| rejected(&Rejection::from(&e), "bad_listing"))?;
+                name.accept(listing);
             }
             let guard = PublishGuard {
                 prev_sha256: stored.map(|s| s.sha256),
-                tombstone_seq: tomb.map(|t| t.seq),
+                name: state,
+                high_water: name.high_water,
             };
             match self
                 .store
@@ -536,7 +528,6 @@ impl<S: Store> Directory<S> {
                 PublishOutcome::Unchanged => return Ok(false),
                 PublishOutcome::Conflict => {}
                 PublishOutcome::TokenRevoked => return Err(revoked),
-                PublishOutcome::NameHeld => return Err(NAME_HELD),
             }
         }
         Err(DirError::new(
@@ -590,10 +581,25 @@ impl<S: Store> Directory<S> {
         }
         let entry = std::str::from_utf8(bytes)
             .map_err(|_| DirError::new(400, "bad_request", "malformed or not canonical"))?;
+        // The tombstone this leaves, by the core's rule.
+        let mut name = name_record(
+            &self
+                .store
+                .name_state(&w.name)
+                .await
+                .map_err(|e| internal(&e))?,
+        );
+        name.tombstone(&w);
+        let tombstone_seq = name
+            .tombstones
+            .iter()
+            .find(|(id, _)| *id == w.identity)
+            .map_or(w.seq, |(_, seq)| *seq);
         let rec = WithdrawalRecord {
             name: &w.name,
             identity: &w.identity,
             seq: w.seq,
+            tombstone_seq,
             entry,
         };
         let changed = match self
@@ -807,6 +813,7 @@ mod tests {
             (K::NotYetValid, 403, "bad_token"),
             (K::TokenMismatch, 403, "bad_token"),
             (K::Revoked, 403, "token_revoked"),
+            (K::Superseded, 409, "name_held"),
             (K::DoorExpired, 400, "bad_door"),
             (K::WrongDirectory, 400, "wrong_directory"),
             (K::StaleTimestamp, 400, "stale_ts"),

@@ -171,7 +171,7 @@ async fn seq_must_rise_across_versions_and_tombstones() {
         let mut older = s.clone();
         older.seq = seq;
         older.description = format!("version {seq}");
-        refused(&h, h.build(&older).bytes, StatusCode::CONFLICT, "stale_seq").await;
+        refused(&h, h.build(&older).bytes, StatusCode::CONFLICT, "name_held").await;
     }
     let mut newer = s.clone();
     newer.seq = 6;
@@ -182,7 +182,7 @@ async fn seq_must_rise_across_versions_and_tombstones() {
         .post("/v0/withdrawals", h.withdrawal("seq-test", &id, 6))
         .await;
     assert_eq!(w.status, StatusCode::OK, "{}", w.text());
-    refused(&h, newer_bytes, StatusCode::CONFLICT, "stale_seq").await;
+    refused(&h, newer_bytes, StatusCode::CONFLICT, "name_held").await;
     let mut back = s.clone();
     back.seq = 7;
     h.publish(&back).await;

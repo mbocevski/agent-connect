@@ -25,10 +25,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   are per address and in memory. Every signature, token and canonical-form
   check is the core's (`agentconnect_core::listing`), under the operator
   keys pinned in `AC_DIRECTORY_TOKEN_KEYS`, and refusals carry the core's
-  error `kind`. `seq` and tombstones are per (name, identity); a new
-  identity takes a name only under a later-issued token, and the newest
-  token ever accepted for a name is kept, so a name can't go back to a
-  rotated-out key. See `directory/README.md`.
+  error `kind`. Who may publish a name is the core's `NameRecord`: `seq`
+  and tombstones are per (name, identity), a new identity takes a name only
+  under a later-issued token, and the newest token ever accepted for a name
+  is kept, so a name can't go back to a rotated-out key (`name_held`). A
+  listing whose owner state becomes `revoked` is withdrawn. See
+  `directory/README.md`.
 - `just test-int` runs the integration tier: the directory's Postgres store
   in docker compose (`compose.test.yaml`).
 - Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon

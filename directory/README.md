@@ -88,7 +88,7 @@ inside it; withdrawing by an IK-signed `Withdrawal`. There are no accounts.
 Refusals are `{"code", "detail", "kind"?}`. When the core decided, `kind` is
 the core's stable error kind (`malformed`, `signature`, `unknown_key`,
 `expired`, `not_yet_valid`, `token_mismatch`, `door_expired`,
-`wrong_directory`, `stale_timestamp`, ...), which picks the code, and
+`wrong_directory`, `stale_timestamp`, `superseded`, ...), which picks the code, and
 `detail` is the core's reason.
 
 | Code | Status | Meaning |
@@ -101,20 +101,22 @@ the core's stable error kind (`malformed`, `signature`, `unknown_key`,
 | `wrong_directory`, `wrong_relay` | 400 | The object names another directory, or a relay this one doesn't list. |
 | `bad_door` | 400 | The door has expired. (A door more than 7 days past `issued_at` is `bad_listing`.) |
 | `stale_ts` | 400 | `issued_at` more than 300 s ahead, or a withdrawal's `ts` more than 300 s off. |
-| `stale_seq` | 409 | This identity's `seq` isn't above its listed or withdrawn `seq` for the name. |
-| `name_held` | 409 | Another identity holds the name, or held it under a newer token. |
+| `name_held` | 409 | Kind `superseded`: the core's `NameRecord` doesn't admit the listing (a token older than the name's newest, no `seq` above the stored one, or a tombstone of this identity). |
+| `stale_seq` | 409 | A withdrawal below the listed `seq`. |
 | `conflict` | 409 | The name changed during the publish; retry. |
 | `wrong_identity` | 403 | A withdrawal by an identity that doesn't hold the name. |
 | `not_found` | 404 | Nothing is listed under that name. |
 | `too_large` | 413 | Over 32 KiB. |
 | `rate_limited` | 429 | Over the per-address limit; see `Retry-After`. |
 
-Replacement follows the core: `seq` and tombstones belong to (directory,
-name, identity), so the same identity needs a higher `seq`
-(`SignedListing::replaces`, `tombstoned_by`), and another identity needs a
-later-issued token. Heimdall also keeps, per name, the newest token
-`issued_at` it ever accepted, through withdrawal, expiry and revocation, so a
-name can't go back to a key it was rotated away from.
+Who may publish a name is the core's `NameRecord`: per name Heimdall
+stores the high-water mark (the newest accepted token's `issued_at` and its
+identity, kept through withdrawal, expiry and revocation, so a name can't go
+back to a key it was rotated away from) and per-identity tombstones. A
+publish is admitted with `NameRecord::admits` against the stored listing and
+recorded with `accept`; a withdrawal's tombstone comes from
+`NameRecord::tombstone`. The store applies either only if the name hasn't
+changed since the decision.
 
 ## Owner verification
 

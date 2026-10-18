@@ -156,8 +156,6 @@ pub struct ListingRecord {
     pub door_expires_at: Option<u64>,
     /// The embedded token's `expires_at`.
     pub token_expires_at: u64,
-    /// The embedded token's `issued_at`.
-    pub token_issued_at: u64,
     /// Unix seconds when this version was published.
     pub published_at: u64,
     /// Unix seconds when the name last changed identity, for the 30-day
@@ -236,15 +234,30 @@ pub struct FeedEntry {
     pub created_at: u64,
 }
 
-/// What the caller saw when it decided that a listing may be stored. The
-/// store refuses the write ([`PublishOutcome::Conflict`]) if either has
-/// changed since, so the decision and the write are atomic.
+/// What the directory keeps per name for the core's `NameRecord`: the newest
+/// token `issued_at` ever accepted and the identity it was issued to (kept
+/// for good, through withdrawal, expiry and revocation), and per identity
+/// the highest tombstoned `seq`, sorted by identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NameState {
+    /// `(issued_at, identity)` of the newest accepted token.
+    pub high_water: Option<(u64, String)>,
+    /// `(identity, seq)`, sorted by identity.
+    pub tombstones: Vec<(String, u64)>,
+}
+
+/// What the caller saw when it decided that a listing may be stored, and
+/// the name's high-water mark after accepting it. The store refuses the
+/// write ([`PublishOutcome::Conflict`]) if what it saw has changed since, so
+/// the decision and the write are atomic.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PublishGuard {
     /// The SHA-256 of the listing stored under the name, if any.
     pub prev_sha256: Option<String>,
-    /// The tombstoned `seq` of this (name, identity), if any.
-    pub tombstone_seq: Option<u64>,
+    /// The name's state the decision was taken on.
+    pub name: NameState,
+    /// The high-water mark to store with the listing.
+    pub high_water: Option<(u64, String)>,
 }
 
 /// Outcome of [`Store::publish`].
@@ -262,8 +275,6 @@ pub enum PublishOutcome {
     Conflict,
     /// The token was revoked.
     TokenRevoked,
-    /// The name was held under a token issued later than this listing's.
-    NameHeld,
 }
 
 /// A withdrawal to apply.
@@ -275,6 +286,9 @@ pub struct WithdrawalRecord<'a> {
     pub identity: &'a str,
     /// The highest `seq` withdrawn.
     pub seq: u64,
+    /// The tombstone to leave for (name, identity): the core's
+    /// `NameRecord::tombstone` of this withdrawal.
+    pub tombstone_seq: u64,
     /// The signed withdrawal, for the feed.
     pub entry: &'a str,
 }
@@ -334,6 +348,9 @@ pub trait Store: Send + Sync + 'static {
     /// The listing under `name`.
     fn get(&self, name: &str) -> impl Future<Output = StoreResult<Option<ListingRecord>>> + Send;
 
+    /// The name's state: its high-water mark and per-identity tombstones.
+    fn name_state(&self, name: &str) -> impl Future<Output = StoreResult<NameState>> + Send;
+
     /// Whether the operator revoked `token_id`.
     fn token_revoked(&self, token_id: &str) -> impl Future<Output = StoreResult<bool>> + Send;
 
@@ -350,10 +367,8 @@ pub trait Store: Send + Sync + 'static {
     /// Store a listing the caller decided may replace what `guard` saw
     /// (`SignedListing::replaces`, `tombstoned_by`), atomically: the token
     /// isn't revoked, the same bytes are idempotent, and the stored listing
-    /// and this identity's tombstone are still what `guard` says, and the
-    /// token is no older than the newest token ever accepted for the name
-    /// (kept after withdrawal, expiry and revocation, so an old key can't
-    /// take a name back). On a
+    /// and the name's state are still what `guard` says; then it writes
+    /// the listing and the name's new high-water mark. On a
     /// change of identity the store sets `key_changed_at` to
     /// `published_at`; otherwise it keeps the previous value.
     fn publish(

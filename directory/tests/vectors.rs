@@ -55,6 +55,7 @@ fn expected(kind: &str, malformed: &'static str) -> (StatusCode, &'static str) {
         "unknown_key" => (StatusCode::FORBIDDEN, "unknown_key"),
         "expired" | "not_yet_valid" | "token_mismatch" => (StatusCode::FORBIDDEN, "bad_token"),
         "revoked" => (StatusCode::FORBIDDEN, "token_revoked"),
+        "superseded" => (StatusCode::CONFLICT, "name_held"),
         "door_expired" => (StatusCode::BAD_REQUEST, "bad_door"),
         "wrong_directory" => (StatusCode::BAD_REQUEST, "wrong_directory"),
         "stale_timestamp" => (StatusCode::BAD_REQUEST, "stale_ts"),
@@ -148,7 +149,7 @@ async fn the_valid_listing_publishes_and_is_served_byte_for_byte() {
 async fn every_invalid_listing_is_refused_with_the_cores_kind() {
     let v = load("listings.json");
     let invalid = v["invalid"].as_array().unwrap();
-    assert_eq!(invalid.len(), 24);
+    assert_eq!(invalid.len(), 30);
     for case in invalid {
         let h = harness(
             s(&v["valid"]["listing"]),
@@ -192,14 +193,7 @@ async fn every_failed_publish_and_token_check_is_refused() {
             assert_eq!(r.status, StatusCode::OK, "{name}: {}", r.text());
         }
         let r = h.post("/v0/listings", listing.as_bytes().to_vec()).await;
-        if name == "issued in the future" {
-            // Same listing and `now` as "token not yet valid": a publish runs
-            // both checks, and the token is checked first.
-            assert_eq!(r.status, StatusCode::FORBIDDEN, "{name}: {}", r.text());
-            assert_eq!(r.json()["kind"], "not_yet_valid", "{name}");
-        } else {
-            assert_core_refusal(&r, case, "bad_listing");
-        }
+        assert_core_refusal(&r, case, "bad_listing");
         assert!(
             h.record(s(&params(listing)["name"])).await.is_none(),
             "{name}"
@@ -228,12 +222,8 @@ async fn replacements_follow_seq_per_identity_and_later_tokens() {
             assert_eq!(md.contains("key changed on"), !same_identity, "{label}");
         } else {
             assert_eq!(r.status, StatusCode::CONFLICT, "{label}: {}", r.text());
-            let code = if same_identity {
-                "stale_seq"
-            } else {
-                "name_held"
-            };
-            assert_eq!(r.code(), code, "{label}");
+            assert_eq!(r.code(), "name_held", "{label}");
+            assert_eq!(r.json()["kind"], "superseded", "{label}");
             assert_eq!(
                 h.get(&format!("/a/{name}.json")).await.body,
                 stored.as_bytes()
@@ -272,7 +262,7 @@ async fn tombstones_block_only_their_own_identity() {
         if case["blocked"] == true {
             assert_eq!(
                 (r.status, r.code()),
-                (StatusCode::CONFLICT, json!("stale_seq")),
+                (StatusCode::CONFLICT, json!("name_held")),
                 "{label}"
             );
         } else {
@@ -332,6 +322,42 @@ async fn an_old_key_cant_take_a_rotated_name_back() {
     );
 }
 
+#[tokio::test]
+async fn the_name_history_replays_through_publish_and_withdraw() {
+    let v = load("listings.json");
+    let steps = v["name_history"].as_array().unwrap();
+    let first = s(&steps[0]["listing"]);
+    let h = harness(first, &keys(&v["directory_keys"]), n(&v["valid"]["now"]));
+    let set = |t: u64| {
+        h.clock
+            .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t));
+    };
+    for step in steps {
+        let label = s(&step["name"]);
+        if let Some(w) = step["withdrawal"].as_str() {
+            let wv: Value = serde_json::from_str(w).unwrap();
+            set(n(&wv["ts"]));
+            let r = h.post("/v0/withdrawals", w.as_bytes().to_vec()).await;
+            assert_eq!(r.status, StatusCode::OK, "{label}: {}", r.text());
+            continue;
+        }
+        let listing = s(&step["listing"]);
+        let p = params(listing);
+        set(n(&p["token"]["issued_at"]).max(n(&p["issued_at"])));
+        let r = h.post("/v0/listings", listing.as_bytes().to_vec()).await;
+        if step["accepted"] == true {
+            assert_eq!(r.status, StatusCode::CREATED, "{label}: {}", r.text());
+            assert_eq!(
+                h.get(&format!("/a/{}.json", s(&p["name"]))).await.body,
+                listing.as_bytes(),
+                "{label}"
+            );
+        } else {
+            assert_core_refusal(&r, step, "bad_listing");
+        }
+    }
+}
+
 // --- listing-tokens.json -------------------------------------------------
 
 /// A listing for the token's grant, signed by its identity's vector key.
@@ -389,15 +415,6 @@ async fn token_vectors_through_publish_and_revocation() {
 
     // Every verify failure, embedded in a listing its identity signed.
     for case in v["verify_invalid"].as_array().unwrap() {
-        let label = s(&case["name"]);
-        let parsed = ListingToken::from_json(s(&case["token"]).as_bytes());
-        let Ok(token) = parsed else {
-            // A token that doesn't parse can't be put in a card at all; the
-            // core reports it as malformed.
-            assert_eq!(s(&case["kind"]), "malformed", "{label}");
-            assert_eq!(parsed.unwrap_err().kind().as_str(), "malformed", "{label}");
-            continue;
-        };
         let h = Harness::pinned(
             dir,
             relay,
@@ -405,25 +422,30 @@ async fn token_vectors_through_publish_and_revocation() {
             Some(n(&case["now"])),
             |d| d,
         );
-        let listing = token_listing(&h, &v["identities"], token);
+        // Tokens that don't parse come with the listing the vector signed
+        // around them; the others are signed into a card here.
+        let (listing, expect) = match case["listing"].as_str() {
+            // The listing's own refusal is named next to the token's.
+            Some(l) => (
+                l.as_bytes().to_vec(),
+                json!({"name": case["name"], "kind": case["listing_kind"], "error": case["listing_error"]}),
+            ),
+            None => {
+                let token = ListingToken::from_json(s(&case["token"]).as_bytes()).unwrap();
+                (token_listing(&h, &v["identities"], token), case.clone())
+            }
+        };
         let r = h.post("/v0/listings", listing).await;
-        assert_core_refusal(&r, case, "bad_listing");
+        assert_core_refusal(&r, &expect, "bad_listing");
     }
 
-    // A token bound to other params can't be signed into a card: the core's
-    // parse refuses it, with the same kind.
+    // A token bound to other params, in the listing the vector signed.
     for case in v["binding_invalid"].as_array().unwrap() {
-        let label = s(&case["name"]);
         let h = Harness::pinned(dir, relay, &pinned, Some(now), |d| d);
-        let holder = agent(&v["identities"], s(&case["identity"]));
-        let mut sp = spec(&h, s(&case["listing_name"]), &holder, valid.clone(), now);
-        sp.directory = s(&case["directory"]).to_owned();
-        sp.owner_domain = case["owner_domain"].as_str().map(str::to_owned);
-        let Err(e) = h.try_build(&sp) else {
-            panic!("{label}: the core signed a mismatched token");
-        };
-        assert_eq!(e.kind().as_str(), s(&case["kind"]), "{label}");
-        assert_eq!(e.to_string(), s(&case["error"]), "{label}");
+        let r = h
+            .post("/v0/listings", s(&case["listing"]).as_bytes().to_vec())
+            .await;
+        assert_core_refusal(&r, case, "bad_listing");
     }
 }
 
@@ -634,9 +656,12 @@ async fn owner_state_vectors_through_publish_and_rechecks() {
         let label = s(&case["name"]);
         let fetches = case["fetches"].as_array().unwrap();
         let want = s(&case["state"]);
-        if case["skipped"] == true {
-            // A daemon's --no-domain-check; a directory always fetches.
-            assert_eq!(want, "unchecked", "{label}");
+        if !case["applies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "directory")
+        {
             continue;
         }
         let holder = identity();
@@ -680,10 +705,10 @@ async fn owner_state_vectors_through_publish_and_rechecks() {
             .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(now));
         let page = h.get(&format!("/a/{name}.md")).await;
         if withdrawn {
-            // Heimdall withdraws a revoked key at once (ADR-006 Decision 2),
-            // so a later vouching fetch can't bring the listing back.
+            // A directory withdraws a listing whose owner state becomes
+            // revoked (SPEC §13.2.4): every URL answers 410.
             assert_eq!(page.status, StatusCode::GONE, "{label}");
-            assert!(matches!(want, "revoked" | "verified"), "{label}");
+            assert_eq!(want, "revoked", "{label}");
         } else {
             assert_eq!(shown_state(&page.text()), want, "{label}");
         }

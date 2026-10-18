@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::store::{
-    FeedEntry, GoneKind, ListingRecord, OwnerStatus, PublishGuard, PublishOutcome, PurgeStats,
-    REVOKED_TOKEN_TTL_SECS, RevokeOutcome, SEARCH_CANDIDATES, SearchQuery, Store, StoreResult,
-    TOMBSTONE_TTL_SECS, Tombstone, WithdrawOutcome, WithdrawalRecord,
+    FeedEntry, GoneKind, ListingRecord, NameState, OwnerStatus, PublishGuard, PublishOutcome,
+    PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome, SEARCH_CANDIDATES, SearchQuery, Store,
+    StoreResult, TOMBSTONE_TTL_SECS, Tombstone, WithdrawOutcome, WithdrawalRecord,
 };
 
 #[derive(Debug, Default)]
@@ -27,8 +27,8 @@ struct State {
     feed: Vec<FeedEntry>,
     next_cursor: i64,
     revoked: HashMap<String, u64>,
-    /// Per name, the newest token `issued_at` ever accepted.
-    marks: HashMap<String, u64>,
+    /// Per name, the newest accepted token's `(issued_at, identity)`.
+    marks: HashMap<String, (u64, String)>,
 }
 
 impl State {
@@ -44,6 +44,20 @@ impl State {
         self.tombstones
             .get(&(name.to_owned(), identity.to_owned()))
             .map(|t| t.seq)
+    }
+
+    fn name_state(&self, name: &str) -> NameState {
+        let mut tombstones: Vec<(String, u64)> = self
+            .tombstones
+            .values()
+            .filter(|t| t.name == name)
+            .map(|t| (t.identity.clone(), t.seq))
+            .collect();
+        tombstones.sort();
+        NameState {
+            high_water: self.marks.get(name).cloned(),
+            tombstones,
+        }
     }
 
     fn append(&mut self, kind: GoneKind, entry: &str, now: u64) {
@@ -142,6 +156,10 @@ impl Store for MemoryStore {
         Ok(self.lock().listings.get(name).cloned())
     }
 
+    async fn name_state(&self, name: &str) -> StoreResult<NameState> {
+        Ok(self.lock().name_state(name))
+    }
+
     async fn token_revoked(&self, token_id: &str) -> StoreResult<bool> {
         Ok(self.lock().revoked.contains_key(token_id))
     }
@@ -171,15 +189,8 @@ impl Store for MemoryStore {
         if prev.as_ref().is_some_and(|p| p.sha256 == record.sha256) {
             return Ok(PublishOutcome::Unchanged);
         }
-        if st
-            .marks
-            .get(&record.name)
-            .is_some_and(|m| *m > record.token_issued_at)
-        {
-            return Ok(PublishOutcome::NameHeld);
-        }
         if prev.as_ref().map(|p| &p.sha256) != guard.prev_sha256.as_ref()
-            || st.tombstone_seq(&record.name, &record.identity) != guard.tombstone_seq
+            || st.name_state(&record.name) != guard.name
         {
             return Ok(PublishOutcome::Conflict);
         }
@@ -195,8 +206,9 @@ impl Store for MemoryStore {
             prev.and_then(|p| p.key_changed_at)
         };
         st.listings.insert(record.name.clone(), stored);
-        let mark = st.marks.entry(record.name.clone()).or_default();
-        *mark = (*mark).max(record.token_issued_at);
+        if let Some(hw) = &guard.high_water {
+            st.marks.insert(record.name.clone(), hw.clone());
+        }
         Ok(PublishOutcome::Published { key_changed })
     }
 
@@ -219,7 +231,13 @@ impl Store for MemoryStore {
             return Ok(WithdrawOutcome::StaleSeq);
         }
         st.listings.remove(w.name);
-        st.tombstone(w.name, w.identity, w.seq, GoneKind::Withdrawal, now);
+        st.tombstone(
+            w.name,
+            w.identity,
+            w.tombstone_seq,
+            GoneKind::Withdrawal,
+            now,
+        );
         st.append(GoneKind::Withdrawal, w.entry, now);
         Ok(WithdrawOutcome::Withdrawn)
     }

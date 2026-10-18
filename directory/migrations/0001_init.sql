@@ -15,7 +15,6 @@ CREATE TABLE listings (
     owner_negative_at BIGINT,
     door_expires_at BIGINT,
     token_expires_at BIGINT NOT NULL,
-    token_issued_at BIGINT NOT NULL,
     published_at BIGINT NOT NULL,
     key_changed_at BIGINT,
     bytes BYTEA NOT NULL,
@@ -55,11 +54,13 @@ CREATE TABLE feed (
     created_at BIGINT NOT NULL
 );
 
--- Per name, the newest token issued_at ever accepted. Kept for good, so a
--- name can't go back to a key it was rotated away from.
+-- Per name, the newest token issued_at ever accepted and its identity (the
+-- core's NameRecord high-water mark). Kept for good, so a name can't go back
+-- to a key it was rotated away from.
 CREATE TABLE name_marks (
     name TEXT PRIMARY KEY,
-    token_issued_at BIGINT NOT NULL
+    issued_at BIGINT NOT NULL,
+    identity TEXT NOT NULL
 );
 
 CREATE TABLE revoked_tokens (
