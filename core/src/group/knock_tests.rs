@@ -13,6 +13,7 @@ use crate::identity::Identity;
 use crate::invite::InviteSecret;
 use crate::knock::{Door, Knock, KnockExpectation, VerifiedKnock};
 use crate::provider::MemoryStore;
+use crate::provider::sealed::Backend as _;
 
 type C = Client<MemoryStore>;
 
@@ -456,6 +457,11 @@ fn a_welcome_with_three_leaves_is_refused() {
 /// which `create_group` would never write: what a holder of a leaked knock
 /// secret could forge.
 fn forged_group(c: &C, created_by: &str) -> Group {
+    forged_group_with(c, created_by, &GroupPolicy::default_for(created_by))
+}
+
+/// [`forged_group`] with `policy` in its context.
+fn forged_group_with(c: &C, created_by: &str, policy: &GroupPolicy) -> Group {
     let meta = GroupMeta {
         v: 0,
         name: NAME.to_owned(),
@@ -463,7 +469,6 @@ fn forged_group(c: &C, created_by: &str) -> Group {
         created_at: c.now(),
         created_by: created_by.to_owned(),
     };
-    let policy = GroupPolicy::default_for(created_by);
     let exts =
         group_context_extensions(&meta.to_json().unwrap(), &policy.to_json().unwrap()).unwrap();
     let id: [u8; 16] = c.rng().array().unwrap();
@@ -611,4 +616,325 @@ fn a_forked_knock_group_shows_a_different_short_code() {
     assert_eq!(ga.epoch(), gb.epoch());
     assert_ne!(ga.sas(), gb.sas());
     assert_ne!(ga.sas().decimal(), gb.sas().decimal());
+}
+
+// ---- Review regressions (L1-L3) ----
+
+/// Review L1: a journal entry replays only for the knock, the listing and
+/// the kind of join it was recorded for.
+#[test]
+fn a_journalled_knock_join_replays_only_for_its_own_knock_and_listing() {
+    let s = setup("journal-bound");
+    let (k, v) = s.knock();
+    let (k2, _) = s.knock();
+    let (g, out) = s.approve(&v);
+    let w = out.welcome.unwrap();
+    s.knocker
+        .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+        .unwrap();
+    let stranger = Identity::generate(&Rng::for_test("knock-group-journal-bound-x")).unwrap();
+    let other = KnockExpectation {
+        identity: stranger.id(),
+        name: "other-name".into(),
+    };
+    let mine = KnockExpectation {
+        identity: s.knocker.instance().identity().to_owned(),
+        name: NAME.into(),
+    };
+    // Another knock, another listing, the knocker's own identity: none of
+    // them replays the entry.
+    for (knock, expect) in [
+        (&k2, &s.expect()),
+        (&k, &other),
+        (&k2, &other),
+        (&k2, &mine),
+    ] {
+        assert_eq!(
+            s.knocker
+                .join_knock_journaled(knock, expect, &w, "key", b"")
+                .unwrap_err(),
+            Error::JournalConflict
+        );
+    }
+    // An invite join under the same key doesn't replay it either.
+    let ks = k.secret();
+    let invite = InviteSecret::from_parts(*ks.knock_id(), ks.secret_for_vectors());
+    let meta = InviteMeta::expected(invite.id(), NAME, PURPOSE);
+    assert_eq!(
+        s.knocker
+            .join_journaled(&invite, &meta, &w, "key", b"")
+            .unwrap_err(),
+        Error::JournalConflict
+    );
+    // The right knock and listing still replay.
+    let j = s
+        .knocker
+        .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+        .unwrap();
+    assert!(j.replayed);
+    assert_eq!(j.value.group_id(), g.group_id());
+}
+
+/// Review L1: a knock join under a key an invite join used is a conflict.
+#[test]
+fn an_invite_journal_entry_does_not_replay_as_a_knock_join() {
+    let s = setup("journal-invite");
+    let (k, _) = s.knock();
+    let mut ga = s.owner.create_group("g", "p").unwrap();
+    let inv = Invite::create(
+        s.owner.rng(),
+        s.owner.clock(),
+        "relay.example.org",
+        std::time::Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = s.knocker.create_join_request(inv.secret(), "j").unwrap();
+    let vr = s.owner.verify_join_request(&req, &inv).unwrap();
+    let out = ga.add_member(&s.owner, &vr, &inv, true).unwrap();
+    ga.confirm_pending_commit(&s.owner, &out.msg_id).unwrap();
+    let w = out.welcome.unwrap();
+    let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
+    s.knocker
+        .join_journaled(inv.secret(), &meta, &w, "key", b"")
+        .unwrap();
+    assert_eq!(
+        s.knocker
+            .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+            .unwrap_err(),
+        Error::JournalConflict
+    );
+}
+
+/// Review L1: a replayed knock join is checked against the listing again,
+/// so a journal entry that names another group (a damaged store) is not
+/// taken for the knock's.
+#[test]
+fn a_replayed_knock_join_is_checked_against_the_listing() {
+    let s = setup("journal-recheck");
+    let (k, v) = s.knock();
+    let (_, out) = s.approve(&v);
+    let w = out.welcome.unwrap();
+    s.knocker
+        .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+        .unwrap();
+    let elsewhere = s.knocker.create_group("other-name", "p").unwrap();
+    let mut row = s
+        .knocker
+        .store()
+        .journal_get(WELCOME_SCOPE, "key")
+        .unwrap()
+        .unwrap();
+    row.group_id = elsewhere.group_id().to_vec();
+    s.knocker.store().journal_put(&row).unwrap();
+    assert_eq!(
+        s.knocker
+            .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+            .unwrap_err(),
+        Error::KnockWelcome("name")
+    );
+}
+
+/// Review L2: while one group's Add of a knock is pending, no other group
+/// can Add the same KeyPackage.
+#[test]
+fn one_knock_is_not_added_into_two_pending_groups() {
+    let s = setup("double");
+    let (k, v) = s.knock();
+    let mut g1 = s.fresh_group();
+    let o1 = g1.add_knocker(&s.owner, &v, s.now).unwrap();
+    let mut g2 = s.fresh_group();
+    assert_eq!(
+        g2.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        Error::KeyPackageReused
+    );
+    assert!(!g2.has_pending_commit());
+    // Discarding the first Add releases the KeyPackage.
+    g1.discard_pending_commit(&s.owner).unwrap();
+    let o2 = g2.add_knocker(&s.owner, &v, s.now).unwrap();
+    assert_eq!(
+        g1.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        Error::KeyPackageReused
+    );
+    g2.confirm_pending_commit(&s.owner, &o2.msg_id).unwrap();
+    // Merged, it is used for good.
+    let mut g3 = s.fresh_group();
+    assert_eq!(
+        g3.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        Error::KeyPackageReused
+    );
+    s.knocker
+        .join_from_knock_welcome(&k, &s.expect(), o2.welcome.as_ref().unwrap())
+        .unwrap();
+    assert!(o1.welcome.is_some());
+}
+
+/// Review L2: the same for a verified JoinRequest and `add_member`.
+#[test]
+fn one_join_request_is_not_added_into_two_pending_groups() {
+    let s = setup("double-invite");
+    let inv = Invite::create(
+        s.owner.rng(),
+        s.owner.clock(),
+        "relay.example.org",
+        std::time::Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = s.knocker.create_join_request(inv.secret(), "j").unwrap();
+    let vr = s.owner.verify_join_request(&req, &inv).unwrap();
+    let mut g1 = s.owner.create_group("g", "p").unwrap();
+    let mut g2 = s.owner.create_group("g", "p").unwrap();
+    g1.add_member(&s.owner, &vr, &inv, true).unwrap();
+    assert_eq!(
+        g2.add_member(&s.owner, &vr, &inv, true).unwrap_err(),
+        Error::KeyPackageReused
+    );
+    g1.discard_pending_commit(&s.owner).unwrap();
+    g2.add_member(&s.owner, &vr, &inv, true).unwrap();
+}
+
+/// Review L2: a pending Add that loses its epoch to another member's
+/// commit releases its KeyPackage too.
+#[test]
+fn a_pending_add_that_loses_its_epoch_releases_the_key_package() {
+    let s = setup("lost");
+    let (k0, v0) = s.knock();
+    let (mut ga, out) = s.approve(&v0);
+    let mut gb = s
+        .knocker
+        .join_from_knock_welcome(&k0, &s.expect(), out.welcome.as_ref().unwrap())
+        .unwrap();
+    let third = client("lost-third", &s.clock);
+    let inv = Invite::create(
+        s.owner.rng(),
+        s.owner.clock(),
+        "relay.example.org",
+        std::time::Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = third.create_join_request(inv.secret(), "t").unwrap();
+    let vr = s.owner.verify_join_request(&req, &inv).unwrap();
+    ga.add_member(&s.owner, &vr, &inv, false).unwrap();
+    // The knocker's update wins the epoch at the relay.
+    let up = gb.update(&s.knocker).unwrap();
+    gb.confirm_pending_commit(&s.knocker, &up.msg_id).unwrap();
+    match ga.process(&s.owner, &up.commit).unwrap() {
+        Event::Commit(c) => assert!(c.discarded_own_pending),
+        e => panic!("{e:?}"),
+    }
+    let mut other = s.owner.create_group("g", "p").unwrap();
+    other.add_member(&s.owner, &vr, &inv, true).unwrap();
+}
+
+/// Review L3: the knocker refuses a group that has a history: more than
+/// the one Add commit, or a member removed before it joined.
+#[test]
+fn a_knock_welcome_into_a_group_with_history_is_refused() {
+    let s = setup("history");
+    let (k, v) = s.knock();
+    let mut g = s.fresh_group();
+    for _ in 0..3 {
+        let up = g.update(&s.owner).unwrap();
+        g.confirm_pending_commit(&s.owner, &up.msg_id).unwrap();
+    }
+    let wrapped = knock_welcome!(s, g, s.owner, v, |b| b);
+    refused(
+        &s,
+        &k,
+        &s.expect(),
+        &wrapped,
+        g.group_id(),
+        &Error::KnockWelcome("not a fresh group"),
+    );
+
+    let (k, v) = s.knock();
+    let third = client("history-third", &s.clock);
+    let (k3, v3) = s.knock_from(&third);
+    let mut g = s.fresh_group();
+    let o3 = g.add_knocker(&s.owner, &v3, s.now).unwrap();
+    g.confirm_pending_commit(&s.owner, &o3.msg_id).unwrap();
+    third
+        .join_from_knock_welcome(&k3, &s.expect(), o3.welcome.as_ref().unwrap())
+        .unwrap();
+    let rm = g.remove(&s.owner, third.instance().identity()).unwrap();
+    g.confirm_pending_commit(&s.owner, &rm.msg_id).unwrap();
+    let wrapped = knock_welcome!(s, g, s.owner, v, |b| b);
+    refused(
+        &s,
+        &k,
+        &s.expect(),
+        &wrapped,
+        g.group_id(),
+        &Error::KnockWelcome("not a fresh group"),
+    );
+}
+
+/// Review L3: the knocker refuses a floor other than `free` and roles for
+/// anyone but the owner, which `add_knocker` never builds.
+#[test]
+fn a_knock_welcome_with_a_floor_or_roles_add_knocker_never_builds_is_refused() {
+    let s = setup("roles");
+    let absent = Identity::generate(&Rng::for_test("knock-group-roles-absent")).unwrap();
+    let owner = s.owner.instance().identity().to_owned();
+    let base = GroupPolicy::default_for(&owner);
+    for (policy, err) in [
+        (
+            GroupPolicy {
+                floor: Floor::Mention,
+                ..base.clone()
+            },
+            "the floor is not free",
+        ),
+        (
+            GroupPolicy {
+                admins: vec![absent.id()],
+                ..base.clone()
+            },
+            "roles for another identity",
+        ),
+        (
+            GroupPolicy {
+                floor_moderator: Some(absent.id()),
+                ..base.clone()
+            },
+            "roles for another identity",
+        ),
+    ] {
+        let (k, v) = s.knock();
+        let mut g = s.fresh_group();
+        let ctx = check_group_context(g.mls.extensions()).unwrap();
+        let exts = group_context_extensions(&ctx.meta_bytes, &policy.to_json().unwrap()).unwrap();
+        let wrapped = knock_welcome!(s, g, s.owner, v, |b| b
+            .propose_group_context_extensions(exts)
+            .unwrap());
+        refused(
+            &s,
+            &k,
+            &s.expect(),
+            &wrapped,
+            g.group_id(),
+            &Error::KnockWelcome(err),
+        );
+        // add_knocker refuses to build either, in a group created so.
+        let (_, v) = s.knock();
+        let mut forged = forged_group_with(&s.owner, &owner, &policy);
+        let want = if policy.floor == Floor::Free {
+            Error::NotPermitted("roles for another identity")
+        } else {
+            Error::NotPermitted("the floor is not free")
+        };
+        assert_eq!(forged.add_knocker(&s.owner, &v, s.now).unwrap_err(), want);
+    }
+    // The owner as its own admin or moderator is the same group.
+    let (k, v) = s.knock();
+    let policy = GroupPolicy {
+        admins: vec![owner.clone()],
+        floor_moderator: Some(owner.clone()),
+        ..base
+    };
+    let mut g = forged_group_with(&s.owner, &owner, &policy);
+    let out = g.add_knocker(&s.owner, &v, s.now).unwrap();
+    g.confirm_pending_commit(&s.owner, &out.msg_id).unwrap();
+    s.knocker
+        .join_from_knock_welcome(&k, &s.expect(), out.welcome.as_ref().unwrap())
+        .unwrap();
 }

@@ -681,13 +681,16 @@ impl<S: Store> Client<S> {
         wrapped: &[u8],
         journal_as: Option<(&str, &[u8])>,
     ) -> Result<Journaled<Group>> {
-        let hash = wire_hash(wrapped);
+        let hash = joining.journal_hash(wrapped);
         if let Some((key, _)) = journal_as
             && let Some((row, _)) = journal::lookup(self.store(), WELCOME_SCOPE, key, Some(&hash))?
         {
             let group = self
                 .load_group(&row.group_id)?
                 .ok_or(Error::Internal("journalled group missing"))?;
+            if let Joining::Knock { expected, .. } = joining {
+                group.check_knock_replay(expected)?;
+            }
             return Ok(Journaled {
                 value: group,
                 replayed: true,
@@ -786,7 +789,7 @@ impl<S: Store> Client<S> {
                 return Err(Error::WrongCiphersuite);
             }
             let ctx = check_group_context(staged.group_context().extensions())?;
-            joining.check_context(&ctx)?;
+            joining.check_context(&ctx, staged.group_context().epoch().as_u64())?;
             let mut group = Group {
                 mls: staged.into_group(&self.provider).map_err(mls)?,
             };
@@ -822,9 +825,34 @@ enum Joining<'a> {
 }
 
 impl Joining<'_> {
+    /// The journal hash of a Welcome joined this way. A knock join binds the
+    /// knock and the listing it expects, under its own label, so an entry
+    /// replays only for the same knock and listing, and never for an invite
+    /// join (whose hash is the Welcome's alone).
+    fn journal_hash(&self, wrapped: &[u8]) -> String {
+        match self {
+            Self::Invite { .. } => wire_hash(wrapped),
+            Self::Knock { secret, expected } => {
+                let mut input = b"agentconnect/v0/journal/knock-welcome".to_vec();
+                for part in [
+                    secret.knock_id().as_slice(),
+                    expected.identity.as_bytes(),
+                    expected.name.as_bytes(),
+                    wrapped,
+                ] {
+                    input.extend_from_slice(
+                        &u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes(),
+                    );
+                    input.extend_from_slice(part);
+                }
+                wire_hash(&input)
+            }
+        }
+    }
+
     /// The group-context checks: the `InviteMeta` comparison, or the knock
-    /// checks that replace it.
-    fn check_context(&self, ctx: &GroupContextInfo) -> Result<()> {
+    /// checks that replace it. `epoch` is the Welcome's.
+    fn check_context(&self, ctx: &GroupContextInfo, epoch: u64) -> Result<()> {
         match self {
             Self::Invite { expected, .. } => {
                 if ctx.meta.name != expected.group_name || ctx.meta.purpose != expected.purpose {
@@ -841,10 +869,27 @@ impl Joining<'_> {
                 if ctx.policy.owner != expected.identity {
                     return Err(Error::KnockWelcome("owner"));
                 }
+                // The group add_knocker builds: the owner's fresh group,
+                // whose one commit added this instance.
+                if epoch != 1 {
+                    return Err(Error::KnockWelcome("not a fresh group"));
+                }
+                if ctx.policy.floor != Floor::Free {
+                    return Err(Error::KnockWelcome("the floor is not free"));
+                }
+                if !roles_only_for(&ctx.policy, &expected.identity) {
+                    return Err(Error::KnockWelcome("roles for another identity"));
+                }
             }
         }
         Ok(())
     }
+}
+
+/// Whether every admin and the floor moderator of `policy` is `owner`.
+fn roles_only_for(policy: &GroupPolicy, owner: &str) -> bool {
+    policy.admins.iter().all(|a| a == owner)
+        && policy.floor_moderator.as_deref().is_none_or(|m| m == owner)
 }
 
 /// How a commit's Welcome is wrapped (SPEC §6.4).
@@ -1490,6 +1535,29 @@ impl Group {
         Ok(())
     }
 
+    /// A replayed knock join (a journal entry not consumed yet): the
+    /// group's name and creator are the listing's, and the listed identity
+    /// is a member. Later commits may have changed the rest.
+    fn check_knock_replay(&self, expected: &KnockExpectation) -> Result<()> {
+        let meta = self.meta()?;
+        if meta.name != expected.name {
+            return Err(Error::KnockWelcome("name"));
+        }
+        if meta.created_by != expected.identity {
+            return Err(Error::KnockWelcome("created_by"));
+        }
+        if !self
+            .members()?
+            .iter()
+            .any(|m| m.identity == expected.identity)
+        {
+            return Err(Error::KnockWelcome(
+                "the other member is not the listed identity",
+            ));
+        }
+        Ok(())
+    }
+
     /// SPEC §6.6.5: exactly two leaves, this instance's own and one of
     /// `listed` (each validated by [`Group::members`], certificate
     /// included).
@@ -1678,7 +1746,10 @@ impl Group {
             .mls
             .pending_commit()
             .ok_or(Error::Internal("staged commit missing"))?;
-        let inspection = match self.inspect_commit(client, staged, self.mls.own_leaf_index()) {
+        let inspection = match self
+            .inspect_commit(client, staged, self.mls.own_leaf_index())
+            .and_then(|i| self.check_not_reserved(client, &i).map(|()| i))
+        {
             Ok(i) => i,
             Err(e) => {
                 self.mls
@@ -1695,11 +1766,20 @@ impl Group {
             let commit = wire(bundle.commit())?;
             let msg_id = b64(&client.rng().array::<16>()?);
             let mut own = OwnCommits::load(client.provider.records(), self.group_id(), epoch)?;
+            let hash = wire_hash(&commit);
             own.pending = Some(PendingRecord {
                 msg_id: msg_id.clone(),
-                hash: wire_hash(&commit),
+                hash: hash.clone(),
             });
             own.save(client.provider.records(), self.group_id())?;
+            records::reserve_key_packages(
+                client.provider.records(),
+                &inspection.added_refs,
+                &records::Reservation {
+                    group_id: self.group_id().to_vec(),
+                    hash,
+                },
+            )?;
             Ok((welcome, commit, msg_id))
         })();
         let (welcome, commit, msg_id) = match built {
@@ -1725,6 +1805,40 @@ impl Group {
             },
             welcome,
         })
+    }
+
+    /// SPEC §6.2 "KeyPackage reuse": a KeyPackage that another group's
+    /// pending own commit Adds can't be Added here until that commit merges
+    /// (it is then used) or is dropped. A reservation counts only while its
+    /// commit is still that group's pending one.
+    fn check_not_reserved<S: Store>(&self, client: &Client<S>, i: &Inspection) -> Result<()> {
+        for kp_ref in &i.added_refs {
+            let Some(r) = records::key_package_reservation(client.provider.records(), kp_ref)?
+            else {
+                continue;
+            };
+            if r.group_id == self.group_id() {
+                continue;
+            }
+            let Some(other) =
+                MlsGroup::load(client.provider.storage(), &GroupId::from_slice(&r.group_id))
+                    .map_err(storage)?
+            else {
+                continue;
+            };
+            if other.pending_commit().is_none() {
+                continue;
+            }
+            let own = OwnCommits::load(
+                client.provider.records(),
+                &r.group_id,
+                other.epoch().as_u64(),
+            )?;
+            if own.pending.is_some_and(|p| p.hash == r.hash) {
+                return Err(Error::KeyPackageReused);
+            }
+        }
+        Ok(())
     }
 
     fn add_member_inner<S: Store>(
@@ -1800,6 +1914,9 @@ impl Group {
         }
         if ctx.policy.floor != Floor::Free {
             return Err(Error::NotPermitted("the floor is not free"));
+        }
+        if !roles_only_for(&ctx.policy, me) {
+            return Err(Error::NotPermitted("roles for another identity"));
         }
         if self.mls.members().count() != 1 || self.epoch() != 0 {
             return Err(Error::NotPermitted("not a fresh group"));
