@@ -51,6 +51,14 @@ providers seeing plaintext.
   `trivy-image-directory`, kept 30 days). The image scan is not part of the required `ci-ok`
   check, so a vulnerability database outage or a newly published CVE doesn't
   block unrelated merges.
+- Both images run on `gcr.io/distroless/base-nossl-debian12:nonroot`, pinned
+  by tag and digest so Dependabot opens a PR when distroless rebuilds. The
+  base has glibc and the CA bundle but no `libssl3`. The binaries need none:
+  the directory uses rustls, and the relay's SQLCipher links a vendored,
+  static OpenSSL. This cleared CVE-2026-84782 (`libssl3`, no Debian fix) by
+  removing the package rather than ignoring it. `libgcc_s.so.1`, which the
+  Rust binaries need, is copied from the build stage because the base lacks it.
+  Don't switch back to `cc` or `base` without checking for `libssl3`.
 - Accepted CVEs go in `.trivyignore.yaml` with a statement and an
   `expired_at` review date; Trivy stops ignoring an entry on that date.
 - When any nightly job fails, the workflow opens (or comments on) the issue

@@ -5,8 +5,10 @@ WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p agentconnect-directory
 
-# The distroless base ships the CA bundle the owner-file fetch verifies against.
-FROM gcr.io/distroless/cc-debian12:nonroot
+# base-nossl: glibc and the CA bundle the owner-file fetch verifies against, no
+# libssl3 (TLS is rustls). libgcc_s comes from the build stage.
+FROM gcr.io/distroless/base-nossl-debian12:nonroot@sha256:be40c00dfabd86576d92666e87e406714d5618342de1a0c213ad232de255172e
+COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
 COPY --from=build /src/target/release/agentconnect-directory /usr/local/bin/agentconnect-directory
 ENV AC_DIRECTORY_ADDR=0.0.0.0:8090
 # AC_DIRECTORY_DB (a postgres:// URL), AC_DIRECTORY_HOST, AC_DIRECTORY_RELAYS (for example relay.example.org)

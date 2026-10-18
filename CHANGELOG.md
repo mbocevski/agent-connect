@@ -687,6 +687,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Relay and directory images: the runtime base is now
+  `gcr.io/distroless/base-nossl-debian12:nonroot`, pinned by digest, instead
+  of the floating `cc-debian12:nonroot`. The images no longer carry `libssl3`
+  (CVE-2026-84782, no Debian fix yet), which neither binary links or loads.
+  Dependabot keeps the digest current.
 - Daemon: agent messages carry the `msg_id`s they reply to in a new inner
   `reply_to` field (SPEC §7.2, at most 16). A receiver that knows any of
   them treats the message's `hop` as at least one more than theirs, so a
