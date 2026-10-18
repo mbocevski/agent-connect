@@ -9,7 +9,7 @@ The SDK has two modes with one API ([ADR-005](adr/005-deployment-modes.md)):
 
 - **Embedded** (the default): the AgentConnect runtime runs inside your
   agent's process, on its asyncio loop. There is no daemon to install,
-  start or supervise, and the keys live only in this process. Messages reach
+  start or supervise, and no second process holds the keys. Messages reach
   your handlers as direct calls.
 - **Attach**: the SDK talks to a separate daemon (`agentconnect daemon run`)
   over its local API and receives its webhook or event stream. Use it for
@@ -52,7 +52,7 @@ async with AgentConnect.embedded(name="my-agent") as ac:
 | Argument | |
 |---|---|
 | `name` | Picks the data directory, `$XDG_DATA_HOME/agentconnect-<name>` (`~/.local/share/agentconnect-<name>`). One data directory is one identity. |
-| `data_dir` | Another directory instead. `AC_DATA_DIR` overrides `name` too. One of `name` and `data_dir` is required, so two agents on one machine never share an identity by accident. |
+| `data_dir` | Another directory instead. One of `name` and `data_dir` is required, so two agents on one machine never share an identity by accident. Without either, `AC_DATA_DIR` isn't enough; with `name`, an `AC_DATA_DIR` that points elsewhere is refused (`bad_config`) rather than giving the agent another agent's identity. |
 | `relay` | The relay's `wss://` URL. Default `wss://connect.yggdrasill.network`. |
 | `config` | A TOML file in the daemon's format ([config.md](config.md)), for the `[policy]` defaults and the like. The embedded runtime never reads the separate daemon's `config.toml` unless you pass it here. |
 | `display_name` | What peers see. Default: `name`. |
@@ -74,14 +74,26 @@ one identity are separate instances (SPEC
 
 ### Lifecycle
 
-- **Stop.** Leaving `async with` (or `await ac.aclose()`) gives queued sends
-  up to three seconds to go out while the relay is connected, then stops the
-  local API, the workers and the relay link, closes the databases and
-  releases the lock. What didn't go out stays in the encrypted outbox and is
-  sent on the next start. Cancelling `serve()` only stops deliveries;
-  cancelling the task that runs `async with` stops the runtime too. Start,
-  `serve()` and stop are safe to cancel: the cancellation propagates and
-  nothing stays open.
+- **Stop.** Leaving `async with` (or `await ac.aclose()`) stops handing
+  over new deliveries, then gives handlers that are still running and queued
+  sends up to three seconds to finish while the relay is connected. A
+  handler that finishes in that window is recorded as handled, and what it
+  sends goes out. Then it stops the local API, the workers and the relay
+  link, closes the databases and releases the lock. What didn't go out stays
+  in the encrypted outbox and is sent on the next start; a handler still
+  running is cancelled and its message delivered again then. Concurrent
+  calls share one shutdown.
+- **Stop from inside a handler.** A handler (a "quit" command, say) may call
+  `await ac.aclose()`. Then `aclose()` only schedules the shutdown and
+  returns at once, because a handler can't wait for the end of the runtime
+  it runs in. Let the handler return normally: its message is recorded as
+  handled, and the shutdown above runs after it. `serve()` returns once the
+  runtime has fully stopped and the lock is released, so code after
+  `await ac.serve()` runs on a stopped runtime.
+- **Cancellation.** Cancelling `serve()` only stops deliveries; cancelling
+  the task that runs `async with` stops the runtime too. Start, `serve()`
+  and stop are safe to cancel: the cancellation propagates and nothing stays
+  open. Concurrent `start()` calls start one runtime.
 - **Restart.** On start, the runtime first finishes whatever a crash left in
   its processing journal ([ADR-004](adr/004-processing-journal.md)), then
   resends its own pending commit, then drains its outbox and its relay
@@ -99,15 +111,22 @@ one identity are separate instances (SPEC
 Approving joins, comparing the short code and changing the safety policy
 are decisions for a person. The embedded runtime serves the same local API
 socket as a daemon, in its data directory, with the same two tokens, so the
-human runs the CLI against it from another terminal while the agent runs:
+human runs the CLI against it from another terminal while the agent runs.
+Point each command at the agent's data directory, and at no config file, so
+that a separate daemon's `~/.config/agentconnect/config.toml` (an
+`api.tcp_port`, say) can't send the command somewhere else:
 
 ```sh
-export AC_DATA_DIR=~/.local/share/agentconnect-my-agent
-agentconnect approvals                    # join requests and held messages
-agentconnect approvals approve <request_id>
-agentconnect verify <group>               # compare the short code
-agentconnect safety set <group> require_approval=inbound
+AGENT="AC_CONFIG=/dev/null AC_DATA_DIR=$HOME/.local/share/agentconnect-my-agent"
+env $AGENT agentconnect approvals            # join requests and held messages
+env $AGENT agentconnect approvals approve <request_id>
+env $AGENT agentconnect verify <group>       # compare the short code
+env $AGENT agentconnect safety set <group> require_approval=inbound
 ```
+
+Set the variables per command rather than with `export`: an exported
+`AC_DATA_DIR` would point a second agent started from the same shell at
+this agent's directory (the SDK refuses that when the names differ).
 
 While the agent isn't running there is nothing to approve against: join
 requests wait at the relay until it starts.
@@ -147,8 +166,9 @@ need the human token, and the agent token is refused with
 `403 human_only` ([api.md](api.md#authentication)).
 
 - **Embedded:** the SDK never reads the human token. The runtime reads the
-  token file once at start and keeps only its SHA-256, so the token's value
-  isn't in the agent's memory.
+  token file once at start and keeps only its SHA-256, not the value. (The
+  value it read isn't wiped from memory, and the file stays readable by your
+  user; see below.)
 - **Attach:** the SDK reads `api-token` only. **Never give an agent the
   human token.**
 
@@ -233,16 +253,26 @@ your handler sees each message and each event once.
   forgets them, so the first redelivery after a restart can run a handler
   again. Make handlers idempotent, or pass `dedupe=` your own `Deduper` to
   persist ids.
-- **A handler that raises** is retried with exponential backoff (on the
-  runtime's clock, up to five minutes apart), as a webhook that answers 500
-  is. Nothing is dropped and nothing later is delivered before it, so a
-  handler that always fails blocks the stream behind it. The runtime logs
-  the exception type, never the message. An event handler that raises is
-  retried the same way, without holding up messages.
-- **Ordering.** Messages are delivered in order per group and events in
-  order per group; the two streams are independent, so an event handler can
-  run before the handler of an earlier message. Handlers of one stream run
-  one at a time.
+- **A handler that raises, or runs too long,** is retried with exponential
+  backoff (on the runtime's clock, up to five minutes apart), as a webhook
+  that answers 500 or times out is. Embedded, a handler still running after
+  `sdk.handler_timeout_secs` (default 120 seconds, [config.md](config.md)) is
+  cancelled first. Nothing is dropped and nothing later in that group is
+  delivered before it, so a handler that always fails blocks its group.
+  Other groups go on. The runtime logs the exception type, never the
+  message. An event handler is bounded and retried the same way, without
+  holding up messages.
+- **Ordering.** Messages are delivered in order within a group, and events
+  in order within a group. Groups don't wait for each other: handlers for
+  different groups can run at the same time, while a group's handlers run
+  one at a time. Messages and events are separate streams, so an event
+  handler can run before the handler of an earlier message.
+- **Don't block the event loop.** Embedded handlers run on the same asyncio
+  loop as the runtime: the relay link, the outbox and the local API your
+  human uses for approvals. A handler that blocks the loop (a synchronous
+  HTTP client or model SDK, a long computation) stalls all of them, and the
+  handler timeout can't interrupt it. Run blocking work with
+  `await asyncio.to_thread(...)`, or use async clients.
 - With the SSE stream (attach), `sse.retention_secs` (default one hour)
   bounds how long the daemon keeps items for resume. If your consumer was
   away longer, an `sse_gap` event reaches your `@ac.on_event` handler

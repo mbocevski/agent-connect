@@ -75,17 +75,28 @@ class StoredDeduper(Deduper):
     def __init__(self, handled: Callable[[], HandledIds]) -> None:
         super().__init__()
         self._handled = handled
+        # The store an id was claimed against, so done() records it there
+        # even while the runtime is stopping.
+        self._claims: dict[str, HandledIds] = {}
 
     @override
     def claim(self, key: str) -> bool:
-        if key in self._handled():
+        store = self._handled()
+        if key in store or not super().claim(key):
             return False
-        return super().claim(key)
+        self._claims[key] = store
+        return True
 
     @override
     def done(self, key: str) -> None:
-        self._handled().add(key)
+        store = self._claims.pop(key, None) or self._handled()
+        store.add(key)
         super().done(key)
+
+    @override
+    def release(self, key: str) -> None:
+        self._claims.pop(key, None)
+        super().release(key)
 
     @override
     def handled(self, key: str) -> bool:
@@ -181,6 +192,8 @@ class EmbeddedHost:
         self._runtime: Runtime | None = None
         self._adapter: CallbackAdapter | None = None
         self._stopped = asyncio.Event()
+        self._starting = asyncio.Lock()  # one start at a time
+        self._stopping: asyncio.Task[None] | None = None  # the one shutdown
 
     @property
     def data_dir(self) -> Path:
@@ -202,12 +215,21 @@ class EmbeddedHost:
         if name is None and data_dir is None:
             msg = "pass name= (or data_dir=): one data directory is one identity"
             raise AgentConnectError("bad_config", msg)
+        env_dir = environ.get("AC_DATA_DIR", "")
         if data_dir is not None:
             where = Path(data_dir).expanduser()
-        elif environ.get("AC_DATA_DIR", "") != "":
-            where = Path(environ["AC_DATA_DIR"]).expanduser()
+        elif name is not None:
+            where = default_data_dir(name, environ)
+            # An AC_DATA_DIR exported for another agent's CLI must not hand
+            # this name that agent's identity (ADR-005, Decision 2).
+            if env_dir != "" and Path(env_dir).expanduser() != where:
+                msg = (
+                    f"AC_DATA_DIR is {env_dir}, not the data directory of name={name!r} "
+                    f"({where}); unset it, or pass data_dir= to choose one"
+                )
+                raise AgentConnectError("bad_config", msg)
         else:
-            where = default_data_dir(str(name), environ)
+            where = Path(env_dir).expanduser()
         overrides: dict[str, Any] = {"data_dir": where, "default_adapter": ADAPTER_NAME}
         if relay is not None:
             overrides |= {"relay_url": relay, "relay_host": ""}
@@ -248,10 +270,15 @@ class EmbeddedHost:
 
     async def start(self, dispatch: Dispatch) -> None:
         """Take the lock, open the keys and databases, start the runtime.
-        On failure or cancellation nothing stays open."""
-        if self._runtime is not None:
-            return
+        On failure or cancellation nothing stays open. Concurrent calls start
+        one runtime; a start during a shutdown waits for it to finish."""
+        async with self._starting:
+            if self._stopping is not None:
+                await asyncio.shield(self._stopping)
+            if self._runtime is None:
+                await self._start(dispatch)
 
+    async def _start(self, dispatch: Dispatch) -> None:
         async def on_payload(payload: dict[str, Any]) -> None:
             if await dispatch(payload) == "busy":
                 raise _BusyError
@@ -296,9 +323,35 @@ class EmbeddedHost:
             adapter.pause()
 
     async def stop(self, *, flush: float | None = None) -> None:
-        """Stop the runtime: a bounded flush of queued sends, then the API,
-        the workers, the relay link, the databases and the lock."""
-        runtime, self._runtime, self._adapter = self._runtime, None, None
-        self._stopped.set()
-        if runtime is not None:
-            await runtime.stop(flush=self._flush if flush is None else flush)
+        """Stop the runtime: stop handing over new deliveries, give handlers
+        that are running and queued sends up to the flush window (3 s by
+        default) to finish, then stop the API, the workers and the relay link,
+        close the databases and release the lock. Handlers that finish in the
+        window are recorded as handled, and what they send goes out.
+
+        Concurrent calls share one shutdown. Called from inside a handler, it
+        only schedules the shutdown and returns, so the handler can return
+        (a handler can't wait for the end of its own runtime); ``serve()``
+        returns once the shutdown is complete."""
+        adapter = self._adapter
+        if self._stopping is None:
+            if self._runtime is None:
+                return
+            window = self._flush if flush is None else flush
+            self._stopping = asyncio.ensure_future(self._shutdown(window))
+        if adapter is not None and adapter.in_handler():
+            return
+        await self._stopping
+
+    async def _shutdown(self, window: float) -> None:
+        runtime, adapter = self._runtime, self._adapter
+        try:
+            if adapter is not None:
+                adapter.pause()
+                await adapter.drain(window)
+            if runtime is not None:
+                await runtime.stop(flush=window)
+        finally:
+            self._runtime = self._adapter = None
+            self._stopping = None
+            self._stopped.set()

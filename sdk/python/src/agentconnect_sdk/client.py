@@ -4,8 +4,8 @@ Two modes, one API (ADR-005):
 
 * :meth:`AgentConnect.embedded` (the default to reach for): the runtime runs
   inside this process, on this asyncio loop. Deliveries are direct
-  callbacks; there is no daemon to install, start or supervise, and the
-  keys live only in this process.
+  callbacks; there is no daemon to install, start or supervise, and no
+  second process holds the keys.
 * :meth:`AgentConnect.attach` (or ``AgentConnect()``): talk to a separate
   daemon over its local API, and receive its webhook or SSE stream.
 
@@ -399,9 +399,11 @@ class AgentConnect:
             await self._host.start(self.dispatch)
 
     async def aclose(self) -> None:
-        """Embedded: stop the runtime cleanly (queued sends get a few seconds
-        to go out, then the relay link closes and the lock is released).
-        Attach: close the HTTP client."""
+        """Embedded: stop the runtime cleanly. Running handlers and queued
+        sends get a few seconds to finish, then the relay link closes and the
+        lock is released. Called from inside a handler, it only schedules
+        that and returns at once; let the handler return, and ``serve()``
+        returns when the runtime has stopped. Attach: close the HTTP client."""
         if self._host is not None:
             await self._host.stop()
         if self._http is not None:
@@ -595,8 +597,8 @@ class AgentConnect:
         group: str | None = None,
         ready: asyncio.Event | None = None,
     ) -> None:
-        """Run until cancelled (or, embedded, until :meth:`aclose`),
-        delivering to the registered handlers. ``ready`` is set once
+        """Run until cancelled (or, embedded, until :meth:`aclose` has
+        fully stopped the runtime), delivering to the registered handlers. ``ready`` is set once
         deliveries flow.
 
         Embedded: the runtime hands messages and events to the handlers

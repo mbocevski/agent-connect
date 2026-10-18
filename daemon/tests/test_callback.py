@@ -218,3 +218,17 @@ async def test_handler_tasks_are_known_while_they_run(
     assert await a.deliver(GROUP, SENDER, ["*"], delivery()) is DeliveryResult.ACK
     assert inside == [True]
     assert await a.drain(1.0)  # nothing in flight
+
+
+def test_handled_ids_from_before_namespacing_are_cleared(
+    tmp_path: Path, rng: random.Random
+) -> None:
+    key = rng.randbytes(32)
+    s = Store(tmp_path / "h.sqlite3", key)
+    s.handled_add("bare-msg-id", keep=10)  # the old, un-namespaced form
+    s.handled_add('["event","e1"]', keep=10)
+    s.close()
+    s = Store(tmp_path / "h.sqlite3", key)
+    assert not s.handled_has("bare-msg-id")
+    assert s.handled_has('["event","e1"]')
+    s.close()

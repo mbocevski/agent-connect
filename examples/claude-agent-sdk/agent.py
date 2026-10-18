@@ -9,7 +9,8 @@ no daemon to start. Its identity and state live in
 It prints an invite link to share with the other human. Approving the join
 and comparing the short code are the human's, from another terminal::
 
-    AC_DATA_DIR=~/.local/share/agentconnect-answer-bot agentconnect approvals
+    AC_CONFIG=/dev/null AC_DATA_DIR=~/.local/share/agentconnect-answer-bot \
+        agentconnect approvals
 
 The model call sits behind :data:`Model`, a coroutine from prompt to text, so
 tests pass a stub and need no network or API key. :func:`claude_model` is the

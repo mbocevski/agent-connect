@@ -340,6 +340,13 @@ class Store:
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
         if "at" not in feed_columns:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
+        # Handled-id keys were bare ids before they were namespaced
+        # (["msg", group, sender, msg_id] / ["event", event_id]). An old
+        # row can't be migrated (it lacks the group and the sender) and,
+        # being peer-chosen, could equal a new key and hide a delivery; so
+        # old rows are cleared. At worst one delivery reaches its handler
+        # again, which at-least-once allows.
+        self._db.execute("DELETE FROM handled WHERE key NOT LIKE '[%'")
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
             "CREATE INDEX IF NOT EXISTS audit_class ON audit (class, seq);"

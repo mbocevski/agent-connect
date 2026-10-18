@@ -12,21 +12,28 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 - Embedded SDK mode (ADR-005): `AgentConnect.embedded(name="my-agent")`
   runs the AgentConnect runtime inside the agent's own process and asyncio
-  loop, so a headless agent needs no separate daemon, and its keys live only
-  in that process. Messages and events reach the handlers through an
+  loop, so a headless agent needs no separate daemon, and no second
+  process holds its keys. Messages and events reach the handlers through an
   in-process adapter (`agentconnect.callback.CallbackAdapter`) with the
-  webhook's semantics: a handler that raises is retried with backoff, in
-  order, and logged without the message. The ids handlers finished with are
-  kept in the runtime's encrypted database, so a redelivery after a crash or
-  restart doesn't reach user code. The data directory is
+  webhook's semantics: a handler that raises, or runs past
+  `sdk.handler_timeout_secs` (default 120 s, then cancelled), is retried
+  with backoff, in order within its group, and logged without the message.
+  The ids handlers finished with are kept in the runtime's encrypted
+  database, namespaced by kind, group and sender, so a redelivery after a
+  crash or restart doesn't reach user code and a peer can't pick a `msg_id`
+  that hides an event or another sender's message. The data directory is
   `$XDG_DATA_HOME/agentconnect-<name>` (or `data_dir=`, `AC_DATA_DIR`), one
-  per identity, and starting fails with `DataDirLockedError` when a daemon
-  or another embedded agent holds it. The embedded runtime serves the same
+  per identity; an `AC_DATA_DIR` that disagrees with `name=` is refused.
+  Starting fails with `DataDirLockedError` when a daemon or another
+  embedded agent holds the directory. The embedded runtime serves the same
   local API socket, so the human runs `agentconnect approvals`, `verify`
   and `safety set` against it with `AC_DATA_DIR`; the SDK offers no human
   operation and never reads the human token. `async with` and `aclose()`
-  give queued sends a bounded flush, then stop and release the lock, and
-  are safe to cancel. `AgentConnect.attach()` names today's mode against a
+  give running handlers and queued sends a bounded window (3 s), then stop
+  and release the lock, and are safe to cancel; concurrent calls share one
+  start or stop. Called from inside a handler, `aclose()` schedules the
+  shutdown and returns, and `serve()` returns once the runtime has fully
+  stopped. `AgentConnect.attach()` names today's mode against a
   separate daemon; both modes have the same API, errors and framing. See
   `docs/sdk.md`.
 - `agentconnect.runtime.Runtime`, the embeddable runtime (ADR-005): the
@@ -348,7 +355,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `agentconnect.runtime` package (ADR-005): `agentconnect.daemon.Daemon` is
   now `agentconnect.runtime.engine.Engine` and `agentconnect.api` is
   `agentconnect.runtime.api`. `load_token` and the token file names moved to
-  `agentconnect.tokens`. No behaviour changes.
+  `agentconnect.tokens`. The engine's log records now come from the logger
+  `agentconnect.engine` (was `agentconnect.daemon`); nothing else changes.
 - The local API keeps only the SHA-256 of `api-token` and `human-token`
   (read once at start, compared in constant time), not their values.
 - The data-directory lock records its holder, so a second runtime's error
@@ -356,9 +364,7 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - `agentconnect-sdk` depends on `agentconnect` (the runtime and the CLI).
 - Deliveries to adapters (webhook, SSE, A2A and the embedded SDK) run per
   group: in order within a group, but a slow or failing delivery holds up
-  its own group only, not every group. The embedded SDK's handlers are
-  bounded by `sdk.handler_timeout_secs` (default 120 s): one still running
-  then is cancelled and retried with backoff, as a webhook that times out.
+  its own group only, not every group.
 - A Unix socket path longer than the platform allows (103 bytes, the macOS
   limit) is bound at `/tmp/agentconnect-<uid>/<hash>.sock`, in a 0700
   directory the runtime creates and checks; the CLI and the SDK derive the

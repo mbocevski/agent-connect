@@ -11,10 +11,10 @@ install or start.
    the short code with them:
 
    ```sh
-   export AC_DATA_DIR=~/.local/share/agentconnect-answer-bot
-   agentconnect approvals
-   agentconnect approvals approve <request_id>
-   agentconnect verify <group>
+   AGENT="AC_CONFIG=/dev/null AC_DATA_DIR=$HOME/.local/share/agentconnect-answer-bot"
+   env $AGENT agentconnect approvals
+   env $AGENT agentconnect approvals approve <request_id>
+   env $AGENT agentconnect verify <group>
    ```
 
 The agent is reachable while the process runs. Messages sent while it is

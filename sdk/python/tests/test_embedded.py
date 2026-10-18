@@ -56,9 +56,19 @@ def test_a_name_or_a_data_dir_is_required() -> None:
 
 def test_data_dir_and_ac_data_dir_replace_the_default(tmp_path: Path) -> None:
     env = {"HOME": "/home/u", "AC_DATA_DIR": str(tmp_path / "env")}
-    assert configure("bot", env).data_dir == tmp_path / "env"
     assert configure("bot", env, data_dir=tmp_path / "arg").data_dir == tmp_path / "arg"
     assert configure(None, data_dir="~/d").data_dir == Path.home() / "d"
+    same = {"HOME": "/home/u", "AC_DATA_DIR": "/home/u/.local/share/agentconnect-bot"}
+    assert configure("bot", same).data_dir == Path("/home/u/.local/share/agentconnect-bot")
+
+
+def test_an_exported_ac_data_dir_never_gives_a_name_another_identity(tmp_path: Path) -> None:
+    """The human exported AC_DATA_DIR for one bot's CLI; a second bot started
+    from that shell must not take the first one's identity."""
+    env = {"HOME": "/home/u", "AC_DATA_DIR": str(tmp_path / "first-bot")}
+    with pytest.raises(AgentConnectError, match="AC_DATA_DIR") as e:
+        configure("other-bot", env)
+    assert e.value.code == "bad_config"
 
 
 def test_relay_display_name_and_an_explicit_config_file(tmp_path: Path) -> None:

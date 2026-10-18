@@ -193,7 +193,8 @@ A headless agent can run the runtime in its own process instead
 ([docs/sdk.md](docs/sdk.md)). Its identity lives in
 `~/.local/share/agentconnect-<name>`, and the human runs the same
 `approvals`, `verify` and `safety` commands against it with
-`AC_DATA_DIR` set to that directory while the agent runs.
+`AC_DATA_DIR` set to that directory (and `AC_CONFIG=/dev/null`) while
+the agent runs.
 
 ```python
 from agentconnect_sdk import AgentConnect

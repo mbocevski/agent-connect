@@ -20,16 +20,44 @@ What was built, and where it departs from the text below:
   re-exports what hosts need, and ruff's `TID251` keeps the CLI, the
   `agentconnect.daemon` host and the SDK on the root. The token helpers are
   in `agentconnect.tokens`.
-- **No `policy=` argument.** The policy hook was replaced by the safety
-  policy (`agentconnect.policy`) before this landed, and the safety policy
-  is runtime code in every host, so `Runtime` takes no hook.
-- **Delivery to the embedded agent** is `agentconnect.callback.CallbackAdapter`:
-  messages are handed over in the delivery loop (a handler that raises is a
-  `RETRY` with the runtime's backoff, as a webhook answering 500), and events
-  go through a queue in the encrypted database with a worker of their own.
-  The SDK keeps the ids its handlers finished with in the same database
-  (`Runtime.handled`), so a redelivery after a restart doesn't reach user
-  code.
+- **`Runtime`'s signature** differs from the sketch below. There is no
+  `policy=` argument: the policy hook was replaced by the safety policy
+  (`agentconnect.policy`) before this landed, and the safety policy is
+  runtime code in every host. `api_address` is `Path | str | None` (`None`
+  before start, or with `serve_api=False`). It also takes `options=` (test
+  seams, the lock owner's name), `gate=` (the separate-OS-user peer checks)
+  and `serve_api=` (default `True`; the harness turns it off where a
+  scenario builds its own API server).
+- **Delivery to the embedded agent** is `agentconnect.callback.CallbackAdapter`.
+  Every handler call runs in a task of its own, bounded by
+  `sdk.handler_timeout_secs` (default 120 s) on the runtime's clock; a
+  handler that raises or times out is a `RETRY` with the runtime's backoff,
+  as a webhook answering 500 or timing out. Events go through a queue in the
+  encrypted database with workers of their own. The SDK keeps the ids its
+  handlers finished with in the same database (`Runtime.handled`), keyed
+  `["msg", group, sender, msg_id]` or `["event", event_id]`, so a redelivery
+  after a restart doesn't reach user code and a peer-chosen `msg_id` can't
+  hide anything else.
+- **Per-group delivery.** The engine hands deliveries to adapters through
+  one worker per group, for every adapter, not one loop for all groups: a
+  stuck or failing delivery holds up its own group only. Order within a
+  group is strict.
+- **Stopping from inside a handler.** `aclose()` called from a handler
+  schedules the shutdown and returns, since a handler can't wait for the end
+  of its own runtime; the shutdown stops new deliveries, waits (at most the
+  flush window) for running handlers, flushes, then stops. `serve()`
+  returns once that is complete.
+- **`AC_DATA_DIR` and `name=`.** Decision 2 says `AC_DATA_DIR` overrides the
+  default in every mode. For the embedded SDK an `AC_DATA_DIR` that
+  disagrees with an explicit `name=` is refused instead: a variable
+  exported for one agent's CLI would otherwise hand a second agent the
+  first one's identity, which the required name exists to prevent.
+- **Long socket paths.** A socket path over 103 bytes (the macOS limit) is
+  bound at `/tmp/agentconnect-<uid>/<hash>.sock`, a 0700 directory that the
+  runtime creates and checks and that the CLI and SDK derive from the same
+  path (`agentconnect.sockets`). Separate-OS-user mode refuses such a path
+  at startup, because the agent users must reach the socket in the agent
+  directory.
 - **Local API.** `ApiServer` keeps only the SHA-256 of both tokens
   (`agentconnect.tokens.TokenDigest`). Agent-scope routes call `AgentApi`, the
   same object the embedded SDK calls.

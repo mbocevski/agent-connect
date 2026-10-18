@@ -14,6 +14,7 @@ of it while the group's policy has ``frame_text`` on (the default);
 
 from __future__ import annotations
 
+import json
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
@@ -240,11 +241,20 @@ def _strings(raw: Any, what: str) -> tuple[str, ...]:
 
 
 def idempotency_key(payload: dict[str, Any]) -> str:
-    """``msg_id`` for a message, ``event_id`` for an event."""
-    for key in ("msg_id", "event_id"):
-        value = payload.get(key)
-        if isinstance(value, str) and value != "":
-            return value
+    """The key a payload is deduplicated by, namespaced so that ids from
+    different sources can't collide: ``["msg", group, sender, msg_id]`` for a
+    message (SPEC 8.3: each sender picks its own ``msg_id``, and another
+    sender may reuse it) and ``["event", event_id]`` for an event (chosen
+    by the runtime). A peer can't pick a ``msg_id`` that hides an event or
+    another sender's message."""
+    msg_id, event_id = payload.get("msg_id"), payload.get("event_id")
+    if isinstance(msg_id, str) and msg_id != "":
+        group, sender = payload.get("group"), payload.get("sender")
+        group_id = group.get("id") if isinstance(group, dict) else None
+        identity = sender.get("identity") if isinstance(sender, dict) else None
+        return json.dumps(["msg", group_id, identity, msg_id], separators=(",", ":"))
+    if isinstance(event_id, str) and event_id != "":
+        return json.dumps(["event", event_id], separators=(",", ":"))
     msg = "payload has neither msg_id nor event_id"
     raise PayloadError(msg)
 

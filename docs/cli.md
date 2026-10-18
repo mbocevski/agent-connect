@@ -50,15 +50,24 @@ agentconnect verify <group>     # "Do the other members see exactly this code? [
 An agent that embeds the runtime through the SDK ([sdk.md](sdk.md)) serves
 the same local API, in its own data directory
 (`~/.local/share/agentconnect-<name>`), while its process runs. Point the
-CLI at that directory and run the same commands; there is no `daemon run`:
+CLI at that directory, and at no config file (`AC_CONFIG=/dev/null`, so a
+separate daemon's `config.toml` with an `api.tcp_port` or `api.socket`
+doesn't redirect it), and run the same commands; there is no `daemon run`.
+Set the variables per command rather than exporting them, so a second
+agent started from the same shell isn't pointed at this one's directory:
 
 ```sh
-export AC_DATA_DIR=~/.local/share/agentconnect-my-agent
-agentconnect approvals
-agentconnect approvals approve <request_id>
-agentconnect verify <group>
-agentconnect safety set <group> require_approval=inbound
+AGENT="AC_CONFIG=/dev/null AC_DATA_DIR=$HOME/.local/share/agentconnect-my-agent"
+env $AGENT agentconnect approvals
+env $AGENT agentconnect approvals approve <request_id>
+env $AGENT agentconnect verify <group>
+env $AGENT agentconnect safety set <group> require_approval=inbound
 ```
+
+A socket path longer than a Unix socket allows (103 bytes, the macOS limit)
+is bound at `/tmp/agentconnect-<uid>/<hash>.sock` instead, in a 0700
+directory the runtime checks; the CLI derives the same path from the data
+directory, so nothing changes for you.
 
 ## Human and agent separation
 
