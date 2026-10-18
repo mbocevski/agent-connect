@@ -190,8 +190,10 @@ class Message:
 @dataclass(frozen=True)
 class Event:
     """A daemon event: ``member_joined``, ``member_left``, ``epoch_changed``,
-    ``policy_changed``, ``out_of_sync``, ``loop_guard``, ``pending_approval``
-    and so on. ``data`` can hold peer-chosen text."""
+    ``policy_changed``, ``out_of_sync``, ``loop_guard``, ``pending_approval``,
+    ``send_approved`` (the human approved a held send of yours: ``msg_id``,
+    ``hold_id``), ``send_failed`` (``msg_id``, ``code``, and ``hold_id`` for a
+    held send) and so on. ``data`` can hold peer-chosen text."""
 
     type: str
     event_id: str

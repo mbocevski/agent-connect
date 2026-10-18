@@ -65,7 +65,7 @@ tries. See [api.md](api.md#authentication).
 | `await ac.status()` | The daemon's status. |
 | `@ac.on_message` | `async def(msg, group)` for A2A messages. |
 | `@ac.on_task` | `async def(msg, group)` for task status and artifact updates. |
-| `@ac.on_event` | `async def(event, group)` for daemon events such as `member_joined` or `loop_guard`. |
+| `@ac.on_event` | `async def(event, group)` for daemon events such as `member_joined`, `loop_guard`, or `send_approved` and `send_failed` for a send the group held for approval. |
 | `await ac.serve(mode="auto")` | Run until cancelled. `webhook` serves the callback, `sse` reads the stream, `auto` picks the webhook when the daemon config has a `callback_url`. |
 | `ac.webhook_receiver(host, port)` | The built-in receiver, to start and stop yourself. |
 | `await ac.receive(headers, body)` | For your own web framework: verify, parse and dispatch one request. |

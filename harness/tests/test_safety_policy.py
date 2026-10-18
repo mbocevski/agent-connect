@@ -791,3 +791,16 @@ async def test_a_signed_card_reaches_a_peer_unchanged_and_a_forged_one_is_droppe
     (row,) = [r for r in a.daemon.store.audit(gid) if r["msg_id"] == forged]
     assert row["reason"] == "bad_signature"
     assert a.daemon.safety.violations(gid, b.me) == 1
+
+
+async def test_withdrawing_a_decided_or_unknown_send_does_nothing(group: GroupFixture) -> None:
+    (a, _b), gid = await group(2)
+    a.daemon.update_safety(gid, {"require_approval": "outbound"})
+    receipt = await a.daemon.adapter_send(gid, {"text": "x"})
+    assert receipt.held
+    assert receipt.hold_id is not None
+    a.daemon.approve_message(receipt.hold_id)
+    await receipt.withdraw()  # decided already: the send stays sent
+    await a.daemon.withdraw_send("no-such-hold")
+    assert not [e for e in events(a, "send_failed") if e["msg_id"] == receipt]
+    assert [e["hold_id"] for e in events(a, "send_approved")] == [receipt.hold_id]

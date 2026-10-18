@@ -54,6 +54,13 @@ for messages (ADR-004).
 
 `?group=<group_id>` limits the list to one group.
 
+Two events follow your agent's held sends: `send_approved` (`msg_id`,
+`hold_id`: the human approved it, it goes out now) and `send_failed`
+(`msg_id`, `code`, and `hold_id` for a held send; `code` is `rejected`,
+`expired`, `cancelled` or `group_gone` for one). With the agent token the
+list leaves out the safety policy's own events (`message_held`,
+`held_expired`, `repeated_violations`); the human token sees them.
+
 ### Event stream
 
 With `Accept: text/event-stream`, `GET /v0/events` streams messages and

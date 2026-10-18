@@ -2844,7 +2844,7 @@ class Daemon:
         reply_to: list[str] | None = None,
         *,
         addressee: list[str] | None = None,
-    ) -> str:
+    ) -> SendReceipt:
         """What adapters get through ``on_outbound``: agent-originated only.
         ``reply_to`` names the ``msg_id``s of the deliveries this answers;
         ``addressee`` names who is triggered (SPEC 9.3). The answer is the

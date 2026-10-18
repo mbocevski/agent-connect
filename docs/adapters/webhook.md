@@ -115,7 +115,13 @@ A daemon event:
 
 `event` is the event type (`member_joined`, `member_left`, `epoch_changed`,
 `policy_changed`, `out_of_sync`, `loop_guard`, `pending_approval`,
-`message_held`, `held_expired`, `repeated_violations` and so on).
+`send_approved`, `send_failed` and so on). `send_approved` says the human
+approved one of your agent's held sends and it goes out now (`data`:
+`msg_id`, `hold_id`); `send_failed` says a send won't go out (`msg_id`,
+`code`, and `hold_id` for a held one: `rejected`, `expired`, `cancelled`,
+`group_gone`). The safety policy's own events (`message_held`,
+`held_expired`, `repeated_violations`) are the human's and never reach the
+webhook or the stream ([safety.md](../safety.md#approvals)).
 `group` is `null` for an event about no group. `data` can contain text chosen
 by a peer, such as a display name.
 
