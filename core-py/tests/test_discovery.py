@@ -245,9 +245,36 @@ def test_a_replayed_knock_is_dropped(rng: random.Random) -> None:
         again.remember_in(ledger)
     assert e.value.kind == "replay"
     assert first.forget_after == T0 + 3900
-    assert len(ledger) == 2
+    assert len(ledger) == 1
     ledger.purge(first.forget_after + 1)
     assert len(ledger) == 0
+
+
+def test_the_knock_ledger_survives_a_restart(rng: random.Random) -> None:
+    """Review N4: after a restart a fresh ledger let the same sealed knock
+    in again; and the ledger had no bound."""
+    knocker, owner = make_client(rng), make_client(rng)
+    door = ac.Door.generate(T0 + 3600)
+    knocks = []
+    for _ in range(3):
+        sealed, _ = knocker.create_knock(door.id, door.public_key, "bob")
+        knocks.append((sealed, owner.verify_knock(door.open_knock(door.id, sealed, T0))))
+    ledger = ac.KnockLedger(capacity=2)
+    knocks[0][1].remember_in(ledger)
+    knocks[1][1].remember_in(ledger)
+    with pytest.raises(ac.AgentConnectError) as e:
+        knocks[2][1].remember_in(ledger)
+    assert e.value.kind == "busy"
+    # Persist, restart, restore.
+    saved = ledger.entries()
+    restarted = ac.KnockLedger(capacity=ledger.capacity)
+    for knock_id, kp_ref, forget_after in saved:
+        restarted.insert(knock_id, kp_ref, forget_after)
+    again = owner.verify_knock(door.open_knock(door.id, knocks[0][0], T0 + 60))
+    with pytest.raises(ac.AgentConnectError) as e:
+        again.remember_in(restarted)
+    assert e.value.kind == "replay"
+    assert ac.KnockLedger().capacity == 65_536
 
 
 def test_a_door_key_that_does_not_seal_is_refused(rng: random.Random) -> None:

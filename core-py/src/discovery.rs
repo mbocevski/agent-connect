@@ -984,9 +984,58 @@ pub(crate) struct KnockLedger(knock::MemoryKnockLedger);
 
 #[pymethods]
 impl KnockLedger {
+    /// An empty ledger of at most `capacity` knocks (default 65536). When
+    /// full, a new knock is refused with kind `busy`; nothing live is ever
+    /// evicted.
     #[new]
-    fn new() -> Self {
-        Self(knock::MemoryKnockLedger::default())
+    #[pyo3(signature = (capacity=None))]
+    fn new(capacity: Option<usize>) -> Self {
+        Self(capacity.map_or_else(
+            knock::MemoryKnockLedger::default,
+            knock::MemoryKnockLedger::with_capacity,
+        ))
+    }
+
+    #[getter]
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
+    /// `[(knock_id, key_package_ref, forget_after)]`, for the daemon to
+    /// persist in its encrypted store. It MUST persist them.
+    fn entries<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> Vec<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, u64)> {
+        self.0
+            .entries()
+            .into_iter()
+            .map(|e| {
+                (
+                    PyBytes::new(py, &e.knock_id),
+                    PyBytes::new(py, &e.key_package_ref),
+                    e.forget_after,
+                )
+            })
+            .collect()
+    }
+
+    /// Restores one persisted entry. Raises (kind `busy`) when full.
+    fn insert(
+        &mut self,
+        knock_id: &[u8],
+        key_package_ref: &[u8],
+        forget_after: u64,
+    ) -> PyResult<()> {
+        guarded(|| {
+            self.0
+                .insert(
+                    array(knock_id, "knock id")?,
+                    key_package_ref.to_vec(),
+                    forget_after,
+                )
+                .map_err(err)
+        })
     }
 
     /// Forgets entries whose knocks can no longer pass check 3 at `now`.

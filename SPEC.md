@@ -571,8 +571,12 @@ this order:
    local policy, lapsed), until `ts + 3600 + 300`, and MUST silently drop a
    knock whose `knock_id` or KeyPackageRef it remembers. The relay sees
    every sealed knock and could otherwise redeliver one the human already
-   rejected, for as long as its `ts` passes step 3. On top of that: at most
-   one pending approval per knocker identity per door.
+   rejected, for as long as its `ts` passes step 3. This record MUST
+   survive a restart (the owner persists it in its encrypted store), and it
+   MUST be bounded without ever forgetting an entry before its time: when
+   it is full, the owner drops new knocks silently until entries expire.
+   On top of that: at most one pending approval per knocker identity per
+   door.
 7. Apply the local limits: at most 32 pending knocks per door; the rest are
    dropped. Local policy (§10.6) may only tighten these limits.
 8. Queue a **human** approval. It shows the listing name, the knocker's

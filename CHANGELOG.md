@@ -55,7 +55,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   doesn't parse counts as a failed fetch; `OwnerHistory` in Python). Doors
   (HPKE key pairs in the v0 suite, checked when loaded), sealed and signed
   knocks, the owner's checks 1 to 5, a `KnockLedger` that drops replayed
-  knocks by `knock_id` and KeyPackage until they lapse, and the knock
+  knocks by `knock_id` and KeyPackage until they lapse (bounded, never
+  evicting a live entry, and exportable so the daemon persists it), and the knock
   Welcome wrap. A knock to a door key HPKE refuses leaves no KeyPackage
   behind, and `Client::forget_knock` deletes a lapsed knock's KeyPackage. Vectors in `testdata/`
   (`listings.json`, `listing-tokens.json`, `withdrawals.json`,

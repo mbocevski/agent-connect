@@ -628,40 +628,127 @@ pub trait KnockLedger {
     ) -> Result<()>;
 }
 
-/// An in-memory [`KnockLedger`]. It doesn't survive a restart: a daemon
-/// that keeps knocks across restarts persists the same entries itself.
-#[derive(Debug, Default)]
+/// How many knocks a [`MemoryKnockLedger`] holds by default: well above
+/// 32 pending per door times the 4 doors a mailbox may hold, times the
+/// knocks a door can take in its 65-minute window at the relay's limits.
+pub const DEFAULT_LEDGER_CAPACITY: usize = 65_536;
+
+/// One remembered knock, for persisting a ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerEntry {
+    /// The knock's id.
+    pub knock_id: [u8; 16],
+    /// Its KeyPackage's `KeyPackageRef`.
+    pub key_package_ref: Vec<u8>,
+    /// Unix seconds after which it may be forgotten.
+    pub forget_after: u64,
+}
+
+/// An in-memory [`KnockLedger`] with a hard capacity. The daemon MUST
+/// persist it (SPEC §6.6.3 step 6): save [`MemoryKnockLedger::entries`] in
+/// its encrypted store and [`MemoryKnockLedger::insert`] them back after a
+/// restart, or a knock seen before the restart could be replayed after it.
+///
+/// It never evicts an entry that is still live: when it is full, a new
+/// knock is refused (kind `busy`) until [`MemoryKnockLedger::purge`] frees
+/// expired entries. Refusing is safe; forgetting early would reopen the
+/// replay window.
+#[derive(Debug)]
 pub struct MemoryKnockLedger {
-    entries: std::collections::HashMap<Vec<u8>, u64>,
+    knocks: std::collections::HashMap<[u8; 16], (Vec<u8>, u64)>,
+    refs: std::collections::HashMap<Vec<u8>, u64>,
+    capacity: usize,
+}
+
+impl Default for MemoryKnockLedger {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_LEDGER_CAPACITY)
+    }
 }
 
 impl MemoryKnockLedger {
-    fn key(tag: u8, value: &[u8]) -> Vec<u8> {
-        [&[tag][..], value].concat()
+    /// An empty ledger that holds at most `capacity` knocks.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            knocks: std::collections::HashMap::new(),
+            refs: std::collections::HashMap::new(),
+            capacity,
+        }
     }
 
-    /// Forgets every entry whose `forget_after` is before `now`.
+    /// The most knocks it holds.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Forgets every knock whose `forget_after` is before `now`.
     pub fn purge(&mut self, now: u64) {
-        self.entries.retain(|_, until| *until >= now);
+        self.knocks.retain(|_, (_, until)| *until >= now);
+        self.refs.retain(|_, until| *until >= now);
     }
 
-    /// How many entries (two per knock) it holds.
+    /// How many knocks it holds.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.knocks.len()
     }
 
     /// Whether it holds nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.knocks.is_empty()
+    }
+
+    /// Every remembered knock, for persisting.
+    #[must_use]
+    pub fn entries(&self) -> Vec<LedgerEntry> {
+        let mut out: Vec<LedgerEntry> = self
+            .knocks
+            .iter()
+            .map(|(id, (kp_ref, until))| LedgerEntry {
+                knock_id: *id,
+                key_package_ref: kp_ref.clone(),
+                forget_after: *until,
+            })
+            .collect();
+        out.sort_by_key(|e| (e.forget_after, e.knock_id));
+        out
+    }
+
+    /// Restores one persisted knock (or remembers a new one).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidKnock`] `"ledger full"` (kind `busy`) when it is at
+    /// capacity and this knock isn't in it yet.
+    pub fn insert(
+        &mut self,
+        knock_id: [u8; 16],
+        key_package_ref: Vec<u8>,
+        forget_after: u64,
+    ) -> Result<()> {
+        if !self.knocks.contains_key(&knock_id) && self.knocks.len() >= self.capacity {
+            return Err(bad("ledger full"));
+        }
+        let until = self
+            .refs
+            .entry(key_package_ref.clone())
+            .or_insert(forget_after);
+        *until = (*until).max(forget_after);
+        let entry = self
+            .knocks
+            .entry(knock_id)
+            .or_insert((key_package_ref, forget_after));
+        entry.1 = entry.1.max(forget_after);
+        Ok(())
     }
 }
 
 impl KnockLedger for MemoryKnockLedger {
     fn seen(&self, knock_id: &[u8; 16], key_package_ref: &[u8]) -> Result<bool> {
-        Ok(self.entries.contains_key(&Self::key(0, knock_id))
-            || self.entries.contains_key(&Self::key(1, key_package_ref)))
+        Ok(self.knocks.contains_key(knock_id) || self.refs.contains_key(key_package_ref))
     }
 
     fn remember(
@@ -670,11 +757,7 @@ impl KnockLedger for MemoryKnockLedger {
         key_package_ref: &[u8],
         forget_after: u64,
     ) -> Result<()> {
-        for k in [Self::key(0, knock_id), Self::key(1, key_package_ref)] {
-            let until = self.entries.entry(k).or_insert(forget_after);
-            *until = (*until).max(forget_after);
-        }
-        Ok(())
+        self.insert(*knock_id, key_package_ref.to_vec(), forget_after)
     }
 }
 
@@ -1175,12 +1258,72 @@ pub(crate) mod tests {
             .unwrap();
         v3.remember_in(&mut ledger).unwrap();
         // After the knock can no longer pass check 3, it is forgotten.
-        assert_eq!(ledger.len(), 4);
+        assert_eq!(ledger.len(), 2);
         ledger.purge(v.forget_after());
-        assert_eq!(ledger.len(), 4);
+        assert_eq!(ledger.len(), 2);
         ledger.purge(v.forget_after() + 1);
         assert_eq!(ledger.len(), 0);
         assert!(ledger.is_empty());
+    }
+
+    /// Review N4: the ledger survives a restart through export and import,
+    /// and when full it refuses new knocks instead of evicting live ones.
+    #[test]
+    fn the_ledger_persists_and_never_evicts_a_live_entry() {
+        let s = setup("knock-ledger");
+        let t = now(&s.clock);
+        let verified: Vec<VerifiedKnock> = (0..3)
+            .map(|_| {
+                let (sealed, _) = knock(&s);
+                s.owner
+                    .verify_knock(s.door.open_knock(s.door.id(), &sealed, t).unwrap())
+                    .unwrap()
+            })
+            .collect();
+        let mut ledger = MemoryKnockLedger::with_capacity(2);
+        verified[0].remember_in(&mut ledger).unwrap();
+        verified[1].remember_in(&mut ledger).unwrap();
+        // Full: the third knock is refused, and nothing was evicted.
+        let e = verified[2].remember_in(&mut ledger).unwrap_err();
+        assert_eq!(e, bad("ledger full"));
+        assert_eq!(e.kind(), crate::ErrorKind::Busy);
+        assert_eq!(verified[0].remember_in(&mut ledger), Err(bad("replayed")));
+        // Export, restart, import: replays are still caught.
+        let saved = ledger.entries();
+        assert_eq!(saved.len(), 2);
+        let mut restarted = MemoryKnockLedger::with_capacity(2);
+        for e in &saved {
+            restarted
+                .insert(e.knock_id, e.key_package_ref.clone(), e.forget_after)
+                .unwrap();
+        }
+        assert_eq!(restarted.entries().len(), 2);
+        for v in &verified[..2] {
+            assert_eq!(v.remember_in(&mut restarted), Err(bad("replayed")));
+        }
+        // Once the entries expire, purging makes room.
+        restarted.purge(verified[0].forget_after() + 1);
+        verified[2].remember_in(&mut restarted).unwrap();
+        // Import refuses past the cap too.
+        let mut tiny = MemoryKnockLedger::with_capacity(1);
+        tiny.insert(
+            saved[0].knock_id,
+            saved[0].key_package_ref.clone(),
+            saved[0].forget_after,
+        )
+        .unwrap();
+        assert_eq!(
+            tiny.insert(
+                saved[1].knock_id,
+                saved[1].key_package_ref.clone(),
+                saved[1].forget_after
+            ),
+            Err(bad("ledger full"))
+        );
+        assert_eq!(
+            MemoryKnockLedger::default().capacity(),
+            DEFAULT_LEDGER_CAPACITY
+        );
     }
 
     /// Review L1: a door key that HPKE can't seal to used to leave a
