@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -53,6 +54,7 @@ from agentconnect.cli_support import (
     resolve_group,
     unverified_hint,
 )
+from agentconnect.config import ConfigError
 from agentconnect.isolation import IsolationError
 
 # Pretty tracebacks with locals would print envelopes, plaintext and secrets.
@@ -198,6 +200,61 @@ def daemon_run(
             asyncio.run(daemon_host.serve(cfg))
         except IsolationError as e:
             raise CliError("isolation", f"refusing to start: {e}", EXIT_USAGE) from None
+
+
+@app.command("mcp")
+def mcp_run(  # noqa: PLR0913, PLR0917
+    agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="The agent's name: its data directory is $XDG_DATA_HOME/agentconnect-<name> "
+            "(default: mcp). One name is one identity.",
+        ),
+    ] = None,
+    data_dir: Annotated[
+        Path | None, typer.Option("--data-dir", help="Another data directory instead.")
+    ] = None,
+    relay: Annotated[
+        str | None, typer.Option("--relay", help="The relay's wss:// URL (AC_RELAY_URL).")
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", help="A config.toml for this agent (none is read by default)."),
+    ] = None,
+    display_name: Annotated[
+        str | None, typer.Option("--display-name", help="What peers see (default: the name).")
+    ] = None,
+    log_file: Annotated[
+        Path | None, typer.Option("--log-file", help="Append the logs here instead of stderr.")
+    ] = None,
+) -> None:
+    """Run the MCP server on stdin and stdout (an agent tool starts it).
+
+    It runs the runtime itself when the data directory is free, or attaches to
+    the daemon or MCP session that runs on it. Its tools are agent-scope only;
+    approvals, verify and safety stay CLI commands for the human
+    (docs/adapters/mcp.md). stdout carries MCP only; logs go to stderr or
+    --log-file. Stops on stdin EOF, SIGTERM or SIGINT.
+    """
+    from agentconnect import mcp as mcp_host  # noqa: PLC0415 - heavy, and this command only
+
+    with guard(False):
+        try:
+            cfg = mcp_host.configure(
+                agent, data_dir=data_dir, relay=relay, config=config, display_name=display_name
+            )
+        except (ConfigError, IsolationError) as e:
+            raise CliError("bad_config", f"refusing to start: {e}", EXIT_USAGE) from None
+    if log_file is not None:
+        sys.stderr = log_file.expanduser().open("a", encoding="utf-8", buffering=1)
+    log.configure()
+    fds = mcp_host.claim_stdio()
+    with guard(False):
+        try:
+            asyncio.run(mcp_host.serve(cfg, fds))
+        except mcp_host.ToolError as e:
+            raise CliError(e.code, f"refusing to start: {e}", EXIT_USAGE) from None
 
 
 # -- groups and invites ------------------------------------------------------------

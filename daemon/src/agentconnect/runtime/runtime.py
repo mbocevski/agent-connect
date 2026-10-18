@@ -30,9 +30,9 @@ from agentconnect.runtime.agent import AgentApi
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import Engine, Options
 from agentconnect.runtime.registry import AdapterRegistry
+from agentconnect.store import HANDLED_KEEP
 
 STOP_FLUSH_SECS = 3.0  # how long stop() lets queued sends go out
-HANDLED_KEEP = 50_000  # ids an in-process agent's handlers finished with
 
 
 class HandledIds:

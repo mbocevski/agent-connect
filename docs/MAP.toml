@@ -143,6 +143,12 @@ code = ["sdk/python/src/agentconnect_sdk/*.py"]
 docs = ["docs/sdk.md"]
 
 [[rule]]
+name = "mcp-adapter"
+# The MCP server (agentconnect mcp) and the delivery queue its sessions pull.
+code = ["daemon/src/agentconnect/mcp/*.py", "daemon/src/agentconnect/deliveries.py"]
+docs = ["docs/adapters/mcp.md"]
+
+[[rule]]
 name = "a2a-adapter"
 code = ["daemon/src/agentconnect/a2a_adapter/*.py"]
 docs = ["docs/adapters/a2a.md"]
@@ -272,6 +278,11 @@ paths = [
     "daemon/src/agentconnect/adapters.py",
 ]
 doc = "docs/adapters/webhook.md"
+
+[[component]]
+name = "mcp-adapter"
+paths = ["daemon/src/agentconnect/mcp/**", "daemon/src/agentconnect/deliveries.py"]
+doc = "docs/adapters/mcp.md"
 
 [[component]]
 name = "harness"

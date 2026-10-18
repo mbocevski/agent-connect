@@ -381,7 +381,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "`none`",
         "The adapter that new groups deliver to: `webhook` "
         "([adapters/webhook.md](adapters/webhook.md)), `sse` (the event stream of "
-        "`GET /v0/events`, see [api.md](api.md#event-stream)) or `none`. With "
+        "`GET /v0/events`, see [api.md](api.md#event-stream)), `mcp` (the queue MCP "
+        "sessions attached to this daemon pull from, [adapters/mcp.md](adapters/mcp.md)) "
+        "or `none`. With "
         "`none`, received messages wait in the inbound queue. The A2A adapter is "
         "not written yet.",
     ),
