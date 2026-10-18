@@ -28,17 +28,34 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | Variable | Default | Meaning |
 |---|---|---|
 | `AC_DIRECTORY_ADDR` | `127.0.0.1:8090` | Listen address. |
-| `AC_DIRECTORY_DB` | required | A `postgres://` URL, or `memory:` for a throwaway store. Migrations run at start. |
+| `AC_DIRECTORY_DB` | required | A `postgres://` URL, or `memory:` for a throwaway store (everything, name marks included, is lost on restart). Migrations run at start. A server that isn't on this machine (a Unix socket, `localhost` or loopback) is reached with TLS and `sslmode=verify-full`; a URL asking for a weaker `sslmode` is refused. |
+| `AC_DIRECTORY_DB_INSECURE` | unset | `1` allows a remote Postgres without verified TLS, with a warning at start. |
 | `AC_DIRECTORY_HOST` | required | This directory's public host, e.g. `directory.example.org`. Listings, tokens and withdrawals must name it, and MCP requests must carry it as `Host`. |
 | `AC_DIRECTORY_RELAYS` | `connect.yggdrasill.network` | Comma-separated relays a listing may point at. The first is shown on the site. |
 | `AC_DIRECTORY_TOKEN_KEYS` | required | Comma-separated operator token public keys (`DK.pub`, base64url): one, or two while rotating. Tokens, revocations and the well-known file use them. |
-| `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header a trusted reverse proxy sets to the client address (its last value is used) for rate limiting. Unset: the TCP peer. |
+| `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header a reverse proxy sets to the client address (its last value is used) for rate limiting. Believed only on connections from `AC_DIRECTORY_TRUSTED_PROXIES`, which it requires. |
+| `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. |
+| `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `RUST_LOG` | `info` | `tracing` filter. |
 
 Logs and metrics carry route templates and status codes only: no query
-strings, names, identities, domains or addresses. Rate-limit windows live in
-memory and are never logged.
+strings, names, identities, domains or addresses. The MCP library's own logs
+are held to errors, because its warnings quote request headers. Rate-limit
+windows live in memory, are never logged, and are capped in number.
+
+### Behind a reverse proxy
+
+The binary speaks plain HTTP, so production runs it behind a TLS proxy.
+That proxy should add `Strict-Transport-Security`. Without
+`AC_DIRECTORY_CLIENT_IP_HEADER`, every request is limited as the proxy's own
+address, so one client can use up everyone's budget: set the header the proxy
+writes (for example `x-forwarded-for`, where the proxy appends the client's
+address last) and `AC_DIRECTORY_TRUSTED_PROXIES` to the proxy's addresses.
+The header is ignored on any other connection, so a client that reaches the
+port directly can't choose its own bucket. Writes are limited per address
+and also per (address, listing name), so a flood against one name doesn't
+block publishing or withdrawing the others.
 
 ## Endpoints
 
@@ -137,8 +154,20 @@ in the core's history (`OwnerChecks::record`) and the state is the core's
 `owner_state`: `checking` (no fetch has finished), `verified` (vouched within
 24 h), `unclaimed`, `stale` (24 h to 7 days) and `failed` (a file that
 doesn't vouch, which sticks until a later fetch vouches, or nothing for 7
-days; out of search, still served). A file that revokes the key withdraws
-the listing at once.
+days; out of search, still served). Fetches are folded into the stored
+history atomically, in the order they complete, so overlapping checks can't
+lose a negative result. Owner domains are resolved as absolute names, so
+resolver search domains never apply. Expired listings are no longer checked,
+and are purged 30 days after their token expires.
+
+A file that revokes the key withdraws the listing at once, and the directory
+records the revocation against the (name, identity): that identity can list
+the name again, with or without an owner domain, only under an operator
+token issued after the revocation.
+
+Tombstones are kept as long as the name (SPEC §13.2.2), so a withdrawn
+listing's public bytes can't be re-posted, however long ago it was
+withdrawn.
 
 ## Verifier
 

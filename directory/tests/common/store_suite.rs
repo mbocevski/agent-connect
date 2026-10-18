@@ -8,8 +8,9 @@
 
 use agentconnect_directory::Store;
 use agentconnect_directory::store::{
-    GoneKind, ListingRecord, NameState, OwnerCheck, OwnerStatus, PublishGuard, PublishOutcome,
-    RevokeOutcome, SearchDoc, SearchQuery, TOMBSTONE_TTL_SECS, WithdrawOutcome, WithdrawalRecord,
+    EXPIRED_GRACE_SECS, FEED_TTL_SECS, GoneKind, ListingRecord, NameState, OwnerCheck, OwnerStatus,
+    PublishGuard, PublishOutcome, RevokeOutcome, SearchDoc, SearchQuery, WithdrawOutcome,
+    WithdrawalRecord,
 };
 
 use super::{DAY, identity_id, random_b64};
@@ -262,20 +263,44 @@ pub async fn owner_updates<S: Store>(s: &S) {
     let mut r = record("delta", &id, 1);
     r.owner_domain = Some("example.com".to_owned());
     put(s, &r).await;
+    // Checks are folded into the stored history in the order they land.
+    for (at, check) in [
+        (NOW - 10, OwnerCheck::Vouched),
+        (NOW - 5, OwnerCheck::NotVouched),
+        (NOW, OwnerCheck::Failed),
+    ] {
+        assert!(
+            s.record_owner_check("delta", &r.sha256, at, check)
+                .await
+                .unwrap()
+        );
+    }
+    assert!(
+        !s.record_owner_check("delta", "other-version", NOW, OwnerCheck::Vouched)
+            .await
+            .unwrap()
+    );
     let st = OwnerStatus {
         latest: Some((NOW, OwnerCheck::Failed)),
         verified_at: Some(NOW - 10),
         negative: Some((NOW - 5, OwnerCheck::NotVouched)),
     };
-    assert!(s.set_owner("delta", &r.sha256, st).await.unwrap());
-    assert!(!s.set_owner("delta", "other-version", st).await.unwrap());
     assert_eq!(s.get("delta").await.unwrap().unwrap().owner, st);
-    assert!(s.due_owner_checks(NOW, 10).await.unwrap().is_empty());
-    assert_eq!(s.due_owner_checks(NOW + 1, 10).await.unwrap().len(), 1);
+    assert!(s.due_owner_checks(NOW, NOW, 10).await.unwrap().is_empty());
+    assert_eq!(s.due_owner_checks(NOW + 1, NOW, 10).await.unwrap().len(), 1);
+    // Expired listings are neither due nor listed for their identity.
+    let token_end = s.get("delta").await.unwrap().unwrap().token_expires_at;
+    assert!(
+        s.due_owner_checks(NOW + 1, token_end, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let plain = record("no-domain", &id, 1);
     put(s, &plain).await;
-    assert_eq!(s.due_owner_checks(NOW + 1, 10).await.unwrap().len(), 1);
-    assert_eq!(s.by_identity(&id).await.unwrap().len(), 2);
+    assert_eq!(s.due_owner_checks(NOW + 1, NOW, 10).await.unwrap().len(), 1);
+    assert_eq!(s.by_identity(&id, NOW).await.unwrap().len(), 2);
+    assert_eq!(s.by_identity(&id, token_end).await.unwrap().len(), 0);
     assert!(
         !s.owner_revoked("delta", "other-version", "{}", NOW)
             .await
@@ -289,6 +314,11 @@ pub async fn owner_updates<S: Store>(s: &S) {
     assert_eq!(
         s.tombstone("delta").await.unwrap().unwrap().kind,
         GoneKind::OwnerRevocation
+    );
+    // The revocation is recorded against (name, identity).
+    assert_eq!(
+        s.name_state("delta").await.unwrap().owner_revoked,
+        vec![(id.clone(), NOW)]
     );
     assert_eq!(
         s.feed(0, 10).await.unwrap()[0].kind,
@@ -385,10 +415,44 @@ pub async fn feed_and_purge<S: Store>(s: &S) {
     let rest = s.feed(all[0].cursor, 10).await.unwrap();
     assert_eq!(rest.len(), 2);
     assert_eq!(s.feed(0, 1).await.unwrap().len(), 1);
-    let stats = s.purge(NOW + TOMBSTONE_TTL_SECS + 1).await.unwrap();
-    assert_eq!((stats.tombstones, stats.feed), (2, 2));
-    assert!(s.tombstone("e1").await.unwrap().is_none());
-    assert!(s.tombstone("e3").await.unwrap().is_some());
+    // An expired listing, purged after the grace period.
+    let mut gone = record("expired", &id, 1);
+    gone.token_expires_at = NOW + DAY;
+    put(s, &gone).await;
+    let later = NOW + FEED_TTL_SECS.max(EXPIRED_GRACE_SECS) + DAY + 1;
+    let stats = s.purge(later).await.unwrap();
+    assert_eq!((stats.feed, stats.expired_listings), (3, 1));
+    assert!(s.get("expired").await.unwrap().is_none());
+    // Tombstones are never purged (SPEC 13.2.2).
+    for name in ["e1", "e2", "e3"] {
+        assert!(s.tombstone(name).await.unwrap().is_some(), "{name}");
+        assert_eq!(
+            s.name_state(name).await.unwrap().tombstones,
+            vec![(id.clone(), 1)]
+        );
+    }
+}
+
+pub async fn listed_after_pages_by_name<S: Store>(s: &S) {
+    let id = identity_id();
+    for name in ["c-three", "a-one", "b-two"] {
+        put(s, &record(name, &id, 1)).await;
+    }
+    let names = |v: Vec<ListingRecord>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
+    assert_eq!(
+        names(s.listed_after("", NOW, 2).await.unwrap()),
+        ["a-one", "b-two"]
+    );
+    assert_eq!(
+        names(s.listed_after("b-two", NOW, 2).await.unwrap()),
+        ["c-three"]
+    );
+    assert!(
+        s.listed_after("", NOW + 91 * DAY, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Run the whole suite against fresh stores from `make`.
@@ -401,4 +465,5 @@ pub async fn run<S: Store, F: std::future::Future<Output = S>>(make: impl Fn() -
     owner_updates(&make().await).await;
     search_ranking_and_filters(&make().await).await;
     feed_and_purge(&make().await).await;
+    listed_after_pages_by_name(&make().await).await;
 }

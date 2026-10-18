@@ -36,13 +36,23 @@ CREATE INDEX listings_identity ON listings (identity);
 CREATE INDEX listings_token_id ON listings (token_id);
 CREATE INDEX listings_owner_checked_at ON listings (owner_checked_at);
 
--- The highest withdrawn seq per (name, identity), kept 30 days.
+-- The highest withdrawn seq per (name, identity). Kept as long as the name
+-- (SPEC 13.2.2): never purged.
 CREATE TABLE tombstones (
     name TEXT NOT NULL,
     identity TEXT NOT NULL,
     seq BIGINT NOT NULL,
     kind TEXT NOT NULL,
     created_at BIGINT NOT NULL,
+    PRIMARY KEY (name, identity)
+);
+
+-- (name, identity) pairs an owner domain revoked, and when the directory saw
+-- it. Such an identity lists the name again only under a later token.
+CREATE TABLE owner_revocations (
+    name TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    revoked_at BIGINT NOT NULL,
     PRIMARY KEY (name, identity)
 );
 

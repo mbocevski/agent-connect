@@ -13,8 +13,11 @@
 
 use std::future::Future;
 
-/// How long tombstones and feed entries are kept, in seconds (30 days).
-pub const TOMBSTONE_TTL_SECS: u64 = 30 * 86_400;
+/// How long feed entries are kept, in seconds (30 days). Tombstones are
+/// never purged: SPEC §13.2.2 keeps them as long as the name.
+pub const FEED_TTL_SECS: u64 = 30 * 86_400;
+/// How long an expired listing is kept (answering 410) before it is purged.
+pub const EXPIRED_GRACE_SECS: u64 = 30 * 86_400;
 /// How long a revoked token id is kept: the longest token lifetime (90 days).
 pub const REVOKED_TOKEN_TTL_SECS: u64 = 90 * 86_400;
 /// Most candidates a search returns before the directory filters them.
@@ -244,6 +247,10 @@ pub struct NameState {
     pub high_water: Option<(u64, String)>,
     /// `(identity, seq)`, sorted by identity.
     pub tombstones: Vec<(String, u64)>,
+    /// `(identity, at)`: identities the owner domain revoked for this name,
+    /// and when the directory saw it, sorted by identity. Such an identity
+    /// may list the name again only under a token issued after `at`.
+    pub owner_revoked: Vec<(String, u64)>,
 }
 
 /// What the caller saw when it decided that a listing may be stored, and
@@ -334,8 +341,8 @@ pub struct SearchQuery {
 /// Rows removed by [`Store::purge`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PurgeStats {
-    /// Tombstones older than 30 days.
-    pub tombstones: u64,
+    /// Listings whose token expired more than 30 days ago.
+    pub expired_listings: u64,
     /// Feed entries older than 30 days.
     pub feed: u64,
     /// Revoked token ids past every possible token lifetime.
@@ -396,8 +403,9 @@ pub trait Store: Send + Sync + 'static {
     ) -> impl Future<Output = StoreResult<RevokeOutcome>> + Send;
 
     /// The owner domain revoked the identity: if `name` still holds the
-    /// version `sha256`, withdraw it, tombstone it and append `entry` to the
-    /// feed. Returns whether it was withdrawn.
+    /// version `sha256`, withdraw it, tombstone it, record the revocation
+    /// of (name, identity) at `now` and append `entry` to the feed. Returns
+    /// whether it was withdrawn.
     fn owner_revoked(
         &self,
         name: &str,
@@ -406,26 +414,40 @@ pub trait Store: Send + Sync + 'static {
         now: u64,
     ) -> impl Future<Output = StoreResult<bool>> + Send;
 
-    /// Record an owner check, if `name` still holds the version `sha256`.
-    fn set_owner(
+    /// Fold one owner check that completed at `at` into the stored history
+    /// of `name`, if it still holds the version `sha256`. The read and the
+    /// write are atomic, so overlapping checks are recorded in the order
+    /// they complete and none is lost.
+    fn record_owner_check(
         &self,
         name: &str,
         sha256: &str,
-        status: OwnerStatus,
+        at: u64,
+        check: OwnerCheck,
     ) -> impl Future<Output = StoreResult<bool>> + Send;
 
-    /// Listings with an owner domain whose last check finished before
-    /// `checked_before` (or never), oldest first.
+    /// Unexpired listings with an owner domain whose last check finished
+    /// before `checked_before` (or never), oldest first.
     fn due_owner_checks(
         &self,
         checked_before: u64,
+        now: u64,
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<ListingRecord>>> + Send;
 
-    /// Every listing of `identity`.
+    /// Every unexpired listing of `identity`.
     fn by_identity(
         &self,
         identity: &str,
+        now: u64,
+    ) -> impl Future<Output = StoreResult<Vec<ListingRecord>>> + Send;
+
+    /// Unexpired listings with a name after `after`, by name.
+    fn listed_after(
+        &self,
+        after: &str,
+        now: u64,
+        limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<ListingRecord>>> + Send;
 
     /// Listings matching the query, best first, at most
@@ -443,7 +465,9 @@ pub trait Store: Send + Sync + 'static {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<FeedEntry>>> + Send;
 
-    /// Delete expired tombstones, feed entries and revoked token ids.
+    /// Delete old feed entries, revoked token ids past every token lifetime,
+    /// and listings expired for longer than the grace period. Tombstones,
+    /// name marks and owner revocations are kept.
     fn purge(&self, now: u64) -> impl Future<Output = StoreResult<PurgeStats>> + Send;
 }
 

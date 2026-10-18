@@ -2,8 +2,11 @@
 //!
 //! Windows live in process memory only. Addresses are never logged, never
 //! stored and never exported as metrics; an idle address is forgotten at the
-//! next sweep. IPv6 clients are limited per /64, since one host usually
-//! holds a whole prefix.
+//! next sweep, and the number of windows is capped (the stalest is evicted).
+//! IPv6 clients are limited per /64, since one host usually holds a whole
+//! prefix. Writes are limited per address and, separately, per (address,
+//! listing name), so one busy client (or one proxy) can't use up every
+//! name's budget.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -20,6 +23,8 @@ pub enum Class {
     Mcp,
     /// Publish, withdraw and revoke.
     Write,
+    /// Publish and withdraw, per listing name.
+    WriteName,
 }
 
 /// A limit: at most `max` requests per `window_secs`.
@@ -40,29 +45,24 @@ pub struct Limits {
     pub search: Limit,
     /// [`Class::Mcp`].
     pub mcp: Limit,
-    /// [`Class::Write`].
+    /// [`Class::Write`], per address.
     pub write: Limit,
+    /// [`Class::WriteName`], per (address, name).
+    pub write_name: Limit,
+    /// Most windows tracked at once.
+    pub max_windows: usize,
 }
 
 impl Default for Limits {
     fn default() -> Self {
+        let l = |max, window_secs| Limit { max, window_secs };
         Self {
-            read: Limit {
-                max: 240,
-                window_secs: 60,
-            },
-            search: Limit {
-                max: 60,
-                window_secs: 60,
-            },
-            mcp: Limit {
-                max: 120,
-                window_secs: 60,
-            },
-            write: Limit {
-                max: 20,
-                window_secs: 3600,
-            },
+            read: l(240, 60),
+            search: l(60, 60),
+            mcp: l(120, 60),
+            write: l(120, 3600),
+            write_name: l(20, 3600),
+            max_windows: 100_000,
         }
     }
 }
@@ -74,6 +74,7 @@ impl Limits {
             Class::Search => self.search,
             Class::Mcp => self.mcp,
             Class::Write => self.write,
+            Class::WriteName => self.write_name,
         }
     }
 }
@@ -95,9 +96,10 @@ pub fn bucket(ip: IpAddr) -> IpAddr {
     }
 }
 
-type Windows = HashMap<(Option<IpAddr>, Class), VecDeque<u64>>;
+type Key = (Option<IpAddr>, Class, Option<String>);
+type Windows = HashMap<Key, VecDeque<u64>>;
 
-/// Sliding-window limiter keyed by (address bucket, class).
+/// Sliding-window limiter keyed by (address bucket, class, name).
 #[derive(Debug, Default)]
 pub struct RateLimiter {
     limits: Limits,
@@ -120,13 +122,39 @@ impl RateLimiter {
     ///
     /// The seconds to wait if it is over the limit.
     pub fn check(&self, ip: Option<IpAddr>, class: Class, now_ms: u64) -> Result<(), u64> {
-        let limit = self.limits.of(class);
+        self.hit((ip.map(bucket), class, None), now_ms)
+    }
+
+    /// Count a write of listing `name` from `ip`.
+    ///
+    /// # Errors
+    ///
+    /// The seconds to wait if it is over the limit.
+    pub fn check_name(&self, ip: Option<IpAddr>, name: &str, now_ms: u64) -> Result<(), u64> {
+        self.hit(
+            (ip.map(bucket), Class::WriteName, Some(name.to_owned())),
+            now_ms,
+        )
+    }
+
+    fn hit(&self, key: Key, now_ms: u64) -> Result<(), u64> {
+        let limit = self.limits.of(key.1);
         let window_ms = limit.window_secs * 1000;
         let mut windows = self
             .windows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let w = windows.entry((ip.map(bucket), class)).or_default();
+        if !windows.contains_key(&key) && windows.len() >= self.limits.max_windows.max(1) {
+            // Bounded memory: drop the window that has been idle longest.
+            if let Some(stalest) = windows
+                .iter()
+                .min_by_key(|(_, w)| w.back().copied().unwrap_or(0))
+                .map(|(k, _)| k.clone())
+            {
+                windows.remove(&stalest);
+            }
+        }
+        let w = windows.entry(key).or_default();
         while w
             .front()
             .is_some_and(|t| now_ms.saturating_sub(*t) >= window_ms)
@@ -148,7 +176,7 @@ impl RateLimiter {
         self.windows
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|(_, class), w| {
+            .retain(|(_, class, _), w| {
                 let window_ms = limits.of(*class).window_secs * 1000;
                 w.back()
                     .is_some_and(|t| now_ms.saturating_sub(*t) < window_ms)
@@ -183,6 +211,8 @@ mod tests {
             search: l,
             mcp: l,
             write: l,
+            write_name: l,
+            max_windows: 1000,
         })
     }
 
@@ -200,6 +230,17 @@ mod tests {
     }
 
     #[test]
+    fn names_have_their_own_budget() {
+        let r = small();
+        let a = ip("192.0.2.1");
+        assert!(r.check_name(a, "one", 0).is_ok());
+        assert!(r.check_name(a, "one", 0).is_ok());
+        assert!(r.check_name(a, "one", 0).is_err());
+        assert!(r.check_name(a, "two", 0).is_ok());
+        assert!(r.check_name(ip("192.0.2.2"), "one", 0).is_ok());
+    }
+
+    #[test]
     fn ipv6_is_limited_per_slash_64() {
         let r = small();
         assert!(r.check(ip("2001:db8:1:2::1"), Class::Read, 0).is_ok());
@@ -210,6 +251,34 @@ mod tests {
             bucket("::ffff:192.0.2.9".parse().unwrap()),
             ip("192.0.2.9").unwrap()
         );
+    }
+
+    #[test]
+    fn memory_is_bounded() {
+        let l = Limit {
+            max: 5,
+            window_secs: 60,
+        };
+        let r = RateLimiter::new(Limits {
+            read: l,
+            search: l,
+            mcp: l,
+            write: l,
+            write_name: l,
+            max_windows: 3,
+        });
+        for i in 0..50_u64 {
+            let a: IpAddr =
+                std::net::Ipv4Addr::from(0xC000_0200 + u32::try_from(i).unwrap()).into();
+            r.check(Some(a), Class::Read, i).unwrap();
+            assert!(r.tracked() <= 3);
+        }
+        // The newest address is still tracked.
+        let last: IpAddr = std::net::Ipv4Addr::from(0xC000_0200 + 49).into();
+        for _ in 0..4 {
+            r.check(Some(last), Class::Read, 100).unwrap();
+        }
+        assert!(r.check(Some(last), Class::Read, 100).is_err());
     }
 
     #[test]

@@ -97,6 +97,9 @@ pub struct Config {
     /// `AC_DIRECTORY_STYLESHEET`: a CSS file served instead of the default
     /// stylesheet.
     pub stylesheet: Option<PathBuf>,
+    /// `AC_DIRECTORY_METRICS_ADDR`: serve `/metrics` on this address only
+    /// (for example a private interface) instead of the public listener.
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 fn list(v: Option<String>) -> Vec<String> {
@@ -164,6 +167,13 @@ impl Config {
                 "AC_DIRECTORY_CLIENT_IP_HEADER needs AC_DIRECTORY_TRUSTED_PROXIES".to_owned(),
             );
         }
+        let metrics_addr =
+            match get("AC_DIRECTORY_METRICS_ADDR").filter(|a| !a.is_empty()) {
+                Some(a) => Some(a.parse().map_err(|_| {
+                    format!("AC_DIRECTORY_METRICS_ADDR is not a socket address: {a}")
+                })?),
+                None => None,
+            };
         let flag = |k: &str| get(k).is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
         Ok(Self {
             addr,
@@ -177,6 +187,7 @@ impl Config {
             stylesheet: get("AC_DIRECTORY_STYLESHEET")
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from),
+            metrics_addr,
         })
     }
 
@@ -218,6 +229,7 @@ mod tests {
         assert_eq!(c.trusted_proxies, Vec::new());
         assert!(!c.db_insecure);
         assert!(c.stylesheet.is_none());
+        assert!(c.metrics_addr.is_none());
     }
 
     #[test]
@@ -235,6 +247,7 @@ mod tests {
             ("AC_DIRECTORY_CLIENT_IP_HEADER", "X-Forwarded-For"),
             ("AC_DIRECTORY_TRUSTED_PROXIES", "10.0.0.0/8, ::1"),
             ("AC_DIRECTORY_STYLESHEET", "/etc/directory/site.css"),
+            ("AC_DIRECTORY_METRICS_ADDR", "127.0.0.1:9100"),
         ]))
         .unwrap();
         assert_eq!(c.addr.port(), 9000);
@@ -245,6 +258,7 @@ mod tests {
         assert_eq!(c.trusted_proxies.len(), 2);
         assert!(c.db_insecure);
         assert_eq!(c.stylesheet, Some(PathBuf::from("/etc/directory/site.css")));
+        assert_eq!(c.metrics_addr.map(|a| a.port()), Some(9100));
     }
 
     #[test]
@@ -278,6 +292,7 @@ mod tests {
                 ("AC_DIRECTORY_TRUSTED_PROXIES", "10.0.0.0/33"),
             ],
             vec![DB, KEYS, HOST, ("AC_DIRECTORY_TRUSTED_PROXIES", "nope")],
+            vec![DB, KEYS, HOST, ("AC_DIRECTORY_METRICS_ADDR", "nope")],
         ] {
             assert!(Config::from_lookup(lookup(&bad)).is_err(), "{bad:?}");
         }

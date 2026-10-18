@@ -105,6 +105,7 @@ fn v4_public(ip: Ipv4Addr) -> bool {
         || a >= 240
         || (a == 100 && (64..128).contains(&b))
         || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 88 && c == 99)
         || (a == 198 && (b == 18 || b == 19)))
 }
 
@@ -131,6 +132,17 @@ pub fn is_public(ip: IpAddr) -> bool {
     }
 }
 
+/// The name to resolve for `host`: the absolute name (a trailing dot), so
+/// resolver search domains (`resolv.conf` `search`, `ndots`) never apply.
+#[must_use]
+pub fn fqdn(host: &str) -> String {
+    if host.ends_with('.') {
+        host.to_owned()
+    } else {
+        format!("{host}.")
+    }
+}
+
 /// Resolves host names to addresses.
 pub trait Lookup: Send + Sync + 'static {
     /// The addresses of `host`.
@@ -145,7 +157,7 @@ impl Lookup for SystemLookup {
     fn lookup(&self, host: &str) -> BoxFuture<'static, io::Result<Vec<IpAddr>>> {
         let host = host.to_owned();
         Box::pin(async move {
-            Ok(tokio::net::lookup_host((host.as_str(), 443))
+            Ok(tokio::net::lookup_host((fqdn(&host).as_str(), 443))
                 .await?
                 .map(|a| a.ip())
                 .collect())

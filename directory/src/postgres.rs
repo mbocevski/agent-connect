@@ -10,13 +10,14 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+use crate::owner::record_fetch;
 use crate::store::{
-    FeedEntry, GoneKind, ListingRecord, NameState, OwnerCheck, OwnerStatus, PublishGuard,
-    PublishOutcome, PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome, SEARCH_CANDIDATES,
-    SearchDoc, SearchQuery, Store, StoreError, StoreResult, TOMBSTONE_TTL_SECS, Tombstone,
+    EXPIRED_GRACE_SECS, FEED_TTL_SECS, FeedEntry, GoneKind, ListingRecord, NameState, OwnerCheck,
+    OwnerStatus, PublishGuard, PublishOutcome, PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome,
+    SEARCH_CANDIDATES, SearchDoc, SearchQuery, Store, StoreError, StoreResult, Tombstone,
     WithdrawOutcome, WithdrawalRecord,
 };
 
@@ -162,9 +163,21 @@ async fn name_state_in(tx: &mut Transaction<'_, Postgres>, name: &str) -> StoreR
                 Ok((row.try_get("identity")?, u64_of(row.try_get("seq")?)))
             })
             .collect::<StoreResult<Vec<_>>>()?;
+    let owner_revoked = sqlx::query(
+        "SELECT identity, revoked_at FROM owner_revocations WHERE name = $1 ORDER BY identity",
+    )
+    .bind(name)
+    .fetch_all(&mut **tx)
+    .await?
+    .iter()
+    .map(|row| -> StoreResult<(String, u64)> {
+        Ok((row.try_get("identity")?, u64_of(row.try_get("revoked_at")?)))
+    })
+    .collect::<StoreResult<Vec<_>>>()?;
     Ok(NameState {
         high_water,
         tombstones,
+        owner_revoked,
     })
 }
 
@@ -228,14 +241,60 @@ async fn append(
     Ok(())
 }
 
+/// Whether `opts` reaches the server only on this machine: a Unix socket,
+/// `localhost` or a loopback address.
+fn is_local(opts: &PgConnectOptions) -> bool {
+    let host = opts.get_host();
+    opts.get_socket().is_some()
+        || host.starts_with('/')
+        || host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The connection options for `url`, with the TLS rule applied: a server
+/// that isn't local is reached over TLS with `sslmode=verify-full`
+/// (certificate and host name checked) unless `insecure` is set. A URL that
+/// asks for a weaker mode is refused without `insecure`. Returns the options
+/// and whether the connection runs without verified TLS to a remote host
+/// (the caller logs a warning).
+///
+/// # Errors
+///
+/// A message for a malformed URL, or a weaker `sslmode` to a remote host.
+pub fn connect_options(url: &str, insecure: bool) -> Result<(PgConnectOptions, bool), String> {
+    let opts = PgConnectOptions::from_str(url)
+        .map_err(|_| "AC_DIRECTORY_DB is not a valid postgres:// URL".to_owned())?;
+    if is_local(&opts) || matches!(opts.get_ssl_mode(), PgSslMode::VerifyFull) {
+        return Ok((opts, false));
+    }
+    if insecure {
+        return Ok((opts, true));
+    }
+    if url.contains("sslmode=") {
+        return Err(
+            "AC_DIRECTORY_DB asks for an sslmode weaker than verify-full for a remote host; \
+             use sslmode=verify-full, or set AC_DIRECTORY_DB_INSECURE=1"
+                .to_owned(),
+        );
+    }
+    Ok((opts.ssl_mode(PgSslMode::VerifyFull), false))
+}
+
 impl PgStore {
-    /// Connect to `url` (`postgres://...`) and run the migrations.
+    /// Connect to `url` (`postgres://...`) under [`connect_options`] (TLS
+    /// with `verify-full` unless the host is local) and run the migrations.
     ///
     /// # Errors
     ///
-    /// Fails if the database cannot be reached or migrated.
+    /// Fails if the URL is refused, or the database cannot be reached or
+    /// migrated.
     pub async fn open(url: &str) -> StoreResult<Self> {
-        Self::open_with(PgConnectOptions::from_str(url)?).await
+        let (opts, _) = connect_options(url, false).map_err(StoreError)?;
+        Self::open_with(opts).await
     }
 
     /// Connect with explicit options and run the migrations.
@@ -517,12 +576,34 @@ impl Store for PgStore {
             now,
         )
         .await?;
+        sqlx::query(
+            "INSERT INTO owner_revocations (name, identity, revoked_at) VALUES ($1, $2, $3) \
+             ON CONFLICT (name, identity) DO UPDATE SET \
+             revoked_at = GREATEST(owner_revocations.revoked_at, EXCLUDED.revoked_at)",
+        )
+        .bind(name)
+        .bind(&l.identity)
+        .bind(i64_of(now))
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(true)
     }
 
-    async fn set_owner(&self, name: &str, sha256: &str, s: OwnerStatus) -> StoreResult<bool> {
-        let n = sqlx::query(
+    async fn record_owner_check(
+        &self,
+        name: &str,
+        sha256: &str,
+        at: u64,
+        check: OwnerCheck,
+    ) -> StoreResult<bool> {
+        let mut tx = self.pool.begin().await?;
+        lock(&mut tx, &format!("name:{name}")).await?;
+        let Some(current) = get_in(&mut tx, name).await?.filter(|l| l.sha256 == sha256) else {
+            return Ok(false);
+        };
+        let s: OwnerStatus = record_fetch(current.owner, at, check);
+        sqlx::query(
             "UPDATE listings SET owner_latest = $3, owner_checked_at = $4, \
              owner_verified_at = $5, owner_negative = $6, owner_negative_at = $7 \
              WHERE name = $1 AND sha256 = $2",
@@ -534,25 +615,27 @@ impl Store for PgStore {
         .bind(s.verified_at.map(i64_of))
         .bind(s.negative.map(|(_, c)| c.as_str()))
         .bind(s.negative.map(|(t, _)| i64_of(t)))
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
-        Ok(n > 0)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn due_owner_checks(
         &self,
         checked_before: u64,
+        now: u64,
         limit: u32,
     ) -> StoreResult<Vec<ListingRecord>> {
         sqlx::query(concat!(
             "SELECT ",
             columns!(),
-            " FROM listings WHERE owner_domain IS NOT NULL \
+            " FROM listings WHERE owner_domain IS NOT NULL AND token_expires_at > $2 \
              AND (owner_checked_at IS NULL OR owner_checked_at < $1) \
-             ORDER BY COALESCE(owner_checked_at, 0), name LIMIT $2"
+             ORDER BY COALESCE(owner_checked_at, 0), name LIMIT $3"
         ))
         .bind(i64_of(checked_before))
+        .bind(i64_of(now))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?
@@ -561,13 +644,35 @@ impl Store for PgStore {
         .collect()
     }
 
-    async fn by_identity(&self, identity: &str) -> StoreResult<Vec<ListingRecord>> {
+    async fn by_identity(&self, identity: &str, now: u64) -> StoreResult<Vec<ListingRecord>> {
         sqlx::query(concat!(
             "SELECT ",
             columns!(),
-            " FROM listings WHERE identity = $1 ORDER BY name"
+            " FROM listings WHERE identity = $1 AND token_expires_at > $2 ORDER BY name"
         ))
         .bind(identity)
+        .bind(i64_of(now))
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(record)
+        .collect()
+    }
+
+    async fn listed_after(
+        &self,
+        after: &str,
+        now: u64,
+        limit: u32,
+    ) -> StoreResult<Vec<ListingRecord>> {
+        sqlx::query(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM listings WHERE name > $1 AND token_expires_at > $2 ORDER BY name LIMIT $3"
+        ))
+        .bind(after)
+        .bind(i64_of(now))
+        .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?
         .iter()
@@ -634,13 +739,13 @@ impl Store for PgStore {
 
     async fn purge(&self, now: u64) -> StoreResult<PurgeStats> {
         let before = |ttl: u64| i64_of(now.saturating_sub(ttl));
-        let tombstones = sqlx::query("DELETE FROM tombstones WHERE created_at <= $1")
-            .bind(before(TOMBSTONE_TTL_SECS))
+        let expired_listings = sqlx::query("DELETE FROM listings WHERE token_expires_at <= $1")
+            .bind(before(EXPIRED_GRACE_SECS))
             .execute(&self.pool)
             .await?
             .rows_affected();
         let feed = sqlx::query("DELETE FROM feed WHERE created_at <= $1")
-            .bind(before(TOMBSTONE_TTL_SECS))
+            .bind(before(FEED_TTL_SECS))
             .execute(&self.pool)
             .await?
             .rows_affected();
@@ -650,9 +755,57 @@ impl Store for PgStore {
             .await?
             .rows_affected();
         Ok(PurgeStats {
-            tombstones,
+            expired_listings,
             feed,
             revoked_tokens,
         })
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    fn mode(url: &str, insecure: bool) -> Result<(PgSslMode, bool), String> {
+        connect_options(url, insecure).map(|(o, warn)| (o.get_ssl_mode(), warn))
+    }
+
+    #[test]
+    fn remote_servers_need_verified_tls() {
+        let remote = "postgres://u@db.example.org/directory";
+        assert!(matches!(
+            mode(remote, false),
+            Ok((PgSslMode::VerifyFull, false))
+        ));
+        assert!(matches!(
+            mode(&format!("{remote}?sslmode=verify-full"), false),
+            Ok((PgSslMode::VerifyFull, false))
+        ));
+        for weak in ["disable", "prefer", "require", "verify-ca"] {
+            assert!(
+                mode(&format!("{remote}?sslmode={weak}"), false).is_err(),
+                "{weak}"
+            );
+            assert!(
+                matches!(
+                    mode(&format!("{remote}?sslmode={weak}"), true),
+                    Ok((_, true))
+                ),
+                "{weak}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_servers_may_go_without() {
+        for url in [
+            "postgres://u@127.0.0.1:5432/d?sslmode=disable",
+            "postgres://u@localhost/d?sslmode=disable",
+            "postgres://u@[::1]/d?sslmode=disable",
+            "postgres://u@%2Frun%2Fpostgresql/d",
+        ] {
+            assert!(matches!(mode(url, false), Ok((_, false))), "{url}");
+        }
+        assert!(connect_options("not a url", false).is_err());
     }
 }

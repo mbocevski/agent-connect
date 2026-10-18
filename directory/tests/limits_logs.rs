@@ -1,14 +1,11 @@
-//! Per-address rate limits, and logs without identifiers.
+//! Per-address rate limits. (The log-privacy test is `log_privacy.rs`.)
 
 mod common;
-
-use std::io::Write;
-use std::sync::{Arc, Mutex};
 
 use agentconnect_directory::ratelimit::{Limit, Limits};
 use axum::body::Body;
 use axum::http::{HeaderName, Request, StatusCode};
-use common::{HOST, Harness, identity};
+use common::{HOST, Harness};
 
 fn tight() -> Limits {
     let l = |max| Limit {
@@ -20,6 +17,8 @@ fn tight() -> Limits {
         search: l(2),
         mcp: l(1),
         write: l(2),
+        write_name: l(2),
+        max_windows: 10_000,
     }
 }
 
@@ -89,6 +88,8 @@ async fn searches_writes_and_mcp_have_their_own_budgets() {
 async fn a_trusted_proxy_header_names_the_client() {
     let mut h = Harness::with(|d| d.with_limits(tight()));
     h.http.client_ip_header = Some(HeaderName::from_static("x-forwarded-for"));
+    h.http.trusted_proxies =
+        vec![agentconnect_directory::config::Cidr::parse(common::CLIENT).unwrap()];
     let from = |xff: &str| {
         Request::get("/healthz")
             .header("x-forwarded-for", xff)
@@ -107,70 +108,4 @@ async fn a_trusted_proxy_header_names_the_client() {
         StatusCode::TOO_MANY_REQUESTS
     );
     assert_eq!(h.send(from("192.0.2.51")).await.status, StatusCode::OK);
-}
-
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Capture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn logs_carry_route_templates_and_no_identifiers() {
-    let capture = Capture::default();
-    let writer = capture.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let h = Harness::new();
-    let id = identity();
-    let mut s = h.spec("secret-agent-name", &id);
-    s.owner_domain = Some("owner-domain.example".into());
-    s.description = "zebra-description-word".into();
-    h.fetcher.fail(
-        "owner-domain.example",
-        agentconnect_directory::owner::FetchError::Timeout,
-    );
-    h.publish(&s).await;
-    let _ = h.get("/a/secret-agent-name").await;
-    let _ = h.get("/a/secret-agent-name.json").await;
-    let _ = h.get("/search?q=zebra-query-term&skill=yak-skill").await;
-    let _ = h.get("/?q=zebra-query-term").await;
-    let _ = h.get("/a/unknown-probe-name").await;
-    let _ = h.get("/no/such/path-probe").await;
-    let _ = h
-        .post("/v0/withdrawals", h.withdrawal("secret-agent-name", &id, 1))
-        .await;
-    let _ = h.post("/v0/listings", b"garbage".to_vec()).await;
-
-    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-    assert!(logs.contains("route=\"/a/{name}\""), "{logs}");
-    assert!(logs.contains("route=\"/search\""), "{logs}");
-    assert!(logs.contains("route=\"unmatched\""), "{logs}");
-    for leak in [
-        "secret-agent-name",
-        id.id().as_str(),
-        &id.fingerprint(),
-        "owner-domain.example",
-        "zebra",
-        "yak-skill",
-        "unknown-probe-name",
-        "path-probe",
-        common::CLIENT,
-        "?q=",
-    ] {
-        assert!(!logs.contains(leak), "logs contain {leak:?}:\n{logs}");
-    }
 }

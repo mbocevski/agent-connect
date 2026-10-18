@@ -277,7 +277,7 @@ async fn a_withdrawal_rechecks_the_identitys_other_listings() {
 }
 
 #[tokio::test]
-async fn maintenance_purges_tombstones_after_30_days() {
+async fn maintenance_keeps_tombstones() {
     let h = Harness::new();
     let id = identity();
     h.publish(&h.spec("purged", &id)).await;
@@ -286,5 +286,5 @@ async fn maintenance_purges_tombstones_after_30_days() {
     assert_eq!(h.get("/a/purged").await.status, StatusCode::GONE);
     h.advance(30 * DAY);
     h.dir.maintain().await.unwrap();
-    assert_eq!(h.get("/a/purged").await.status, StatusCode::NOT_FOUND);
+    assert_eq!(h.get("/a/purged").await.status, StatusCode::GONE);
 }

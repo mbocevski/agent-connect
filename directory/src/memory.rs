@@ -14,10 +14,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, MutexGuard};
 
+use crate::owner::record_fetch;
 use crate::store::{
-    FeedEntry, GoneKind, ListingRecord, NameState, OwnerStatus, PublishGuard, PublishOutcome,
-    PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome, SEARCH_CANDIDATES, SearchQuery, Store,
-    StoreResult, TOMBSTONE_TTL_SECS, Tombstone, WithdrawOutcome, WithdrawalRecord,
+    EXPIRED_GRACE_SECS, FEED_TTL_SECS, FeedEntry, GoneKind, ListingRecord, NameState, OwnerCheck,
+    PublishGuard, PublishOutcome, PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome,
+    SEARCH_CANDIDATES, SearchQuery, Store, StoreResult, Tombstone, WithdrawOutcome,
+    WithdrawalRecord,
 };
 
 #[derive(Debug, Default)]
@@ -29,6 +31,8 @@ struct State {
     revoked: HashMap<String, u64>,
     /// Per name, the newest accepted token's `(issued_at, identity)`.
     marks: HashMap<String, (u64, String)>,
+    /// (name, identity) the owner domain revoked, and when.
+    owner_revoked: HashMap<(String, String), u64>,
 }
 
 impl State {
@@ -54,9 +58,17 @@ impl State {
             .map(|t| (t.identity.clone(), t.seq))
             .collect();
         tombstones.sort();
+        let mut owner_revoked: Vec<(String, u64)> = self
+            .owner_revoked
+            .iter()
+            .filter(|((n, _), _)| n == name)
+            .map(|((_, id), at)| (id.clone(), *at))
+            .collect();
+        owner_revoked.sort();
         NameState {
             high_water: self.marks.get(name).cloned(),
             tombstones,
+            owner_revoked,
         }
     }
 
@@ -285,15 +297,23 @@ impl Store for MemoryStore {
         };
         st.listings.remove(name);
         st.tombstone(name, &l.identity, l.seq, GoneKind::OwnerRevocation, now);
+        st.owner_revoked
+            .insert((name.to_owned(), l.identity.clone()), now);
         st.append(GoneKind::OwnerRevocation, entry, now);
         Ok(true)
     }
 
-    async fn set_owner(&self, name: &str, sha256: &str, status: OwnerStatus) -> StoreResult<bool> {
+    async fn record_owner_check(
+        &self,
+        name: &str,
+        sha256: &str,
+        at: u64,
+        check: OwnerCheck,
+    ) -> StoreResult<bool> {
         let mut st = self.lock();
         match st.listings.get_mut(name).filter(|l| l.sha256 == sha256) {
             Some(l) => {
-                l.owner = status;
+                l.owner = record_fetch(l.owner, at, check);
                 Ok(true)
             }
             None => Ok(false),
@@ -303,13 +323,14 @@ impl Store for MemoryStore {
     async fn due_owner_checks(
         &self,
         checked_before: u64,
+        now: u64,
         limit: u32,
     ) -> StoreResult<Vec<ListingRecord>> {
         let st = self.lock();
         let mut due: Vec<ListingRecord> = st
             .listings
             .values()
-            .filter(|l| l.owner_domain.is_some())
+            .filter(|l| l.owner_domain.is_some() && l.token_expires_at > now)
             .filter(|l| l.owner.checked_at().is_none_or(|t| t < checked_before))
             .cloned()
             .collect();
@@ -318,12 +339,29 @@ impl Store for MemoryStore {
         Ok(due)
     }
 
-    async fn by_identity(&self, identity: &str) -> StoreResult<Vec<ListingRecord>> {
+    async fn by_identity(&self, identity: &str, now: u64) -> StoreResult<Vec<ListingRecord>> {
         Ok(self
             .lock()
             .listings
             .values()
-            .filter(|l| l.identity == identity)
+            .filter(|l| l.identity == identity && l.token_expires_at > now)
+            .cloned()
+            .collect())
+    }
+
+    async fn listed_after(
+        &self,
+        after: &str,
+        now: u64,
+        limit: u32,
+    ) -> StoreResult<Vec<ListingRecord>> {
+        Ok(self
+            .lock()
+            .listings
+            .range::<str, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            .map(|(_, l)| l)
+            .filter(|l| l.token_expires_at > now)
+            .take(limit as usize)
             .cloned()
             .collect())
     }
@@ -366,14 +404,14 @@ impl Store for MemoryStore {
     async fn purge(&self, now: u64) -> StoreResult<PurgeStats> {
         let mut st = self.lock();
         let old = |t: u64, ttl: u64| now.saturating_sub(t) >= ttl;
-        let (t0, f0, r0) = (st.tombstones.len(), st.feed.len(), st.revoked.len());
-        st.tombstones
-            .retain(|_, t| !old(t.created_at, TOMBSTONE_TTL_SECS));
-        st.feed.retain(|e| !old(e.created_at, TOMBSTONE_TTL_SECS));
+        let (l0, f0, r0) = (st.listings.len(), st.feed.len(), st.revoked.len());
+        st.listings
+            .retain(|_, l| !old(l.token_expires_at, EXPIRED_GRACE_SECS));
+        st.feed.retain(|e| !old(e.created_at, FEED_TTL_SECS));
         st.revoked.retain(|_, t| !old(*t, REVOKED_TOKEN_TTL_SECS));
         let gone = |a: usize, b: usize| u64::try_from(a - b).unwrap_or(u64::MAX);
         Ok(PurgeStats {
-            tombstones: gone(t0, st.tombstones.len()),
+            expired_listings: gone(l0, st.listings.len()),
             feed: gone(f0, st.feed.len()),
             revoked_tokens: gone(r0, st.revoked.len()),
         })

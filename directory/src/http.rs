@@ -14,7 +14,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, Path, Query, Request, State};
+use axum::extract::{
+    ConnectInfo, DefaultBodyLimit, Extension, MatchedPath, Path, Query, Request, State,
+};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -51,8 +53,14 @@ const MAX_SMALL_BODY: usize = 4 * 1024;
 /// HTTP settings.
 #[derive(Debug, Clone, Default)]
 pub struct HttpConfig {
-    /// A trusted proxy's client-address header (last value used).
+    /// A trusted proxy's client-address header (its last value is used),
+    /// believed only on connections from `trusted_proxies`.
     pub client_ip_header: Option<HeaderName>,
+    /// Proxies whose client-address header is believed.
+    pub trusted_proxies: Vec<crate::config::Cidr>,
+    /// Serve `/metrics` on this router (false when it has its own
+    /// listener).
+    pub hide_metrics: bool,
     /// The stylesheet served at [`render::CSS_PATH`] instead of the default.
     pub stylesheet: Option<Arc<str>>,
 }
@@ -68,23 +76,47 @@ type Shared<S> = Arc<App<S>>;
 /// not zero.
 #[must_use]
 pub fn wants_markdown(headers: &HeaderMap) -> bool {
-    headers
+    let (mut markdown, mut other) = (0.0_f32, 0.0_f32);
+    for range in headers
         .get_all(header::ACCEPT)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .any(|range| {
-            let mut parts = range.split(';');
-            let media = parts.next().unwrap_or_default().trim();
-            if !media.eq_ignore_ascii_case("text/markdown") {
-                return false;
-            }
-            !parts.any(|p| {
-                let p = p.trim();
-                p.get(..2).is_some_and(|k| k.eq_ignore_ascii_case("q="))
-                    && p[2..].trim().parse::<f32>().is_ok_and(|q| q <= 0.0)
-            })
-        })
+    {
+        let mut parts = range.split(';');
+        let media = parts.next().unwrap_or_default().trim();
+        if media.is_empty() {
+            continue;
+        }
+        let q = quality(parts);
+        if media.eq_ignore_ascii_case("text/markdown") {
+            markdown = markdown.max(q);
+        } else {
+            other = other.max(q);
+        }
+    }
+    markdown > 0.0 && markdown >= other
+}
+
+/// The `q` of a media range's parameters: 1 when absent, and 0 when it
+/// isn't a number from 0 to 1 (RFC 9110 §12.4.2).
+fn quality<'a>(params: impl Iterator<Item = &'a str>) -> f32 {
+    for p in params {
+        let p = p.trim();
+        if let Some(v) = p
+            .get(..2)
+            .filter(|k| k.eq_ignore_ascii_case("q="))
+            .map(|_| &p[2..])
+        {
+            return v
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|q| q.is_finite() && (0.0..=1.0).contains(q))
+                .unwrap_or(0.0);
+        }
+    }
+    1.0
 }
 
 fn header_value(s: &str) -> HeaderValue {
@@ -181,7 +213,12 @@ async fn home_page<S: Store>(
     negotiated: bool,
 ) -> Response {
     let query = params.home();
-    let results = match dir.search(query.q, query.skill).await {
+    let results = if query.is_search() {
+        dir.search(query.q, query.skill).await
+    } else {
+        dir.listed(crate::directory::SEARCH_LIMIT).await
+    };
+    let results = match results {
         Ok(r) => r,
         Err(e) => return error_json(e),
     };
@@ -302,7 +339,13 @@ fn card_json(found: &Lookup, headers: &HeaderMap) -> Response {
             let matches = headers
                 .get(header::IF_NONE_MATCH)
                 .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"));
+                .is_some_and(|v| {
+                    // Weak comparison (RFC 9110 §13.1.2): `W/` is ignored.
+                    v.split(',').any(|t| {
+                        let t = t.trim();
+                        t == "*" || t.strip_prefix("W/").unwrap_or(t) == etag
+                    })
+                });
             let mut r = if matches {
                 respond(
                     StatusCode::NOT_MODIFIED,
@@ -337,7 +380,7 @@ fn card_json(found: &Lookup, headers: &HeaderMap) -> Response {
 }
 
 async fn llms<S: Store>(State(app): State<Shared<S>>) -> Response {
-    match app.dir.search(None, None).await {
+    match app.dir.listed(crate::directory::LLMS_LIMIT).await {
         Ok(found) => {
             let names: Vec<String> = found.into_iter().map(|l| l.record.name).collect();
             respond(
@@ -381,8 +424,12 @@ fn written(status: StatusCode, body: &serde_json::Value) -> Response {
     respond(status, JSON_TYPE, CACHE_NONE, body.to_string())
 }
 
-async fn publish<S: Store>(State(app): State<Shared<S>>, body: Bytes) -> Response {
-    match app.dir.publish(&body).await {
+async fn publish<S: Store>(
+    State(app): State<Shared<S>>,
+    Extension(ClientKey(key)): Extension<ClientKey>,
+    body: Bytes,
+) -> Response {
+    match app.dir.publish_from(&body, key).await {
         Ok(p) => written(
             if p.changed {
                 StatusCode::CREATED
@@ -400,8 +447,12 @@ async fn publish<S: Store>(State(app): State<Shared<S>>, body: Bytes) -> Respons
     }
 }
 
-async fn withdraw<S: Store>(State(app): State<Shared<S>>, body: Bytes) -> Response {
-    match app.dir.withdraw(&body).await {
+async fn withdraw<S: Store>(
+    State(app): State<Shared<S>>,
+    Extension(ClientKey(key)): Extension<ClientKey>,
+    body: Bytes,
+) -> Response {
+    match app.dir.withdraw_from(&body, key).await {
         Ok(w) => written(
             StatusCode::OK,
             &json!({"withdrawn": w.name, "seq": w.seq, "changed": w.changed}),
@@ -493,8 +544,13 @@ async fn fallback<S: Store>(State(app): State<Shared<S>>, headers: HeaderMap) ->
 /// The client address used for rate limiting: the trusted proxy header's
 /// last value if configured, else the TCP peer.
 fn client_ip(req: &Request, config: &HttpConfig) -> Option<IpAddr> {
-    if let Some(name) = &config.client_ip_header {
-        return req
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
+    let trusted = peer.is_some_and(|ip| config.trusted_proxies.iter().any(|c| c.contains(ip)));
+    if trusted && let Some(name) = &config.client_ip_header {
+        let forwarded = req
             .headers()
             .get_all(name)
             .iter()
@@ -502,18 +558,22 @@ fn client_ip(req: &Request, config: &HttpConfig) -> Option<IpAddr> {
             .flat_map(|v| v.split(','))
             .next_back()
             .and_then(|v| v.trim().parse().ok());
+        if forwarded.is_some() {
+            return forwarded;
+        }
     }
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip())
+    peer
 }
 
+/// The rate-limit key a request was counted under, for the handlers' own
+/// per-name limits.
+#[derive(Debug, Clone, Copy)]
+struct ClientKey(Option<IpAddr>);
+
 fn class_of(route: &str, req: &Request) -> Class {
+    // Decoded as the handlers decode it, so `%71=` counts as `q=`.
     let searching = || {
-        req.uri().query().is_some_and(|q| {
-            q.split('&')
-                .any(|kv| kv.starts_with("q=") || kv.starts_with("skill="))
-        })
+        Query::<SearchParams>::try_from_uri(req.uri()).is_ok_and(|Query(p)| p.home().is_search())
     };
     match route {
         "/search" => Class::Search,
@@ -526,16 +586,16 @@ fn class_of(route: &str, req: &Request) -> Class {
 
 /// Rate limit, then add the security headers, then log and count by route
 /// template only.
-async fn guard<S: Store>(State(app): State<Shared<S>>, req: Request, next: Next) -> Response {
+async fn guard<S: Store>(State(app): State<Shared<S>>, mut req: Request, next: Next) -> Response {
     let route = template(
         req.extensions()
             .get::<MatchedPath>()
             .map(MatchedPath::as_str),
     );
     let method = req.method().clone();
-    let limited = app
-        .dir
-        .rate_check(client_ip(&req, &app.config), class_of(route, &req));
+    let key = client_ip(&req, &app.config);
+    req.extensions_mut().insert(ClientKey(key));
+    let limited = app.dir.rate_check(key, class_of(route, &req));
     let mut resp = match limited {
         Ok(()) => next.run(req).await,
         Err(wait) => {
@@ -564,11 +624,23 @@ async fn guard<S: Store>(State(app): State<Shared<S>>, req: Request, next: Next)
     resp
 }
 
+/// A router serving only `/metrics`, for a separate (private) listener.
+pub fn metrics_app<S: Store>(dir: Arc<Directory<S>>) -> Router {
+    let state = Arc::new(App {
+        dir,
+        config: HttpConfig::default(),
+    });
+    Router::new()
+        .route("/metrics", get(metrics::<S>))
+        .with_state(state)
+}
+
 /// Build the directory's router.
 pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
     let mcp = crate::mcp::service(Arc::clone(&dir), &dir.settings().host);
+    let hide_metrics = config.hide_metrics;
     let state = Arc::new(App { dir, config });
-    Router::new()
+    let router = Router::new()
         .route("/", get(home::<S>))
         .route("/index.md", get(index_md::<S>))
         .route("/search", get(search::<S>))
@@ -594,8 +666,13 @@ pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
             post(revoke::<S>).layer(DefaultBodyLimit::max(MAX_SMALL_BODY)),
         )
         .route_service("/mcp", mcp)
-        .route("/healthz", get(healthz))
-        .route("/metrics", get(metrics::<S>))
+        .route("/healthz", get(healthz));
+    let router = if hide_metrics {
+        router
+    } else {
+        router.route("/metrics", get(metrics::<S>))
+    };
+    router
         .fallback(fallback::<S>)
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -622,6 +699,14 @@ mod tests {
             "text/html;q=0.9, Text/Markdown;charset=utf-8"
         )));
         assert!(wants_markdown(&accept("text/markdown;q=0.5")));
+        assert!(!wants_markdown(&accept(
+            "text/html;q=1, text/markdown;q=0.01"
+        )));
+        assert!(!wants_markdown(&accept("text/markdown;q=NaN")));
+        assert!(!wants_markdown(&accept("text/markdown;q=2")));
+        assert!(wants_markdown(&accept(
+            "text/markdown;q=0.9, text/html;q=0.5"
+        )));
         assert!(!wants_markdown(&accept("text/markdown;q=0")));
         assert!(!wants_markdown(&accept("text/markdown; Q=0.0")));
         assert!(!wants_markdown(&accept("*/*")));

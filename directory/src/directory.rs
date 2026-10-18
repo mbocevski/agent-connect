@@ -11,7 +11,7 @@ use agentconnect_core::listing::{MAX_LISTING_BYTES, NameRecord, SignedListing};
 
 use crate::card::Card;
 use crate::metrics::Metrics;
-use crate::owner::{OwnerFetcher, OwnerState, RECHECK_EVERY_SECS, owner_state, record_fetch};
+use crate::owner::{OwnerFetcher, OwnerState, RECHECK_EVERY_SECS, owner_state};
 use crate::ratelimit::{Class, Limits, RateLimiter};
 use crate::store::{
     FeedEntry, GoneKind, ListingRecord, NameState, OwnerCheck, OwnerStatus, PublishGuard,
@@ -26,10 +26,16 @@ pub const KEY_CHANGED_SECS: u64 = 30 * 86_400;
 pub const SEARCH_LIMIT: usize = 50;
 /// Longest search text kept, in characters.
 pub const MAX_QUERY_CHARS: usize = 200;
+/// Listings read per store page when listing names.
+pub const PAGE: u32 = 200;
+/// Most names `llms.txt` lists.
+pub const LLMS_LIMIT: usize = 10_000;
 /// Most feed entries per page.
 pub const FEED_PAGE: u32 = 100;
 /// Owner checks run per maintenance pass.
 pub const CHECKS_PER_PASS: u32 = 100;
+/// Owner fetches in flight at once during a pass.
+pub const CHECK_CONCURRENCY: usize = 8;
 
 /// Whether `name` is a listing slug (the core's rule, SPEC §13.1.1).
 pub use agentconnect_core::listing::is_listing_name as valid_name;
@@ -80,6 +86,14 @@ fn name_record(state: &NameState) -> NameRecord {
         tombstones: state.tombstones.clone(),
     }
 }
+
+/// The identity's owner domain revoked it for this name, and its token is
+/// no newer than the revocation.
+const OWNER_REVOKED: DirError = DirError::new(
+    403,
+    "owner_revoked",
+    "the owner domain revoked this key for this name; it needs a token issued after that",
+);
 
 /// The refusal for a core [`Rejection`]: the code comes from the core's
 /// error kind (`malformed` uses `malformed_code`), the detail is the core's
@@ -203,6 +217,7 @@ pub struct Directory<S: Store> {
     settings: Settings,
     metrics: Metrics,
     limiter: RateLimiter,
+    page: u32,
 }
 
 fn fingerprint_of(identity: &str) -> String {
@@ -226,7 +241,15 @@ impl<S: Store> Directory<S> {
             settings,
             metrics: Metrics::default(),
             limiter: RateLimiter::new(Limits::default()),
+            page: PAGE,
         }
+    }
+
+    /// Read `n` listings per store page when listing names (tests).
+    #[must_use]
+    pub fn with_page_size(mut self, n: u32) -> Self {
+        self.page = n.max(1);
+        self
     }
 
     /// Replace the rate limits.
@@ -273,6 +296,12 @@ impl<S: Store> Directory<S> {
     /// The seconds to wait.
     pub fn rate_check(&self, ip: Option<std::net::IpAddr>, class: Class) -> Result<(), u64> {
         self.limiter.check(ip, class, self.clock.unix_millis())
+    }
+
+    fn name_rate(&self, key: Option<std::net::IpAddr>, name: &str) -> Result<(), DirError> {
+        self.limiter
+            .check_name(key, name, self.clock.unix_millis())
+            .map_err(|_| DirError::RATE_LIMITED)
     }
 
     /// The canonical URL of a listing's signed card.
@@ -370,6 +399,40 @@ impl<S: Store> Directory<S> {
             .collect())
     }
 
+    /// Listed (unexpired, not `failed`) listings by name, at most `limit`,
+    /// paging past any run of hidden ones.
+    ///
+    /// # Errors
+    ///
+    /// Storage failures.
+    pub async fn listed(&self, limit: usize) -> Result<Vec<Listing>, DirError> {
+        let now = self.now();
+        let mut out = Vec::new();
+        let mut after = String::new();
+        while out.len() < limit {
+            let page = self
+                .store
+                .listed_after(&after, now, self.page)
+                .await
+                .map_err(|e| internal(&e))?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            after.clone_from(&last.name);
+            let full = page.len() == self.page as usize;
+            out.extend(
+                page.into_iter()
+                    .filter_map(|r| Self::view(r, now))
+                    .filter(|l| l.owner != OwnerState::Failed),
+            );
+            if !full {
+                break;
+            }
+        }
+        out.truncate(limit);
+        Ok(out)
+    }
+
     /// Withdrawal feed entries after `after`, and the cursor to continue from.
     ///
     /// # Errors
@@ -391,7 +454,21 @@ impl<S: Store> Directory<S> {
     ///
     /// A [`DirError`] naming the first rule the listing breaks.
     pub async fn publish(&self, bytes: &[u8]) -> Result<Published, DirError> {
-        let r = self.publish_inner(bytes).await;
+        self.publish_from(bytes, None).await
+    }
+
+    /// [`Directory::publish`] for a client under rate-limit key `key`: on
+    /// top of the per-key write limit, writes are limited per (key, name).
+    ///
+    /// # Errors
+    ///
+    /// A [`DirError`].
+    pub async fn publish_from(
+        &self,
+        bytes: &[u8],
+        key: Option<std::net::IpAddr>,
+    ) -> Result<Published, DirError> {
+        let r = self.publish_inner(bytes, key).await;
         self.metrics.event(
             "publish",
             match &r {
@@ -403,7 +480,11 @@ impl<S: Store> Directory<S> {
         r
     }
 
-    async fn publish_inner(&self, bytes: &[u8]) -> Result<Published, DirError> {
+    async fn publish_inner(
+        &self,
+        bytes: &[u8],
+        key: Option<std::net::IpAddr>,
+    ) -> Result<Published, DirError> {
         let bad = |code, detail| Err(DirError::new(400, code, detail));
         if bytes.len() > MAX_LISTING_BYTES {
             return Err(DirError::TOO_LARGE);
@@ -414,6 +495,7 @@ impl<S: Store> Directory<S> {
             .listing(bytes)
             .map_err(|r| rejected(&r, "bad_listing"))?;
         let p = listing.params();
+        self.name_rate(key, &p.name)?;
         if p.directory != self.settings.host {
             return bad("wrong_directory", "listing is for another directory");
         }
@@ -502,6 +584,11 @@ impl<S: Store> Directory<S> {
                 .name_state(&p.name)
                 .await
                 .map_err(|e| internal(&e))?;
+            if let Some((_, at)) = state.owner_revoked.iter().find(|(id, _)| *id == p.identity)
+                && listing.token().grant.issued_at <= *at
+            {
+                return Err(OWNER_REVOKED);
+            }
             let mut name = name_record(&state);
             // The same bytes again are idempotent; anything else must be
             // admitted by the core's name rules.
@@ -543,7 +630,20 @@ impl<S: Store> Directory<S> {
     ///
     /// A [`DirError`].
     pub async fn withdraw(&self, bytes: &[u8]) -> Result<Withdrawn, DirError> {
-        let r = self.withdraw_inner(bytes).await;
+        self.withdraw_from(bytes, None).await
+    }
+
+    /// [`Directory::withdraw`] for a client under rate-limit key `key`.
+    ///
+    /// # Errors
+    ///
+    /// A [`DirError`].
+    pub async fn withdraw_from(
+        &self,
+        bytes: &[u8],
+        key: Option<std::net::IpAddr>,
+    ) -> Result<Withdrawn, DirError> {
+        let r = self.withdraw_inner(bytes, key).await;
         self.metrics.event(
             "withdraw",
             match &r {
@@ -555,12 +655,17 @@ impl<S: Store> Directory<S> {
         r
     }
 
-    async fn withdraw_inner(&self, bytes: &[u8]) -> Result<Withdrawn, DirError> {
+    async fn withdraw_inner(
+        &self,
+        bytes: &[u8],
+        key: Option<std::net::IpAddr>,
+    ) -> Result<Withdrawn, DirError> {
         let now = self.now();
         let w = self
             .verifier
             .withdrawal(bytes, now)
             .map_err(|r| rejected(&r, "bad_request"))?;
+        self.name_rate(key, &w.name)?;
         let wrong_identity = DirError::new(
             403,
             "wrong_identity",
@@ -668,7 +773,7 @@ impl<S: Store> Directory<S> {
     async fn recheck_identity(&self, identity: &str) -> Result<(), DirError> {
         for r in self
             .store
-            .by_identity(identity)
+            .by_identity(identity, self.now())
             .await
             .map_err(|e| internal(&e))?
         {
@@ -719,16 +824,13 @@ impl<S: Store> Directory<S> {
                 }
             },
         };
-        self.set_owner(r, record_fetch(r.owner, now, check)).await?;
-        self.metrics.event("owner_check", outcome);
-        Ok(())
-    }
-
-    async fn set_owner(&self, r: &ListingRecord, s: OwnerStatus) -> Result<(), DirError> {
+        // The store folds the result into the history it holds now, so an
+        // overlapping check can't overwrite this one.
         self.store
-            .set_owner(&r.name, &r.sha256, s)
+            .record_owner_check(&r.name, &r.sha256, now, check)
             .await
             .map_err(|e| internal(&e))?;
+        self.metrics.event("owner_check", outcome);
         Ok(())
     }
 
@@ -738,21 +840,33 @@ impl<S: Store> Directory<S> {
     ///
     /// Storage failures.
     pub async fn recheck_due(&self) -> Result<usize, DirError> {
-        let before = self.now().saturating_sub(RECHECK_EVERY_SECS);
+        use futures_util::StreamExt as _;
+        let now = self.now();
+        let before = now.saturating_sub(RECHECK_EVERY_SECS);
         let due = self
             .store
-            .due_owner_checks(before + 1, CHECKS_PER_PASS)
+            .due_owner_checks(before + 1, now, CHECKS_PER_PASS)
             .await
             .map_err(|e| internal(&e))?;
         let n = due.len();
-        for r in due {
-            self.check_owner(&r).await?;
-        }
+        // Up to CHECK_CONCURRENCY fetches at a time, so slow owner domains
+        // don't hold up the pass.
+        let results: Vec<Result<(), DirError>> = futures_util::stream::iter(due)
+            .map(|r| async move { self.check_owner(&r).await })
+            .buffer_unordered(CHECK_CONCURRENCY)
+            .collect()
+            .await;
+        results.into_iter().collect::<Result<(), DirError>>()?;
         Ok(n)
     }
 
-    /// Periodic maintenance: owner re-checks, expired tombstones and rate
-    /// windows.
+    /// Forget idle rate-limit windows. Runs on its own timer.
+    pub fn sweep_limits(&self) {
+        self.limiter.sweep(self.clock.unix_millis());
+    }
+
+    /// Periodic maintenance: rate windows, old feed entries and expired
+    /// listings, then owner re-checks.
     ///
     /// # Errors
     ///
