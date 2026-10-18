@@ -29,7 +29,8 @@ unicode-properties.workspace = true
 zeroize.workspace = true
 
 [features]
-# Hooks only tests use (Group::add_knocker_unchecked). Off by default: release
+# Hooks only tests use (Group::add_knocker_unchecked, Group::commit_unchecked).
+# Off by default: release
 # builds, and the agentconnect-core wheel, never contain them.
 test-hooks = []
 

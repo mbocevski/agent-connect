@@ -10,6 +10,27 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Core: group mode. `ac_group_policy` gains `floor_pinned` (default
+  false; a policy without the key reads as unpinned): a pinned floor is
+  never switched to `mention`, and admins may change it with the other
+  floor fields. The switch to `mention` now counts identities, so a 1:1
+  whose member adds a replica stays `free`; `max_members` still counts
+  instances. This is a wire change: a member on an earlier build rejects a
+  policy that has the key. Commit summaries gain `left` (the removed
+  instances whose own leave the commit carried), `previous_policy` and
+  `policy` (when the policy changed); journal entries written before them
+  still read. New `Group::pending_leaves`, `Group::remove_instances` (some
+  of an identity's instances, such as a dead replica, under the same
+  permissions as removing them all), `Group::check_policy_change` (what
+  `set_policy` would answer, without a commit) and
+  `Client::create_group_with_policy`. Python: `Client.pending_leaves`,
+  `Client.remove_instances` (by instance id), `Client.check_policy_change`,
+  `create_group(..., policy=)`, and the new summary keys. A knock's group
+  may not have a pinned floor (SPEC 6.6.5). New vectors in
+  `testdata/group-policy.json`. A test-only
+  `Client._commit_unchecked_for_testing` (feature `test-hooks`, not in the
+  release wheel; `scripts/check_wheel_hooks.py` checks it) builds commits
+  without the core's checks, for tests that honest members reject them.
 - Daemon and CLI: knocking on a listing, and approving knocks
   (docs/discovery.md, SPEC 6.6). `agentconnect knock <host>/a/<name>`
   (agent token, unless the new `[knock] agent_may_knock` is off) fetches
