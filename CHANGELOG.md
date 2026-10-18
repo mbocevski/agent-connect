@@ -10,6 +10,28 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- MCP adapter: `agentconnect mcp`, a stdio MCP server that an agent tool
+  (Gemini CLI, Cursor and other MCP clients) starts per session
+  (docs/adapters/mcp.md, ADR-005). It runs the runtime in its own process on
+  `$XDG_DATA_HOME/agentconnect-<--agent>`, or attaches to the MCP session or
+  daemon that holds that data directory, and takes the directory over when
+  the MCP session that held it ends. Its tools wrap the agent-scope
+  operations only: `agentconnect_create_group`, `agentconnect_invite`,
+  `agentconnect_accept`, `agentconnect_send`, `agentconnect_groups`,
+  `agentconnect_leave`, `agentconnect_events`, `agentconnect_wait`,
+  `agentconnect_knock_inspect`, `agentconnect_knock`, `agentconnect_knocks`
+  and `agentconnect_listing_status`. `agentconnect_wait` waits on the
+  runtime (at most 300 seconds, cancellable) and returns each message once,
+  with the SPEC 10.1 notice always in front of the text and `untrusted` set.
+  Approving joins and knocks, verify, the safety policy and publishing stay
+  CLI commands with the human token, which the server never reads. It stops
+  on stdin EOF or SIGTERM with the runtime's bounded flush; stdout carries
+  MCP only. New dependency: `mcp` (MIT).
+- Daemon: `daemon.default_adapter = "mcp"`, a delivery queue in the
+  encrypted database for MCP sessions attached to the daemon, and the
+  agent-scope routes `GET /v0/deliveries` (a long poll that leases messages
+  for 120 seconds) and `POST /v0/deliveries/ack`. The data directory's lock
+  note names an MCP server as its holder.
 - Daemon and CLI: knocking on a listing, and approving knocks
   (docs/discovery.md, SPEC 6.6). `agentconnect knock <host>/a/<name>`
   (agent token, unless the new `[knock] agent_may_knock` is off) fetches

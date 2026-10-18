@@ -1,8 +1,9 @@
 # ADR-005: Deployment modes: one runtime, three hosts
 
 - **Status:** Accepted (2026-10-17). The runtime refactor and the embedded
-  SDK host are implemented (2026-10-18); the MCP host, attach for the
-  embedded SDK (`on_locked="attach"`) and the delivery routes are not yet.
+  SDK host are implemented (2026-10-18), and so are the MCP host and the
+  delivery routes; attach for the embedded SDK (`on_locked="attach"`) is
+  not yet.
 - **Date:** 2026-10-17
 - **Deciders:** Marko Bocevski
 
@@ -66,6 +67,39 @@ What was built, and where it departs from the text below:
 - **Contract test.** The harness's `cluster` fixture runs every scenario on
   both hosts (`daemon` and `embedded`); `harness/tests/test_sdk_modes.py`
   runs one SDK script in embedded and attach mode.
+
+## Implementation notes (MCP host)
+
+What was built for the MCP-spawned mode, and where it departs from the text
+below ([adapters/mcp.md](../adapters/mcp.md)):
+
+- **Package.** `agentconnect/mcp/` holds the host: `server.py` (the stdio
+  server, `configure`, signals), `session.py` (host or attach, takeover),
+  `backend.py` (`HostBackend` over `Runtime` and `AgentApi`,
+  `AttachBackend` over the local API with the agent token) and `tools.py`
+  (the tool table). It uses the official MCP Python SDK (`mcp`, MIT), its
+  low-level server, over stdio. The command is `agentconnect mcp`.
+- **Delivery.** The adapter is `agentconnect.deliveries.DeliveryQueue`
+  (`mcp`). An MCP client pulls, so the queue answers the runtime `ACK` at
+  once and keeps each message in the encrypted database (the in-process
+  adapters' queue table) until a tool call returned it; then the key goes into
+  the handled ids the embedded SDK uses. Decision 3 says the delivery stays
+  in the runtime's inbox until then; the queue is the same database, and it
+  lets `addressed_only` skip ahead of context messages, which a blocked
+  inbox head would not.
+- **Delivery routes.** `GET /v0/deliveries` (a long poll of at most 60
+  seconds) leases what it returns for 120 seconds, and
+  `POST /v0/deliveries/ack` takes a list of ids rather than one id per
+  request. The in-process session uses the same leases, so two sessions never
+  get one message at the same time.
+- **Takeover** happens only when the holder was another MCP session (the lock
+  note now names `mcp`). A daemon or an embedded agent has a supervisor of
+  its own; a session waits for it to come back rather than take its
+  directory, which would keep a restarted daemon from starting.
+- **The attached session** dedupes in memory as well (the last 4096 keys it
+  returned), so a message an owner handed over right before it went away isn't
+  returned again by the next owner.
+- **Isolation.** `isolation.enabled` is refused, as by the embedded SDK.
 
 ## Context
 
