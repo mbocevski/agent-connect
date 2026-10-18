@@ -11,8 +11,9 @@ one agent). The relay is the MLS Delivery Service and forwards ciphertext only.
 Trust comes from the secret in the link's `#fragment`, plus optional SAS (short
 code) verification. Message payloads are A2A v1.0 JSON inside the encryption.
 
-Primary targets: **A2A-server agents** and **headless/SDK agents** (webhooks).
-MCP / Claude Code Channels adapters are deferred.
+Primary targets: **A2A-server agents**, **headless/SDK agents** (webhooks,
+embedded) and **MCP agent tools** (`agentconnect mcp`, stdio).
+The Claude Code Channels push adapter is deferred.
 
 ## Status
 
@@ -20,7 +21,8 @@ Pre-alpha. The protocol is in `SPEC.md` and the stack decisions in
 `docs/adr/001-stack.md`; those two files are the source of truth. The core,
 relay, daemon, the A2A, webhook and SSE adapters, the safety policy, the
 separate-OS-user mode, the Python SDK (embedded mode by default, attach mode
-for a separate daemon) and the directory are implemented. The daemon and CLI
+for a separate daemon), the MCP server (`agentconnect mcp`) and the directory
+are implemented. The daemon and CLI
 side of discovery (publishing a listing, knocking, approving knocks) is not:
 the core and the relay already support signed listings, doors and knocks.
 The README's Status section lists what works; `docs/MAP.toml` keeps it in step.
@@ -33,7 +35,7 @@ The README's Status section lists what works; `docs/MAP.toml` keeps it in step.
 | `core-py/` | PyO3 bindings for `core` (maturin) | Rust |
 | `relay/` | MLS Delivery Service: commit ordering, fan-out, invites, doors and knock forwarding; serves `web/` | Rust (axum) |
 | `directory/` | The directory of signed listings (discovery, ADR-006): search, cards, owner verification, MCP | Rust (axum) |
-| `daemon/` | The runtime (`runtime/`), `agentconnectd` + `agentconnect` CLI, adapters (A2A, webhook, SSE), safety policy, separate-OS-user mode, group mode | Python |
+| `daemon/` | The runtime (`runtime/`), `agentconnectd` + `agentconnect` CLI, the MCP server (`mcp/`), adapters (A2A, webhook, SSE, MCP delivery queue), safety policy, separate-OS-user mode, group mode | Python |
 | `harness/` | Multi-node test harness: relay process, daemons, malicious relay proxy | Python |
 | `sdk/python/` | Python SDK for headless agents: embedded runtime by default, attach to a daemon | Python |
 | `examples/` | Runnable agent examples (Claude Agent SDK, LangGraph) | Python |
@@ -129,7 +131,7 @@ Python. Don't use `pip install` or global venvs.
 
 - [Conventional Commits](https://www.conventionalcommits.org/):
   `<type>(<scope>): <subject>`. Scopes: `spec`, `core`, `relay`, `directory`, `daemon`,
-  `a2a`, `sdk`, `web`, `policy`, `group`, `ci`, `docs`, `deps`.
+  `a2a`, `mcp`, `sdk`, `web`, `policy`, `group`, `ci`, `docs`, `deps`.
 - Add every user-visible change to `CHANGELOG.md` under `[Unreleased]`
   ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)). CI fails if you
   don't, unless the PR is labelled `skip-changelog`.
