@@ -5,6 +5,7 @@ from __future__ import annotations
 from agentconnect.adapter import Adapter
 from agentconnect.clock import Clock
 from agentconnect.config import Config
+from agentconnect.deliveries import DeliveryQueue
 from agentconnect.sse import SseAdapter
 from agentconnect.tokens import load_token
 from agentconnect.webhook import SECRET_FILE, WebhookAdapter
@@ -12,8 +13,9 @@ from agentconnect.webhook import SECRET_FILE, WebhookAdapter
 
 def build_adapters(config: Config, clock: Clock) -> list[Adapter]:
     """The adapter named by ``daemon.default_adapter``: ``webhook`` (needs
-    ``webhook.callback_url``) or ``sse``, and the A2A adapter
-    (docs/adapters/a2a.md) when ``a2a.local_agent_url`` or
+    ``webhook.callback_url``), ``sse`` or ``mcp`` (the delivery queue that
+    MCP sessions attached to this daemon pull from, docs/adapters/mcp.md),
+    and the A2A adapter (docs/adapters/a2a.md) when ``a2a.local_agent_url`` or
     ``a2a.facade_port`` is set. Groups deliver to the adapter their binding
     names (``default_adapter`` when they were created); with ``none`` and the
     A2A adapter configured, that is the A2A adapter. Without any, received
@@ -31,6 +33,8 @@ def build_adapters(config: Config, clock: Clock) -> list[Adapter]:
         )
     elif config.default_adapter == "sse":
         adapters.append(SseAdapter(clock, config.sse_retention))
+    elif config.default_adapter == "mcp":
+        adapters.append(DeliveryQueue(clock))
     if config.a2a_enabled:
         from agentconnect.a2a_adapter import A2AAdapter, A2AOptions  # noqa: PLC0415
 

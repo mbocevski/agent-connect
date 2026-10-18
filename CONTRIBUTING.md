@@ -21,8 +21,8 @@ Python workspace (`uv sync --all-packages`), and all git hooks via prek.
 1. Branch from `main`: `git switch -c feat/<topic>`.
 2. Commit using [Conventional Commits](https://www.conventionalcommits.org/).
    The `commit-msg` hook checks the type and scope. Scopes: `spec`, `core`,
-   `relay`, `daemon`, `a2a`, `sdk`, `web`, `policy`, `group`, `ci`, `docs`,
-   `deps`.
+   `relay`, `directory`, `daemon`, `a2a`, `mcp`, `sdk`, `web`, `policy`,
+   `group`, `ci`, `docs`, `deps`.
 3. Add user-facing changes to `CHANGELOG.md` under `[Unreleased]`.
 4. `just pr` pushes the branch and opens a PR. Use a Conventional Commit PR
    title; it becomes the squash commit.

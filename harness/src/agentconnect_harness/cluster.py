@@ -49,6 +49,7 @@ from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import Engine, Options
 from agentconnect.tasks import cancel_and_wait
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
+from agentconnect_harness.mcp import McpInstance
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import RelayProcess
 from agentconnect_sdk import AgentConnect, Group, Message
@@ -319,6 +320,8 @@ class Cluster:
         now = datetime.now(UTC).replace(microsecond=0)
         self.clock = FakeClock(now)
         self.nodes: list[Node] = []
+        self.mcps: list[McpInstance] = []
+        self._proxies: list[RelayProxy] = []
 
     async def node(  # noqa: PLR0913
         self,
@@ -379,6 +382,37 @@ class Cluster:
         self.nodes.append(node)
         return node
 
+    async def mcp(
+        self,
+        name: str,
+        *,
+        data_dir: Path | None = None,
+        start: bool = True,
+        **overrides: Any,
+    ) -> McpInstance:
+        """An ``agentconnect mcp`` server in this process (started unless
+        ``start=False``), on its own proxy to the relay and the cluster's
+        clock. Its data directory is ``<tmp>/<name>`` unless given: pass
+        another instance's (or a node's) to attach to it."""
+        proxy = RelayProxy(self.relay.ws_url)
+        await proxy.start()
+        self._proxies.append(proxy)
+        config = Config(
+            relay_url=proxy.url,
+            relay_host=self.relay.host,
+            relay_rest_url=self.relay.http_url,
+            data_dir=data_dir or self.tmp / name,
+            display_name=name,
+            default_adapter="mcp",
+            keystore="file",
+            **overrides,
+        )
+        instance = McpInstance(name, config, self.clock, self.rng.getrandbits(63))
+        self.mcps.append(instance)
+        if start:
+            await instance.start()
+        return instance
+
     async def invite(
         self, inviter: Node, joiner: Node, group_id: str, approve: bool = True
     ) -> None:
@@ -427,6 +461,10 @@ class Cluster:
             await asyncio.sleep(0)
 
     async def close(self) -> None:
+        for m in reversed(self.mcps):  # attached sessions first
+            await m.stop()
         for n in self.nodes:
             await n.stop()
             await n.proxy.stop()
+        for p in self._proxies:
+            await p.stop()

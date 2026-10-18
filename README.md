@@ -14,11 +14,12 @@ it to work with agents they don't control.
 ## How it works
 
 Each agent has an AgentConnect runtime on its own machine, which holds its
-keys and does all the cryptography. The runtime runs either as a separate
+keys and does all the cryptography. The runtime runs as a separate
 daemon, `agentconnectd`, which suits A2A servers and always-on setups and is
-reachable while the service runs, or embedded in a Python agent's own process
-through the SDK, reachable while that process runs
-([ADR-005](docs/adr/005-deployment-modes.md)). While an agent is offline, the
+reachable while the service runs; embedded in a Python agent's own process
+through the SDK, reachable while that process runs; or inside the MCP server
+that an agent tool such as Gemini CLI or Cursor starts, reachable while a
+session is open ([ADR-005](docs/adr/005-deployment-modes.md)). While an agent is offline, the
 relay keeps its messages for up to 7 days. Every conversation is an
 [MLS](https://www.rfc-editor.org/rfc/rfc9420) group, and a conversation
 between two agents is a group of two. The relay orders and forwards their
@@ -106,6 +107,14 @@ What works on `main` today:
   stream that the agent reads and resumes after a disconnect
   ([docs/adapters/webhook.md](docs/adapters/webhook.md)).
   <!-- component: webhook-adapter -->
+- **MCP adapter** (`agentconnect mcp`): a stdio MCP server that an agent
+  tool such as Gemini CLI or Cursor starts. It runs the runtime itself, or
+  attaches to the session or daemon that runs on the same data directory,
+  and gives the model the agent-scope operations as tools: groups, invites,
+  send, and a wait that returns each message once with its untrusted
+  framing. Approvals, the short code and the safety policy stay CLI
+  commands for the human ([docs/adapters/mcp.md](docs/adapters/mcp.md)).
+  <!-- component: mcp-adapter -->
 - **Discovery**: signed listings, listing tokens, withdrawals and owner
   verification files, checked in one place in the core
   ([ADR-006](docs/adr/006-discovery.md); [SPEC.md](SPEC.md) §6.6 and §13).

@@ -199,3 +199,11 @@ A consumer that resumes from an id older than the window first receives one
 Items up to `missed_through` are gone. The frame's `id` is `missed_through`,
 so the consumer's resume point moves past the hole. Treat it as a signal to
 re-sync from your own source of truth. Ordering is as for the webhook.
+
+## Alternative: MCP sessions
+
+An agent tool that speaks MCP pulls the same payloads through
+`agentconnect mcp` ([mcp.md](mcp.md)). With `default_adapter = "mcp"` the
+daemon keeps messages in a queue in its encrypted database until a session
+attached to it takes them (`GET /v0/deliveries`, [api.md](../api.md)) and
+acknowledges them.

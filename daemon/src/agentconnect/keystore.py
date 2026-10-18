@@ -69,7 +69,21 @@ def write_private(path: Path, data: bytes) -> None:
 
 
 class DataDirLockedError(RuntimeError):
-    """Another runtime (a daemon or an embedded agent) holds the data directory."""
+    """Another runtime (a daemon, an embedded agent or an MCP server) holds
+    the data directory. ``holder`` is the kind its note names (``daemon``,
+    ``embedded``, ``mcp``), or ``None`` when the note is missing."""
+
+    def __init__(self, message: str, holder: str | None = None) -> None:
+        super().__init__(message)
+        self.holder = holder
+
+
+class DataDirAccessError(OSError):
+    """This OS user can't open the data directory's lock (another user's,
+    such as a daemon in separate-OS-user mode)."""
+
+
+LOCK_HOLDERS = {"daemon": "a daemon", "embedded": "an embedded agent", "mcp": "an MCP server"}
 
 
 class DataDirLock:
@@ -90,26 +104,50 @@ class DataDirLock:
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            holder = self._holder(self._fd)
+            note = self._note(self._fd)
             os.close(self._fd)
             self._fd = None
+            holder = "unknown" if note is None else f"{LOCK_HOLDERS[note[0]]}, pid {note[1]}"
             msg = (
                 f"another agentconnect runtime ({holder}) is using {data_dir}: "
                 "stop it, or use another data directory"
             )
-            raise DataDirLockedError(msg) from None
+            raise DataDirLockedError(msg, None if note is None else note[0]) from None
         os.ftruncate(self._fd, 0)
         os.pwrite(self._fd, f"{owner} {os.getpid()}\n".encode("ascii"), 0)
 
+    @classmethod
+    def probe(cls, data_dir: Path) -> tuple[bool, str | None]:
+        """Whether a runtime holds ``data_dir`` now, and the kind its note
+        names (the holder's, or the last holder's when nobody holds it;
+        ``None`` without a note). Takes the lock for an instant when it is
+        free, so a runtime that starts at that instant is refused once."""
+        try:
+            fd = os.open(data_dir / cls.FILE, os.O_RDWR)
+        except FileNotFoundError:
+            return False, None
+        except PermissionError:
+            msg = f"{data_dir} is not accessible to this user"
+            raise DataDirAccessError(msg) from None
+        try:
+            note = cls._note(fd)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True, None if note is None else note[0]
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False, None if note is None else note[0]
+        finally:
+            os.close(fd)
+
     @staticmethod
-    def _holder(fd: int) -> str:
-        """``an embedded agent, pid 123`` from the holder's note, or
-        ``unknown`` when it's missing or not ours."""
+    def _note(fd: int) -> tuple[str, str] | None:
+        """``(kind, pid)`` from the holder's note, or ``None`` when it's
+        missing or not ours."""
         words = os.pread(fd, 64, 0).decode("ascii", "replace").split()
-        names = {"daemon": "a daemon", "embedded": "an embedded agent"}
-        if len(words) != 2 or words[0] not in names or not words[1].isdigit():  # noqa: PLR2004
-            return "unknown"
-        return f"{names[words[0]]}, pid {words[1]}"
+        if len(words) != 2 or words[0] not in LOCK_HOLDERS or not words[1].isdigit():  # noqa: PLR2004
+            return None
+        return words[0], words[1]
 
     def release(self) -> None:
         if self._fd is not None:
