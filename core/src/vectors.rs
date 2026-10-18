@@ -1715,6 +1715,9 @@ const NOT_POLICY: &str = "unauthorized commit: committer may not change this pol
 /// What a commit does, as stored in `group-policy.json`: committer, Adds,
 /// Removes (identity, proposed by the removed leaf), the policy the commit
 /// introduces, and leaves and identities before and after it.
+/// `identities_kept` (those with an instance from before the commit that
+/// it doesn't remove) is every identity after the commit that its Adds
+/// don't bring alone; [`with_kept`] overrides it.
 fn facts(
     committer: &str,
     adds: &[&str],
@@ -1723,6 +1726,11 @@ fn facts(
     leaves: [usize; 2],
     identities: [&[&str]; 2],
 ) -> Value {
+    let kept: Vec<&str> = identities[1]
+        .iter()
+        .copied()
+        .filter(|i| identities[0].contains(i) || !adds.contains(i))
+        .collect();
     json!({
         "committer": committer,
         "adds": adds,
@@ -1734,7 +1742,14 @@ fn facts(
         "leaves_after": leaves[1],
         "identities_before": identities[0],
         "identities_after": identities[1],
+        "identities_kept": kept,
     })
+}
+
+/// `facts` with these `identities_kept`.
+fn with_kept(mut facts: Value, kept: &[&str]) -> Value {
+    facts["identities_kept"] = json!(kept);
+    facts
 }
 
 /// Checks a `group-policy.json` value against the core. A case marked
@@ -2421,6 +2436,30 @@ fn group_policy_vectors() {
             None,
         ),
         (
+            "an Add of a new owner instance doesn't keep the owner",
+            "members invite",
+            with_kept(
+                facts(m, &[o], &[(o, true), (o, true)], None, [3, 2], [two, two]),
+                &[m],
+            ),
+            owner_must_transfer.as_str(),
+            None,
+        ),
+        (
+            "ownership may not go to an identity the commit adds",
+            "admin",
+            facts(
+                o,
+                &[m],
+                none_removed,
+                Some("transferred to the member"),
+                [2, 3],
+                [&[o, a], three],
+            ),
+            "unauthorized commit: new owner is not a member",
+            None,
+        ),
+        (
             "an admin may not remove one of the owner's instances",
             "admins invite and remove",
             facts(a, none, &[(o, false)], None, [4, 3], [three, three]),
@@ -2440,7 +2479,7 @@ fn group_policy_vectors() {
         .collect();
 
     let mut fresh = header(
-        "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, and leaves and identities before and after) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies, and the policy-change cases through check_policy_change, through the bindings.",
+        "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, leaves and identities before and after, and `identities_kept`: those with an instance from before the commit that it doesn't remove) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies, and the policy-change cases through check_policy_change, through the bindings.",
         &seed,
     );
     fresh["identities"] = json!({"owner": o, "admin": a, "member": m, "joiner": j});

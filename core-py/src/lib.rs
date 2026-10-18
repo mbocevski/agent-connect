@@ -1490,6 +1490,8 @@ impl Client {
 /// commit as written in `testdata/group-policy.json` (JSON bytes), against
 /// the policy in force and the policy the commit introduces (canonical JSON
 /// bytes). Raises the error a receiver would reject the commit with.
+/// Only with the `test-hooks` feature, which the release wheel leaves off.
+#[cfg(feature = "test-hooks")]
 #[pyfunction]
 #[pyo3(signature = (policy, facts, new_policy=None))]
 fn _authorize_for_testing(policy: &[u8], facts: &[u8], new_policy: Option<&[u8]>) -> PyResult<()> {
@@ -1773,7 +1775,6 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     for f in [
         wrap_pyfunction!(supports_protocol, m)?,
         wrap_pyfunction!(parse_invite_url, m)?,
-        wrap_pyfunction!(_authorize_for_testing, m)?,
         wrap_pyfunction!(join_request_mac, m)?,
         wrap_pyfunction!(unwrap_welcome, m)?,
         wrap_pyfunction!(derive_sas, m)?,
@@ -1788,5 +1789,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ] {
         m.add_function(f)?;
     }
+    #[cfg(feature = "test-hooks")]
+    m.add_function(wrap_pyfunction!(_authorize_for_testing, m)?)?;
     Ok(())
 }

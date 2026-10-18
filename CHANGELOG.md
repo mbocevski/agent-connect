@@ -46,9 +46,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   an instance whose own leave is pending is refused with `not permitted`.
   A commit's GroupContextExtensions must carry the policy's canonical
   encoding; a policy written before `floor_pinned` is still read from a
-  stored context or a Welcome. The Python suite runs every authorization
-  case of `testdata/group-policy.json` (test-only
-  `_native._authorize_for_testing`).
+  stored context or a Welcome. A commit keeps the owner, or makes an
+  identity the new owner, only through an instance that was in the group
+  before it: an Add of a new instance of the owner's identity in the
+  commit that removes all its earlier ones is rejected (SPEC 9.2). The
+  Python suite runs every authorization case of
+  `testdata/group-policy.json` through the test-only
+  `_native._authorize_for_testing` (feature `test-hooks`, which
+  `scripts/check_wheel_hooks.py` checks).
 - MCP adapter: `agentconnect mcp`, a stdio MCP server that an agent tool
   (Gemini CLI, Cursor and other MCP clients) starts per session
   (docs/adapters/mcp.md, ADR-005). It runs the runtime in its own process on

@@ -49,8 +49,15 @@ def test_the_unchecked_commit_hook_fails_a_wheel(tmp_path: Path) -> None:
     assert check.main([str(hooked)]) == 1
 
 
+def test_the_authorization_hook_fails_a_wheel(tmp_path: Path) -> None:
+    hooked = _wheel(tmp_path, "authorize.whl", b"\x7fELF _authorize_for_testing")
+    assert check.hooks_in(hooked) == ["_authorize_for_testing"]
+    assert check.main([str(hooked)]) == 1
+
+
 def test_the_development_build_has_the_hooks() -> None:
     """The test environment (uv sync) builds the core with ``test-hooks``;
     the names the check looks for are the ones that build exports."""
     for hook in check.TEST_HOOKS:
-        assert hasattr(ac.Client, hook.decode())
+        name = hook.decode()
+        assert hasattr(ac.Client, name) or hasattr(ac._native, name), name

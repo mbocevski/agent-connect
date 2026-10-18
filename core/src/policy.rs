@@ -293,6 +293,9 @@ pub(crate) struct CommitFacts {
     pub members_after: usize,
     /// Identities present after the commit.
     pub identities_after: BTreeSet<String>,
+    /// Identities that keep an instance from before the commit, one it
+    /// doesn't remove: the instances its Adds bring are not counted.
+    pub identities_kept: BTreeSet<String>,
 }
 
 /// Why the owner's last instance may not leave (SPEC §9.2).
@@ -305,7 +308,9 @@ pub(crate) const OWNER_MUST_TRANSFER: &str = "the owner must transfer ownership 
 ///   if the added identity is the committer's own (another replica).
 /// - Removing the owner's instances needs the owner, unless it's a leave.
 /// - No commit may remove the owner's last instance: the owner transfers
-///   ownership before it leaves.
+///   ownership before it leaves. The owner must keep an instance that was
+///   in the group before the commit; one the commit adds doesn't count
+///   (its Welcome may never be used). The same holds for a new owner.
 /// - The floor switch (`free` → `mention` in the commit that grows the
 ///   group past two identities, unless `floor_pinned`) is accepted from any
 ///   committer allowed to make that Add.
@@ -328,7 +333,7 @@ pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()>
         }
     }
     if facts.removes.iter().any(|r| r.identity == policy.owner)
-        && !facts.identities_after.contains(&policy.owner)
+        && !facts.identities_kept.contains(&policy.owner)
     {
         // The committer is never removed by its own commit, so an owner
         // committer always survives it: the owner's last instance can only
@@ -351,15 +356,18 @@ pub(crate) fn authorize(policy: &GroupPolicy, facts: &CommitFacts) -> Result<()>
 /// [`authorize`] on the facts of a commit as written in
 /// `testdata/group-policy.json`: a JSON object with `committer`, `adds`,
 /// `removes` (`identity`, `self_proposed`), `leaves_after`,
-/// `identities_before` and `identities_after`. Its `new_policy` names a
-/// policy of the file; the caller resolves it and passes it as
-/// `new_policy`. **Tests only** (the shared vectors, from Rust and through
-/// the bindings): a member's facts come from the commit itself.
+/// `identities_before`, `identities_after` and `identities_kept`. Its
+/// `new_policy` names a policy of the file; the caller resolves it and
+/// passes it as `new_policy`. **Tests only** (the shared vectors, from
+/// Rust and through the bindings): a member's facts come from the commit
+/// itself. Only with the `test-hooks` feature, which release builds leave
+/// off.
 ///
 /// # Errors
 ///
 /// [`Error::Malformed`] for facts that don't have this shape, or the error
 /// [`authorize`] returns.
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub fn authorize_facts_for_testing(
     in_force: &GroupPolicy,
@@ -399,6 +407,7 @@ pub fn authorize_facts_for_testing(
             .and_then(|n| usize::try_from(n).ok())
             .ok_or_else(bad)?,
         identities_after: texts("identities_after")?.into_iter().collect(),
+        identities_kept: texts("identities_kept")?.into_iter().collect(),
     };
     authorize(in_force, &facts)
 }
@@ -411,7 +420,7 @@ fn authorize_policy_change(
     if new == old {
         return Ok(());
     }
-    if !facts.identities_after.contains(&new.owner) {
+    if !facts.identities_kept.contains(&new.owner) {
         return Err(Error::Unauthorized("new owner is not a member"));
     }
     let committer = facts.committer.as_str();
@@ -477,7 +486,77 @@ mod tests {
             identities_before: BTreeSet::new(),
             members_after: 2,
             identities_after: BTreeSet::new(),
+            identities_kept: BTreeSet::new(),
         }
+    }
+
+    /// [`super::authorize`], with `identities_kept` (when a test leaves it
+    /// empty) derived as the identities after the commit that it doesn't
+    /// only add: what the hand-written facts below mean.
+    fn authorize(policy: &GroupPolicy, f: &CommitFacts) -> Result<()> {
+        let mut f = f.clone();
+        if f.identities_kept.is_empty() {
+            f.identities_kept = f
+                .identities_after
+                .iter()
+                .filter(|i| f.identities_before.contains(*i) || !f.adds.contains(*i))
+                .cloned()
+                .collect();
+        }
+        super::authorize(policy, &f)
+    }
+
+    /// Re-review R1: an Add of a new instance of the owner's identity, in
+    /// the commit that removes every instance it had, doesn't keep the
+    /// owner; nor may ownership go to an identity the commit only adds.
+    #[test]
+    fn only_instances_from_before_the_commit_keep_a_role() {
+        let id = ids(3);
+        let p = GroupPolicy {
+            invite: InvitePermission::Members,
+            ..GroupPolicy::default_for(&id[0])
+        };
+        let mut f = facts(&id[1]);
+        f.adds = vec![id[0].clone()];
+        f.removes = vec![
+            Removal {
+                identity: id[0].clone(),
+                self_proposed: true,
+            },
+            Removal {
+                identity: id[0].clone(),
+                self_proposed: true,
+            },
+        ];
+        f.identities_before = set(&[&id[0], &id[1]]);
+        f.identities_after = set(&[&id[0], &id[1]]);
+        f.identities_kept = set(&[&id[1]]);
+        assert_eq!(
+            super::authorize(&p, &f),
+            Err(Error::Unauthorized(OWNER_MUST_TRANSFER))
+        );
+        // One of the owner's earlier instances stays: fine.
+        f.identities_kept = set(&[&id[0], &id[1]]);
+        super::authorize(&p, &f).unwrap();
+
+        let mut f = facts(&id[0]);
+        f.adds = vec![id[2].clone()];
+        f.identities_before = set(&[&id[0], &id[1]]);
+        f.identities_after = id.iter().cloned().collect();
+        f.identities_kept = set(&[&id[0], &id[1]]);
+        f.new_policy = Some(GroupPolicy {
+            owner: id[2].clone(),
+            ..p.clone()
+        });
+        assert_eq!(
+            super::authorize(&p, &f),
+            Err(Error::Unauthorized("new owner is not a member"))
+        );
+        f.new_policy = Some(GroupPolicy {
+            owner: id[1].clone(),
+            ..p
+        });
+        super::authorize(&GroupPolicy::default_for(&id[0]), &f).unwrap();
     }
 
     fn set(ids: &[&String]) -> BTreeSet<String> {
@@ -1060,7 +1139,7 @@ mod tests {
         let good = serde_json::json!({
             "committer": id[0], "adds": [id[1]], "removes": [],
             "leaves_after": 2, "identities_before": [id[0]],
-            "identities_after": [id[0], id[1]],
+            "identities_after": [id[0], id[1]], "identities_kept": [id[0]],
         });
         authorize_facts_for_testing(&p, None, good.to_string().as_bytes()).unwrap();
         let mut leave = good.clone();
@@ -1068,6 +1147,7 @@ mod tests {
         leave["adds"] = serde_json::json!([]);
         leave["removes"] = serde_json::json!([{"identity": id[0], "self_proposed": true}]);
         leave["identities_after"] = serde_json::json!([id[1]]);
+        leave["identities_kept"] = serde_json::json!([id[1]]);
         assert_eq!(
             authorize_facts_for_testing(&p, None, leave.to_string().as_bytes()),
             Err(Error::Unauthorized(OWNER_MUST_TRANSFER))
@@ -1079,6 +1159,7 @@ mod tests {
             ("removes", serde_json::json!([{"identity": id[0]}])),
             ("leaves_after", serde_json::json!(-1)),
             ("identities_after", serde_json::json!([1])),
+            ("identities_kept", serde_json::json!(null)),
         ] {
             let mut bad = good.clone();
             bad[key] = value;

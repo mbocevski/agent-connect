@@ -1193,7 +1193,7 @@ and SHOULD leave the group if the honest members can't converge.
 | Remove other member | A committer whose identity satisfies `remove`. Only the owner may remove the owner's instances. |
 | Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. The owner's last instance may not leave until it has transferred ownership. A sole remaining member only deletes its local state. |
 | Policy change (GroupContextExtensions) | Owner. Admins may change `floor`, `floor_pinned` and `floor_moderator` only. Any committer allowed to make the Add may apply the §9.1 floor switch. |
-| Owner transfer | Owner. The new owner must be a member after the commit. |
+| Owner transfer | Owner. The new owner must keep an instance that was in the group before the commit; one the commit adds doesn't count. |
 | Update (own leaf) | The instance itself |
 | Add another instance of an existing identity | Any instance of that identity (multi-replica), whatever `invite` says |
 | Remove other instances of one's own identity | Any instance of that identity |
@@ -1225,7 +1225,9 @@ Notes on the table:
   in the epoch as gone. Receivers MUST reject a leave proposal from the
   owner's only instance in the group (and not store it), and MUST reject
   any commit after which the identity named as `owner` by the policy in
-  force has no instance left although it had one before.
+  force has no instance left although it had one before. Only instances
+  that were in the group before the commit count: one the same commit adds
+  doesn't keep the owner, since nothing makes its holder join.
 - **Owner instances leaving at once.** Two instances of the owner can each
   propose a leave before they see the other's, and the relay doesn't
   deliver a proposal to its sender, so members can't agree on which came

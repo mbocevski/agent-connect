@@ -1150,6 +1150,21 @@ pub fn peek_header(bytes: &[u8]) -> Result<MessageHeader> {
     })
 }
 
+/// The identities of `members` (the group before a commit), and those that
+/// keep an instance the commit doesn't remove (`removed` leaves).
+fn identities_kept(
+    members: &[MemberInfo],
+    removed: &BTreeSet<u32>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let before = members.iter().map(|m| m.identity.clone()).collect();
+    let kept = members
+        .iter()
+        .filter(|m| !removed.contains(&m.leaf_index))
+        .map(|m| m.identity.clone())
+        .collect();
+    (before, kept)
+}
+
 /// Whether `q` is the leave (own Remove proposal) of `leaf`.
 fn is_leave_of(q: &QueuedProposal, leaf: u32) -> bool {
     matches!(
@@ -1345,6 +1360,7 @@ impl Group {
                 identities_before,
                 members_after: staying.len(),
                 identities_after: staying.iter().map(|m| m.identity.clone()).collect(),
+                identities_kept: staying.iter().map(|m| m.identity.clone()).collect(),
             },
         )
     }
@@ -1955,13 +1971,8 @@ impl Group {
 
         let removed_leaves: BTreeSet<u32> = removed.iter().map(|m| m.leaf_index).collect();
         let members = self.members()?;
-        let identities_before: BTreeSet<String> =
-            members.iter().map(|m| m.identity.clone()).collect();
-        let mut identities_after: BTreeSet<String> = members
-            .iter()
-            .filter(|m| !removed_leaves.contains(&m.leaf_index))
-            .map(|m| m.identity.clone())
-            .collect();
+        let (identities_before, identities_kept) = identities_kept(&members, &removed_leaves);
+        let mut identities_after = identities_kept.clone();
         identities_after.extend(added.iter().map(|a| a.identity.clone()));
         let new_policy = new_ctx.map(|c| c.policy);
         let policy_change = new_policy
@@ -1976,6 +1987,7 @@ impl Group {
             identities_before,
             members_after: members.len() + added.len() - removed_leaves.len(),
             identities_after,
+            identities_kept,
         };
         authorize(&current.policy, &facts)?;
         Ok(Inspection {

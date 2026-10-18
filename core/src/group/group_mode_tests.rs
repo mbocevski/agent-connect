@@ -798,6 +798,65 @@ fn a_commit_carrying_every_owner_replica_leave_is_rejected() {
     );
 }
 
+/// Re-review R1: both owner instances are leaving, and a member that may
+/// invite commits both leaves plus an Add of a KeyPackage of the owner's
+/// identity it holds (and withholds the Welcome). The owner would be left
+/// with only that new, never-joined instance: rejected. The owner must keep
+/// an instance that was in the group before the commit.
+#[test]
+fn rr_both_owner_leaves_plus_new_owner_instance_is_rejected() {
+    let clock = Arc::new(FakeClock::default());
+    let a = identity("rr3-a");
+    let mut m = Members::new(instance_of(&a, "rr3-a1", &clock), None);
+    m.join(0, instance_of(&a, "rr3-a2", &clock));
+    m.join(0, client("rr3-b", &clock));
+    let p = GroupPolicy {
+        invite: InvitePermission::Members,
+        ..m.policy()
+    };
+    m.set_policy(0, &p);
+    let p1 = m.gs[0].propose_leave(&m.cs[0]).unwrap();
+    let p2 = m.gs[1].propose_leave(&m.cs[1]).unwrap();
+    for (to, p) in [(1, &p1), (2, &p1), (0, &p2), (2, &p2)] {
+        assert!(matches!(
+            m.gs[to].process(&m.cs[to], p),
+            Ok(Event::LeaveProposed(_))
+        ));
+    }
+    let a3 = key_package(&instance_of(&a, "rr3-a3", &clock));
+    m.rejected(
+        2,
+        &[a3],
+        &[],
+        None,
+        None,
+        &Error::Unauthorized(OWNER_MUST_TRANSFER),
+    );
+    assert!(m.gs[0].is_active() && m.gs[1].is_active());
+}
+
+/// R1, the same rule for a transfer: the new owner must be an instance that
+/// was in the group before the commit, not one the commit adds.
+#[test]
+fn ownership_may_not_go_to_an_identity_the_same_commit_adds() {
+    let clock = Arc::new(FakeClock::default());
+    let mut m = Members::of(&["rrt-a", "rrt-b"], &clock);
+    let d = client("rrt-d", &clock);
+    let to_d = GroupPolicy {
+        owner: d.instance().identity().to_owned(),
+        ..m.policy()
+    };
+    let kp = key_package(&d);
+    m.rejected(
+        0,
+        &[kp],
+        &[],
+        None,
+        Some(&to_d),
+        &Error::Unauthorized("new owner is not a member"),
+    );
+}
+
 /// Review F4: removing a member whose leave is pending carries its own
 /// proposal, so every member reports a leave (`left`), for `remove` and
 /// `remove_instances` alike, and a plain member may commit it this way.
