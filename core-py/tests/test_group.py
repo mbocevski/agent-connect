@@ -164,6 +164,35 @@ def test_wrong_secret_and_bad_inputs(rng: random.Random) -> None:
     a._set_time_for_testing(None)
 
 
+def test_a_join_request_seen_before_is_a_replay(rng: random.Random) -> None:
+    """SPEC 6.2 "Replays": the inviter remembers a verified request by its
+    request id and KeyPackageRef until its invite expires (plus the grace),
+    and a full ledger refuses (``busy``) without evicting."""
+    a, b = make_client(rng), make_client(rng)
+    invite = a.create_invite("relay.example", 86_400)
+    link = ac.parse_invite_url(invite.url)
+    request = b.create_join_request(link, "b")
+    first = a.verify_join_request(request, invite)
+    assert first.forget_after == invite.expires_at + ac.LEDGER_GRACE_SECS
+    ledger = ac.ReplayLedger(capacity=2)
+    first.remember_in(ledger, b"msg-1")  # then the human rejects it
+    again = a.verify_join_request(request, invite)
+    for request_id in (b"msg-1", b"msg-2"):
+        with pytest.raises(ac.AgentConnectError) as e:
+            again.remember_in(ledger, request_id)
+        assert e.value.kind == "replay"
+    other = a.verify_join_request(b.create_join_request(link, "b"), invite)
+    other.remember_in(ledger, b"msg-3")
+    third = a.verify_join_request(b.create_join_request(link, "b"), invite)
+    with pytest.raises(ac.AgentConnectError) as e:
+        third.remember_in(ledger, b"msg-4")
+    assert e.value.kind == "busy"
+    assert sorted(i for i, _, _ in ledger.entries()) == [b"msg-1", b"msg-3"]
+    ledger.purge(first.forget_after + 1)
+    assert len(ledger) == 0
+    assert ac.ReplayLedger().capacity == ac.DEFAULT_LEDGER_CAPACITY
+
+
 def test_persistence_and_invite_parts(rng: random.Random, tmp_path: Path) -> None:
     db = tmp_path / "b.sqlite"
     identity = ac.Identity._generate_for_testing(rng.getrandbits(64))

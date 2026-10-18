@@ -19,6 +19,8 @@
 //! - [`db`]: [`EncryptedDb`], the SQLCipher database for a daemon's own records
 //! - [`journal`]: the processing journal that makes processing crash-safe (ADR-004)
 //! - [`knock`]: doors, sealed knocks and the knock Welcome wrap (§6.6)
+//! - [`ledger`]: the owner's replay ledger for join requests and knocks
+//!   (§6.2, §6.6.3)
 //! - [`listing`]: signed listings, listing tokens, withdrawals and owner
 //!   verification (§13)
 //! - [`net`]: which addresses an outbound fetch may connect to (§13.2.4)
@@ -36,6 +38,7 @@ pub mod invite;
 pub mod join;
 pub mod journal;
 pub mod knock;
+pub mod ledger;
 pub mod listing;
 mod mls;
 pub mod net;

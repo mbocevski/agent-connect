@@ -274,14 +274,14 @@ def test_listings_seen_keep_the_newest_1024_of_90_days(tmp_path: Path, rng: rand
     )
 )
 def test_the_ledger_and_its_table_agree_with_a_reference(steps: list[tuple[Any, ...]]) -> None:
-    """``KnockLedger`` with the ``knock_ledger`` table, as the knock service
+    """``ReplayLedger`` with the ``knock_ledger`` table, as the knock service
     uses them, against a model: a knock id or KeyPackageRef seen and not yet
     past its ``forget_after`` is always a replay, across restarts (the ledger
     is rebuilt from the table) and rolled-back transactions."""
     with tempfile.TemporaryDirectory() as tmp:
         key = random.Random(len(steps)).randbytes(32)  # noqa: S311 - a test database key
         store = Store(Path(tmp) / "d.sqlite3", key)
-        ledger = ac.KnockLedger()
+        ledger = ac.ReplayLedger()
         model: dict[str, tuple[str, int]] = {}  # knock id -> (ref, forget_after)
         clock = 0
 
@@ -317,7 +317,7 @@ def test_the_ledger_and_its_table_agree_with_a_reference(steps: list[tuple[Any, 
                 clock = max(clock, step[1])
                 store.close()
                 store = Store(Path(tmp) / "d.sqlite3", key)
-                ledger = ac.KnockLedger()
+                ledger = ac.ReplayLedger()
                 for kid, ref, until in store.ledger_rows(clock):
                     ledger.insert(_id(kid), _id(ref), until)
         for kid, (ref, until) in model.items():

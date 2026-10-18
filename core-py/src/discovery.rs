@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use zeroize::Zeroizing;
 
-use crate::{Identity, array, bad_arg, err, guarded, secret32};
+use crate::{Identity, ReplayLedger, array, bad_arg, err, guarded, secret32};
 
 fn trusted(directory: &str, keys: &[Vec<u8>]) -> PyResult<listing::TrustedDirectory> {
     let keys = keys
@@ -1062,9 +1062,10 @@ impl VerifiedKnock {
     }
 
     /// SPEC §6.6.3 step 6: raises `AgentConnectError` with kind `replay`
-    /// if `ledger` has seen this knock's id or KeyPackage, else records
-    /// them. Call it for every verified knock before anything else.
-    fn remember_in(&self, ledger: &mut KnockLedger) -> PyResult<()> {
+    /// if `ledger` has seen this knock's id or KeyPackage (`busy` if it is
+    /// full), else records them. Call it for every verified knock before
+    /// anything else.
+    fn remember_in(&self, ledger: &mut ReplayLedger) -> PyResult<()> {
         guarded(|| self.0.remember_in(&mut ledger.0).map_err(err))
     }
 
@@ -1089,78 +1090,6 @@ impl VerifiedKnock {
 
     fn __repr__(&self) -> String {
         format!("{:?}", self.0)
-    }
-}
-
-/// An in-memory record of the knocks an owner has seen (SPEC §6.6.3 step
-/// 6). A daemon that must survive restarts stores `knock_id`,
-/// `key_package_ref` and `forget_after` of each `VerifiedKnock` itself.
-#[pyclass(module = "agentconnect_core._native")]
-pub(crate) struct KnockLedger(knock::MemoryKnockLedger);
-
-#[pymethods]
-impl KnockLedger {
-    /// An empty ledger of at most `capacity` knocks (default 65536). When
-    /// full, a new knock is refused with kind `busy`; nothing live is ever
-    /// evicted.
-    #[new]
-    #[pyo3(signature = (capacity=None))]
-    fn new(capacity: Option<usize>) -> Self {
-        Self(capacity.map_or_else(
-            knock::MemoryKnockLedger::default,
-            knock::MemoryKnockLedger::with_capacity,
-        ))
-    }
-
-    #[getter]
-    fn capacity(&self) -> usize {
-        self.0.capacity()
-    }
-
-    /// `[(knock_id, key_package_ref, forget_after)]`, for the daemon to
-    /// persist in its encrypted store. It MUST persist them.
-    fn entries<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> Vec<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, u64)> {
-        self.0
-            .entries()
-            .into_iter()
-            .map(|e| {
-                (
-                    PyBytes::new(py, &e.knock_id),
-                    PyBytes::new(py, &e.key_package_ref),
-                    e.forget_after,
-                )
-            })
-            .collect()
-    }
-
-    /// Restores one persisted entry. Raises (kind `busy`) when full.
-    fn insert(
-        &mut self,
-        knock_id: &[u8],
-        key_package_ref: &[u8],
-        forget_after: u64,
-    ) -> PyResult<()> {
-        guarded(|| {
-            self.0
-                .insert(
-                    array(knock_id, "knock id")?,
-                    key_package_ref.to_vec(),
-                    forget_after,
-                )
-                .map_err(err)
-        })
-    }
-
-    /// Forgets entries whose knocks can no longer pass check 3 at `now`.
-    fn purge(&mut self, now: u64) {
-        self.0.purge(now);
-    }
-
-    fn __len__(&self) -> usize {
-        self.0.len()
     }
 }
 
@@ -1189,7 +1118,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DOOR_GRACE_SECS", knock::DOOR_GRACE_SECS)?;
     m.add("KNOCK_LIFETIME_SECS", knock::KNOCK_LIFETIME_SECS)?;
     m.add("KNOCK_FUTURE_SECS", knock::KNOCK_FUTURE_SECS)?;
-    m.add("DEFAULT_LEDGER_CAPACITY", knock::DEFAULT_LEDGER_CAPACITY)?;
     m.add_class::<Listing>()?;
     m.add_class::<DirectoryKey>()?;
     m.add_class::<Door>()?;
@@ -1197,7 +1125,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PendingKnock>()?;
     m.add_class::<VerifiedKnock>()?;
     m.add_class::<OwnerHistory>()?;
-    m.add_class::<KnockLedger>()?;
     m.add_class::<NameRecord>()?;
     for f in [
         wrap_pyfunction!(verify_listing, m)?,

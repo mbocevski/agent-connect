@@ -203,7 +203,7 @@ class KnockService:
         self._knock_lock = asyncio.Lock()
         self.dropped = 0  # knocks dropped since start (the human's listing status)
         self._max_pending = config.knock_max_pending_per_door
-        self._ledger = ac.KnockLedger(config.knock_ledger_capacity)
+        self._ledger = ac.ReplayLedger(config.knock_ledger_capacity)
         self._load_ledger()
 
     # -- plumbing ---------------------------------------------------------------
@@ -237,7 +237,7 @@ class KnockService:
         now = self._now()
         self._store.ledger_purge(now)
         rows = self._store.ledger_rows(now)
-        ledger = ac.KnockLedger(max(self._engine.config.knock_ledger_capacity, len(rows)))
+        ledger = ac.ReplayLedger(max(self._engine.config.knock_ledger_capacity, len(rows)))
         for knock_id, kp_ref, forget_after in rows:
             ledger.insert(unb64(knock_id), unb64(kp_ref), forget_after)
         self._ledger = ledger
