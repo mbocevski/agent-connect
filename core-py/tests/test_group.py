@@ -305,11 +305,33 @@ def _join_without_switch(owner: ac.Client, gid: bytes, joiner: ac.Client) -> byt
     return commit
 
 
+#: Authorization cases of group-policy.json Python doesn't check, by name,
+#: each with the reason. Every other case is checked.
+SKIPPED_AUTHORIZATION_CASES: dict[str, str] = {}
+
+
+def _dry_runnable(facts: dict[str, Any], three: set[str]) -> bool:
+    """A GroupContextExtensions alone, in a group of owner, admin and
+    member: what the committer's check_policy_change can answer."""
+    return (
+        not facts["adds"]
+        and not facts["removes"]
+        and facts["new_policy"] is not None
+        and set(facts["identities_before"]) == three
+        and set(facts["identities_after"]) == three
+        and (facts["leaves_before"], facts["leaves_after"]) == (3, 3)
+    )
+
+
 def test_group_policy_authorization_vectors(rng: random.Random) -> None:
-    """The policy-change cases of testdata/group-policy.json (SPEC 9.2): a
-    GroupContextExtensions alone, in a group of owner, admin and member,
-    through the committer's check_policy_change. The vector's identities
-    become these clients'."""
+    """Every authorization case of testdata/group-policy.json (SPEC 9.2).
+
+    Each case's facts go through the core's authorisation as stored in the
+    file. The policy-change cases also run, in a real group of owner, admin
+    and member, through the committer's check_policy_change, with the
+    vector's identities replaced by these clients'. A case marked
+    `pending` must not pass, as in core/src/vectors.rs.
+    """
     testdata = Path(__file__).resolve().parents[2] / "testdata"
     vectors = json.loads((testdata / "group-policy.json").read_text(encoding="utf-8"))
     ids = vectors["identities"]
@@ -320,22 +342,38 @@ def test_group_policy_authorization_vectors(rng: random.Random) -> None:
             policy = policy.replace(identity, clients[label].identity)
         return policy.encode()
 
+    def answer(call: Any) -> str:
+        try:
+            call()
+        except ac.AgentConnectError as e:
+            return str(e)
+        return "ok"
+
     policies = {p["name"]: p["policy"] for p in vectors["valid"]}
     three = {ids["owner"], ids["admin"], ids["member"]}
+    cases = vectors["authorization"]
+    names = [c["name"] for c in cases]
+    assert len(set(names)) == len(names)
+    assert set(SKIPPED_AUTHORIZATION_CASES) <= set(names)
     groups: dict[str, bytes] = {}
-    checked = 0
-    for case in vectors["authorization"]:
-        f = case["facts"]
-        if (
-            f["adds"]
-            or f["removes"]
-            or f["new_policy"] is None
-            or set(f["identities_before"]) != three
-            or set(f["identities_after"]) != three
-            or (f["leaves_before"], f["leaves_after"]) != (3, 3)
-        ):
+    checked = dry_runs = 0
+    for case in cases:
+        name, f, old = case["name"], case["facts"], case["policy"]
+        if name in SKIPPED_AUTHORIZATION_CASES:
             continue
-        old = case["policy"]
+        new = None if f["new_policy"] is None else policies[f["new_policy"]].encode()
+        got = answer(
+            lambda f=f, old=old, new=new: ac._native._authorize_for_testing(
+                policies[old].encode(), json.dumps(f).encode(), new
+            )
+        )
+        if "pending" in case:
+            assert got != case["result"], f"{name} passes now; drop `pending`"
+        else:
+            assert got == case["result"], name
+        checked += 1
+        if "pending" in case or not _dry_runnable(f, three):
+            continue
         if old not in groups:
             owner = clients["owner"]
             gid = owner.create_group(NAME, PURPOSE, policy=ours(policies[old]))
@@ -345,15 +383,17 @@ def test_group_policy_authorization_vectors(rng: random.Random) -> None:
             assert owner.policy(gid) == ours(policies[old]), old
             groups[old] = gid
         label = next(k for k, v in ids.items() if v == f["committer"])
-        new = ours(policies[f["new_policy"]])
-        if case["result"] == "ok":
-            assert clients[label].check_policy_change(groups[old], new) is None, case["name"]
-        else:
-            with pytest.raises(ac.AgentConnectError) as err:
-                clients[label].check_policy_change(groups[old], new)
-            assert str(err.value) == case["result"], case["name"]
-        checked += 1
-    assert checked >= 10
+        new_ours = ours(policies[f["new_policy"]])
+        dry = answer(
+            lambda c=clients[label], g=groups[old], n=new_ours: c.check_policy_change(g, n)
+        )
+        assert dry == case["result"], name
+        dry_runs += 1
+    assert checked + len(SKIPPED_AUTHORIZATION_CASES) == len(cases)
+    assert dry_runs == sum(
+        1 for c in cases if "pending" not in c and _dry_runnable(c["facts"], three)
+    )
+    assert dry_runs > 0
 
 
 def _b64(raw: bytes) -> str:

@@ -1486,6 +1486,23 @@ impl Client {
     }
 }
 
+/// **Tests only**: SPEC §9.2 commit authorisation on the facts of a
+/// commit as written in `testdata/group-policy.json` (JSON bytes), against
+/// the policy in force and the policy the commit introduces (canonical JSON
+/// bytes). Raises the error a receiver would reject the commit with.
+#[pyfunction]
+#[pyo3(signature = (policy, facts, new_policy=None))]
+fn _authorize_for_testing(policy: &[u8], facts: &[u8], new_policy: Option<&[u8]>) -> PyResult<()> {
+    guarded(|| {
+        let in_force = core::GroupPolicy::from_json(policy).map_err(err)?;
+        let new_policy = new_policy
+            .map(core::GroupPolicy::from_json)
+            .transpose()
+            .map_err(err)?;
+        core::policy::authorize_facts_for_testing(&in_force, new_policy, facts).map_err(err)
+    })
+}
+
 /// Parses an invite URL (SPEC §4.1).
 #[pyfunction]
 fn parse_invite_url(url: &str) -> PyResult<InviteLink> {
@@ -1756,6 +1773,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     for f in [
         wrap_pyfunction!(supports_protocol, m)?,
         wrap_pyfunction!(parse_invite_url, m)?,
+        wrap_pyfunction!(_authorize_for_testing, m)?,
         wrap_pyfunction!(join_request_mac, m)?,
         wrap_pyfunction!(unwrap_welcome, m)?,
         wrap_pyfunction!(derive_sas, m)?,
