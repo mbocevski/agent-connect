@@ -32,7 +32,7 @@ from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, convert
 from agentconnect.a2a_adapter import facade as facade_module
 from agentconnect.a2a_adapter.serve import LoopbackServer
 from agentconnect.adapter import Delivery, Event, GroupView, Sender
-from agentconnect.daemon import DaemonError
+from agentconnect.runtime.engine import DaemonError
 
 GID = "Z3JvdXA"
 OTHER = "b3RoZXI"

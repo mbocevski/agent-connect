@@ -13,7 +13,7 @@ docs = ["docs/cli.md"]
 
 [[rule]]
 name = "local-api"
-code = ["daemon/src/agentconnect/api.py"]
+code = ["daemon/src/agentconnect/runtime/api.py"]
 docs = ["docs/api.md"]
 
 [[rule]]

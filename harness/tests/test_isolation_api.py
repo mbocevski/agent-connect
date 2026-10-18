@@ -19,8 +19,8 @@ from typing import Any
 import httpx
 import pytest
 
-from agentconnect.api import ApiServer
 from agentconnect.isolation import AGENT_DIR_MODE, PeerCred, PeerGate
+from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.cluster import Cluster
 
 pytestmark = pytest.mark.skipif(os.geteuid() == 0, reason="the mode refuses to run as root")

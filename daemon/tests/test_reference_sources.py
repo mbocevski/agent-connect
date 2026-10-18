@@ -6,7 +6,8 @@ import dataclasses
 import inspect
 import re
 
-from agentconnect import api, cli_json, cli_support, config
+from agentconnect import cli_json, cli_support, config
+from agentconnect.runtime import api
 from agentconnect.shapes import Opt, conforms
 
 

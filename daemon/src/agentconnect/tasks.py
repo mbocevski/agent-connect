@@ -3,7 +3,7 @@
 ``task.cancel(); with suppress(CancelledError): await task`` is wrong: if
 the *calling* task is cancelled while it waits, its ``CancelledError`` is
 suppressed too, and the caller carries on as if nothing happened (so
-``Daemon.stop`` or a shutdown that cancels a worker never takes effect).
+``Engine.stop`` or a shutdown that cancels a worker never takes effect).
 """
 
 from __future__ import annotations

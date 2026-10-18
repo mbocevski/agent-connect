@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from agentconnect.adapter import RecordingAdapter
-from agentconnect.daemon import UPDATE_AFTER_MESSAGES, UPDATE_AFTER_SECS, DaemonError
+from agentconnect.runtime.engine import UPDATE_AFTER_MESSAGES, UPDATE_AFTER_SECS, DaemonError
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
 

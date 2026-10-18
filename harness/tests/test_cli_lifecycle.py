@@ -16,8 +16,8 @@ import pytest_asyncio
 from typer.testing import CliRunner
 
 from agentconnect import cli_support
-from agentconnect.api import ApiServer
 from agentconnect.cli import app
+from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
 

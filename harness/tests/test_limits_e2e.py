@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from agentconnect.daemon import DaemonError, new_msg_id
 from agentconnect.limits import MAX_MESSAGE_BYTES, SENDER_PER_MINUTE
+from agentconnect.runtime.engine import DaemonError, new_msg_id
 from agentconnect_harness.cluster import Node
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]

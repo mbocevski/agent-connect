@@ -90,7 +90,7 @@ from agentconnect.schemas import normalize
 from agentconnect.store import GroupRow, OutboxRow, Store
 from agentconnect.tasks import cancel_and_wait
 
-LOG = log.get("agentconnect.daemon")
+LOG = log.get("agentconnect.engine")
 
 UPDATE_AFTER_SECS = 24 * 3600  # SPEC §3.1 update cadence
 UPDATE_AFTER_MESSAGES = 1000
@@ -317,7 +317,7 @@ class Options:
     keyring_backend: Any = None
 
 
-class Daemon:
+class Engine:
     """One daemon: one identity, one instance, one relay connection."""
 
     def __init__(

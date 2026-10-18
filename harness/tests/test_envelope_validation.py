@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from agentconnect.daemon import _envelope_problem
+from agentconnect.runtime.engine import _envelope_problem
 from agentconnect.store import GroupRow
 from agentconnect_harness.cluster import Cluster, Node
 from agentconnect_harness.proxy import RelayProxy

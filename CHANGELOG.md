@@ -315,6 +315,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- The daemon's protocol engine and local API moved into the
+  `agentconnect.runtime` package (ADR-005): `agentconnect.daemon.Daemon` is
+  now `agentconnect.runtime.engine.Engine` and `agentconnect.api` is
+  `agentconnect.runtime.api`. `load_token` and the token file names moved to
+  `agentconnect.tokens`. No behaviour changes.
 - The default relay is now `wss://connect.yggdrasill.network`, and the
   planned A2A extension URI in SPEC §13 is
   `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't

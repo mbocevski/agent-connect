@@ -33,7 +33,7 @@ from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, cards, convert
 from agentconnect.a2a_adapter import adapter as adapter_module
 from agentconnect.a2a_adapter.seen import Seen
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
-from agentconnect.daemon import DaemonError
+from agentconnect.runtime.engine import DaemonError
 from agentconnect.schemas import normalize
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor, ScriptedExecutor
 

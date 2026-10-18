@@ -219,7 +219,7 @@ class A2AAdapter:
             LOG.info("a2a_facade_started", port=facade.port)
 
     async def close(self) -> None:
-        """Called by ``Daemon.stop``."""
+        """Called by ``Engine.stop``."""
         await self.aclose()
 
     async def aclose(self) -> None:
@@ -241,7 +241,7 @@ class A2AAdapter:
     def _facade_token(self) -> str:
         if self.options.data_dir is None:
             return secrets.token_urlsafe(32)
-        from agentconnect.api import load_token  # noqa: PLC0415 - avoid an import cycle
+        from agentconnect.tokens import load_token  # noqa: PLC0415 - avoid an import cycle
 
         return load_token(self.options.data_dir / FACADE_TOKEN_FILE)
 

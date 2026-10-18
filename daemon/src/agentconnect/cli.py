@@ -1,6 +1,6 @@
 """`agentconnect` command-line interface.
 
-A thin layer over the daemon's local API (``agentconnect.api``): it parses
+A thin layer over the daemon's local API (``agentconnect.runtime.api``): it parses
 arguments, calls the daemon, and renders the answer. Protocol decisions live
 in the daemon. Every command takes ``--json`` for a stable machine-readable
 shape (docs/cli.md); errors are then ``{"error": {"code", "message"}}`` on
@@ -168,14 +168,14 @@ def status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
 
 async def _run(cfg: Config, ready: asyncio.Event | None = None) -> None:
     from agentconnect.adapters import build_adapters  # noqa: PLC0415
-    from agentconnect.api import ApiServer  # noqa: PLC0415
     from agentconnect.clock import SystemClock  # noqa: PLC0415
-    from agentconnect.daemon import Daemon  # noqa: PLC0415
+    from agentconnect.runtime.api import ApiServer  # noqa: PLC0415
+    from agentconnect.runtime.engine import Engine  # noqa: PLC0415
 
     # Separate-OS-user mode: refuse a loose setup before any key is opened.
     gate = PeerGate.from_config(cfg)
     clock = SystemClock()
-    daemon = Daemon(cfg, build_adapters(cfg, clock), clock=clock)
+    daemon = Engine(cfg, build_adapters(cfg, clock), clock=clock)
     api = ApiServer(daemon, gate)
     await daemon.start()
     await api.start()

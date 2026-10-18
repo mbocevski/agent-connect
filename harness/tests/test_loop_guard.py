@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from agentconnect.adapter import Delivery
-from agentconnect.daemon import new_msg_id
+from agentconnect.runtime.engine import new_msg_id
 from agentconnect_harness.cluster import Node
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]

@@ -80,7 +80,7 @@ and the docs that describe it:
 | Code | Docs (any one) |
 |---|---|
 | `daemon/src/agentconnect/cli.py` | `docs/cli.md` |
-| `daemon/src/agentconnect/api.py` (local API routes) | `docs/api.md` |
+| `daemon/src/agentconnect/runtime/api.py` (local API routes) | `docs/api.md` |
 | `daemon/src/agentconnect/config.py` | `docs/config.md` |
 | `relay/src/proto.rs`, `rest.rs`, `ws.rs` | `SPEC.md` or `relay/README.md` |
 | `testdata/*.json` (not `MANIFEST.json`) | `SPEC.md` |
@@ -113,7 +113,7 @@ markers. Don't edit them by hand and don't move the markers; the prose around
 them is yours.
 
 After you change a CLI command or option, a local API route
-(`ROUTE_SPECS` in `daemon/src/agentconnect/api.py`), a config key
+(`ROUTE_SPECS` in `daemon/src/agentconnect/runtime/api.py`), a config key
 (`CONFIG_KEYS` in `config.py`), an exit code (`EXIT_CODES` in
 `cli_support.py`) or a `--json` shape (`cli_json.py`), run:
 

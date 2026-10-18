@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from agentconnect import daemon as daemon_mod
+from agentconnect.runtime import engine as daemon_mod
 from agentconnect_harness.cluster import Cluster, Node
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]

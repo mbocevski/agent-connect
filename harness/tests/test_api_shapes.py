@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest_asyncio
 
-from agentconnect.api import ROUTE_SPECS, ApiServer, RouteSpec
+from agentconnect.runtime.api import ROUTE_SPECS, ApiServer, RouteSpec
 from agentconnect.shapes import conforms
 from agentconnect_harness.cluster import Cluster, Node
 

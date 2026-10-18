@@ -17,9 +17,9 @@ import pytest
 import pytest_asyncio
 from typer.testing import CliRunner
 
-from agentconnect.api import ApiServer
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import _run, app
+from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 from agentconnect_harness.cluster import Cluster, Node
 
@@ -326,8 +326,8 @@ async def test_api_hardening(
 ) -> None:
     api = await serve(cluster, "h", sockdir, auto_approve=False)
     addr = str(api.server.address)
-    monkeypatch.setattr("agentconnect.api.READ_TIMEOUT", 0.3)
-    monkeypatch.setattr("agentconnect.api.MAX_CONNECTIONS", 1)
+    monkeypatch.setattr("agentconnect.runtime.api.READ_TIMEOUT", 0.3)
+    monkeypatch.setattr("agentconnect.runtime.api.MAX_CONNECTIONS", 1)
     # A client that never finishes its request is cut off (408)...
     reader, writer = await asyncio.open_unix_connection(addr)
     writer.write(b"GET /v0/status HTTP/1.1\r\n")

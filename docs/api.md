@@ -2,7 +2,7 @@
 
 The daemon (`agentconnectd`) serves a small JSON API to local tools: the
 `agentconnect` CLI, agent adapters and the SDK. It is not exposed to the
-network. The code is `daemon/src/agentconnect/api.py`.
+network. The code is `daemon/src/agentconnect/runtime/api.py`.
 
 This page records the transport, authentication, routes and errors. The
 route list and the error table are generated from the code (see

@@ -1,6 +1,6 @@
 """Test-only fault injection at the daemon's step boundaries (ADR-004).
 
-Each :class:`~agentconnect.daemon.Daemon` has a :class:`Failpoints` set. It
+Each :class:`~agentconnect.runtime.engine.Engine` has a :class:`Failpoints` set. It
 is empty unless a test arms a point, and an empty set is one falsy check per
 point, so the points are inert in production. An armed point either
 

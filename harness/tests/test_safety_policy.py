@@ -24,9 +24,9 @@ from typer.testing import CliRunner
 
 from agentconnect.a2a_adapter import cards, convert
 from agentconnect.adapter import Event
-from agentconnect.api import ApiServer
 from agentconnect.cli import app
-from agentconnect.daemon import DaemonError, new_msg_id
+from agentconnect.runtime.api import ApiServer
+from agentconnect.runtime.engine import DaemonError, new_msg_id
 from agentconnect_harness.cluster import WAIT, Cluster, Node, serve_api
 from agentconnect_harness.headless import headless
 from agentconnect_sdk import Group, Message, parse_payload

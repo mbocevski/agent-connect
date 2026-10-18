@@ -8,7 +8,7 @@ The facts come from the code, never from scraped terminal output:
 * exit codes: ``agentconnect.cli_support.EXIT_CODES``;
 * ``--json`` shapes: ``agentconnect.cli_json.SCHEMAS`` (the CLI tests check
   real output against the same shapes);
-* local API routes: ``agentconnect.api.ROUTE_SPECS`` (the server is built from
+* local API routes: ``agentconnect.runtime.api.ROUTE_SPECS`` (the server is built from
   that table) and ``API_ERRORS``;
 * config keys: ``agentconnect.config.CONFIG_KEYS`` and the ``Config`` dataclass;
 * safety settings: ``agentconnect.policy.KNOBS``.
@@ -34,7 +34,8 @@ import typer
 import typer.core
 import typer.main
 
-from agentconnect import api, cli, cli_json, cli_support, config, policy
+from agentconnect import cli, cli_json, cli_support, config, policy
+from agentconnect.runtime import api
 from agentconnect.shapes import Opt
 
 REPO = Path(__file__).resolve().parents[1]

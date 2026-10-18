@@ -150,7 +150,7 @@ nightly workflow runs lychee with network access to check external links.
 | CLI commands, options, defaults, help | the typer app (`agentconnect.cli.app`), introspected |
 | Exit codes | `agentconnect.cli_support.EXIT_CODES` |
 | `--json` shapes | `agentconnect.cli_json.SCHEMAS` |
-| Local API routes and errors | `ROUTE_SPECS` and `API_ERRORS` in `agentconnect.api`; the server is built from the same table |
+| Local API routes and errors | `ROUTE_SPECS` and `API_ERRORS` in `agentconnect.runtime.api`; the server is built from the same table |
 | Config keys and environment overrides | `CONFIG_KEYS` in `agentconnect.config` and the `Config` dataclass |
 
 Tests keep the sources honest:

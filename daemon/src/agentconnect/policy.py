@@ -13,11 +13,11 @@ malicious or confused, so every decrypted message goes through
   token (``require_approval``), or drop it when the hold expires;
 * ``drop``: never deliver (or send) it, with a reason.
 
-The daemon calls these in exactly one place each (``Daemon._make_delivery``
-when a message is received, ``Daemon.queue_message`` when one is sent) and
+The daemon calls these in exactly one place each (``Engine._make_delivery``
+when a message is received, ``Engine.queue_message`` when one is sent) and
 records the decision with the message. Adapters only ever see what was
 recorded as delivered, and adapters can only send through
-``Daemon.adapter_send``, so neither direction can bypass the policy.
+``Engine.adapter_send``, so neither direction can bypass the policy.
 
 Settings come from ``[policy]`` in ``config.toml`` (:data:`KNOBS`), with
 per-group overrides and, for the limits, per-sender overrides, which the

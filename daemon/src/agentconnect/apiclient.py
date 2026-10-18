@@ -6,8 +6,8 @@ from typing import Any
 
 import httpx
 
-from agentconnect.api import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 from agentconnect.config import Config
+from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 
 
 class ApiClientError(RuntimeError):

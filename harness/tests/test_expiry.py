@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from agentconnect.daemon import (
+from agentconnect.runtime.engine import (
     JOIN_CLOSED_GRACE_SECS,
     MAX_PARKED_GROUPS,
     MAX_PARKED_PER_GROUP,

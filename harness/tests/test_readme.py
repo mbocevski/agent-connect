@@ -34,8 +34,8 @@ import pytest
 import pytest_asyncio
 import typer.main
 
-from agentconnect.api import ApiServer
 from agentconnect.cli import app
+from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 from agentconnect_harness.relay import REPO, RelayProcess
 

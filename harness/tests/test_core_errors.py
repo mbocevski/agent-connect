@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 import agentconnect_core as ac
-from agentconnect.daemon import MAX_TRANSIENT_RETRIES, _core_error
+from agentconnect.runtime.engine import MAX_TRANSIENT_RETRIES, _core_error
 from agentconnect_harness.cluster import Node
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]

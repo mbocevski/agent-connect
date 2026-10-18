@@ -35,7 +35,7 @@ from starlette.routing import Route
 
 from agentconnect.a2a_adapter import A2AAdapter
 from agentconnect.a2a_adapter.serve import LoopbackServer
-from agentconnect.daemon import DaemonError
+from agentconnect.runtime.engine import DaemonError
 from agentconnect_harness.a2a_agents import (
     AgentServer,
     HelloWorldExecutor,

@@ -34,7 +34,6 @@ import hmac
 import json
 import os
 import re
-import secrets
 import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -43,12 +42,18 @@ from typing import Any
 
 from agentconnect import log
 from agentconnect.cli_json import HELD
-from agentconnect.daemon import HUMAN_EVENTS, HUMAN_ONLY_KINDS, Daemon, DaemonError, new_msg_id
 from agentconnect.isolation import PeerGate
-from agentconnect.keystore import write_private
 from agentconnect.relay import RelayError
+from agentconnect.runtime.engine import (
+    HUMAN_EVENTS,
+    HUMAN_ONLY_KINDS,
+    DaemonError,
+    Engine,
+    new_msg_id,
+)
 from agentconnect.shapes import Opt
 from agentconnect.sse import SseAdapter, Subscription
+from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE, load_token
 
 LOG = log.get("agentconnect.api")
 
@@ -56,8 +61,6 @@ MAX_BODY = 1 << 20
 MAX_HEADER = 16 << 10
 READ_TIMEOUT = 10.0  # seconds to send a whole request
 MAX_CONNECTIONS = 64
-API_TOKEN_FILE = "api-token"  # noqa: S105 - a file name
-HUMAN_TOKEN_FILE = "human-token"  # noqa: S105 - a file name
 SCOPE = "_scope"  # handler parameter carrying the request's token scope
 ACCEPT = "_accept"  # ... the Accept header
 LAST_EVENT_ID = "_last_event_id"  # ... the Last-Event-ID header
@@ -142,20 +145,6 @@ class ApiError(Exception):
     def __init__(self, status: int, code: str, message: str) -> None:
         super().__init__(message)
         self.status, self.code = status, code
-
-
-def load_token(path: Path) -> str:
-    """Read the token at ``path``, creating it (0600) if missing. An existing
-    token file must be ours and private (no group or other bits)."""
-    if path.exists():
-        st = path.stat()
-        if st.st_mode & 0o077 or st.st_uid != os.geteuid():
-            msg = f"{path.name} must be owned by this user with mode 0600"
-            raise PermissionError(msg)
-        return path.read_text(encoding="ascii").strip()
-    token = secrets.token_urlsafe(32)
-    write_private(path, token.encode("ascii"))
-    return token
 
 
 Handler = Callable[[dict[str, str], dict[str, Any]], Awaitable[Any]]
@@ -628,9 +617,9 @@ def _query_int(p: dict[str, str], key: str) -> int:
 
 
 class ApiServer:
-    """Serves the control API for one :class:`Daemon`."""
+    """Serves the control API for one :class:`Engine`."""
 
-    def __init__(self, daemon: Daemon, gate: PeerGate | None = None) -> None:
+    def __init__(self, daemon: Engine, gate: PeerGate | None = None) -> None:
         self.daemon = daemon
         # Peer-credential checks; a no-op unless isolation.enabled.
         self.gate = gate if gate is not None else PeerGate.from_config(daemon.config)

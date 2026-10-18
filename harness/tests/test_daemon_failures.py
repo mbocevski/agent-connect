@@ -19,9 +19,9 @@ from agentconnect.adapter import (
     OutboundSend,
     Sender,
 )
-from agentconnect.daemon import Daemon, DaemonError, new_msg_id
 from agentconnect.keystore import FileKeystore
 from agentconnect.relay import RelayError
+from agentconnect.runtime.engine import DaemonError, Engine, new_msg_id
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
 
@@ -239,7 +239,7 @@ async def test_broken_adapters_do_not_stop_the_daemon(
     (a, b), gid = await group(2)
     broken = BrokenAdapter()
     await b.daemon.stop()
-    b.daemon = Daemon(
+    b.daemon = Engine(
         b.config.with_overrides(default_adapter="broken"),
         [broken],
         clock=b.clock,
@@ -261,7 +261,7 @@ async def test_broken_adapters_do_not_stop_the_daemon(
 async def test_daemon_without_adapters(cluster: Cluster) -> None:
     n = await cluster.node("bare")
     await n.daemon.stop()
-    n.daemon = Daemon(
+    n.daemon = Engine(
         n.config, [], clock=n.clock, keystore=FileKeystore(n.config.data_dir / "keys")
     )
     await n.daemon.start()

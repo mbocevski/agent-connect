@@ -16,12 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from agentconnect.adapter import Adapter, RecordingAdapter
-from agentconnect.api import ApiServer
 from agentconnect.clock import Clock, FakeClock
 from agentconnect.config import Config
-from agentconnect.daemon import Daemon, Options
 from agentconnect.identity import Seeded
 from agentconnect.keystore import FileKeystore
+from agentconnect.runtime.api import ApiServer
+from agentconnect.runtime.engine import Engine, Options
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import RelayProcess
 
@@ -38,14 +38,14 @@ class Node:
     seed: int
     starts: int = 0
     make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None
-    daemon: Daemon = field(init=False)
+    daemon: Engine = field(init=False)
 
-    def _make(self) -> Daemon:
+    def _make(self) -> Engine:
         # A fresh seed per start: a restarted daemon must not replay the
         # randomness (keys, msg_ids) of its previous run.
         self.starts += 1
         seed = self.seed + self.starts
-        return Daemon(
+        return Engine(
             self.config,
             [self.adapter, *self._extra_adapters()],
             clock=self.clock,
