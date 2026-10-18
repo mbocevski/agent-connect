@@ -62,7 +62,7 @@ if [ -z "$host_port" ]; then
   exit 1
 fi
 if curl --silent --show-error --fail --output /dev/null \
-  --retry 30 --retry-delay 1 --retry-connrefused --retry-max-time 60 \
+  --retry 30 --retry-delay 1 --retry-connrefused --retry-all-errors --retry-max-time 60 \
   "http://127.0.0.1:$host_port/healthz"; then
   echo "healthz: 200 ($component, ${platform:-native})"
 else
