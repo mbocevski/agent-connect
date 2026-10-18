@@ -97,7 +97,10 @@ CONTENT_FIELDS = frozenset(
 LIVE = frozenset({"publishing", "published", "stale"})
 # States that hold the runtime's one listing (D2): another can't be published.
 HOLDING = LIVE | {"withdrawing"}
-WITHDRAWABLE = HOLDING | {"expired", "withdraw_failed"}
+#: ``withdrawn_locally``: a forced withdrawal; the directory may still list it.
+WITHDRAWABLE = HOLDING | {"expired", "withdraw_failed", "withdrawn_locally"}
+#: What ``force`` may end: a withdrawal the directory hasn't taken.
+FORCEABLE = frozenset({"withdrawing", "withdraw_failed"})
 PENDING_DOOR = frozenset({"registering", "registered"})
 OPEN_DOOR = frozenset({"current", "retiring"})
 #: SPEC 6.6.1/13.2: the refusals of a renewal that stop renewing. Any other
@@ -173,6 +176,9 @@ class ListingManager:
         self._fetcher: Fetcher = options.owner_fetcher or OwnerFileFetcher()
         # door_id -> its key pair: what the owner opens knocks with.
         self._doors: dict[str, ac.Door] = {}
+        # door_id -> (next close attempt, attempts) for doors the relay
+        # hasn't confirmed closed; after a restart they are tried at once.
+        self._close_retry: dict[str, tuple[int, int]] = {}
         self._load_doors()
 
     # -- plumbing -------------------------------------------------------------
@@ -523,7 +529,19 @@ class ListingManager:
             closed = e.code == "door_not_open"
         if closed:
             self._store.delete_door(door_id)
+            self._close_retry.pop(door_id, None)
+        else:
+            # Tried again after a backoff (5 min doubling to an hour), not on
+            # every pass.
+            _, attempts = self._close_retry.get(door_id, (0, 0))
+            delay = min(RETRY_CAP_SECS, CLOSE_RETRY_SECS * 2 ** min(attempts, 16))
+            self._close_retry[door_id] = (self._now() + delay, attempts + 1)
         return closed
+
+    def _close_due(self, door: dict[str, Any], now: int) -> bool:
+        """Whether a ``closing`` door's next close attempt is due."""
+        due, _ = self._close_retry.get(str(door["door_id"]), (now, 0))
+        return str(door["state"]) != "closing" or due <= now
 
     async def _free_door_slot(self, keep: str, row: dict[str, Any]) -> None:
         """The relay holds at most 4 open doors per mailbox: close the doors
@@ -626,7 +644,9 @@ class ListingManager:
                 MIN_TOKEN_LEFT_SECS
             ):
                 # The door runs out with the token; a new token is a new publish.
-                self._store.update_listing(row["directory"], row["name"], next_renewal_at=None)
+                self._store.update_listing(
+                    row["directory"], row["name"], next_renewal_at=None, retry_at=None
+                )
                 return None
             return self._new_door(row)
         made, expires = int(door["created_at"]), int(door["expires_at"])
@@ -896,13 +916,17 @@ class ListingManager:
         """Close every door at the relay (keys deleted at once), then send
         the signed withdrawal. Allowed to the agent: it only reduces
         exposure (SPEC 13.2.3). ``force`` (the human only, after a
-        withdrawal the directory never took) ends it locally."""
+        withdrawal the directory hasn't taken) ends it here only:
+        ``withdrawn_locally``, and the directory may go on listing it."""
         if force and not human:
             raise ApiError(403, "human_only", "forcing a withdrawal needs the human token")
         async with self._lock:
             row = self._withdrawable()
             if row is None:
                 raise ApiError(404, "not_found", "there is no listing to withdraw")
+            if force and row["state"] not in FORCEABLE:
+                msg = "force only ends a withdrawal the directory hasn't taken; withdraw first"
+                raise ApiError(409, "not_withdrawing", msg)
             if row["state"] != "withdrawing":
                 self._store.update_listing(
                     row["directory"],
@@ -918,7 +942,7 @@ class ListingManager:
                     restore_renewal_at=None,
                     updated_at=self._now(),
                 )
-            answer = await self._withdraw_round(self._refresh(row), force=force)
+            answer = await self._withdraw_round(self._refresh(row), force=force, now=True)
         self._wake.set()
         if answer.pop("unknown_directory", False):
             msg = (
@@ -928,11 +952,16 @@ class ListingManager:
             raise ApiError(400, "unknown_directory", msg)
         return answer
 
-    async def _withdraw_round(self, row: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+    async def _withdraw_round(
+        self, row: dict[str, Any], *, force: bool = False, now: bool = False
+    ) -> dict[str, Any]:
+        """One attempt. ``now`` (a request, not the worker) tries every door
+        again, whatever its close backoff."""
         host, name = str(row["directory"]), str(row["name"])
         closed = 0
         for door in self._store.doors(host, name):
-            closed += await self._close_door(door)
+            if now or self._close_due(door, self._now()):
+                closed += await self._close_door(door)
         pending = len(self._store.doors(host, name))
         self._engine.failpoints.hit("withdraw.after_close")
         seq = int(row["max_signed_seq"])
@@ -943,6 +972,7 @@ class ListingManager:
             "state": "withdrawing",
             "doors_closed": closed,
             "doors_close_pending": pending,
+            "forced": force,
         }
         error: str | None = "forced" if force else None
         if seq > 0 and not force:  # something was signed, so something may be listed
@@ -958,16 +988,17 @@ class ListingManager:
                 # not_found: nothing was listed. wrong_identity and the rest:
                 # the directory won't take a withdrawal from this identity.
                 error = None if e.code == "not_found" else e.code
-        now = self._now()
+        state = "withdrawn_locally" if force else "withdrawn"
+        at = self._now()
         fields: dict[str, Any] = {
-            "state": "withdrawn",
+            "state": state,
             "retry_at": None,
             "attempts": 0,
             "failing_since": None,
-            "updated_at": now,
+            "updated_at": at,
         }
         if error is not None:
-            fields["last_error"] = _error(error, now)
+            fields["last_error"] = _error(error, at)
         data = {
             "directory": host,
             "name": name,
@@ -977,10 +1008,10 @@ class ListingManager:
         }
         await self._commit(
             lambda: self._store.update_listing(host, name, **fields),
-            [("listing_withdrawn", f"listing_withdrawn/{host}/{name}/{seq}", data)],
+            [("listing_withdrawn", f"listing_withdrawn/{host}/{name}/{seq}/{state}", data)],
         )
-        LOG.info("listing_withdrawn", doors_close_pending=pending)
-        return answer | {"seq": seq, "state": "withdrawn"}
+        LOG.info("listing_withdrawn", doors_close_pending=pending, forced=force)
+        return answer | {"seq": seq, "state": state}
 
     async def _send_withdrawal(self, row: dict[str, Any]) -> int:
         """Withdraw everything up to ``max_signed_seq`` (a publish whose answer
@@ -1089,32 +1120,21 @@ class ListingManager:
             await self._wait(due)
 
     async def _wait(self, due: float | None) -> None:
-        """Until ``due`` (Unix seconds on the runtime's clock) or a wake-up."""
-        clock = self._engine.clock
+        """Until ``due`` (Unix seconds on the runtime's clock) or a wake-up.
+        One timer, set against the clock itself (``Clock.sleep_until``), so
+        neither a busy loop nor a test moving a fake clock re-arms it."""
         woken = asyncio.ensure_future(self._wake.wait())
-        sleep: asyncio.Future[Any] | None = None
+        waits: set[asyncio.Future[Any]] = {woken}
+        if due is not None:
+            # A deadline, not a retry pause: the fake clock doesn't count it.
+            waits.add(asyncio.ensure_future(self._engine.clock.sleep_until(due, deadline=True)))
         try:
-            while True:
-                at = clock.unix_millis()
-                if due is not None:
-                    left = due - at / 1000
-                    if left <= 0:
-                        self._engine._pulse()
-                        await asyncio.sleep(0)
-                        return  # due already: the next pass runs now
-                    # A deadline, not a retry pause: the fake clock doesn't count it.
-                    sleep = asyncio.ensure_future(clock.sleep(left, deadline=True))
-                await asyncio.sleep(0)  # the timer is set before anyone is told
-                if sleep is None or sleep.done() or clock.unix_millis() == at:
-                    break
-                sleep.cancel()  # the clock moved before the timer was set: set it again
+            await asyncio.sleep(0)  # the timer is set before anyone is told
             self._engine._pulse()  # a pass ended: waiters re-check
-            waits: set[asyncio.Future[Any]] = {woken} if sleep is None else {woken, sleep}
             await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            woken.cancel()
-            if sleep is not None:
-                sleep.cancel()
+            for w in waits:
+                w.cancel()
 
     async def step(self) -> float | None:
         """One pass over the doors and listings. Returns when the next thing
@@ -1131,8 +1151,11 @@ class ListingManager:
         for door in self._store.doors():
             door_id, expires_at = str(door["door_id"]), int(door["expires_at"])
             if door["state"] == "closing":
-                if now >= expires_at or await self._close_door(door):
+                if now >= expires_at:  # the relay forgets it anyway
                     self._store.delete_door(door_id)
+                    self._close_retry.pop(door_id, None)
+                elif self._close_due(door, now):
+                    await self._close_door(door)
                 continue
             # SPEC 6.6.1: the key goes an hour after the door expires, once
             # every knock it could have received has lapsed.
@@ -1248,7 +1271,8 @@ class ListingManager:
         for door in self._store.doors():
             expires_at = int(door["expires_at"])
             if door["state"] == "closing":
-                times.append(now + CLOSE_RETRY_SECS)
+                due, _ = self._close_retry.get(str(door["door_id"]), (now, 0))
+                times.append(min(due, expires_at))
             else:
                 times.append(expires_at + ac.DOOR_GRACE_SECS)
             if door["state"] == "current":
@@ -1262,10 +1286,10 @@ class ListingManager:
             times.append(expires_at)
             if not row["token_warned"]:
                 times.append(expires_at - TOKEN_WARNING_SECS)
-            if row["retry_at"] is not None:
-                times.append(int(row["retry_at"]))
-            elif row["next_renewal_at"] is not None:
-                times.append(int(row["next_renewal_at"]))
+            # Only when a round would run: a publish, or a renewal scheduled.
+            renew_at = row["next_renewal_at"]
+            if row["state"] == "publishing" or renew_at is not None:
+                times.append(max(int(row["retry_at"] or 0), int(renew_at or 0)))
         return float(min(times)) if times else None
 
 

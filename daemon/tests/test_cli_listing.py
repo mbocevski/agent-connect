@@ -72,6 +72,7 @@ WITHDRAWN = {
     "state": "withdrawn",
     "doors_closed": 2,
     "doors_close_pending": 0,
+    "forced": False,
 }
 
 
@@ -262,9 +263,16 @@ def test_status(fake: Fake) -> None:
 
 
 def test_force_uses_the_human_token_and_says_what_it_does(fake: Fake) -> None:
+    fake.routes["GET /v0/listing"] = {"listing": STATUS | {"state": "withdraw_failed"}}
+    fake.routes["POST /v0/listing/withdraw"] = WITHDRAWN | {
+        "state": "withdrawn_locally",
+        "forced": True,
+    }
     result = fake.run("listing", "withdraw", "--force", input="y\n")
     assert result.exit_code == 0, result.output
     assert "without the directory's answer" in result.output
+    assert "may still list it" in result.output
+    assert "Withdrew" not in result.output
     assert all(human for human, _, _ in fake.calls)
     assert fake.calls[-1][2] == {"force": True}
 

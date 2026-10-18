@@ -5,10 +5,11 @@ so a door's whole life runs in a few steps without the network."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import httpx
 import pytest
@@ -25,6 +26,7 @@ from agentconnect.runtime import ApiError, Options, Runtime
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import Engine
 from agentconnect.runtime.listing import ListingManager
+from agentconnect.tasks import cancel_and_wait
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 from agentconnect_harness.fake_directory import DOWN, FakeDirectory, FakeDoors
 
@@ -608,6 +610,7 @@ async def test_withdraw_closes_every_door_before_withdrawing(world: World) -> No
         "state": "withdrawn",
         "doors_closed": 2,
         "doors_close_pending": 0,
+        "forced": False,
     }
     assert world.door_rows() == []
     assert all(world.mgr.door(i) is None for i in world.doors.created)
@@ -671,8 +674,9 @@ async def test_a_withdrawal_without_answer_is_resent_with_a_fresh_ts(world: Worl
     await world.at(world.now + 60)
     assert world.row()["state"] == "withdrawn"
     assert ac.verify_withdrawal(world.directory.withdrawals[1])["ts"] == first + 60
-    assert world.door_rows() == []
     assert world.events("listing_withdrawn")
+    await world.at(world.now + 240)  # the door's own close backoff
+    assert world.door_rows() == []
 
 
 async def test_a_withdrawal_the_directory_refuses_is_done_locally(world: World) -> None:
@@ -1000,7 +1004,7 @@ async def test_auth_failed_on_a_close_keeps_the_door_until_it_is_closed(world: W
     assert (out["doors_closed"], out["doors_close_pending"]) == (0, 1)
     assert world.doors_in("closing") == [door_id]
     assert world.mgr.door(door_id) is None  # the key goes at once anyway
-    await world.mgr.step()
+    await world.at(world.now + 300)
     assert world.doors.closed == [door_id]
     assert world.door_rows() == []
 
@@ -1140,7 +1144,7 @@ async def test_a_withdrawal_that_is_never_taken_stops_blocking_and_can_be_forced
         await world.mgr.withdraw(force=True, human=False)
     assert e.value.code == "human_only"
     out = await world.mgr.withdraw(force=True, human=True)
-    assert out["state"] == "withdrawn"
+    assert (out["state"], out["forced"]) == ("withdrawn_locally", True)
     assert json.loads(world.row()["last_error"])["code"] == "forced"
     (event,) = world.events("listing_withdrawn")
     assert event["forced"] is True
@@ -1148,7 +1152,9 @@ async def test_a_withdrawal_that_is_never_taken_stops_blocking_and_can_be_forced
 
 async def test_overdue_work_runs_at_once(world: World) -> None:
     await world.publish()
-    world.engine.store.update_listing(DIR, NAME, retry_at=world.now - 5)
+    world.engine.store.update_listing(
+        DIR, NAME, retry_at=world.now - 5, next_renewal_at=world.now - 5
+    )
     assert (world.mgr._next_due() or 0) <= world.now
 
 
@@ -1166,3 +1172,146 @@ async def test_the_preview_hash_covers_the_token_and_the_directory(world: World)
             await world.mgr.publish({**other, "content_sha256": shown["content_sha256"]})
         assert e.value.code == "card_changed"
     assert world.calls == []
+
+
+# -- verification regressions ---------------------------------------------------------
+
+
+async def test_a_signing_ts_far_ahead_of_the_clock_is_dropped(world: World) -> None:
+    # The clock was far ahead once (and signed then), then put right.
+    world.engine.store.kv_set("relay/rest_ts", str(world.now + 10_000))
+    await world.restart()
+    world.doors.stamps.clear()
+    await world.publish()
+    assert all(0 <= s - world.now <= 60 for s in world.doors.stamps)
+    # A small lead (many requests in one second) is kept, so none repeats.
+    world.engine.store.kv_set("relay/rest_ts", str(world.now + 5))
+    await world.restart()
+    world.doors.stamps.clear()
+    await world.mgr.withdraw()
+    assert world.doors.stamps[0] == world.now + 6
+
+
+async def test_the_clock_stepping_forward_then_back_keeps_signing(world: World) -> None:
+    world.clock.advance(10_000)
+    await world.publish()
+    world.clock.advance(-10_000)
+    world.doors.stamps.clear()
+    out = await world.mgr.withdraw()
+    assert out["doors_close_pending"] == 0
+    assert all(abs(s - world.now) <= 60 for s in world.doors.stamps)
+
+
+class Ticking(FakeClock):
+    """A clock that moves a millisecond whenever it is read, as a real one
+    does under load, and counts the timers set on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timers = 0
+
+    @override
+    def unix_millis(self) -> int:
+        self.advance(0.001)
+        return super().unix_millis()
+
+    @override
+    async def sleep(self, seconds: float, *, deadline: bool = False) -> None:
+        self.timers += 1
+        await super().sleep(seconds, deadline=deadline)
+
+    @override
+    async def sleep_until(self, unix: float, *, deadline: bool = False) -> None:
+        self.timers += 1
+        await super().sleep_until(unix, deadline=deadline)
+
+
+async def test_the_worker_sets_one_timer_for_a_far_deadline(
+    tmp_path: Path, rng: random.Random
+) -> None:
+    clock = Ticking()
+    w = World(tmp_path, rng, clock, None)
+    try:
+        waiting = asyncio.ensure_future(w.mgr._wait(clock.unix_millis() / 1000 + 3600))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert not waiting.done()
+        w.mgr._wake.set()
+        await asyncio.wait_for(waiting, 1)
+        assert clock.timers == 1
+    finally:
+        await w.rt.stop(flush=0)
+
+
+async def test_a_retry_with_no_round_to_run_is_not_overdue(world: World) -> None:
+    await world.publish(world.body(lifetime=3 * DAY))
+    expires = world.row()["token_expires_at"]
+    world.directory.faults.fail("POST", "/v0/listings", 400, "wrong_relay", times=10_000)
+    world.engine.store.update_listing(DIR, NAME, next_renewal_at=expires - 7230)
+    await world.at(expires - 7230)
+    world.clock.advance(world.row()["retry_at"] - world.now)
+    for _ in range(5):
+        due = await world.mgr.step()
+        assert due is not None
+        assert due > world.now
+    assert world.row()["retry_at"] is None
+
+
+async def test_a_door_that_wont_close_is_retried_with_a_backoff(world: World) -> None:
+    await world.publish()
+    world.doors.faults.fail("DELETE", "/v0/doors/", 503, "internal", times=10_000)
+    world.directory.faults.fail("POST", "/v0/withdrawals", DOWN, times=10_000)
+    await world.mgr.withdraw()
+    first = len([c for c in world.calls if c.startswith("DELETE")])
+    for _ in range(10):
+        await world.mgr.step()
+    assert len([c for c in world.calls if c.startswith("DELETE")]) == first
+    await world.at(world.now + 300)
+    assert len([c for c in world.calls if c.startswith("DELETE")]) == first + 1
+
+
+async def test_force_only_ends_a_withdrawal_and_says_so(world: World) -> None:
+    await world.publish()
+    with pytest.raises(ApiError) as e:
+        await world.mgr.withdraw(force=True, human=True)
+    assert e.value.code == "not_withdrawing"
+    assert world.row()["state"] == "published"
+    world.directory.faults.fail("POST", "/v0/withdrawals", DOWN)
+    assert (await world.mgr.withdraw())["forced"] is False
+    out = await world.mgr.withdraw(force=True, human=True)
+    assert (out["state"], out["forced"]) == ("withdrawn_locally", True)
+    assert world.directory.listing(NAME) is not None  # nothing told the directory
+    status = (await world.rt.agent.listing_status())["listing"]
+    assert status["state"] == "withdrawn_locally"
+    # It can be withdrawn properly later, and doesn't block another listing.
+    await world.mgr.preview(world.body("other-name"))
+    assert (await world.mgr.withdraw())["state"] == "withdrawn"
+    assert NAME in world.directory.withdrawn
+
+
+async def test_the_worker_passes_a_few_times_a_minute_at_most(world: World) -> None:
+    await world.publish(world.body(lifetime=3 * DAY))
+    expires = world.row()["token_expires_at"]
+    world.directory.faults.fail("POST", "/v0/listings", 400, "wrong_relay", times=10_000)
+    world.doors.faults.fail("DELETE", "/v0/doors/", 503, "internal", times=10_000)
+    world.engine.store.update_listing(DIR, NAME, next_renewal_at=expires - 7230)
+    world.clock.advance(expires - 7230 - world.now)
+    passes = 0
+    step = world.mgr.step
+
+    async def counted() -> float | None:
+        nonlocal passes
+        passes += 1
+        return await step()
+
+    world.mgr.step = counted  # ty: ignore[invalid-assignment]
+    worker = asyncio.ensure_future(world.mgr.run())
+    try:
+        for _ in range(180):
+            world.clock.advance(1)
+            for _ in range(20):
+                await asyncio.sleep(0)
+    finally:
+        await cancel_and_wait(worker)
+    # Three minutes: the refused renewal, then nothing until the token expires.
+    assert 1 <= passes <= 5

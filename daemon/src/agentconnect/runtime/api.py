@@ -559,8 +559,11 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "token may: withdrawing only reduces exposure (SPEC 13.2.3). `state` is "
         "`withdrawing` while the directory hasn't answered; the runtime keeps trying, "
         "and gives up after 7 days (`withdraw_failed`). `force: true` (the human token "
-        "only) ends the withdrawal locally without the directory, after the doors are "
-        "closed. A directory removed from the config answers `400 unknown_directory`.",
+        "only, and only while a withdrawal is `withdrawing` or `withdraw_failed`; else "
+        "`409 not_withdrawing`) ends it here without the directory, after the doors are "
+        "closed: `state` is then `withdrawn_locally` and `forced` is true, and the "
+        "directory may go on listing it. A directory removed from the config answers "
+        "`400 unknown_directory`.",
         request={"force?": "bool"},
         response={
             "directory": "str",
@@ -569,6 +572,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
             "state": "str",
             "doors_closed": "int",
             "doors_close_pending": "int",
+            "forced": "bool",
         },
     ),
     RouteSpec(
@@ -684,6 +688,11 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         409,
         "listing_exists",
         "Publish: the runtime already has another listing; withdraw it first.",
+    ),
+    (
+        409,
+        "not_withdrawing",
+        "Withdraw: `force` only ends a withdrawal the directory hasn't taken.",
     ),
     (409, "card_changed", "Publish: the card or token changed since the preview."),
     (

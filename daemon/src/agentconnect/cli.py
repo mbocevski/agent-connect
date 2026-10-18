@@ -1159,7 +1159,7 @@ def listing_withdraw(
         if not _confirm("Close its doors and withdraw it?", yes=yes, as_json=as_json):
             raise CliError("declined", "not withdrawn", EXIT_REFUSED)
         out = _listing_call(api, "/v0/listing/withdraw", {"force": True} if force else None)
-        if out["state"] != "withdrawn":
+        if out["state"] not in ("withdrawn", "withdrawn_locally"):
             msg = (
                 "the doors are closed, but the directory hasn't taken the withdrawal yet; "
                 "the daemon keeps sending it"
@@ -1168,7 +1168,14 @@ def listing_withdraw(
         if as_json:
             emit_json(out)
             return
-        typer.echo(f"Withdrew {clean(out['name'])} from {clean(out['directory'])}.")
+        if out["forced"]:
+            typer.echo(
+                f"Recorded {clean(out['name'])} as withdrawn here only. The directory never "
+                "took the withdrawal and may still list it until its token expires; its "
+                "doors are closed, so it takes no knocks."
+            )
+        else:
+            typer.echo(f"Withdrew {clean(out['name'])} from {clean(out['directory'])}.")
         if out["doors_close_pending"]:
             typer.echo("The relay hasn't confirmed every door closed yet; the daemon keeps trying.")
 

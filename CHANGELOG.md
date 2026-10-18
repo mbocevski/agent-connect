@@ -40,10 +40,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   the relay confirms it closed; only `token_revoked`, `bad_token` and
   `name_held` stop renewal, other refusals are retried and reported. Only
   known directory codes and owner states come through. The last signed
-  relay request's `ts` is kept across restarts. A withdrawal the directory
-  never takes is reported after an hour, stops after 7 days
-  (`withdraw_failed`), and `listing withdraw --force` (human token) ends it
-  locally. The preview hash covers the card, the token, the directory and
+  relay request's `ts` is kept across restarts, unless it is more than a
+  minute ahead of the clock. A withdrawal the directory never takes is
+  reported after an hour, stops after 7 days (`withdraw_failed`), and
+  `listing withdraw --force` (human token, only for a pending or failed
+  withdrawal) ends it locally as `withdrawn_locally`. The worker sleeps
+  on one timer set against the clock (`Clock.sleep_until`), and retries
+  door closes with a backoff. The preview hash covers the card, the token, the directory and
   the owner domain. The core bindings gain `check_directory_keys`, the
   pinned-key check every verification makes. Knocking and knock approvals
   come next.

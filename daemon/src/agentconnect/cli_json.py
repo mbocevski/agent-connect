@@ -204,6 +204,7 @@ SCHEMAS: dict[str, Any] = {
         "state": "str",
         "doors_closed": "int",
         "doors_close_pending": "int",
+        "forced": "bool",
     },
     "listing status": {"listing": Opt(LISTING)},
     "events (one object per line)": {
@@ -257,9 +258,10 @@ NOTES: dict[str, str] = {
         "the daemon keeps sending the same signed listing."
     ),
     "listing withdraw": (
-        "`state` is `withdrawn`. Until the directory takes the withdrawal the command fails "
-        "with `withdraw_pending` (exit 1); the doors are closed already and the daemon "
-        "keeps sending it."
+        "`state` is `withdrawn`, or `withdrawn_locally` with `forced` true after "
+        "`--force`: recorded here only, and the directory may still list it. Until the "
+        "directory takes the withdrawal the command fails with `withdraw_pending` "
+        "(exit 1); the doors are closed already and the daemon keeps sending it."
     ),
     "listing status": "`listing` is `null` when the runtime has never had a listing.",
 }

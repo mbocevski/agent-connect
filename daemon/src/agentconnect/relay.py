@@ -31,6 +31,9 @@ LOG = log.get("agentconnect.relay")
 MAX_FRAME = 4 << 20
 REQUEST_TIMEOUT = 30.0
 NONCE_LEN = 32  # SPEC 8.2
+# How far a signed request's ts may run ahead of the clock (many requests
+# in one second, or the last run's); the relay allows 300 s either way.
+REST_TS_LEAD_SECS = 60
 DRAIN_KEY = "_drain"  # set on every frame handed to the daemon
 
 
@@ -277,8 +280,16 @@ class RelayRest:
         # signed request is single use at the relay, and Ed25519 signs the
         # same input the same way). `on_ts` stores it before the request
         # goes out, and the next run starts above it (`last_ts`), so this
-        # holds across a restart in the same second too.
-        ts = max(unix_seconds(self._clock), self._last_ts + 1)
+        # holds across a restart in the same second too. A value far ahead of
+        # the clock (it was wrong once, then put right) is dropped: the relay
+        # refuses a ts more than 300 s off, and a repeat matters only within
+        # that window.
+        now = unix_seconds(self._clock)
+        following = self._last_ts + 1
+        if following > now + REST_TS_LEAD_SECS:
+            LOG.warning("relay_rest_ts_reset", reason="clock_behind_last_request")
+            following = now
+        ts = max(now, following)
         self._last_ts = ts
         if self._on_ts is not None:
             self._on_ts(ts)

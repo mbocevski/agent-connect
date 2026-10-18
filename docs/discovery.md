@@ -179,7 +179,9 @@ anywhere resumes from where it stopped: a door the relay may already have is
 registered again ("already exists" counts as done), and signed bytes are
 posted again unchanged. The `ts` of the last signed relay request is kept
 too, so a request signed again after a restart is never byte-identical to
-one the relay has seen.
+one the relay has seen. A kept `ts` more than a minute ahead of the clock
+(the clock was wrong once, then put right) is dropped, since the relay
+refuses anything more than 300 s off.
 
 A door the relay may hold is never forgotten. If the relay's answer to a
 registration is lost, the door is closed before its record goes, and only
@@ -223,8 +225,11 @@ agentconnect listing withdraw --force
 ```
 
 `--force` (the human token, after you confirm) ends a withdrawal the
-directory never took, here only: the doors are closed, and the directory
-may go on listing it until its token expires.
+directory hasn't taken (`withdrawing` or `withdraw_failed` only), here
+only: the state is `withdrawn_locally` and the answer says `forced`. The
+doors are closed, so it takes no knocks, but the directory may go on
+listing it until its token expires. A later `listing withdraw` tries the
+directory again.
 
 ## Status and events
 
