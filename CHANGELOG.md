@@ -14,6 +14,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `/static/fonts/<file>` and adds `font-src 'self'` to the
   Content-Security-Policy, so a replacement stylesheet can use its own
   fonts. Off by default, and the policy is unchanged without it.
+- Relay: `/metrics` exposes `agentconnect_relay_ws_connections_open`, a
+  gauge of the WebSocket connections open now. It carries no labels or
+  identifiers, and a drop guard takes each connection off the count exactly
+  once, however the connection ends.
 - Core: approving a knock and joining from its Welcome, and listing
   renewal (SPEC §6.6.4, §6.6.5, §13.2.2), with Python bindings.
   `Group::add_knocker` (`Client.add_knock`) commits the Add of an approved

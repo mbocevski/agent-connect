@@ -47,10 +47,28 @@ pub struct Metrics {
     doors_registered: AtomicU64,
     doors_closed: AtomicU64,
     knocks_accepted: AtomicU64,
+    /// Gauge: WebSocket connections open now. Only a [`WsOpenGuard`] moves it.
+    ws_open: Arc<AtomicU64>,
     errors: [AtomicU64; ErrorCode::ALL.len()],
 }
 
+/// Counts one open WebSocket connection: up when created, down exactly once
+/// when dropped, whichever way the connection ends.
+#[derive(Debug)]
+pub(crate) struct WsOpenGuard(Arc<AtomicU64>);
+
+impl Drop for WsOpenGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl Metrics {
+    pub(crate) fn ws_open(&self) -> WsOpenGuard {
+        self.ws_open.fetch_add(1, Ordering::Relaxed);
+        WsOpenGuard(Arc::clone(&self.ws_open))
+    }
+
     fn inc(c: &AtomicU64) {
         c.fetch_add(1, Ordering::Relaxed);
     }
@@ -165,6 +183,13 @@ impl Metrics {
             "agentconnect_relay_knocks_accepted_total",
             "Knocks answered with accepted.",
             &self.knocks_accepted,
+        );
+        let _ = writeln!(
+            out,
+            "# HELP agentconnect_relay_ws_connections_open WebSocket connections open now.\n\
+             # TYPE agentconnect_relay_ws_connections_open gauge\n\
+             agentconnect_relay_ws_connections_open {}",
+            self.ws_open.load(Ordering::Relaxed)
         );
         let _ = writeln!(
             out,
@@ -1089,6 +1114,19 @@ impl<S: Store> Relay<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ws_open_guards_count_up_and_each_drop_counts_down_once() {
+        let m = Metrics::default();
+        let value = |m: &Metrics| m.ws_open.load(Ordering::Relaxed);
+        let a = m.ws_open();
+        let b = m.ws_open();
+        assert_eq!(value(&m), 2);
+        drop(a);
+        assert_eq!(value(&m), 1);
+        drop(b);
+        assert_eq!(value(&m), 0);
+    }
 
     #[test]
     fn a_window_refills_only_after_its_own_length() {

@@ -36,7 +36,7 @@ closing and knocks log no identifier at all, not even a tag.
 | `POST /v0/doors` | Register a door (signed request, below). |
 | `DELETE /v0/doors/{id}` | Close a door now (signed request, owner only). |
 | `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. |
-| `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers. |
+| `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers, plus one gauge, `agentconnect_relay_ws_connections_open`: the WebSocket connections open now, authenticated or not. It has no labels. |
 
 ### Signed REST requests (SPEC 8.1.1)
 
