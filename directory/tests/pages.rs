@@ -3,6 +3,7 @@
 
 mod common;
 
+use agentconnect_directory::config::HomeLink;
 use axum::http::StatusCode;
 use common::{DAY, HOST, Harness, RELAY, Resp, Spec, identity};
 
@@ -626,4 +627,209 @@ async fn health_and_metrics_carry_no_identifiers() {
     for leak in ["metered", id.id().as_str(), common::CLIENT] {
         assert!(!m.contains(leak), "metrics leak {leak}");
     }
+}
+
+fn branded() -> Harness {
+    let mut h = Harness::new();
+    h.http.name = Some("Example <directory> & co".into());
+    h.http.home =
+        Some(HomeLink::parse("https://example.org/?a=1&b=2  Example \"home\" [x] <b>").unwrap());
+    h
+}
+
+#[tokio::test]
+async fn the_operator_name_and_home_link_show_escaped_in_both_formats() {
+    let h = branded();
+    h.publish(&verified_spec(&h)).await;
+    let name = "Example &lt;directory&gt; &amp; co";
+    let link = "<li><a href=\"https://example.org/?a=1&amp;b=2\" rel=\"noreferrer\">Example \
+&quot;home&quot; [x] &lt;b&gt;</a></li>";
+    let home = h.get("/").await.text();
+    assert!(
+        home.contains(&format!("<title>{name} · AgentConnect directory</title>")),
+        "{home}"
+    );
+    assert!(home.contains(&format!(
+        "<main>\n<p class=\"kicker\">AgentConnect directory</p>\n<h1>{name}</h1>\n"
+    )));
+    assert!(home.contains(&format!("<a class=\"site-name\" href=\"/\">{name}</a>")));
+    assert!(home.contains(link), "{home}");
+    assert!(!home.contains("<directory>") && !home.contains("<b>"));
+    let page = h.get("/a/release-planner").await.text();
+    assert!(page.contains(&format!(
+        "<title>release-planner · {name} · AgentConnect directory</title>"
+    )));
+    assert!(page.contains(&format!("<a class=\"site-name\" href=\"/\">{name}</a>")));
+    assert!(page.contains(link));
+    assert!(!page.contains("class=\"kicker\""));
+    let missing = h.get("/a/nobody-here").await.text();
+    assert!(missing.contains(&format!(
+        "<title>Not found · {name} · AgentConnect directory</title>"
+    )));
+    let md = h.get("/index.md").await.text();
+    assert!(
+        md.starts_with(
+            "# Example <directory> & co\n\nAgentConnect directory\n\n\
+[Example \"home\" \\[x\\] <b>](https://example.org/?a=1&b=2)\n\nAgents listed on "
+        ),
+        "{md}"
+    );
+    let listing_md = h.get("/a/release-planner.md").await.text();
+    assert!(listing_md.contains(&format!(
+        "Listed on Example <directory> & co, an AgentConnect directory, at {HOST}."
+    )));
+}
+
+#[tokio::test]
+async fn without_a_name_the_pages_say_agentconnect_directory_only() {
+    let h = Harness::new();
+    h.publish(&verified_spec(&h)).await;
+    let home = h.get("/").await.text();
+    assert!(home.contains("<title>AgentConnect directory</title>"));
+    assert!(home.contains("<main>\n<h1>AgentConnect directory</h1>\n"));
+    assert!(home.contains("<a class=\"site-name\" href=\"/\">AgentConnect directory</a>"));
+    assert!(!home.contains("kicker") && !home.contains("noreferrer"));
+    let page = h.get("/a/release-planner").await.text();
+    assert!(page.contains("<title>release-planner · AgentConnect directory</title>"));
+    let md = h.get("/index.md").await.text();
+    assert!(
+        md.starts_with(&format!(
+            "# AgentConnect directory\n\nAgents listed on {HOST},"
+        )),
+        "{md}"
+    );
+    assert!(
+        h.get("/a/release-planner.md")
+            .await
+            .text()
+            .contains(&format!("Listed on the AgentConnect directory at {HOST}."))
+    );
+}
+
+#[tokio::test]
+async fn a_closed_door_has_no_knock_in_either_format() {
+    let h = Harness::new();
+    h.publish(&h.spec("open-door", &identity())).await;
+    let mut closed = h.spec("closed-door", &identity());
+    closed.door_expires_at = None;
+    h.publish(&closed).await;
+    let open_knock = format!("agentconnect knock {HOST}/a/open-door");
+    let closed_knock = format!("agentconnect knock {HOST}/a/closed-door");
+
+    let open = h.get("/a/open-door").await.text();
+    assert!(open.contains("<dt>Door</dt><dd class=\"door\" data-state=\"open\">open until "));
+    assert!(open.contains(&format!("<dt>Knock</dt><dd><code>{open_knock}</code></dd>")));
+    let shut = h.get("/a/closed-door").await.text();
+    assert!(shut.contains(
+        "<dt>Door</dt><dd class=\"door\" data-state=\"closed\">closed (not taking new connections)</dd>"
+    ));
+    assert!(
+        !shut.contains("<dt>Knock</dt>") && !shut.contains(&closed_knock),
+        "{shut}"
+    );
+
+    let open_md = h.get("/a/open-door.md").await.text();
+    assert!(open_md.contains(&format!("- Knock: `{open_knock}`")));
+    let shut_md = h.get("/a/closed-door.md").await.text();
+    assert!(shut_md.contains("- Door: closed (not taking new connections)"));
+    assert!(
+        !shut_md.contains("Knock") && !shut_md.contains(&closed_knock),
+        "{shut_md}"
+    );
+
+    let home = h.get("/").await.text();
+    assert!(home.contains(&open_knock) && !home.contains(&closed_knock));
+    assert_eq!(home.matches("<dt>Knock</dt>").count(), 1);
+    assert!(home.contains("data-state=\"open\"") && home.contains("data-state=\"closed\""));
+    let home_md = h.get("/index.md").await.text();
+    assert!(
+        home_md.contains(&format!(" · knock `{open_knock}`\n")),
+        "{home_md}"
+    );
+    assert!(home_md.contains(&format!(
+        "- closed-door: https://{HOST}/a/closed-door.md · owner no owner domain claimed · \
+door closed (not taking new connections)\n"
+    )));
+    assert!(!home_md.contains(&closed_knock));
+}
+
+#[tokio::test]
+async fn card_text_and_directory_facts_are_separate_lists() {
+    let h = Harness::new();
+    h.publish(&verified_spec(&h)).await;
+    let page = h.get("/a/release-planner").await.text();
+    let text = page
+        .split("<div class=\"card-text\">\n<dl>\n")
+        .nth(1)
+        .unwrap();
+    let (text, facts) = text
+        .split_once("</dl>\n</div>\n<dl class=\"facts\">\n")
+        .unwrap();
+    for label in ["Card name", "Description", "Skills", "Organization"] {
+        assert!(text.contains(&format!("<dt>{label}</dt>")), "{label}");
+        assert!(!facts.contains(&format!("<dt>{label}</dt>")), "{label}");
+    }
+    for label in ["Owner", "Fingerprint", "Door", "Knock"] {
+        assert!(facts.contains(&format!("<dt>{label}</dt>")), "{label}");
+        assert!(!text.contains(&format!("<dt>{label}</dt>")), "{label}");
+    }
+    assert!(!text.contains("<a "), "card text is never a link");
+}
+
+#[tokio::test]
+async fn empty_and_no_match_states_point_to_get_listed() {
+    let h = Harness::new();
+    for (path, text) in [
+        ("/", "Nothing is listed yet."),
+        ("/?q=nothing", "No listing matches."),
+    ] {
+        let html = h.get(path).await.text();
+        assert!(
+            html.contains(&format!(
+                "<div class=\"empty\">\n<p>{text}</p>\n<p>To list an agent, see \
+<a href=\"#listed\">Get listed</a>.</p>\n</div>"
+            )),
+            "{html}"
+        );
+    }
+    for (path, text) in [
+        ("/index.md", "Nothing is listed yet."),
+        ("/index.md?q=nothing", "No listing matches."),
+    ] {
+        let md = h.get(path).await.text();
+        assert!(
+            md.contains(&format!(
+                "{text}\n\nTo list an agent, see Get listed below.\n"
+            )),
+            "{md}"
+        );
+        assert!(md.contains("\n## Get listed\n"));
+    }
+}
+
+#[tokio::test]
+async fn the_home_page_says_how_to_get_listed() {
+    let h = Harness::new();
+    let html = h.get("/").await.text();
+    assert!(html.contains("<li><a href=\"/#listed\">Get listed</a></li>"));
+    assert!(html.contains("<section id=\"listed\" aria-labelledby=\"listed-h\">"));
+    let command = format!("agentconnect listing publish --directory {HOST}");
+    assert!(html.contains(&format!("<pre><code>{command}</code></pre>")));
+    let md = h.get("/index.md").await.text();
+    assert!(md.contains(&format!("```sh\n{command}\n```\n")));
+    let text = html_text(&html);
+    for needle in [
+        "needs a listing token from this directory's operator",
+        "--token <file>",
+        "listing.token_file",
+        "--card <file>",
+        "[[directory]]",
+        "agentconnect listing withdraw",
+        "closes the listing's doors at the relay first",
+    ] {
+        assert!(text.contains(needle), "HTML lacks {needle:?}");
+        assert!(md.contains(needle), "Markdown lacks {needle:?}");
+    }
+    assert!(html.contains("<code>agentconnect listing withdraw</code>"));
+    assert!(md.contains("`agentconnect listing withdraw`"));
 }
