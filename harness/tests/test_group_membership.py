@@ -13,6 +13,7 @@ import pytest
 
 from agentconnect.runtime.engine import DaemonError
 from agentconnect.runtime.groups import LEAVE_COMMIT_GRACE_SECS, update_threshold
+from agentconnect.store import OutboxRow
 from agentconnect_harness.cluster import Cluster, Node, converged, status
 from agentconnect_harness.proxy import Frame, RelayProxy
 
@@ -60,6 +61,7 @@ async def test_leaves_and_removals_converge_and_say_who(group: GroupFixture, siz
     staying = [n for n in nodes if n not in (leaver, removed)]
 
     assert await leaver.daemon.leave(gid) == "leaving"
+    assert await leaver.daemon.leave(gid) == "leaving"  # asked twice: one notice
     assert leaver.daemon.group_info(gid)["leaving"]["blocked"] is False
     await leaver.wait(lambda: status(leaver, gid) == "left")
     await converged([*staying, removed], gid)
@@ -285,3 +287,38 @@ async def test_the_update_threshold_is_drawn_per_instance_and_epoch(group: Group
     a.daemon.send_message(gid, {"text": "at it"})
     await b.wait_texts(gid, 2)
     assert a.epoch(gid) == epoch + 1
+
+
+async def test_a_queued_proposal_that_can_no_longer_go_out_is_dropped(
+    cluster: Cluster, group: GroupFixture
+) -> None:
+    (a, b), gid = await group(2)
+    group_a, group_b = a.daemon.store.group(gid), b.daemon.store.group(gid)
+    assert group_a is not None
+    assert group_b is not None
+    row = OutboxRow(0, "proposal", gid, {}, "queued")
+    # The leave ended meanwhile.
+    assert await b.daemon.groups.run_proposal(row, group_b) == "failed"
+    # The owner's last instance: the leave waits for a transfer.
+    a.daemon.store.kv_set(f"leaving/{gid}", "1")
+    assert await a.daemon.groups.run_proposal(row, group_a) == "failed"
+    assert [d["reason"] for d in data(a, "leave_blocked")] == ["owner_must_transfer"]
+    # The core refuses for another reason (a commit of its own is pending).
+    b.daemon.store.kv_set(f"leaving/{gid}", "1")
+    b.daemon.client.update(raw(gid))
+    assert await b.daemon.groups.run_proposal(row, group_b) == "failed"
+    assert data(b, "leave_blocked") == []
+    b.daemon.client.discard_pending_commit(raw(gid))
+    # A leave recorded before its start time was kept starts its timeout on restart.
+    b.daemon.store.kv_set(f"leaving_since/{gid}", "")
+    await b.restart()
+    since = b.daemon.groups.leave_state(gid)
+    assert since is not None
+    assert since["since"] == b.daemon.now()
+
+    # The timer skips a group whose MLS state is gone, and goes on.
+    solo = await cluster.node("solo")
+    sgid = solo.daemon.create_group("Solo", "")
+    await solo.idle()
+    solo.daemon.client.delete_group(raw(sgid))
+    assert await solo.daemon.groups.step() is None

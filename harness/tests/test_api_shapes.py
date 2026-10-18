@@ -144,6 +144,14 @@ async def test_membership_routes_match_the_declared_shapes(cluster: Cluster, soc
     (mine,) = [m for m in info["members"] if m["self"]]
     other = next(i["instance_id"] for i in mine["instances"] if not i["self"])
     path = f"/v0/groups/{gid}/members/{bob.node.me}/remove"
+    for body, answer in (
+        ({"instances": "x"}, (400, "bad_request")),
+        ({"instances": []}, (400, "bad_request")),
+        ({}, (404, "not_found")),  # one's own identity needs instances
+    ):
+        assert await refused(bob, "POST", path, body) == answer
+    nobody = f"/v0/groups/{gid}/members/ac:v0:nobody/remove"
+    assert await refused(bob, "POST", nobody, {"instances": [other]}) == (404, "not_found")
     await bob.call("POST", path, {"instances": [other]}, "human")
     await bob.node.wait(lambda: len(bob.node.daemon.client.members(_raw(gid))) == 2)
     await bob.call("POST", f"/v0/groups/{gid}/leave")
@@ -151,6 +159,16 @@ async def test_membership_routes_match_the_declared_shapes(cluster: Cluster, soc
     assert info["leaving"] is None or info["leaving"]["blocked"] is False
     await alice.server.stop()
     await bob.server.stop()
+
+
+async def refused(
+    rec: Recorder, method: str, path: str, body: Any, scope: str = "human"
+) -> tuple[int, str]:
+    """The status and error code of a request the API refuses."""
+    headers = {"authorization": f"Bearer {api_token(rec.server, scope)}"}
+    async with httpx.AsyncClient(transport=rec.transport, base_url="http://ac") as c:
+        resp = await c.request(method, path, json=body, headers=headers)
+    return resp.status_code, str(resp.json()["code"])
 
 
 def _raw(gid: str) -> bytes:
