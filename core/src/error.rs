@@ -233,7 +233,6 @@ fn reason_kind(reason: &str) -> ErrorKind {
         "expired" => K::Expired,
         "not yet valid" => K::NotYetValid,
         "revoked" => K::Revoked,
-        "token name differs" | "token directory differs" => K::TokenMismatch,
         r if r.starts_with("bound to another") => K::TokenMismatch,
         "door has expired" | "door expired" => K::DoorExpired,
         "not this door" | "door_id mismatch" => K::WrongDoor,
@@ -301,10 +300,6 @@ mod tests {
             (Error::InvalidToken("revoked"), K::Revoked),
             (
                 Error::InvalidToken("bound to another name"),
-                K::TokenMismatch,
-            ),
-            (
-                Error::InvalidListing("token name differs"),
                 K::TokenMismatch,
             ),
             (Error::InvalidListing("door has expired"), K::DoorExpired),

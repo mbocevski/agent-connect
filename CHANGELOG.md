@@ -42,8 +42,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   same for knock display names and notes),
   the canonical JCS profile (non-canonical bytes are rejected), and the
   single `EdDSA` JWS by the identity key, which a2a-sdk's own verifier
-  accepts. Operator listing tokens checked against pinned directory keys
-  (binding, 90-day lifetime, expiry, revocation), token revocations,
+  accepts; the token's binding to the listing is checked as part of
+  parsing. Operator listing tokens checked against pinned directory keys
+  (90-day lifetime, not-before, expiry, revocation), token revocations,
+  `seq` and tombstones per (directory, name, identity) with
+  `SignedListing::replaces` and `tombstoned_by` for directories,
   withdrawals, and the owner well-known file with its owner states (a
   negative result is sticky until a later fetch vouches, and a file that
   doesn't parse counts as a failed fetch; `OwnerHistory` in Python). Doors

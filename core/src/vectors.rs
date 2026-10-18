@@ -410,7 +410,7 @@ use crate::knock::{Door, Knock, KnockSecret};
 use crate::listing::testing::{DIRECTORY, T0, card_for, grant};
 use crate::listing::{
     DirectoryKey, FetchResult, ListingCard, ListingToken, OwnerChecks, OwnerFile, RevocationReason,
-    SignedListing, TokenRevocation, TrustedDirectory, Vouch, Withdrawal, owner_state,
+    SignedListing, TokenGrant, TokenRevocation, TrustedDirectory, Vouch, Withdrawal, owner_state,
     protected_header,
 };
 
@@ -468,6 +468,9 @@ fn discovery(rng: &Rng) -> Discovery {
         listing,
     }
 }
+
+/// A listing check vector: name, check, now, pinned keys, revoked token.
+type ListingCheck<'a> = (&'a str, &'a str, u64, &'a [[u8; 32]], Option<[u8; 16]>);
 
 fn trusted(dk: &DirectoryKey) -> TrustedDirectory {
     TrustedDirectory::new(DIRECTORY, &[dk.public_key()]).unwrap()
@@ -592,6 +595,26 @@ fn listing_vectors() {
             mutate(&|m| params(m)["name"] = json!("Release-Planner")),
         ),
     ];
+    // Tokens that bind something else fail at parse (SPEC 13.1.4).
+    let theirs = d.dk.issue_token(&rng, &grant(&d.stranger.id())).unwrap();
+    let pinned_elsewhere =
+        d.dk.issue_token(
+            &rng,
+            &TokenGrant {
+                owner_domain: Some("other.example".into()),
+                ..grant(&id)
+            },
+        )
+        .unwrap();
+    let with_token = |t: &ListingToken| {
+        mutate(&|m| params(m)["token"] = serde_json::from_slice(&t.to_json().unwrap()).unwrap())
+    };
+    let mut invalid = invalid;
+    invalid.push(("token for another identity", with_token(&theirs)));
+    invalid.push((
+        "token pinning another owner domain",
+        with_token(&pinned_elsewhere),
+    ));
     let invalid: Vec<Value> = invalid
         .into_iter()
         .map(|(name, listing)| {
@@ -599,85 +622,145 @@ fn listing_vectors() {
             json!({"name": name, "listing": listing, "error": e.to_string(), "kind": e.kind().as_str()})
         })
         .collect();
-    // Valid listings that fail a later check.
+    // Valid listings that fail a later check, each under the pinned
+    // `directory_keys` it runs with.
     let door_expiry = l.params().door.as_ref().unwrap().expires_at;
-    let theirs = d.dk.issue_token(&rng, &grant(&d.stranger.id())).unwrap();
-    let foreign = card_for(&d.ik, theirs, None).sign(&d.ik).unwrap();
     let token_end = l.token().grant.expires_at;
-    let checks = [
-        (
-            "expired door",
-            "publish",
-            s(l.bytes()),
-            door_expiry,
-            None,
-            d.listing.check_publish(door_expiry),
-        ),
-        (
-            "issued in the future",
-            "publish",
-            s(l.bytes()),
-            T0 - 301,
-            None,
-            d.listing.check_publish(T0 - 301),
-        ),
+    let pinned = [d.dk.public_key()];
+    let unpinned = [d.other_dk.public_key()];
+    let rotated = [d.other_dk.public_key(), d.dk.public_key()];
+    let checks: Vec<ListingCheck<'_>> = vec![
+        ("expired door", "publish", door_expiry, &pinned, None),
+        ("issued in the future", "publish", T0 - 301, &pinned, None),
         (
             "token signed by an unpinned key",
             "token",
-            s(l.bytes()),
             T0,
+            &unpinned,
             None,
-            l.check_token(&trusted(&d.other_dk), T0, |_| false),
         ),
+        ("expired token", "token", token_end, &pinned, None),
         (
-            "expired token",
+            "token not yet valid",
             "token",
-            s(l.bytes()),
-            token_end,
+            l.token().grant.issued_at - 301,
+            &pinned,
             None,
-            l.check_token(&trusted(&d.dk), token_end, |_| false),
         ),
         (
             "revoked token",
             "token",
-            s(l.bytes()),
             T0,
-            Some(b64(&l.token().token_id)),
-            l.check_token(&trusted(&d.dk), T0, |t| *t == l.token().token_id),
+            &pinned,
+            Some(l.token().token_id),
         ),
         (
-            "token bound to another identity",
+            "revoked token, keys mid-rotation",
             "token",
-            s(foreign.bytes()),
             T0,
-            None,
-            foreign.check_token(&trusted(&d.dk), T0, |_| false),
+            &rotated,
+            Some(l.token().token_id),
         ),
     ];
     let checks: Vec<Value> = checks
         .into_iter()
-        .map(|(name, check, listing, now, revoked, result)| {
+        .map(|(name, check, now, keys, revoked)| {
+            let result = if check == "publish" {
+                l.check_publish(now)
+            } else {
+                let t = TrustedDirectory::new(DIRECTORY, keys).unwrap();
+                l.check_token(&t, now, |id| revoked == Some(*id))
+            };
             let e = result.expect_err(name);
             json!({
                 "name": name,
                 "check": check,
-                "listing": listing,
+                "listing": s(l.bytes()),
                 "now": now,
-                "revoked": revoked,
+                "directory_keys": keys.iter().map(|k| b64(k)).collect::<Vec<_>>(),
+                "revoked": revoked.map(|r| b64(&r)),
                 "error": e.to_string(),
                 "kind": e.kind().as_str(),
             })
         })
         .collect();
+    // Which listing may replace which (SPEC 13.2.2), and tombstones
+    // (13.2.3): seq is per identity; another identity needs a later token.
+    let listed = |ik: &Identity, seq: u64, issued_at: u64| {
+        let token =
+            d.dk.issue_token(
+                &rng,
+                &TokenGrant {
+                    issued_at,
+                    expires_at: issued_at + 30 * 24 * 3600,
+                    ..grant(&ik.id())
+                },
+            )
+            .unwrap();
+        let mut c = card_for(ik, token, None);
+        c.params.seq = seq;
+        c.sign(ik).unwrap()
+    };
+    let stored = listed(&d.ik, 7, T0);
+    let replacements: Vec<Value> = [
+        ("same identity, higher seq", listed(&d.ik, 8, T0), true),
+        ("same identity, same seq", listed(&d.ik, 7, T0), false),
+        ("same identity, lower seq", listed(&d.ik, 6, T0 + 60), false),
+        (
+            "new identity under a later token, seq 1",
+            listed(&d.stranger, 1, T0 + 60),
+            true,
+        ),
+        (
+            "new identity under an older token",
+            listed(&d.stranger, 99, T0 - 60),
+            false,
+        ),
+        (
+            "new identity under a token of the same time",
+            listed(&d.stranger, 99, T0),
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, l2, replaces)| {
+        assert_eq!(l2.replaces(&stored), replaces, "{name}");
+        json!({"name": name, "listing": s(l2.bytes()), "replaces": replaces})
+    })
+    .collect();
+    let tombstones: Vec<Value> = [
+        ("same identity, seq at the tombstone", d.ik.id(), 7, true),
+        ("same identity, tombstone above", d.ik.id(), 9, true),
+        ("same identity, tombstone below", d.ik.id(), 6, false),
+        (
+            "another identity's tombstone",
+            d.stranger.id(),
+            crate::encoding::MAX_SAFE_INTEGER,
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, identity, seq, blocked)| {
+        assert_eq!(stored.tombstoned_by(&identity, seq), blocked, "{name}");
+        json!({"name": name, "identity": identity, "seq": seq, "blocked": blocked})
+    })
+    .collect();
     l.check_token(&trusted(&d.dk), T0, |_| false).unwrap();
     l.check_publish(T0).unwrap();
     let mut out = header(
-        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Checks run at `now` against directory_keys (base64url Ed25519 public keys) for `directory`; `error` is the core's message.",
+        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Each check runs at `now` against its own `directory_keys` (base64url Ed25519 public keys) for `directory`, with the `revoked` token id; `error` is the core's message and `kind` its stable kind. `replacements` say whether `listing` may replace `stored_listing` (SPEC 13.2.2: seq per identity; another identity needs a later token), `tombstones` whether a tombstone (identity, seq) blocks `stored_listing`. `identities` and `directory_key_secret` are seed-derived secrets for signing more test listings and tokens.",
         &seed,
     );
     out["directory"] = DIRECTORY.into();
     out["directory_keys"] = json!([b64(&d.dk.public_key())]);
-    out["other_directory_key"] = b64(&d.other_dk.public_key()).into();
+    out["directory_key_secret"] = hex(d.dk.secret_bytes().as_slice()).into();
+    out["identities"] = json!([
+        {"identity": id, "ik_secret": hex(d.ik.secret_bytes().as_slice())},
+        {"identity": d.stranger.id(), "ik_secret": hex(d.stranger.secret_bytes().as_slice())},
+    ]);
+    out["stored_listing"] = s(stored.bytes()).into();
+    out["replacements"] = replacements.into();
+    out["tombstones"] = tombstones.into();
     out["valid"] = json!({
         "listing": s(l.bytes()),
         "now": T0,
@@ -720,6 +803,7 @@ fn listing_token_vectors() {
         ("forged under the pinned key_id", forged, T0, b64(&d.dk.public_key())),
         ("tampered name", tj.replace("release-planner", "release-plannex"), T0, b64(&d.dk.public_key())),
         ("expired", tj.clone(), end, b64(&d.dk.public_key())),
+        ("not yet valid", tj.clone(), token.grant.issued_at - 301, b64(&d.dk.public_key())),
         ("overlong", s(&overlong.to_json().unwrap()), T0, b64(&d.dk.public_key())),
         ("not canonical", tj.replacen('{', "{ ", 1), T0, b64(&d.dk.public_key())),
     ]
@@ -763,6 +847,11 @@ fn listing_token_vectors() {
     out["directory"] = DIRECTORY.into();
     out["directory_key"] = b64(&d.dk.public_key()).into();
     out["key_id"] = b64(&d.dk.key_id()).into();
+    out["directory_key_secret"] = hex(d.dk.secret_bytes().as_slice()).into();
+    out["identities"] = json!([
+        {"identity": d.ik.id(), "ik_secret": hex(d.ik.secret_bytes().as_slice())},
+        {"identity": d.stranger.id(), "ik_secret": hex(d.stranger.secret_bytes().as_slice())},
+    ]);
     out["valid"] = json!({
         "token": tj,
         "now": T0,
@@ -809,6 +898,8 @@ fn withdrawal_vectors() {
     );
     out["directory"] = DIRECTORY.into();
     out["listing"] = s(d.listing.bytes()).into();
+    out["directory_keys"] = json!([b64(&d.dk.public_key())]);
+    out["identity_secret"] = hex(d.ik.secret_bytes().as_slice()).into();
     out["valid"] = json!({
         "withdrawal": wj,
         "signing_input": s(&w.signing_input().unwrap()),
@@ -818,6 +909,8 @@ fn withdrawal_vectors() {
         "stale_kind": w.check_fresh(DIRECTORY, ts + 301).unwrap_err().kind().as_str(),
         "applies": true,
     });
+    let wrong_dir = w.check_fresh("other.example", ts).unwrap_err();
+    out["wrong_directory"] = json!({"directory": "other.example", "now": ts, "error": wrong_dir.to_string(), "kind": wrong_dir.kind().as_str()});
     out["old_seq"] = json!({"withdrawal": s(&old.to_json().unwrap()), "applies": false});
     out["invalid"] = invalid.into();
     check_or_write("withdrawals.json", &out);

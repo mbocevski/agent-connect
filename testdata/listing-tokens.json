@@ -3,7 +3,7 @@
     {
       "directory": "other.example",
       "error": "invalid listing token: bound to another directory",
-      "identity": "ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38",
+      "identity": "ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU",
       "kind": "token_mismatch",
       "listing_name": "release-planner",
       "name": "another directory",
@@ -12,7 +12,7 @@
     {
       "directory": "agents.example",
       "error": "invalid listing token: bound to another name",
-      "identity": "ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38",
+      "identity": "ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU",
       "kind": "token_mismatch",
       "listing_name": "other-name",
       "name": "another name",
@@ -21,7 +21,7 @@
     {
       "directory": "agents.example",
       "error": "invalid listing token: bound to another identity",
-      "identity": "ac:v0:1Xl5cQWJYfeNnpP-LR_Pk_4cL-ROq22cEBHvsXMgVd8",
+      "identity": "ac:v0:XqAiuSdZkoCkP-j0BHcWZfeJMKL_lvrrcZuXd2EUW_s",
       "kind": "token_mismatch",
       "listing_name": "release-planner",
       "name": "another identity",
@@ -30,7 +30,7 @@
     {
       "directory": "agents.example",
       "error": "invalid listing token: bound to another owner domain",
-      "identity": "ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38",
+      "identity": "ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU",
       "kind": "token_mismatch",
       "listing_name": "release-planner",
       "name": "another owner domain",
@@ -39,71 +39,90 @@
   ],
   "description": "SPEC 13.2.1 ListingToken and TokenRevocation: sig = Ed25519(DK, label || JCS(object without sig)), labels 'agentconnect/v0/listing-token' and 'agentconnect/v0/listing-token-revoke'; key_id = base64url(SHA-256(DK.pub)[0..16]). Tokens verify for `directory` at `now` under `directory_key`.",
   "directory": "agents.example",
-  "directory_key": "oVSSz0kAyEL2XlqBaxKMjc1P5T8Am1xkc6XCKJhf-44",
+  "directory_key": "34X54ncqan5wKp-DprXNMlxN_dqM3f-bwaqBlBTWAmM",
+  "directory_key_secret": "91ec33114e57220cd71ee7cc7349e4982c16719481e84724a2b33e22de3b8180",
   "generator": "core/src/vectors.rs (just vectors)",
-  "key_id": "Amc7D9AkEBLVtR6-raNrjw",
+  "identities": [
+    {
+      "identity": "ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU",
+      "ik_secret": "51a4a2041828744e9e22c5835153079604267e52147ce8c664e650e0e127f71e"
+    },
+    {
+      "identity": "ac:v0:XqAiuSdZkoCkP-j0BHcWZfeJMKL_lvrrcZuXd2EUW_s",
+      "ik_secret": "acdd1db41d41e84fc36971bdf746594ff22901b1e7a15af4b0529a5515f1de80"
+    }
+  ],
+  "key_id": "BNec-UV5Kg1s7QffkdDqig",
   "revocation": {
-    "revocation": "{\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"reason\":\"spam\",\"revoked_at\":1792497660,\"sig\":\"2j1PxFMYbafF9AgEy9nGCW7Z7wZF1loIuv4OFH6V8dfgqUf05JWtT4mKtwW2HT9BTlOGoBEGbnsZYyjAiGxNBQ\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}",
-    "signing_input": "agentconnect/v0/listing-token-revoke{\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"reason\":\"spam\",\"revoked_at\":1792497660,\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}",
-    "tampered": "{\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"reason\":\"spam\",\"revoked_at\":1792497661,\"sig\":\"2j1PxFMYbafF9AgEy9nGCW7Z7wZF1loIuv4OFH6V8dfgqUf05JWtT4mKtwW2HT9BTlOGoBEGbnsZYyjAiGxNBQ\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}",
+    "revocation": "{\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"reason\":\"spam\",\"revoked_at\":1792497660,\"sig\":\"B4vwuGfCaDiqppQb7hNodXf6UXEWmG_--ihD9eiBDb4ZYvLBB93dndOaL6P28O-uo5edNsWJhRukPuyfUSPvBg\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}",
+    "signing_input": "agentconnect/v0/listing-token-revoke{\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"reason\":\"spam\",\"revoked_at\":1792497660,\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}",
+    "tampered": "{\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"reason\":\"spam\",\"revoked_at\":1792497661,\"sig\":\"B4vwuGfCaDiqppQb7hNodXf6UXEWmG_--ihD9eiBDb4ZYvLBB93dndOaL6P28O-uo5edNsWJhRukPuyfUSPvBg\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}",
     "tampered_error": "invalid listing token: revocation signature",
     "tampered_kind": "signature"
   },
-  "seed": "6ec8d18894941393de12ec1c0e025191fa7187ae36de66d0115b0c7ca3a73823",
+  "seed": "fc19995be3c63ef454346bb518b1ad08c9f3bec522fb1b2d570cb7e97764b6dd",
   "valid": {
-    "identity": "ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38",
+    "identity": "ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU",
     "now": 1792497600,
-    "signing_input": "agentconnect/v0/listing-token{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}",
-    "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"cR6BS9Dl3Z9zhsM127Oe0fEM9VMW8LMQyDkBA6bqcAl1PyufJu85AmrEx3APhprRVFgtFssQJTxb6o-NjqVVDA\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}"
+    "signing_input": "agentconnect/v0/listing-token{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}",
+    "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"lsfFkCd6DSGKdxRkm2aZJFrtZQs93xQsw5j1fIi14y38pbPNSI27wBdgIdQczPZuczDwlNpS2vpSCNYBsjyAAQ\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}"
   },
   "verify_invalid": [
     {
-      "directory_key": "TL9FdYK34uqwzX4gV11EQboAtzd4nWnPI7fJzunWIH0",
+      "directory_key": "g6GwDYntk_D_5vLwXY3SjISjJ_zKZcC21inHt0IpqMs",
       "error": "invalid listing token: unknown key_id",
       "kind": "unknown_key",
       "name": "unpinned key",
       "now": 1792497600,
-      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"cR6BS9Dl3Z9zhsM127Oe0fEM9VMW8LMQyDkBA6bqcAl1PyufJu85AmrEx3APhprRVFgtFssQJTxb6o-NjqVVDA\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}"
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"lsfFkCd6DSGKdxRkm2aZJFrtZQs93xQsw5j1fIi14y38pbPNSI27wBdgIdQczPZuczDwlNpS2vpSCNYBsjyAAQ\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}"
     },
     {
-      "directory_key": "oVSSz0kAyEL2XlqBaxKMjc1P5T8Am1xkc6XCKJhf-44",
+      "directory_key": "34X54ncqan5wKp-DprXNMlxN_dqM3f-bwaqBlBTWAmM",
       "error": "invalid listing token: signature",
       "kind": "signature",
       "name": "forged under the pinned key_id",
       "now": 1792497600,
-      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"YnQBDcXoB4t4fE0WiKm7NztgCFHlhZQYe4n1mCAGVZkrVqxDDGSjMAbGDN95-nfKJYAT0VfyuBDoC0Oyn5qgAA\",\"token_id\":\"Wsg5v6g56oVarDqlJl54sg\",\"v\":0}"
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"Ly9PM2ytdcaRCwa9caymOfrHfXYcxuYxrQHekITkicy9V0EPlfMBGaUBzQBQ0VImInG9Kb3DoT2zfavfK_IqAw\",\"token_id\":\"x1SjdUmSrYygkxhNfGI8lw\",\"v\":0}"
     },
     {
-      "directory_key": "oVSSz0kAyEL2XlqBaxKMjc1P5T8Am1xkc6XCKJhf-44",
+      "directory_key": "34X54ncqan5wKp-DprXNMlxN_dqM3f-bwaqBlBTWAmM",
       "error": "invalid listing token: signature",
       "kind": "signature",
       "name": "tampered name",
       "now": 1792497600,
-      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-plannex\",\"owner_domain\":\"example.com\",\"sig\":\"cR6BS9Dl3Z9zhsM127Oe0fEM9VMW8LMQyDkBA6bqcAl1PyufJu85AmrEx3APhprRVFgtFssQJTxb6o-NjqVVDA\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}"
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-plannex\",\"owner_domain\":\"example.com\",\"sig\":\"lsfFkCd6DSGKdxRkm2aZJFrtZQs93xQsw5j1fIi14y38pbPNSI27wBdgIdQczPZuczDwlNpS2vpSCNYBsjyAAQ\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}"
     },
     {
-      "directory_key": "oVSSz0kAyEL2XlqBaxKMjc1P5T8Am1xkc6XCKJhf-44",
+      "directory_key": "34X54ncqan5wKp-DprXNMlxN_dqM3f-bwaqBlBTWAmM",
       "error": "invalid listing token: expired",
       "kind": "expired",
       "name": "expired",
       "now": 1795089600,
-      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"cR6BS9Dl3Z9zhsM127Oe0fEM9VMW8LMQyDkBA6bqcAl1PyufJu85AmrEx3APhprRVFgtFssQJTxb6o-NjqVVDA\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}"
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"lsfFkCd6DSGKdxRkm2aZJFrtZQs93xQsw5j1fIi14y38pbPNSI27wBdgIdQczPZuczDwlNpS2vpSCNYBsjyAAQ\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}"
     },
     {
-      "directory_key": "oVSSz0kAyEL2XlqBaxKMjc1P5T8Am1xkc6XCKJhf-44",
+      "directory_key": "34X54ncqan5wKp-DprXNMlxN_dqM3f-bwaqBlBTWAmM",
+      "error": "invalid listing token: not yet valid",
+      "kind": "not_yet_valid",
+      "name": "not yet valid",
+      "now": 1792497299,
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"lsfFkCd6DSGKdxRkm2aZJFrtZQs93xQsw5j1fIi14y38pbPNSI27wBdgIdQczPZuczDwlNpS2vpSCNYBsjyAAQ\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}"
+    },
+    {
+      "directory_key": "34X54ncqan5wKp-DprXNMlxN_dqM3f-bwaqBlBTWAmM",
       "error": "invalid listing token: lifetime",
       "kind": "malformed",
       "name": "overlong",
       "now": 1792497600,
-      "token": "{\"directory\":\"agents.example\",\"expires_at\":1800273601,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"mox-ExGlyHu4u0ByQqHMItQlE2MI4YmFhNi6Bnx_4U4ldBKR5s_ckZv3pynbwe8Ut-XzJ9IcQOLWRATl4M-RAQ\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}"
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1800273601,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"Y_d8o77sWicZgm-HEs0_z-fE6ce57Vwe-QjZAVxLBkS47y_gZwwthILm7teXdR-M1G1hxnLsKq-RjFOrxnZKBw\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}"
     },
     {
-      "directory_key": "oVSSz0kAyEL2XlqBaxKMjc1P5T8Am1xkc6XCKJhf-44",
+      "directory_key": "34X54ncqan5wKp-DprXNMlxN_dqM3f-bwaqBlBTWAmM",
       "error": "invalid listing token: encoding",
       "kind": "malformed",
       "name": "not canonical",
       "now": 1792497600,
-      "token": "{ \"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cC1O8DGnZaiHxY83HtGwBF7j6e6KiWzNP6PY4-8Wv38\",\"issued_at\":1792497600,\"key_id\":\"Amc7D9AkEBLVtR6-raNrjw\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"cR6BS9Dl3Z9zhsM127Oe0fEM9VMW8LMQyDkBA6bqcAl1PyufJu85AmrEx3APhprRVFgtFssQJTxb6o-NjqVVDA\",\"token_id\":\"ync1mjIEyGlAK91K_zMIQg\",\"v\":0}"
+      "token": "{ \"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:cRmtguHpQdgBTqzpifUs4b0EZdRIQ2Tb7Eqqx8PSqqU\",\"issued_at\":1792497600,\"key_id\":\"BNec-UV5Kg1s7QffkdDqig\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"lsfFkCd6DSGKdxRkm2aZJFrtZQs93xQsw5j1fIi14y38pbPNSI27wBdgIdQczPZuczDwlNpS2vpSCNYBsjyAAQ\",\"token_id\":\"FzkdmxNb0bvg0W_jycPmxw\",\"v\":0}"
     }
   ]
 }

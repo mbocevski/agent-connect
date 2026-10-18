@@ -30,8 +30,8 @@ pub use owner::{
     VERIFIED_FOR_SECS, Vouch, owner_file_url, owner_state,
 };
 pub use token::{
-    DirectoryKey, ListingToken, MAX_TOKEN_LIFETIME_SECS, TokenGrant, TokenRevocation,
-    TrustedDirectory, directory_key_id,
+    DirectoryKey, ListingToken, MAX_TOKEN_LIFETIME_SECS, TOKEN_SKEW_SECS, TokenGrant,
+    TokenRevocation, TrustedDirectory, directory_key_id,
 };
 pub use withdrawal::{WITHDRAWAL_SKEW_SECS, Withdrawal};
 

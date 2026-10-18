@@ -83,7 +83,7 @@ def test_listings() -> None:
         assert e.value.kind == case.get("kind", "malformed"), case["name"]
     for case in v["checks"]:
         listing = ac.verify_listing(case["listing"].encode())
-        key_set = [b64d(v["other_directory_key"])] if "unpinned" in case["name"] else keys
+        key_set = [b64d(k) for k in case["directory_keys"]]
         revoked = [b64d(case["revoked"])] if case["revoked"] else []
         if case["check"] == "publish":
             with pytest.raises(ac.AgentConnectError) as e:
@@ -93,6 +93,24 @@ def test_listings() -> None:
                 listing.check_token(v["directory"], key_set, case["now"], revoked)
         assert str(e.value) == case["error"], case["name"]
         assert e.value.kind == case.get("kind", "malformed"), case["name"]
+
+
+def test_listing_replacements_and_secrets() -> None:
+    """SPEC 13.2.2-13.2.3: seq per identity; secrets for more test data."""
+    v = load("listings.json")
+    stored = ac.verify_listing(v["stored_listing"].encode())
+    for case in v["replacements"]:
+        newer = ac.verify_listing(case["listing"].encode())
+        assert newer.replaces(stored) is case["replaces"], case["name"]
+    for case in v["tombstones"]:
+        assert stored.tombstoned_by(case["identity"], case["seq"]) is case["blocked"], case["name"]
+    # The seed-derived secrets sign as the listed identities and issue
+    # tokens under the pinned key.
+    for entry in v["identities"]:
+        ik = ac.Identity.from_secret_bytes(bytes.fromhex(entry["ik_secret"]))
+        assert ik.id == entry["identity"]
+    dk = ac.DirectoryKey.from_secret_bytes(bytes.fromhex(v["directory_key_secret"]))
+    assert [b64e(dk.public_key)] == v["directory_keys"]
 
 
 def test_listing_tokens() -> None:
@@ -106,6 +124,11 @@ def test_listing_tokens() -> None:
     token = json.loads(good["token"])
     assert good["signing_input"].startswith("agentconnect/v0/listing-token{")
     assert ed25519_ok(key, good["signing_input"].encode(), b64d(token["sig"]))
+    dk = ac.DirectoryKey.from_secret_bytes(bytes.fromhex(v["directory_key_secret"]))
+    assert dk.public_key == key
+    for entry in v["identities"]:
+        ik = ac.Identity.from_secret_bytes(bytes.fromhex(entry["ik_secret"]))
+        assert ik.id == entry["identity"]
     for case in v["verify_invalid"]:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.verify_listing_token(
@@ -153,6 +176,22 @@ def test_withdrawals() -> None:
         assert e.value.kind == good["stale_kind"]
     assert ac.withdrawal_applies(data, listing) is good["applies"]
     assert ac.withdrawal_applies(v["old_seq"]["withdrawal"].encode(), listing) is False
+    wrong = v["wrong_directory"]
+    with pytest.raises(ac.AgentConnectError) as e:
+        ac.check_withdrawal_fresh(data, wrong["directory"], wrong["now"])
+    assert (str(e.value), e.value.kind) == (wrong["error"], wrong["kind"])
+    # The listing publishes end to end under its directory key.
+    keys = [b64d(k) for k in v["directory_keys"]]
+    listing.check_token(v["directory"], keys, listing.issued_at)
+    listing.check_publish(listing.issued_at)
+    ik = ac.Identity.from_secret_bytes(bytes.fromhex(v["identity_secret"]))
+    assert ik.id == listing.identity
+    assert (
+        ac.verify_withdrawal(
+            ac.sign_withdrawal(ik, v["directory"], listing.name, listing.seq, listing.issued_at)
+        )["seq"]
+        == listing.seq
+    )
     for case in v["invalid"]:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.verify_withdrawal(case["withdrawal"].encode())

@@ -415,14 +415,14 @@ impl E2eParams {
         {
             return Err(bad("owner_domain"));
         }
-        let g = &self.token.grant;
-        if g.name != self.name {
-            return Err(bad("token name differs"));
-        }
-        if g.directory != self.directory {
-            return Err(bad("token directory differs"));
-        }
-        Ok(())
+        // The token must bind this listing; needs no key, so it is part of
+        // parsing and no caller can skip it (§13.1.4).
+        self.token.check_binding(
+            &self.directory,
+            &self.name,
+            &self.identity,
+            self.owner_domain.as_deref(),
+        )
     }
 }
 
@@ -815,6 +815,40 @@ impl SignedListing {
         Ok(())
     }
 
+    /// Whether this listing may replace `stored`, the listing a directory
+    /// holds for the same directory and name (SPEC §13.2.2):
+    ///
+    /// - by the same identity, only with a higher `seq`: `seq` belongs to
+    ///   (directory, name, identity);
+    /// - by another identity, only under a token the operator issued later
+    ///   (`token.issued_at` strictly greater). A new identity for a name
+    ///   needs a new token, and starts its own `seq`; the old identity's
+    ///   key, even at the maximum `seq`, can't take the name back from it.
+    ///
+    /// Listings for another directory or name are never comparable. The
+    /// token's validity is [`SignedListing::check_token`]'s.
+    #[must_use]
+    pub fn replaces(&self, stored: &SignedListing) -> bool {
+        let (new, old) = (self.params(), stored.params());
+        if new.directory != old.directory || new.name != old.name {
+            return false;
+        }
+        if new.identity == old.identity {
+            new.seq > old.seq
+        } else {
+            new.token.grant.issued_at > old.token.grant.issued_at
+        }
+    }
+
+    /// Whether the tombstone `(identity, seq)` that a withdrawal left for
+    /// this listing's name blocks it: the same identity, and a `seq` no
+    /// higher than the tombstone's (SPEC §13.2.3). Another identity's
+    /// tombstone never blocks it.
+    #[must_use]
+    pub fn tombstoned_by(&self, identity: &str, seq: u64) -> bool {
+        self.params().identity == identity && self.params().seq <= seq
+    }
+
     /// The time checks of a publish (SPEC §13.2.2): `issued_at` is at most
     /// 300 s in the future, and a door, if present, hasn't expired. The
     /// `seq`, tombstone and relay checks need the directory's state.
@@ -837,6 +871,7 @@ impl SignedListing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::listing::TokenGrant;
     use crate::listing::Withdrawal;
     use crate::listing::testing::{Fixture, T0, card_for, fixture, grant};
     use crate::rng::Rng;
@@ -1343,9 +1378,20 @@ mod tests {
             &|c| c.params.owner_domain = Some("example.com.".into()),
             bad("owner_domain"),
         );
+        let mut unpinned = grant(&f.ik.id());
+        unpinned.owner_domain = None;
+        let unpinned = f.dk.issue_token(&rng, &unpinned).unwrap();
+        check(
+            &|c| {
+                c.params.owner_domain = None;
+                c.params.token = unpinned.clone();
+            },
+            bad("provider needs owner_domain"),
+        );
+        // Dropping the domain a token pins breaks the binding.
         check(
             &|c| c.params.owner_domain = None,
-            bad("provider needs owner_domain"),
+            Error::InvalidToken("bound to another owner domain"),
         );
         check(
             &|c| c.provider.as_mut().unwrap().url = "https://example.com.evil.example".into(),
@@ -1369,14 +1415,14 @@ mod tests {
         let other_name = f.dk.issue_token(&rng, &g).unwrap();
         check(
             &|c| c.params.token = other_name.clone(),
-            bad("token name differs"),
+            Error::InvalidToken("bound to another name"),
         );
         let mut g = grant(&f.ik.id());
         g.directory = "other.example".into();
         let other_dir = f.dk.issue_token(&rng, &g).unwrap();
         check(
             &|c| c.params.token = other_dir.clone(),
-            bad("token directory differs"),
+            Error::InvalidToken("bound to another directory"),
         );
         // Too large once encoded.
         let mut big = f.card.clone();
@@ -1411,25 +1457,118 @@ mod tests {
             l.check_token(&other.trusted, T0, |_| false),
             Err(Error::InvalidToken("unknown key_id"))
         );
-        // A valid token for another identity, embedded in this listing.
-        let stranger = Identity::generate(&Rng::for_test("stranger")).unwrap();
-        let theirs =
-            f.dk.issue_token(&Rng::for_test("theirs"), &grant(&stranger.id()))
-                .unwrap();
-        let l2 = card_for(&f.ik, theirs, None).sign(&f.ik).unwrap();
+        // Review L3: a post-dated token isn't valid yet.
         assert_eq!(
-            l2.check_token(&f.trusted, T0, |_| false),
-            Err(Error::InvalidToken("bound to another identity"))
+            l.check_token(&f.trusted, l.token().grant.issued_at - 301, |_| false),
+            Err(Error::InvalidToken("not yet valid"))
         );
-        // A token pinning another owner domain.
+        l.check_token(&f.trusted, l.token().grant.issued_at - 300, |_| false)
+            .unwrap();
+    }
+
+    /// Review L5: the token's binding is part of parsing, so a caller that
+    /// stops at `from_bytes` can't accept someone else's token.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn a_token_bound_to_something_else_fails_at_parse() {
+        let f = fixture("card-token-binding");
+        let v = value(&signed(&f));
+        let stranger = Identity::generate(&Rng::for_test("stranger")).unwrap();
         let mut g = grant(&f.ik.id());
         g.owner_domain = Some("other.example".into());
-        let pinned = f.dk.issue_token(&Rng::for_test("pinned"), &g).unwrap();
-        let l3 = card_for(&f.ik, pinned, None).sign(&f.ik).unwrap();
-        assert_eq!(
-            l3.check_token(&f.trusted, T0, |_| false),
-            Err(Error::InvalidToken("bound to another owner domain"))
-        );
+        let mut no_domain = grant(&f.ik.id());
+        no_domain.owner_domain = None;
+        let rng = Rng::for_test("card-token-binding-tokens");
+        for (grant, expected) in [
+            (grant(&stranger.id()), "bound to another identity"),
+            (g, "bound to another owner domain"),
+            (
+                TokenGrant {
+                    name: "other-name".into(),
+                    ..grant(&f.ik.id())
+                },
+                "bound to another name",
+            ),
+            (
+                TokenGrant {
+                    directory: "other.example".into(),
+                    ..grant(&f.ik.id())
+                },
+                "bound to another directory",
+            ),
+        ] {
+            let token = f.dk.issue_token(&rng, &grant).unwrap();
+            let card = card_for(&f.ik, token.clone(), None);
+            assert_eq!(card.sign(&f.ik), Err(Error::InvalidToken(expected)));
+            let mut m = v.clone();
+            m["capabilities"]["extensions"][0]["params"]["token"] =
+                serde_json::from_slice(&token.to_json().unwrap()).unwrap();
+            let e = err(&resign(m, &f.ik));
+            assert_eq!(e, Error::InvalidToken(expected));
+            assert_eq!(e.kind(), crate::ErrorKind::TokenMismatch);
+        }
+        // A token without a pinned domain binds a listing with or without one.
+        let open = f.dk.issue_token(&rng, &no_domain).unwrap();
+        card_for(&f.ik, open, None).sign(&f.ik).unwrap();
+    }
+
+    /// Review M3: `seq` and tombstones belong to (directory, name,
+    /// identity), and between identities the newer operator grant wins.
+    #[test]
+    fn seq_is_per_identity_and_a_newer_token_replaces_another_identity() {
+        let f = fixture("card-seq");
+        let rng = Rng::for_test("card-seq-tokens");
+        let at = |ik: &Identity, seq: u64, issued_at: u64| {
+            let token =
+                f.dk.issue_token(
+                    &rng,
+                    &TokenGrant {
+                        issued_at,
+                        expires_at: issued_at + 30 * 24 * 3600,
+                        ..grant(&ik.id())
+                    },
+                )
+                .unwrap();
+            let mut c = card_for(ik, token, None);
+            c.params.seq = seq;
+            c.sign(ik).unwrap()
+        };
+        let old = &f.ik;
+        let new = Identity::generate(&Rng::for_test("card-seq-new")).unwrap();
+        let stored = at(old, 7, T0);
+        // The same identity needs a higher seq.
+        assert!(at(old, 8, T0).replaces(&stored));
+        assert!(!at(old, 7, T0).replaces(&stored));
+        assert!(!at(old, 6, T0 + 10).replaces(&stored));
+        // A new identity (rotation) starts its own seq, under a later token.
+        let rotated = at(&new, 1, T0 + 60);
+        assert!(rotated.replaces(&stored));
+        // A stolen old key at the maximum seq can't take the name back from
+        // the identity the operator issued a newer token to.
+        let stolen = at(old, MAX_SAFE_INTEGER, T0);
+        assert!(!stolen.replaces(&rotated));
+        assert!(rotated.replaces(&stolen));
+        // An older grant never replaces a newer one, nor an equal one.
+        assert!(!at(&new, 1, T0).replaces(&stored));
+        assert!(!at(&new, 1, T0 - 60).replaces(&stored));
+        // Tombstones are per identity too.
+        assert!(stored.tombstoned_by(&old.id(), 7));
+        assert!(stored.tombstoned_by(&old.id(), 9));
+        assert!(!stored.tombstoned_by(&old.id(), 6));
+        assert!(!rotated.tombstoned_by(&old.id(), MAX_SAFE_INTEGER));
+        // Listings of other names are not comparable.
+        let mut other = card_for(old, stored.token().clone(), None);
+        other.params.name = "other-name".into();
+        other.params.token =
+            f.dk.issue_token(
+                &rng,
+                &TokenGrant {
+                    name: "other-name".into(),
+                    ..grant(&old.id())
+                },
+            )
+            .unwrap();
+        assert!(!other.sign(old).unwrap().replaces(&stored));
     }
 
     struct DirectoryKeyFixture {

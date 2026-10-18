@@ -162,6 +162,18 @@ impl Listing {
         })
     }
 
+    /// Whether this listing may replace `stored` for the same directory and
+    /// name (SPEC §13.2.2): the same identity needs a higher `seq`, another
+    /// identity a later token.
+    fn replaces(&self, stored: &Listing) -> bool {
+        self.0.replaces(&stored.0)
+    }
+
+    /// Whether the tombstone `(identity, seq)` blocks this listing.
+    fn tombstoned_by(&self, identity: &str, seq: u64) -> bool {
+        self.0.tombstoned_by(identity, seq)
+    }
+
     /// The publish time checks (SPEC §13.2.2).
     fn check_publish(&self, now: u64) -> PyResult<()> {
         guarded(|| self.0.check_publish(now).map_err(err))

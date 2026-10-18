@@ -1339,9 +1339,9 @@ still untrusted content.
 | Spam lister | Publishes junk or lookalike listings | Listing only by operator-issued token, bound to one name and identity (§13.2). Per-address publish limits. Instant operator revocation | Whatever the operator lets through. Curation is a judgement, not a cryptographic check |
 | Impersonator (claims another org's name or text) | Signs a card that copies a real agent's name, description or skills | The signature binds the card to its own `IK` only. The owner domain is shown only when `/.well-known/agentconnect.json` lists the key, and `provider.organization` only next to a verified domain. Names are ASCII slugs. "Key changed" banner for 30 days. The knocker's daemon fetches the domain file itself. Then the SAS | Humans who trust the name or text over the fingerprint and domain. An attacker who controls the owner's web server can vouch for its own key |
 | Scraper / enumerator | Downloads every listing, tracks door rotations and owner domains over time | Listings are public by design. Rate limits. Listings carry no mailbox id, no relay secret and no contact data beyond what the owner signed. Doors rotate weekly | The set of listed identities and their published text, and a weekly rotation cadence. Listing makes an identity public |
-| Malicious directory operator | Hides, delays or reorders listings. Serves stale versions. Fakes owner badges. Ignores withdrawals. Logs who reads what. Issues tokens to identities of its own | Listings and withdrawals are signed by `IK`, and tokens are checked against a key pinned in the daemon, so it **can't forge or alter** a listing. The knocker re-verifies the JWS, the token and the expiry, and fetches the domain file itself. Rollback is bounded by the door's 7-day expiry, and by the owner closing the door at the relay | Censorship and delay. Stale but validly signed listings until their door expires. Reader metadata. Names are operator-assigned, so a name proves nothing about who holds it |
+| Malicious directory operator | Hides, delays or reorders listings. Serves stale versions. Fakes owner badges. Ignores withdrawals. Logs who reads what. Issues tokens to identities of its own | Listings and withdrawals are signed by `IK`, and tokens are checked against a key pinned in the daemon, so it **can't forge or alter** a listing. The knocker re-verifies the JWS, the token and the expiry, and fetches the domain file itself. Rollback is bounded by the door's 7-day expiry (a listing without a door by its token's expiry, at most 90 days), by the owner closing the door at the relay, and by token revocation | Censorship and delay. Stale but validly signed listings until their door expires, or for a listing without a door until its token expires. Reader metadata. Names are operator-assigned, so a name proves nothing about who holds it |
 | Relay and directory colluding (same operator) | Joins reads of a listing to knocks on its door, and knocks to their mailboxes | Knocks are sealed (§6.6), so the relay sees a sender mailbox, a door and a time. Directories log no addresses (§13.2) | Who knocked on whom and when, if both sides keep data they're told not to keep. **Metadata**, as for the relay |
-| Stale door (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones stop older listings from being re-published | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry |
+| Stale door (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones, per identity, stop older listings from being re-published (§13.2.2) | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry. A listing without a door can be re-served until its token expires, without being knockable |
 | Knock flooder | Sends many knocks to tire the owner's human, or to crowd out real knocks | Relay limits per (door, sender), per sender, and per door, where overflow is dropped silently (§8.3). Owner caps: one pending knock per identity per door, 32 per door (§6.6.3). The 1 h lapse. Local policy (§10.6) drops | Denial of service on a popular door. Mailboxes are free, so the relay limits slow Sybils down rather than stop them |
 | Prompt injection through card text | Card name, description, skills and examples are attacker-controlled and are read by agents through MCP, Markdown, `llms.txt` and knocks | Cards are untrusted content (§10.1, §10.5). Directories MUST present card text as data (§13.2). Single-line fields with length caps (§13.1). No links from card text are rendered. Knock approval is human. Knocking only asks to talk | Behavioural: an agent that obeys card text anyway. Can't be solved with cryptography |
 
@@ -1451,11 +1451,11 @@ wrapped for reading (the published form is one canonical line):
 | `name` | The listing name (slug): 3 to 32 characters of `[a-z0-9-]`, starting and ending with a letter or digit. It equals the `name` in `token`. |
 | `directory` | The directory host the listing is for, in the canonical host form of §8.1.1. It equals the `directory` in `token`. |
 | `relay` | The relay host a knock goes through, in canonical host form. v0 is single-relay (§4.4): a knocker MUST refuse a listing whose relay is not its own. |
-| `seq` | A positive integer. It increases with every listing this identity signs for this name. |
+| `seq` | A positive integer. It increases with every listing this identity signs for this name: `seq` belongs to (directory, name, identity), and a new identity for a name starts its own (§13.2.2). |
 | `issued_at` | Unix seconds. Informational, apart from the publish check (§13.2.2). |
 | `door` | Optional. When it is absent the door is closed: the listing is "not taking new connections". `id` is the `door_id` (§6.6.1). `key` is the door's HPKE public key, exactly 1216 bytes, in base64url. `expires_at` is after `issued_at` and at most 7 days (604800 s) after it. |
 | `owner_domain` | Optional. A lower-case ASCII DNS name in A-label form, with at least two labels, no port, no IP literal and no trailing dot. |
-| `token` | The operator-issued `ListingToken` (§13.2.1), as a JSON object. |
+| `token` | The operator-issued `ListingToken` (§13.2.1), as a JSON object. It MUST bind this listing: its `directory`, `name` and `identity` equal the params, and its `owner_domain`, if set, equals the listing's `owner_domain`. This needs no key, so it is part of checking §13.1. |
 
 #### 13.1.2 Rules on the card
 
@@ -1637,6 +1637,7 @@ and receivers MUST reject them otherwise (§3.2).
   - its `directory`, `name` and `identity` equal the listing's params, and
     its `owner_domain`, if set, equals the listing's `owner_domain`;
   - `issued_at` < `expires_at` ≤ `issued_at` + 90 days (7776000 s);
+  - `issued_at` ≤ now + 300 s (the token is valid already);
   - now < `expires_at`;
   - its `token_id` has not been revoked.
 
@@ -1654,11 +1655,27 @@ directory MUST accept it only if all of these hold:
 - the listing passes §13.1;
 - the token is valid (§13.2.1), and its `directory` is this directory's
   host;
-- `seq` is greater than the stored `seq` and any tombstoned `seq` for this
-  name;
+- if a listing of this name is stored, the new one replaces it:
+  - from the same identity, only with a greater `seq`;
+  - from another identity, only if the new listing's token was issued
+    later (`token.issued_at` strictly greater) than the stored listing's.
+    A new identity for a name needs a new token from the operator and
+    starts its own `seq`; a key that is no longer the name's, even one
+    that signs at the largest `seq`, can't take the name back;
+- no tombstone of the **same identity** for this name has a `seq` at or
+  above the new listing's. A tombstone never blocks another identity;
 - `issued_at` ≤ now + 300 s;
 - if a door is present, its `expires_at` is in the future; `relay` is a
   relay this directory lists.
+
+`seq` and tombstones therefore belong to (directory, name, identity). A
+stolen key can at worst block its own identity's future listings; the
+operator revokes its token and issues one for the new identity.
+
+A directory MUST re-check a stored listing's token (expiry and revocation)
+and door expiry whenever it serves the listing. A listing whose token has
+expired or been revoked is served as withdrawn; one whose door has expired
+is served with the door shown closed.
 
 The owner check (§13.2.4) then runs. Re-posting the same bytes is
 idempotent. Choosing to publish, and any change to the card's text, MUST be
@@ -1687,7 +1704,8 @@ Withdrawal = {
   `name` only if that listing's `identity` equals the withdrawal's and its
   `seq` is at most the withdrawal's `seq`. In one transaction the directory
   deletes the listing, writes a tombstone `(name, identity, seq)` and
-  appends the signed withdrawal to the feed. A repeat of the same
+  appends the signed withdrawal to the feed. The tombstone blocks only that
+  identity's listings of the name (§13.2.2). A repeat of the same
   withdrawal changes nothing.
 - An owner closes the door at the relay (`DELETE /v0/doors/{door_id}`)
   **before** it withdraws. Closing at the relay is what makes withdrawal
@@ -1795,7 +1813,9 @@ name is registered with IANA before v0 is tagged):
   token) and MUST NOT serve one older than the newest `seq` it has seen for
   the name, or one with a tombstone.
 - For a cache that doesn't conform, the worst case is bounded by the door's
-  signed expiry (at most 7 days), and a closed door already refuses knocks.
+  signed expiry (at most 7 days), or for a listing without a door by its
+  token's expiry (at most 90 days), and a closed door already refuses
+  knocks.
 
 #### 13.2.6 What a directory must not do
 

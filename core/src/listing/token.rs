@@ -18,6 +18,8 @@ const REVOKE_LABEL: &[u8] = b"agentconnect/v0/listing-token-revoke";
 
 /// The longest a token may be valid: 90 days (SPEC §13.2.1).
 pub const MAX_TOKEN_LIFETIME_SECS: u64 = 90 * 24 * 3600;
+/// How far in the future a token's `issued_at` may be (SPEC §13.2.1).
+pub const TOKEN_SKEW_SECS: u64 = 300;
 /// Longest `TokenRevocation.reason`, in characters.
 const MAX_REASON_CHARS: usize = 200;
 /// At most two directory keys are valid at once, so `DK` can rotate.
@@ -230,7 +232,8 @@ impl ListingToken {
 
     /// The token's own checks (SPEC §13.2.1): its directory is `trusted`'s
     /// host, its `key_id` names a pinned key and `sig` verifies under it,
-    /// its lifetime is at most 90 days, and it hasn't expired at `now`.
+    /// its lifetime is at most 90 days, it is valid already (`issued_at` at
+    /// most 300 s after `now`) and it hasn't expired at `now`.
     ///
     /// # Errors
     ///
@@ -238,11 +241,14 @@ impl ListingToken {
     pub fn verify(&self, trusted: &TrustedDirectory, now: u64) -> Result<()> {
         check_grant(&self.grant)?;
         if self.grant.directory != trusted.host {
-            return Err(bad("directory"));
+            return Err(bad("bound to another directory"));
         }
         let key = trusted.key_for(&self.key_id).ok_or(bad("unknown key_id"))?;
         if !verify_ed25519(key, &self.signing_input()?, &self.sig) {
             return Err(bad("signature"));
+        }
+        if self.grant.issued_at > now.saturating_add(TOKEN_SKEW_SECS) {
+            return Err(bad("not yet valid"));
         }
         if now >= self.grant.expires_at {
             return Err(bad("expired"));
@@ -555,7 +561,10 @@ pub(crate) mod tests {
         assert_eq!(t.verify(&trusted, T0), Err(bad("signature")));
         let mut t = token;
         t.grant.directory = "other.example".into();
-        assert_eq!(t.verify(&trusted, T0), Err(bad("directory")));
+        assert_eq!(
+            t.verify(&trusted, T0),
+            Err(bad("bound to another directory"))
+        );
     }
 
     #[test]
