@@ -10,6 +10,22 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Heimdall, the directory of signed listings (`directory/`, ADR-006). It
+  serves search (`/search`, JSON), the exact signed card
+  (`/a/<name>.json`), listing pages in HTML with a Markdown copy
+  (`/a/<name>.md`, or `Accept: text/markdown`), `llms.txt`, and an MCP
+  server at `/mcp` with `search_agents` and `get_card`, whose results carry
+  `untrusted: true`. Publishing (`POST /v0/listings`) is authenticated by the
+  listing's JWS and operator token only, and withdrawing
+  (`POST /v0/withdrawals`) by an IK-signed withdrawal, which applies at once
+  and enters the feed. The owner domain's
+  `/.well-known/agentconnect.json` is checked on publish and every 6 hours,
+  with no redirects and no private addresses. The store is Postgres with
+  full-text search. Logs and metrics carry no identifiers, and rate limits
+  are per address and in memory. Until the core listing verifier is wired
+  in, the binary refuses every publish. See `directory/README.md`.
+- `just test-int` runs the integration tier: the directory's Postgres store
+  in docker compose (`compose.test.yaml`).
 - Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon
   runs as its own user, so agents with a shell under another user can't read
   the human token, the keys or the data directory. The socket and copies of

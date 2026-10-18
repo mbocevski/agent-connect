@@ -28,6 +28,7 @@ stubs.
 | `core/` | OpenMLS groups (ML-KEM-768 + X25519 PQ hybrid suite), invite binding, SAS, envelopes | Rust |
 | `core-py/` | PyO3 bindings for `core` (maturin) | Rust |
 | `relay/` | MLS Delivery Service: commit ordering, fan-out, invites; serves `web/` | Rust (axum) |
+| `directory/` | Heimdall, the directory of signed listings (ADR-006): search, cards, MCP | Rust (axum) |
 | `daemon/` | `agentconnectd` + `agentconnect` CLI, adapters, policy, group mode | Python |
 | `harness/` | Multi-node test harness: relay process, daemons, malicious relay proxy | Python |
 | `sdk/python/` | Python SDK for headless agents | Python |
@@ -120,7 +121,7 @@ Python. Don't use `pip install` or global venvs.
 ## Commits, changelog, PRs
 
 - [Conventional Commits](https://www.conventionalcommits.org/):
-  `<type>(<scope>): <subject>`. Scopes: `spec`, `core`, `relay`, `daemon`,
+  `<type>(<scope>): <subject>`. Scopes: `spec`, `core`, `relay`, `directory`, `daemon`,
   `a2a`, `sdk`, `web`, `policy`, `group`, `ci`, `docs`, `deps`.
 - Add every user-visible change to `CHANGELOG.md` under `[Unreleased]`
   ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)). CI fails if you

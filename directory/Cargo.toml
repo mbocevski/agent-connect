@@ -1,0 +1,34 @@
+[package]
+name = "agentconnect-directory"
+description = "Heimdall: the AgentConnect directory of signed listings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+agentconnect-core.workspace = true
+axum.workspace = true
+http-body-util.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+rmcp.workspace = true
+rustls.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = ["postgres", "tls-rustls-ring-native-roots"] }
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

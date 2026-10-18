@@ -8,7 +8,7 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 | Command | Contents | Budget | Network / docker | Runs |
 |---|---|---|---|---|
 | `just test` | Rust and Python unit, property and contract tests (`just contract`), multi-node harness scenarios | < 60 s | loopback only | pre-push, CI |
-| `just test-int` | docker compose integration (relay + daemons) and demos | < 10 min | docker | CI (once populated) |
+| `just test-int` | docker compose integration (`compose.test.yaml`: Postgres for the directory store) and demos | < 10 min | docker | CI (once populated) |
 | `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests; fuzzing and criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
 | `just ci` | exactly the PR pipeline: `lint`, `test`, `cov` (gates and ratchet), `changelog-check`, `docs-check` | minutes | none | PR CI (`ci-ok`) |
 
@@ -171,6 +171,7 @@ Tests keep the sources honest:
 |---|---|---|
 | `core` | >= 90% | lines (`cargo llvm-cov`) |
 | `relay` | >= 80% | lines (`cargo llvm-cov`, `main.rs` excluded) |
+| `directory` | >= 80% | lines (`cargo llvm-cov`; `main.rs` excluded, and `postgres.rs`, which `just test-int` covers) |
 | Python | >= 85% | lines + branches (`coverage.py`, `branch = true`) |
 
 **Rust branch coverage is not gated.** `cargo llvm-cov --branch` requires a

@@ -5,6 +5,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 # Coverage gates (see TESTING.md)
 cov_core := "90"
 cov_relay := "80"
+cov_directory := "80"
 cov_python := "85"
 
 default:
@@ -74,8 +75,10 @@ contract:
     uv run --no-project python scripts/check_manifest.py
 
 # Integration tier (docker compose); populated as components land
+# Postgres for Heimdall's store comes from compose.test.yaml (loopback only).
 test-int:
-    @echo "no integration tests yet (added with the relay and daemon)"
+    docker compose -f compose.test.yaml up -d --wait
+    status=0; AC_DIRECTORY_TEST_DB=postgres://heimdall@127.0.0.1:55432/heimdall cargo nextest run -p agentconnect-directory --locked --run-ignored only || status=$?; docker compose -f compose.test.yaml down; exit "$status"
 
 # Nightly tier: mutation testing, quarantined tests, long property runs
 # (fuzzing and benchmarks are added with the core)
@@ -96,19 +99,20 @@ cov: cov-rust cov-py
 
 # Coverage gates plus the ratchet against coverage-baseline.json
 cov-rust: _cov-rust-run
-    uv run --no-project python scripts/cov_ratchet.py check core=target/cov/core.json relay=target/cov/relay.json
+    uv run --no-project python scripts/cov_ratchet.py check core=target/cov/core.json relay=target/cov/relay.json directory=target/cov/directory.json
 
 cov-py: _cov-py-run
     uv run --no-project python scripts/cov_ratchet.py check python=target/cov/python.json
 
 # Rewrite coverage-baseline.json from a fresh run. Commit it in the PR that raises coverage.
 cov-baseline: _cov-rust-run _cov-py-run
-    uv run --no-project python scripts/cov_ratchet.py update core=target/cov/core.json relay=target/cov/relay.json python=target/cov/python.json
+    uv run --no-project python scripts/cov_ratchet.py update core=target/cov/core.json relay=target/cov/relay.json directory=target/cov/directory.json python=target/cov/python.json
 
 _cov-rust-run:
     mkdir -p target/cov
     cargo llvm-cov nextest -p agentconnect-core --locked --fail-under-lines {{ cov_core }} --json --summary-only --output-path target/cov/core.json
     cargo llvm-cov nextest -p agentconnect-relay --locked --fail-under-lines {{ cov_relay }} --ignore-filename-regex 'main\.rs$' --json --summary-only --output-path target/cov/relay.json
+    cargo llvm-cov nextest -p agentconnect-directory --locked --fail-under-lines {{ cov_directory }} --ignore-filename-regex '(main|postgres)\.rs$' --json --summary-only --output-path target/cov/directory.json
 
 # Debug relay binary for the multi-node harness (a no-op when up to date)
 build-relay-dev:
@@ -138,9 +142,13 @@ ci: lint test cov changelog-check docs-check
 relay:
     cargo run -p agentconnect-relay
 
-# Release builds: relay binary and Python wheels
+# Run Heimdall locally on the in-memory store (AC_DIRECTORY_ADDR, default 127.0.0.1:8090)
+directory:
+    AC_DIRECTORY_DB="${AC_DIRECTORY_DB:-memory:}" cargo run -p agentconnect-directory
+
+# Release builds: relay and directory binaries and Python wheels
 build:
-    cargo build --release --locked -p agentconnect-relay
+    cargo build --release --locked -p agentconnect-relay -p agentconnect-directory
     uv build --all-packages --sdist --wheel --out-dir dist
 
 # Push branch and open/refresh its PR
