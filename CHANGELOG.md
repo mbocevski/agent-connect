@@ -10,6 +10,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Relay: `/metrics` exposes `agentconnect_relay_ws_connections_open`, a
+  gauge of the WebSocket connections open now. It carries no labels or
+  identifiers, and a drop guard takes each connection off the count exactly
+  once, however the connection ends.
 - Embedded SDK mode (ADR-005): `AgentConnect.embedded(name="my-agent")`
   runs the AgentConnect runtime inside the agent's own process and asyncio
   loop, so a headless agent needs no separate daemon, and no second
