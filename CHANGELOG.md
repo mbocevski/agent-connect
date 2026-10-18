@@ -14,24 +14,34 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   renewal (SPEC §6.6.4, §6.6.5, §13.2.2), with Python bindings.
   `Group::add_knocker` (`Client.add_knock`) commits the Add of an approved
   knock's KeyPackage in a fresh group of the owner's own (one leaf, owned
-  and created by it, floor `free`, epoch 0) and wraps the Welcome under the
-  knock key; it refuses a knock past its `lapses_at`, a used KeyPackage and
-  a knock from the owner's own identity. `Client::join_from_knock_welcome`
-  and `join_knock_journaled` (`Client.join_knock`) check the Welcome against
-  the listing: its name, `created_by` and `owner`, and exactly two members,
-  the knocker and one instance of the listed identity. A mismatch spends the
-  KeyPackage and has the new error kind `welcome_mismatch`.
-  `Client::restore_knock` rebuilds a verified knock from
-  `VerifiedKnock::to_secret_bytes` with its KeyPackage and signature checked
-  again, so an approval can wait across a restart, and `create_knock_at`
-  (`create_knock(ts=...)`) stamps the caller's clock. `ListingContent` is
-  the card text a human approves, in its own closed schema
-  (`canonical_listing_content`, `sign_listing_content`), and
-  `SignedListing::renew` (`Listing.renew`) re-signs only `door`, `seq` and
-  `issued_at`. The public-address rule for outbound fetches moves from the
-  directory to `agentconnect_core::net::is_public_ip` (`is_public_address`),
-  so the directory and the daemon share it. Vectors: `listings.json` gains a
-  renewal and content cases, and `public-addresses.json` is new.
+  and created by it, floor `free`, no admin or moderator but the owner,
+  epoch 0) and wraps the Welcome under the knock key. On the client's clock
+  it refuses a knock past its `lapses_at` or stamped more than 300 s
+  ahead; it also refuses a used KeyPackage and a knock from the owner's own
+  identity. A pending own commit now reserves the KeyPackages it Adds, so
+  neither `add_knocker` nor `add_member` can Add one KeyPackage in two
+  groups at once. `Client::join_from_knock_welcome` and
+  `join_knock_journaled` (`Client.join_knock`) check the Welcome against
+  the listing: its name, `created_by` and `owner`, epoch 1, floor `free`,
+  no roles for another identity, and exactly two members, the knocker and
+  one instance of the listed identity. A mismatch spends the KeyPackage and
+  has the new error kind `welcome_mismatch`; a Welcome after `gives_up_at`
+  is refused unopened (kind `expired`). A knock join's journal entry is
+  bound to the knock and the listing, so it never replays for another knock
+  or an invite join. `Client::restore_knock` rebuilds a verified knock
+  from `VerifiedKnock::to_secret_bytes` with its KeyPackage and signature
+  checked again, so an approval can wait across a restart, and
+  `create_knock_at` (`create_knock(ts=...)`) stamps the caller's clock.
+  `ListingContent` is the card text a human approves, in its own closed
+  schema (`canonical_listing_content`, `sign_listing_content`), and
+  `SignedListing::renew` (`Listing.renew`) re-signs only `door`, `seq`
+  and `issued_at`, never with a lower `seq` or an earlier `issued_at`.
+  The public-address rule for outbound fetches moves from the directory to
+  `agentconnect_core::net::is_public_ip` (`is_public_address`), so the
+  directory and the daemon share it, and it now also refuses `3fff::/20`
+  (RFC 9637), with a rule of its own for every IPv6 special-purpose block.
+  Vectors: `listings.json` gains a renewal and content cases, and
+  `public-addresses.json` is new.
 - Embedded SDK mode (ADR-005): `AgentConnect.embedded(name="my-agent")`
   runs the AgentConnect runtime inside the agent's own process and asyncio
   loop, so a headless agent needs no separate daemon, and no second
