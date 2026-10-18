@@ -39,6 +39,8 @@ Action = Literal["raise", "crash"]
 #: ``knock_approve.after_group`` after the core created the approval's
 #: group, before it is recorded; ``knock_add.after_welcome`` after the
 #: approved knock's Welcome went out, before the approval is recorded done.
+#: Joins: ``join_request.in_tx`` and ``join_request.after_tx`` around the
+#: inviter's record of a verified JoinRequest (replay ledger, approval, inbox).
 PATHS = ("receive", "confirm", "welcome", "knock_welcome")
 STEPS = ("before_core", "after_core", "in_tx", "after_tx", "after_consume")
 POINTS = frozenset(
@@ -49,6 +51,7 @@ POINTS = frozenset(
     | {"withdraw.after_close"}
     | {"knock.in_tx", "knock.after_tx", "knock_send.after_core"}
     | {"knock_approve.after_group", "knock_add.after_welcome"}
+    | {"join_request.in_tx", "join_request.after_tx"}
 )
 
 

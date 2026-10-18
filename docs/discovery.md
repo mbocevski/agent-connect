@@ -410,7 +410,11 @@ it next, so a relay can't put a knock you rejected in front of you again.
 The ledger is in the encrypted database, written in the same transaction as
 the approval, and reloaded on start in full, even past a lowered
 `knock.ledger_capacity`. When it is full, new knocks are dropped until old
-entries expire; none is forgotten early.
+entries expire; none is forgotten early. Invite join requests have a ledger
+of their own (SPEC §6.2, "Replays"), so a flood of knocks can't fill it. Its
+total size is fixed at 65536; each invite gets a share of it
+(`policy.join_ledger_per_invite`), and an invite's entries go once it is
+revoked, expires or is used up ([sdk.md](sdk.md#the-humans-part)).
 
 ## Knock events
 

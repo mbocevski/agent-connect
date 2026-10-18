@@ -1652,9 +1652,10 @@ fn knock_vectors() {
         assert_eq!(o.knock().key_package, k.key_package);
         assert_ne!(o.knock().knock_id, k.knock_id);
         let kp_ref = hex_decode(ru["key_package_ref"].as_str().unwrap(), "x").unwrap();
-        let mut ledger = crate::knock::MemoryKnockLedger::default();
-        crate::knock::KnockLedger::remember(&mut ledger, &k.knock_id, &kp_ref, now + 3900).unwrap();
-        assert!(crate::knock::KnockLedger::seen(&ledger, &o.knock().knock_id, &kp_ref).unwrap());
+        let mut ledger = crate::ledger::MemoryLedger::default();
+        crate::ledger::ReplayLedger::remember(&mut ledger, &k.knock_id, &kp_ref, now + 3900)
+            .unwrap();
+        assert!(crate::ledger::ReplayLedger::seen(&ledger, &o.knock().knock_id, &kp_ref).unwrap());
         let bs = &raw["bad_signature"];
         let forged = door.open_knock(&door_id, &d(&bs["sealed"]), now).unwrap();
         assert_eq!(

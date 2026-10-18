@@ -814,6 +814,55 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core, daemon and SPEC: an invite JoinRequest that was rejected, lapsed
+  or dropped could be delivered again by the relay (or anyone holding the
+  envelope) and passed every check again, so a request the human rejected
+  could come back in front of them while a multi-use invite stayed open.
+  The inviter now remembers every JoinRequest that passed its checks, by
+  its envelope `msg_id` and its KeyPackageRef, until its invite's
+  `expires_at` plus 300 s, and drops a replay silently: no approval, no
+  event, nothing to the joiner, one audit row (`join_replay`). The approval
+  timeout runs from receipt, so the invite's expiry is the bound a replay
+  can't reset; after it the invite refuses the copy. The record is
+  persisted in a new `join_ledger` table of the encrypted database in the
+  transaction that records the approval, reloaded on start, bounded (when
+  full, new requests are dropped as `join_ledger_full` and nothing live is
+  evicted) and purged on the clock's current time. SPEC §6.2 states the
+  rule ("Replays"), as §6.6.3 step 6 does for knocks. The core's replay
+  ledger is shared by both: `agentconnect_core::ledger` (`ReplayLedger`,
+  `MemoryLedger`, `LEDGER_GRACE_SECS`) replaces the knock-only
+  `KnockLedger` and `MemoryKnockLedger`, with `Error::Replayed` and
+  `Error::LedgerFull` for the `replay` and `busy` kinds;
+  `VerifiedJoinRequest` gains `forget_after` and `remember_in`, and Python
+  gets `ReplayLedger` (with `seen`, and `id_len=16` for knock ids) in
+  place of `KnockLedger`. New daemon failpoints `join_request.in_tx` and
+  `join_request.after_tx`; with `policy.auto_approve` the approval and its
+  Add are recorded in the same transaction as the request, so a failure
+  after it can't leave the approval waiting until it lapses.
+  - A leaked invite link can't fill the ledger for every invite. Each entry
+    records its invite; a revoked, expired or used-up (`exhausted`)
+    invite's entries are forgotten
+    at once (both are final, and step 1 refuses any copy); each invite holds
+    at most max(4 × `max_uses`, 64) entries, at most the new
+    `policy.join_ledger_per_invite` (default 1024, 64 to 1024), and at most
+    the new `policy.max_pending_joins_per_invite` (default 32, 1 to 32)
+    pending requests; requests being added or added don't count against the
+    share. Past either, requests for that invite are dropped
+    (`join_invite_quota`, `join_invite_full`), and the human gets a new
+    `invite_flooded` event, once per invite and reason, which the agent token
+    and the adapters never see, suggesting revoking the invite. Creating an
+    invite fails with `409 too_many_invites` when the open invites' shares
+    plus their uses would exceed the ledger's 65536 entries; if it fills
+    anyway, requests are dropped as `join_ledger_full` and the human gets a
+    daemon-wide `join_ledger_full` event (once a day, no invite named).
+    Forgetting the expired invites of one pass rebuilds the ledger once.
+    SPEC §6.2 allows forgetting at revocation, expiry and use-up, and
+    recommends the per-invite bounds.
+  - The ledgers load in full and purge only in the runtime's passes. The
+    knock ledger's load used to purge on the start-time clock (since the
+    knock ledger landed), so a clock that was ahead at start and put right
+    before the next knock forgot live entries; the join ledger shared that
+    load.
 - Dependencies: RUSTSEC-2026-0329 (`libcrux-hmac-drbg` 0.0.1),
   RUSTSEC-2026-0330 and RUSTSEC-2026-0331 (`libcrux-kem` 0.0.9) are cleared
   and no longer ignored by `cargo deny`. `openmls_traits`,

@@ -481,6 +481,116 @@ impl VerifiedJoinRequest {
     fn mailbox_id(&self) -> String {
         self.mailbox_id.clone()
     }
+
+    /// Until when the inviter must remember this request: its invite's
+    /// `expires_at` plus `LEDGER_GRACE_SECS`.
+    #[getter]
+    fn forget_after(&self) -> u64 {
+        self.inner.forget_after()
+    }
+
+    /// SPEC §6.2 "Replays": raises `AgentConnectError` with kind `replay`
+    /// if `ledger` has seen `request_id` (the approval's id) or this
+    /// request's KeyPackage (`busy` if it is full), else records both.
+    /// Call it for every verified request before anything else.
+    fn remember_in(&self, ledger: &mut ReplayLedger, request_id: &[u8]) -> PyResult<()> {
+        guarded(|| {
+            ledger.check_id(request_id)?;
+            self.inner
+                .remember_in(&mut ledger.inner, request_id)
+                .map_err(err)
+        })
+    }
+}
+
+/// The owner's replay ledger (SPEC §6.2, §6.6.3 step 6): ids and
+/// KeyPackageRefs of the JoinRequests or knocks it has seen, each until its
+/// `forget_after`. A daemon that must survive restarts stores the entries
+/// itself, in its encrypted store.
+#[pyclass(module = "agentconnect_core._native")]
+pub(crate) struct ReplayLedger {
+    pub(crate) inner: core::ledger::MemoryLedger,
+    id_len: Option<usize>,
+}
+
+impl ReplayLedger {
+    /// An id of the wrong length for this ledger (a knock ledger takes the
+    /// 16-byte `knock_id` only) is refused (kind `malformed`).
+    pub(crate) fn check_id(&self, id: &[u8]) -> PyResult<()> {
+        match self.id_len {
+            Some(n) if id.len() != n => Err(bad_arg(format!("ledger id must be {n} bytes"))),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[pymethods]
+impl ReplayLedger {
+    /// An empty ledger of at most `capacity` entries (default 65536). When
+    /// full, a new request is refused with kind `busy`; nothing live is
+    /// ever evicted. With `id_len`, every id must have that many bytes (16
+    /// for a knock ledger).
+    #[new]
+    #[pyo3(signature = (capacity=None, *, id_len=None))]
+    fn new(capacity: Option<usize>, id_len: Option<usize>) -> Self {
+        Self {
+            inner: capacity.map_or_else(
+                core::ledger::MemoryLedger::default,
+                core::ledger::MemoryLedger::with_capacity,
+            ),
+            id_len,
+        }
+    }
+
+    #[getter]
+    fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Whether `id` or `key_package_ref` is remembered.
+    fn seen(&self, id: &[u8], key_package_ref: &[u8]) -> PyResult<bool> {
+        guarded(|| core::ledger::ReplayLedger::seen(&self.inner, id, key_package_ref).map_err(err))
+    }
+
+    /// `[(id, key_package_ref, forget_after)]`, for the daemon to persist
+    /// in its encrypted store. It MUST persist them.
+    fn entries<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> Vec<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, u64)> {
+        self.inner
+            .entries()
+            .into_iter()
+            .map(|e| {
+                (
+                    PyBytes::new(py, &e.id),
+                    PyBytes::new(py, &e.key_package_ref),
+                    e.forget_after,
+                )
+            })
+            .collect()
+    }
+
+    /// Restores one persisted entry. Raises (kind `busy`) when full, and
+    /// (kind `malformed`) for an id of the wrong length.
+    fn insert(&mut self, id: &[u8], key_package_ref: &[u8], forget_after: u64) -> PyResult<()> {
+        guarded(|| {
+            self.check_id(id)?;
+            self.inner
+                .insert(id.to_vec(), key_package_ref.to_vec(), forget_after)
+                .map_err(err)
+        })
+    }
+
+    /// Forgets entries whose `forget_after` is before `now` (the clock's
+    /// current time).
+    fn purge(&mut self, now: u64) {
+        self.inner.purge(now);
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
 }
 
 enum Inner {
@@ -1535,6 +1645,11 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CIPHERSUITE_V0", core::CIPHERSUITE_V0)?;
     m.add("PADDING_BUCKETS", core::padding::BUCKETS.to_vec())?;
     m.add("DB_KEY_LEN", core::provider::DB_KEY_LEN)?;
+    m.add(
+        "DEFAULT_LEDGER_CAPACITY",
+        core::ledger::DEFAULT_LEDGER_CAPACITY,
+    )?;
+    m.add("LEDGER_GRACE_SECS", core::ledger::LEDGER_GRACE_SECS)?;
     m.add("AgentConnectError", m.py().get_type::<AgentConnectError>())?;
     m.add("CoreError", m.py().get_type::<CoreError>())?;
     m.add_class::<Identity>()?;
@@ -1543,6 +1658,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<InviteLink>()?;
     m.add_class::<Sas>()?;
     m.add_class::<VerifiedJoinRequest>()?;
+    m.add_class::<ReplayLedger>()?;
     m.add_class::<Client>()?;
     m.add_class::<Database>()?;
     discovery::register(m)?;
