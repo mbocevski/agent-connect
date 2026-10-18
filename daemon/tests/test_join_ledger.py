@@ -152,6 +152,28 @@ async def test_a_failed_record_leaves_no_ledger_entry(owner: Owner, rng: random.
     assert owner.ledger() == 1
 
 
+async def test_a_request_id_or_key_package_taken_is_dropped_past_the_ledger(
+    owner: Owner, rng: random.Random
+) -> None:
+    """If the ledger forgot a request while its invite is still open (it
+    was purged on a clock that ran ahead), the approvals still hold its id
+    and KeyPackage: the request id stays taken, and the KeyPackage of a
+    pending approval gets no second one."""
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    request = bob.request(url)
+    first = await owner.deliver(request, bob.mailbox)
+    pending = bob.request(url)
+    await owner.deliver(pending, bob.mailbox)
+    owner.engine.reject(first)
+    owner.engine.store.ledger_purge(owner.now + 30 * 86_400, ledger="join")
+    owner.engine._join_ledger = ac.ReplayLedger()
+    await owner.deliver(request, b64(rng.randbytes(16)), msg_id=first)
+    await owner.deliver(pending, bob.mailbox)
+    assert owner.audit() == ["join_replay", "join_replay"]
+    assert len(owner.engine.join_approvals()) == 1
+
+
 async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(
     owner: Owner, rng: random.Random
 ) -> None:
