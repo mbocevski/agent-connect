@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -191,3 +192,28 @@ def test_relay_host_canonical_form() -> None:
         r["method"], r["path"], r["ts"], r["body"].encode(), r["relay_host"].upper()
     )
     assert _b64(sig) == r["sig"]
+
+
+def _mlkem768_x25519_seed(ikm: bytes) -> bytes:
+    # SPEC 3.1: SHAKE256.LabeledDerive(ikm, "DeriveKeyPair", "", 32) with
+    # suite_id = "KEM" || I2OSP(0x647a, 2).
+    label = b"DeriveKeyPair"
+    suite_id = b"KEM" + (0x647A).to_bytes(2, "big")
+    labeled = ikm + b"HPKE-v1" + suite_id + len(label).to_bytes(2, "big") + label
+    return hashlib.shake_256(labeled + (32).to_bytes(2, "big")).digest(32)
+
+
+def test_hpke_pq_derive_key_pair_known_answer(rng: random.Random) -> None:
+    # draft-ietf-hpke-pq vectors, vendored byte-for-byte (MANIFEST.json).
+    vectors = [
+        v
+        for v in json.loads((TESTDATA / "hpke-pq-test-vectors.json").read_text())
+        if v["kem_id"] == 0x647A
+    ]
+    assert len(vectors) == 2
+    for v in vectors:
+        ikm = h(v["ikmR"])
+        # The X-Wing private key is the 32-byte seed itself.
+        assert _mlkem768_x25519_seed(ikm) == h(v["skRm"])
+        door = ac.Door._derive_for_testing(rng.randbytes(16), ikm, 2**40)
+        assert door.public_key == h(v["pkRm"])

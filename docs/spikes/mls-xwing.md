@@ -13,11 +13,29 @@
 | Go / no-go | **GO** on OpenMLS 0.9 with `openmls_libcrux_crypto`. |
 | hpke-rs MPL-2.0 | **Allowed, scoped** to the three hpke-rs crates (ADR-001 §4). |
 | Ciphersuite | **WG track:** `MLS_128_MLKEM768X25519_AES128GCM_SHA256_Ed25519`, draft-ietf-mls-pq-ciphersuites TBD1, OpenMLS provisional `0x004F`. `0x004D` (X-Wing) is not used. |
-| Provider advisories | **Build `core` now, mitigate:** check HPKE key lengths before OpenMLS; the `deny.toml` ignores are temporary; no release or public relay until a fixed provider ships (ADR-001 §2). |
+| Provider advisories | **Build `core` now, mitigate:** check HPKE key lengths before OpenMLS; the `deny.toml` ignores are temporary; no release or public relay until a fixed provider ships (ADR-001 §2). **Cleared 2026-10-18**, see below. |
 | Invite binding | **AEAD-wrapped Welcome only** (SPEC §6.4); the PSK binding is dropped. |
 
 The proposed SPEC edits below are applied in a follow-up change with these
 choices.
+
+**Update (2026-10-18): advisories cleared.**
+
+- The workspace `Cargo.toml` patches `openmls_traits`,
+  `openmls_libcrux_crypto`, `openmls_memory_storage` and the unbuilt
+  `openmls_rust_crypto` to upstream commit
+  `be2368a21ec5e0380abd568821addc57b79013ea`. That commit depends on
+  `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2 and `hpke-rs` 0.8.
+  `openmls` 0.9.1, `openmls_basic_credential` 0.6.0 and
+  `openmls_sqlite_storage` 0.3.0 stay on crates.io: main's `openmls` pulls
+  rusqlite 0.40, whose libsqlite3-sys conflicts with sqlx 0.9.
+- RUSTSEC-2026-0329, -0330 and -0331 are no longer ignored in `deny.toml`.
+  The HPKE key length check stays as defence in depth.
+- With the fix, the t9 KeyPackage gives the inviter an error instead of a
+  panic, and the provider advertises `0x004F`. The t9 tests assert both.
+- hpke-rs 0.8 switches `DeriveKeyPair` for the suite's KEM to
+  `draft-ietf-hpke-pq` (SPEC §3.1), so the test vectors were frozen with the
+  new derivation, as item 9 recommended.
 
 ## Recommendation: GO, with conditions
 
@@ -35,20 +53,24 @@ The classical fallback (`0x0003`) is **not** needed.
 
 Before `core/` depends on it, though, four things have to be settled:
 
-1. **Wait for the next provider release (blocker).**
-   `openmls_libcrux_crypto` 0.4.0 pins `libcrux-kem` 0.0.9, which is affected
-   by RUSTSEC-2026-0330 and RUSTSEC-2026-0331, and `libcrux-hmac-drbg` 0.0.1,
-   which is affected by RUSTSEC-2026-0329.
-   - RUSTSEC-2026-0331 is **reachable**: a validly signed KeyPackage with a
-     32-byte `init_key` passes `KeyPackageIn::validate` and then panics the
-     inviter inside `add_members` (test
-     `t9_advisories::malicious_key_package_crashes_the_inviter`). Anyone
-     holding an invite link can therefore crash the inviter's daemon.
-   - Upstream `main` already depends on the fixed crates (`hpke-rs` 0.8,
-     `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2), but they haven't been
-     released as a provider yet.
-   - Until they are, `core/` MUST check the length of every HPKE public key
-     it accepts (1216 bytes for X-Wing) before calling OpenMLS.
+1. **Wait for the next provider release (blocker; lifted 2026-10-18 by the
+   provider patch, see the update above).**
+   `openmls_libcrux_crypto` 0.4.0 pinned `libcrux-kem` 0.0.9, which was
+   affected by RUSTSEC-2026-0330 and RUSTSEC-2026-0331, and
+   `libcrux-hmac-drbg` 0.0.1, which was affected by RUSTSEC-2026-0329.
+   - RUSTSEC-2026-0331 was **reachable** with libcrux-kem 0.0.9: a validly
+     signed KeyPackage with a 32-byte `init_key` passed
+     `KeyPackageIn::validate` and then panicked the inviter inside
+     `add_members`, so anyone holding an invite link could crash the
+     inviter's daemon. With the patched provider `add_members` returns an
+     error instead; `t9_advisories::short_init_key_is_an_error_not_a_crash_*`
+     asserts that on `0x004F` and `0x004D`.
+   - At the time, upstream `main` already depended on the fixed crates
+     (`hpke-rs` 0.8, `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2), but no
+     provider release shipped them.
+   - `core/` checks the length of every HPKE public key it accepts (1216
+     bytes) before calling OpenMLS. SPEC §3.1 makes that check permanent:
+     it stays as defence in depth after the fix.
 2. **Approve the hpke-rs licence (maintainer sign-off).** `hpke-rs`,
    `hpke-rs-crypto` and `hpke-rs-libcrux` are **MPL-2.0**.
    - Both OpenMLS providers depend on them, so there's no OpenMLS without
@@ -83,6 +105,12 @@ Before `core/` depends on it, though, four things have to be settled:
 | `libcrux-kem` | 0.0.9 | Apache-2.0 | RUSTSEC-2026-0330, -0331 |
 | `libcrux-hmac-drbg` | 0.0.1 | Apache-2.0 | RUSTSEC-2026-0329 |
 | `hkdf` / `sha2` | 0.13.0 / 0.11.1 | MIT/Apache-2.0 | SPEC §3.5 KDFs |
+
+These are the spike's versions. Since 2026-10-18 the provider side is
+patched to upstream main (see the update above): `hpke-rs*` 0.8.0,
+`libcrux-kem` 0.0.10 and `libcrux-hmac-drbg` 0.0.2. The patched provider
+also compiles in `libcrux-ecdsa` (P-256, P-384) and, with the PQ feature,
+`libcrux-ml-dsa`; the v0 suite uses neither.
 
 `openmls_sqlx_storage` 0.3.0 exists too, but wasn't tried. Its manifest
 lists no `draft-ietf-mls-pq-ciphersuites` feature.
@@ -357,6 +385,10 @@ Test: `t8_pyo3_shape` is a compile-time check plus a working handle.
   `draft-ietf-hpke-pq` and keeps the old derivation for `0x004D` behind an
   opt-in `legacy-pq-key-derivation` feature. 0.4.0 groups won't interoperate
   with the next provider by default.
+  - *Confirmed 2026-10-18.* The change comes from hpke-rs 0.8 and applies
+    to `0x004F` too; the legacy feature only covers `0x004D`. Only
+    `DeriveKeyPair` changes: hpke-rs 0.8 still opens a knock sealed with
+    hpke-rs 0.7 when given the key pair derived the 0.4.0 way.
 - *Naming.* The suite name claims `MLS_256`, but X-Wing gives ML-KEM-768
   strength (NIST level 3). The WG names the comparable suite `MLS_128`.
 
@@ -423,11 +455,12 @@ These aren't applied here; they need the maintainer's review.
    - Fix the AGENTS.md rule that names the suite.
    - Drop the "256" claim, or explain it.
    - Freeze test vectors only once the next provider release (with the new
-     HPKE-PQ derivation) is out.
+     HPKE-PQ derivation) is out. Done on 2026-10-18 with the patched
+     provider; the door-key vectors now use the new derivation.
 2. **§3.1 and §6.2 step 3: key lengths.** Add "every HPKE public key in a
    KeyPackage or LeafNode MUST have the suite's public key length (1216
    bytes for X-Wing) and is checked before MLS processing". This is defence
-   in depth, and needed until the libcrux fix ships.
+   in depth. It was needed until the libcrux fix shipped, and stays after it.
 3. **§3.1 Required extensions.** Note that `RequiredCapabilities` doesn't
    enforce presence; the existing MUST on `ac_instance_cert` stands.
    `ratchet_tree` may stay in the list (it's accepted) or be dropped as a

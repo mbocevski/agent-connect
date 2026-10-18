@@ -101,18 +101,53 @@ upstream docs.
 **Spike outcome (2026-10-17): GO** (`docs/spikes/mls-xwing.md`). OpenMLS
 covers everything v0 needs, so the classical fallback isn't needed.
 
-**Accepted risk: provider advisories.** `openmls_libcrux_crypto` 0.4.0, the
-only release, pins `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1.
+**Provider advisories (accepted 2026-10-17, cleared 2026-10-18).**
+`openmls_libcrux_crypto` 0.4.0, the only release, pinned `libcrux-kem`
+0.0.9 and `libcrux-hmac-drbg` 0.0.1. The first four bullets record the
+decision of 2026-10-17; the last one is the current state.
 
-- RUSTSEC-2026-0331 is reachable: a validly signed KeyPackage with a short
-  hybrid key panics the inviter, so anyone holding an invite link can crash
-  the inviter's daemon. RUSTSEC-2026-0329 and RUSTSEC-2026-0330 are also open.
-- Fixed crates exist upstream, but no provider release ships them yet.
-- Decision: build `core` on 0.4.0 now. `core` MUST check the length of every
+- RUSTSEC-2026-0331 was reachable: a validly signed KeyPackage with a short
+  hybrid key panicked the inviter, so anyone holding an invite link could
+  crash the inviter's daemon. RUSTSEC-2026-0329 and RUSTSEC-2026-0330 were
+  open too.
+- Fixed crates existed upstream, but no provider release shipped them.
+- Decision: build `core` on 0.4.0. `core` MUST check the length of every
   HPKE public key before handing it to OpenMLS, with a regression test. The
-  advisories are ignored in `deny.toml` as **temporary**.
-- **Release blocker:** no release and no public relay until a fixed provider
-  is published and the ignores are removed.
+  advisories were ignored in `deny.toml` as **temporary**. The length check
+  stays after the fix (SPEC §3.1).
+- **Release blocker (lifted 2026-10-18):** no release and no public relay
+  until a fixed provider was in the build and the ignores were removed.
+- **Resolution (2026-10-18).** The workspace patches the provider side
+  (`openmls_traits`, `openmls_libcrux_crypto`, `openmls_memory_storage`,
+  and `openmls_rust_crypto`, which isn't built but whose 0.6.0 release
+  would keep `libcrux-kem` 0.0.9 in `Cargo.lock`) to
+  upstream OpenMLS commit `be2368a21ec5e0380abd568821addc57b79013ea`, which
+  depends on `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2 and `hpke-rs`
+  0.8. The three ignores are gone and the blocker is lifted.
+  - The patch is mixed: `openmls` 0.9.1, `openmls_basic_credential` 0.6.0
+    and `openmls_sqlite_storage` 0.3.0 stay on crates.io, because main's
+    `openmls` pulls rusqlite 0.40, whose libsqlite3-sys 0.38 can't share a
+    build with sqlx 0.9. `deny.toml` allows only this git source and
+    requires a `rev`. `scripts/check_cargo_patch.py` (in `just lint`)
+    requires a full commit SHA and the same patch in every workspace,
+    including the fuzz ones, and refuses any `Cargo.lock` with an affected
+    libcrux crate.
+  - Remove the patch once crates.io has an `openmls_libcrux_crypto` release
+    (with matching `openmls_traits` and `openmls_memory_storage`) that
+    depends on `libcrux-kem` >= 0.0.10 and `libcrux-hmac-drbg` >= 0.0.2 and
+    works with the `openmls` release we pin. The nightly `audit` job's
+    `check_cargo_patch.py upstream` step fails when one appears, which
+    opens the nightly failure issue. A sqlx release that allows
+    libsqlite3-sys 0.38 matters only for patching the whole family to an
+    upstream commit.
+  - The draft-ietf-hpke-pq known-answer test
+    (`mls::tests::derive_hpke_keypair_matches_the_hpke_pq_known_answer`)
+    keeps the derivation from changing silently when the patch goes.
+  - hpke-rs 0.8 changes `DeriveKeyPair` for the suite's KEM to
+    `draft-ietf-hpke-pq` (SPEC §3.1). Daemons built on the 0.4.0 provider
+    don't interoperate on commits with an update path; v0 is unreleased,
+    so there is no migration.
+  - The HPKE key length check stays as defence in depth.
 
 ### 3. Tooling
 
