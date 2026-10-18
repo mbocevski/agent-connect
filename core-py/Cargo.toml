@@ -12,6 +12,12 @@ publish.workspace = true
 name = "agentconnect_core_native"
 crate-type = ["cdylib"]
 
+[features]
+# The test-only bindings (Client._add_knock_unchecked_for_testing). Off in the
+# release wheel; the development environment (uv sync) turns it on, see
+# [tool.uv.config-settings-package] in the root pyproject.toml.
+test-hooks = ["agentconnect-core/test-hooks"]
+
 [dependencies]
 agentconnect-core.workspace = true
 pyo3.workspace = true

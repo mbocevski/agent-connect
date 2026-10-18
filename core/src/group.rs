@@ -1957,11 +1957,13 @@ impl Group {
     /// `extra` knocks too: the Welcomes a broken (or malicious) owner could
     /// send, which a knocker must refuse (SPEC §6.6.5). **Tests only**: it
     /// changes nothing a knocker accepts, since a knocker checks every
-    /// Welcome whoever built it.
+    /// Welcome whoever built it. Only with the `test-hooks` feature, which
+    /// release builds leave off.
     ///
     /// # Errors
     ///
     /// [`Error::CommitPending`], or an MLS error.
+    #[cfg(any(test, feature = "test-hooks"))]
     #[doc(hidden)]
     pub fn add_knocker_unchecked<S: Store>(
         &mut self,

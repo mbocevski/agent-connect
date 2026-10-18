@@ -150,6 +150,7 @@ directory:
 build:
     cargo build --release --locked -p agentconnect-relay -p agentconnect-directory
     uv build --all-packages --sdist --wheel --out-dir dist
+    uv run --no-project python scripts/check_wheel_hooks.py dist/agentconnect_core-*.whl
 
 # Push branch and open/refresh its PR
 pr:

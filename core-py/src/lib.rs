@@ -920,6 +920,7 @@ impl Client {
     /// KeyPackages of the `extra` knocks too: the Welcomes a broken owner
     /// could send (a group that isn't fresh, three leaves), for testing that
     /// knockers refuse them.
+    #[cfg(feature = "test-hooks")]
     #[pyo3(signature = (group_id, knock, extra=Vec::new()))]
     fn _add_knock_unchecked_for_testing<'py>(
         &self,

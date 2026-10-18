@@ -64,6 +64,8 @@ jobs:
         uses: ./.github/actions/core-wheel
         with:
           manylinux: ${{ matrix.manylinux }}
+      - name: No test-only hooks in the core wheel
+        run: uv run --no-project python scripts/check_wheel_hooks.py dist/agentconnect_core-*.whl
       - name: Python packages and sdists
         if: matrix.pure
         run: |

@@ -294,6 +294,13 @@ scenarios are in `harness/tests/`.
     whose authentication has no timestamp. The core checks the knock
     deadlines on its own clock, so under the test seed the runtime sets the
     core's clock to its own for each of those calls.
+- **Test-only core hooks.** Bindings that only tests may call (such as
+  `Client._add_knock_unchecked_for_testing`, the Welcomes a broken knock
+  owner sends) are behind the `test-hooks` cargo feature of `core` and
+  `core-py`. `uv sync` builds the development `agentconnect-core` with it
+  (`[tool.uv.config-settings-package]` in `pyproject.toml`); the release
+  and reproducible wheels are built with maturin without it, and
+  `scripts/check_wheel_hooks.py` fails a wheel that exports one.
 - **Fakes for days-long behaviour.** The daemon tier runs a listing's whole
   life (renewal at half-life, key deletion, token expiry) on the fake clock
   against `agentconnect_harness.fake_directory`: `FakeDirectory` checks
