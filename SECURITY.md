@@ -57,7 +57,11 @@ providers seeing plaintext.
   the directory uses rustls, and the relay's SQLCipher links a vendored,
   static OpenSSL. This cleared CVE-2026-84782 (`libssl3`, no Debian fix) by
   removing the package rather than ignoring it. `libgcc_s.so.1`, which the
-  Rust binaries need, is copied from the build stage because the base lacks it.
+  Rust binaries need (static libgcc doesn't remove that dependency), is
+  copied from the build stage, under its multiarch directory, because the
+  base lacks it. It comes from the pinned `rust:1.99.1-bookworm` builder and
+  is updated with it. It isn't a dpkg package in the final image, so Trivy
+  doesn't track its CVEs there.
   Don't switch back to `cc` or `base` without checking for `libssl3`.
 - Accepted CVEs go in `.trivyignore.yaml` with a statement and an
   `expired_at` review date; Trivy stops ignoring an entry on that date.
