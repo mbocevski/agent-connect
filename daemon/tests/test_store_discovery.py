@@ -45,11 +45,15 @@ def test_the_tables_appear_in_an_existing_database_and_survive_reopening(
     assert row is not None
     assert (row["seq"], row["max_signed_seq"], row["attempts"], row["token_warned"]) == (0, 0, 0, 0)
     (door,) = s.doors("directory.example.org", "release-planner")
-    assert (door["state"], bytes(door["secret"])) == ("registering", secret)
+    assert door["state"] == "registering"
+    assert "secret" not in door  # door queries never read the keys
+    assert s.door_secrets() == [("d1", secret)]
     assert s.doors("other.example") == []
-    s.update_door("d1", state="current", secret=None)
+    s.update_door("d1", state="current")
+    s.drop_door_secret("d1", "closing")
     s.update_listing("directory.example.org", "release-planner", seq=7)
-    assert s.doors()[0]["secret"] is None
+    assert s.door_secrets() == []
+    assert s.doors()[0]["state"] == "closing"
     assert s.listings()[0]["seq"] == 7
     with pytest.raises(ValueError, match="unknown listing column"):
         s.update_listing("directory.example.org", "release-planner", bogus=1)

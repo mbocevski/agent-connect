@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import unicodedata
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
@@ -36,19 +38,77 @@ from agentconnect.ownerfile import (
 
 REQUEST_TIMEOUT_SECS = 10.0
 MAX_ANSWER_BYTES = 64 << 10  # publish and withdraw answers, and error bodies
+SUCCESS = 200
+MULTIPLE_CHOICES = 300
 TOO_MANY_REQUESTS = 429
 SERVER_ERROR = 500
 NOT_FOUND = 404
 GONE = 410
-# Directory answers that say "not now" rather than "no" (directory/README.md).
-TRANSIENT_CODES = frozenset({"conflict", "rate_limited", "unreachable", "timeout", "blocked"})
+MAX_DETAIL_CHARS = 200
+#: The codes a directory answers with (directory/README.md). Any other code,
+#: or anything that isn't a short code, becomes ``directory``: what a
+#: directory says is untrusted, and only known codes reach events, logs and
+#: the terminal.
+DIRECTORY_CODES = frozenset(
+    {
+        "bad_door",
+        "bad_listing",
+        "bad_request",
+        "bad_signature",
+        "bad_token",
+        "conflict",
+        "internal",
+        "name_held",
+        "not_found",
+        "not_vouched",
+        "owner_revoked",
+        "rate_limited",
+        "stale_seq",
+        "stale_ts",
+        "token_revoked",
+        "too_large",
+        "unavailable",
+        "unknown_key",
+        "withdrawn",
+        "wrong_directory",
+        "wrong_identity",
+        "wrong_relay",
+    }
+)
+#: The owner states of SPEC 13.2.4; any other value a directory reports is
+#: ``unknown``.
+OWNER_STATES = frozenset(
+    {"verified", "unclaimed", "stale", "failed", "revoked", "checking", "unchecked"}
+)
+_CODE = re.compile(r"^[a-z_]{1,32}$")
+# Answers that say "not now" rather than "no", and ours for no usable answer.
+TRANSIENT_CODES = frozenset(
+    {"conflict", "rate_limited", "unreachable", "timeout", "blocked", "unreadable", "redirect"}
+)
+
+
+def clean_detail(text: str) -> str:
+    """A directory's ``detail`` made safe to show: no control or format
+    characters, at most 200 characters."""
+    out = "".join("?" if unicodedata.category(c)[0] == "C" else c for c in text)
+    return out[:MAX_DETAIL_CHARS]
+
+
+def owner_state(answer: dict[str, Any]) -> str | None:
+    """The owner state a publish answer reports (information only): a known
+    state, ``unknown`` for anything else, None when there is none."""
+    value = answer.get("owner_state")
+    if value is None:
+        return None
+    return value if isinstance(value, str) and value in OWNER_STATES else "unknown"
 
 
 class DirectoryError(Exception):
-    """A refused or failed directory request: the directory's ``code`` (or
-    ours: ``unreachable``, ``timeout``, ``blocked``, ``redirect``,
-    ``too_large``, ``bad_response``), its HTTP ``status`` (0 when there was
-    no answer), and its ``detail`` and ``kind`` when it gave them."""
+    """A refused or failed directory request: the directory's ``code`` (one of
+    :data:`DIRECTORY_CODES`, else ``directory``) or ours (``unreachable``,
+    ``timeout``, ``blocked``, ``redirect``, ``unreadable``), its HTTP
+    ``status`` (0 when there was no answer), and its cleaned ``detail`` and
+    ``kind`` when it gave them."""
 
     def __init__(self, code: str, status: int = 0, detail: str = "", kind: str | None = None):
         super().__init__(f"{code}: {detail}" if detail else code)
@@ -57,13 +117,19 @@ class DirectoryError(Exception):
     @property
     def transient(self) -> bool:
         """Whether the same request may succeed later (5xx, 429, a conflict,
-        or no answer at all)."""
+        no answer, or one that couldn't be read)."""
         return (
             self.status == 0
             or self.status >= SERVER_ERROR
             or self.status == TOO_MANY_REQUESTS
             or self.code in TRANSIENT_CODES
         )
+
+    @property
+    def maybe_accepted(self) -> bool:
+        """A 2xx whose body couldn't be read: the directory may have taken
+        the request, so the outcome is unknown, never a refusal."""
+        return self.code == "unreadable" and SUCCESS <= self.status < MULTIPLE_CHOICES
 
 
 class DirectoryClient:
@@ -105,7 +171,7 @@ class DirectoryClient:
         if status != httpx.codes.OK:
             raise _refusal(status, body)
         if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
-            raise DirectoryError("bad_response", status, "not application/json")
+            raise DirectoryError("unreadable", status, "not application/json")
         return body
 
     async def _write(self, path: str, body: bytes) -> dict[str, Any]:
@@ -114,7 +180,7 @@ class DirectoryClient:
             raise _refusal(status, answer)
         data = _json_object(answer)
         if data is None:
-            raise DirectoryError("bad_response", status, "not a JSON object")
+            raise DirectoryError("unreadable", status, "not a JSON object")
         return data
 
     async def _send(
@@ -139,11 +205,13 @@ class DirectoryClient:
                     ) as resp,
                 ):
                     problem = head_problem(resp, cap)
-                    if problem in ("redirect", "encoding", "too_large"):
-                        raise DirectoryError(problem, resp.status_code)
+                    if problem == "redirect":
+                        raise DirectoryError("redirect", resp.status_code)
+                    if problem in ("encoding", "too_large"):
+                        raise DirectoryError("unreadable", resp.status_code, problem)
                     data = await read_capped(resp, cap)
                     if data is None:
-                        raise DirectoryError("too_large", resp.status_code)
+                        raise DirectoryError("unreadable", resp.status_code, "too_large")
                     return resp.status_code, resp.headers, data
         except TimeoutError:
             raise DirectoryError("timeout") from None
@@ -172,15 +240,16 @@ def _json_object(body: bytes) -> dict[str, Any] | None:
 
 
 def _refusal(status: int, body: bytes) -> DirectoryError:
-    """The directory's ``{"code", "detail", "kind"?}`` as an error; a body
-    without one is ``bad_response`` (5xx stays transient by its status)."""
-    data = _json_object(body) or {}
-    code = data.get("code")
-    detail = data.get("detail")
-    kind = data.get("kind")
+    """The directory's ``{"code", "detail", "kind"?}`` as an error. A body
+    without a code is ``unreadable`` (retried); a code this daemon doesn't
+    know is ``directory``."""
+    data = _json_object(body)
+    if data is None or not isinstance(data.get("code"), str):
+        return DirectoryError("unreadable", status, "no error code")
+    code, detail, kind = data["code"], data.get("detail"), data.get("kind")
     return DirectoryError(
-        code if isinstance(code, str) and code else "bad_response",
+        code if _CODE.match(code) and code in DIRECTORY_CODES else "directory",
         status,
-        detail if isinstance(detail, str) else "",
-        kind if isinstance(kind, str) else None,
+        clean_detail(detail) if isinstance(detail, str) else "",
+        kind if isinstance(kind, str) and _CODE.match(kind) else None,
     )

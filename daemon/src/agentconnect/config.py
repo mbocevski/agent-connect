@@ -740,7 +740,25 @@ def _directory_url(url: str, host: str) -> str:
     if parts.path not in ("", "/"):
         msg = f"directory.url for {host} must not have a path"
         raise ConfigError(msg)
+    if parts.scheme == "https" and _never_dialled(str(parts.hostname)):
+        # The client dials public addresses only (agentconnect.ownerfile);
+        # a name must resolve to one too, or requests fail as `blocked`.
+        msg = (
+            f"directory.url for {host} names a loopback or private address; an https "
+            "directory must be on a public address (http:// is for a loopback test directory)"
+        )
+        raise ConfigError(msg)
     return f"{parts.scheme}://{parts.netloc}"
+
+
+def _never_dialled(hostname: str) -> bool:
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return not ac.is_public_address(hostname)
 
 
 def _directories(data: Mapping[str, Any]) -> tuple[DirectoryConfig, ...]:

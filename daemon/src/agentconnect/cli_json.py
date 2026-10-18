@@ -65,12 +65,13 @@ LISTING: dict[str, Any] = {
     "published_at": Opt("int"),
     "identity": "str",
     "fingerprint": "str",
-    "door": Opt({"expires_at": "int", "renews_at": Opt("int")}),
+    "door": Opt({"expires_at": "int", "renews_at": Opt("int"), "expiring": "bool"}),
     "doors_open": "int",
     "token": {"expires_at": "int", "warn_at": "int"},
     "owner_domain": Opt("str"),
     "owner_state": Opt("str"),
     "last_error": Opt({"code": "str", "at": "int"}),
+    "retrying": Opt({"since": "int", "code": Opt("str")}),
 }
 HELD_DECISION: dict[str, Any] = {"hold_id": "str", "group_id": "str", "status": "str"}
 SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}

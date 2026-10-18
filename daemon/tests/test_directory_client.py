@@ -10,7 +10,7 @@ import pytest
 
 import agentconnect_core as ac
 from agentconnect.config import DirectoryConfig
-from agentconnect.directory_client import DirectoryClient, DirectoryError
+from agentconnect.directory_client import DirectoryClient, DirectoryError, owner_state
 
 JSON = {"content-type": "application/json"}
 
@@ -45,14 +45,14 @@ async def test_a_listing_is_fetched_as_its_exact_bytes(rng: random.Random) -> No
     [
         (404, {"json": {"code": "not_found"}}, "not_found", False),
         (410, {"json": {"code": "withdrawn"}}, "listing_withdrawn", False),
-        (500, {"content": b"<html>"}, "bad_response", True),
-        (200, {"content": b"{}", "headers": {"content-type": "text/html"}}, "bad_response", False),
-        (302, {"headers": {"location": "https://127.0.0.1/a/x.json"}}, "redirect", False),
+        (500, {"content": b"<html>"}, "unreadable", True),
+        (200, {"content": b"{}", "headers": {"content-type": "text/html"}}, "unreadable", True),
+        (302, {"headers": {"location": "https://127.0.0.1/a/x.json"}}, "redirect", True),
         (
             200,
             {"content": b"x" * (ac.MAX_LISTING_BYTES + 1), "headers": JSON},
-            "too_large",
-            False,
+            "unreadable",
+            True,
         ),
     ],
 )
@@ -79,7 +79,8 @@ async def test_writes_return_the_answer_of_the_directory(rng: random.Random) -> 
     }
     with pytest.raises(DirectoryError) as e:
         await client(answer(200, json=[1]), rng).publish(b"{}")
-    assert e.value.code == "bad_response"
+    # Taken, perhaps: the answer can't be read, which is never a refusal.
+    assert (e.value.code, e.value.maybe_accepted, e.value.transient) == ("unreadable", True, True)
 
 
 @pytest.mark.parametrize(
@@ -94,7 +95,7 @@ async def test_writes_return_the_answer_of_the_directory(rng: random.Random) -> 
         (409, {"code": "conflict", "detail": "retry"}, "conflict", True),
         (429, {"code": "rate_limited"}, "rate_limited", True),
         (403, {"code": "token_revoked", "detail": 7}, "token_revoked", False),
-        (400, {"detail": "no code"}, "bad_response", False),
+        (400, {"detail": "no code"}, "unreadable", True),
         (503, {"code": "unavailable"}, "unavailable", True),
     ],
 )
@@ -140,3 +141,30 @@ async def test_an_https_directory_is_dialled_at_a_public_address_only(rng: rando
     got = await DirectoryClient(entry, resolver=public, transport_for=transport_for).publish(b"{}")
     assert got == {"seq": 1}
     assert dialled == ["93.184.215.14"]
+
+
+@pytest.mark.parametrize(
+    ("code", "seen"),
+    [
+        ("something_new", "directory"),
+        ("\x1b]0;x\x07", "directory"),
+        ("name_held" * 5, "directory"),
+        ("owner_revoked", "owner_revoked"),
+    ],
+)
+async def test_only_known_codes_come_through(rng: random.Random, code: str, seen: str) -> None:
+    body = {"code": code, "detail": "\x1b[2J" + "x" * 1000, "kind": "Bad Kind!"}
+    with pytest.raises(DirectoryError) as e:
+        await client(answer(400, json=body), rng).publish(b"{}")
+    assert e.value.code == seen
+    assert e.value.detail.startswith("?[2J")
+    assert len(e.value.detail) == 200
+    assert e.value.kind is None
+    assert not e.value.maybe_accepted
+
+
+def test_owner_states_are_the_specs_or_unknown() -> None:
+    assert owner_state({"owner_state": "verified"}) == "verified"
+    assert owner_state({"owner_state": "\x1b]0;x"}) == "unknown"
+    assert owner_state({"owner_state": 3}) == "unknown"
+    assert owner_state({}) is None

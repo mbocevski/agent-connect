@@ -120,7 +120,9 @@ The command reads the card and token files as you, and sends their
 contents; the daemon never opens a path you name, which matters when it
 runs as another user ([isolation.md](isolation.md)). The daemon checks the
 token against the pinned keys and your identity, checks the card, and shows
-what it will sign. Only after you confirm does it:
+what it will sign. The hash it returns covers the card text, the token, the
+directory and the owner domain, so the publish signs exactly what you saw.
+Only after you confirm does it:
 
 1. generate a fresh door (a new HPKE key pair) and register it at the relay;
 2. sign the listing, with `seq` = `max(previous + 1, now)`, so no `seq` is
@@ -153,9 +155,13 @@ token's expiry. The runtime keeps the listing reachable on its own:
 - **A renewal that fails** is retried with the same bytes. After an hour of
   failures the listing is `stale` and you get a `listing_stale` event
   (`reason: publish_failed`), once per episode; the old door keeps working
-  until it expires. A refused renewal (`token_revoked`, `name_held`) stops
-  renewing (`reason: refused`), and a door that expires before a renewal
-  lands raises `reason: door_expired`.
+  until it expires. Only `token_revoked`, `bad_token` and `name_held` stop
+  renewing (`reason: refused`). Any other refusal (`stale_ts`, `bad_door`,
+  `wrong_relay`, ...) is reported at once (`reason: publish_failed`, with
+  the `code`) and retried with a fresh door and signature. A door that
+  expires before a renewal lands raises `reason: door_expired`, and a
+  republish that keeps failing warns a day before the listed door expires
+  (`reason: door_expiring`).
 - **The token.** 14 days before it expires you get
   `listing_token_expiring`. At expiry the listing counts as withdrawn
   everywhere: the doors are closed and their keys deleted
@@ -171,7 +177,25 @@ transactions as the rest of the listing's state, and deleted with secure
 delete. Every step is recorded before the next one starts, so a crash
 anywhere resumes from where it stopped: a door the relay may already have is
 registered again ("already exists" counts as done), and signed bytes are
-posted again unchanged.
+posted again unchanged. The `ts` of the last signed relay request is kept
+too, so a request signed again after a restart is never byte-identical to
+one the relay has seen.
+
+A door the relay may hold is never forgotten. If the relay's answer to a
+registration is lost, the door is closed before its record goes, and only
+a confirmed close (or `door_not_open`) ends it: any other answer, such as
+`auth_failed` from a skewed clock, leaves it `closing` and the daemon tries
+again.
+
+A publish that fails puts the listing back exactly as it was: a withdrawn,
+expired or stale listing stays so, and nothing is renewed that you didn't
+publish again. A directory answer that can't be read (a 2xx whose body
+isn't the directory's) is not a refusal: the daemon reads the listing back
+and counts it published if it holds exactly the signed bytes, or tries
+again. What the directory answers is untrusted: only the codes in
+[directory/README.md](../directory/README.md#publish-and-withdraw) come
+through (any other is `directory`), its owner state is one of SPEC
+§13.2.4's (or `unknown`), and its `detail` is cleaned before you see it.
 
 ## Withdrawing
 
@@ -184,24 +208,42 @@ daemon closes every door at the relay first: from then on every knock gets
 `door_not_open`, whatever a cache, mirror or hostile directory still shows.
 The door keys are deleted at once. Then it sends the signed withdrawal for
 the highest `seq` it ever signed, which also covers a publish whose answer
-was lost. If the directory doesn't answer, the command fails with
-`withdraw_pending` and the daemon keeps trying with a fresh timestamp; a
-door the relay couldn't be told about is closed later too.
+was lost. A refused publish whose listing was signed can be withdrawn too.
+If the directory doesn't answer, the command fails with `withdraw_pending`
+and the daemon keeps trying with a fresh timestamp; a door the relay
+couldn't be told about is closed later too. After an hour you get
+`listing_withdraw_pending`. After 7 days, past the life of every door, the
+daemon stops (`withdraw_failed`, `listing_withdraw_failed`) and the listing
+no longer blocks publishing elsewhere. A directory that was removed from
+the config answers `unknown_directory`: the doors are closed, but nothing
+can be sent.
+
+```sh
+agentconnect listing withdraw --force
+```
+
+`--force` (the human token, after you confirm) ends a withdrawal the
+directory never took, here only: the doors are closed, and the directory
+may go on listing it until its token expires.
 
 ## Status and events
 
 `agentconnect listing status` (either token) shows the state, the door and
-when it renews, the token's expiry and the last error. The owner state it
-shows is what the directory reported, for information only.
+when it renews (and whether it expires within a day), the token's expiry,
+the last error, and since when a publish or withdrawal has been retried.
+The owner state it shows is what the directory reported, for information
+only.
 
 | Event | Data |
 |---|---|
 | `listing_published` | `directory`, `name`, `seq`, `url`, `door_expires_at`, `token_expires_at` |
 | `listing_renewed` | `directory`, `name`, `seq`, `door_expires_at` |
-| `listing_stale` | `directory`, `name`, `reason` (`publish_failed`, `refused`, `door_expired`), `code`, `since`, `door_expires_at` |
+| `listing_stale` | `directory`, `name`, `reason` (`publish_failed`, `refused`, `door_expired`, `door_expiring`), `code`, `since`, `door_expires_at` |
 | `listing_token_expiring` | `directory`, `name`, `token_expires_at` |
 | `listing_token_expired` | `directory`, `name` |
-| `listing_withdrawn` | `directory`, `name`, `seq`, `doors_close_pending` |
+| `listing_withdrawn` | `directory`, `name`, `seq`, `doors_close_pending`, `forced` |
+| `listing_withdraw_pending` | `directory`, `name`, `code`, `since` |
+| `listing_withdraw_failed` | `directory`, `name`, `code`, `since` |
 
 They carry nothing about any peer, so both tokens and the agent's adapter
 see them.

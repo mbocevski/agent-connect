@@ -27,7 +27,7 @@ import typer
 import agentconnect_core
 from agentconnect import __version__, cli_support, log
 from agentconnect import daemon as daemon_host
-from agentconnect.apiclient import ApiClient
+from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli_support import (
     COMPARE_REMINDER,
     EXIT_CODES_HELP,
@@ -1091,12 +1091,12 @@ def listing_publish(  # noqa: PLR0913, PLR0917
         if owner_domain is not None:
             body["owner_domain"] = owner_domain
         api = connect(config, human=True)
-        shown = api.request("POST", "/v0/listing/preview", body)
+        shown = _listing_call(api, "/v0/listing/preview", body)
         _print_preview(shown, as_json=as_json)
         if not _confirm("Publish this listing?", yes=yes, as_json=as_json):
             raise CliError("declined", "not published; nothing was sent", EXIT_REFUSED)
-        out = api.request(
-            "POST", "/v0/listing/publish", {**body, "content_sha256": shown["content_sha256"]}
+        out = _listing_call(
+            api, "/v0/listing/publish", {**body, "content_sha256": shown["content_sha256"]}
         )
         if out["retrying"]:
             msg = (
@@ -1128,22 +1128,37 @@ def listing_publish(  # noqa: PLR0913, PLR0917
             typer.echo("renews it while it runs. `agentconnect listing withdraw` takes it down.")
 
 
-@listing_app.command("withdraw")
+@listing_app.command(
+    "withdraw",
+    help="Withdraw your agent's listing: its doors close at the relay first, so knocks stop "
+    "at once, then the directory takes it down. Allowed with the agent token. --force ends "
+    "a withdrawal the directory never took, locally (HUMAN ONLY: the human token, after you "
+    "confirm).",
+)
 def listing_withdraw(
-    yes: YesOpt = False, config: ConfigOpt = None, as_json: JsonOpt = False
+    yes: YesOpt = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="End it locally without the directory (human token).")
+    ] = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
 ) -> None:
-    """Withdraw your agent's listing: its doors close at the relay first, so knocks stop
-    at once, then the directory takes it down. Allowed with the agent token."""
     with guard(as_json):
         _require_yes(as_json, yes, "withdraw")
-        api = connect(config)
+        api = connect(config, human=force)
         info = api.request("GET", "/v0/listing")["listing"]
-        if info is None or info["state"] in ("withdrawn", "refused"):
+        if info is None or info["state"] == "withdrawn":
             raise CliError("not_found", "there is no listing to withdraw", EXIT_FAILED)
         _say(f"Withdraw {clean(info['name'])} from {clean(info['directory'])}?", as_json=as_json)
+        if force:
+            _say(
+                "--force records it as withdrawn here without the directory's answer; the "
+                "directory may go on listing it until its token expires.",
+                as_json=as_json,
+            )
         if not _confirm("Close its doors and withdraw it?", yes=yes, as_json=as_json):
             raise CliError("declined", "not withdrawn", EXIT_REFUSED)
-        out = api.request("POST", "/v0/listing/withdraw")
+        out = _listing_call(api, "/v0/listing/withdraw", {"force": True} if force else None)
         if out["state"] != "withdrawn":
             msg = (
                 "the doors are closed, but the directory hasn't taken the withdrawal yet; "
@@ -1156,6 +1171,21 @@ def listing_withdraw(
         typer.echo(f"Withdrew {clean(out['name'])} from {clean(out['directory'])}.")
         if out["doors_close_pending"]:
             typer.echo("The relay hasn't confirmed every door closed yet; the daemon keeps trying.")
+
+
+def _listing_call(api: ApiClient, path: str, body: dict[str, Any] | None = None) -> Any:
+    """A listing request. A directory that doesn't list this daemon's relay
+    answers ``wrong_relay``, which here is about the directory, not an invite."""
+    try:
+        return api.request("POST", path, body)
+    except ApiClientError as e:
+        if e.code != "wrong_relay":
+            raise
+        msg = (
+            "the directory doesn't list this daemon's relay, so it won't take the listing; "
+            "ask its operator, or use a directory that lists your relay"
+        )
+        raise CliError("wrong_relay", msg, EXIT_REFUSED) from None
 
 
 @listing_app.command("status")
@@ -1178,7 +1208,12 @@ def listing_status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
         else:
             renews = door["renews_at"]
             then = f", renews {_when(renews)}" if renews is not None else ", not renewing"
-            typer.echo(f"door         open until {_when(door['expires_at'])}{then}")
+            soon = " (expires within a day)" if door["expiring"] else ""
+            typer.echo(f"door         open until {_when(door['expires_at'])}{then}{soon}")
+        retrying = listing["retrying"]
+        if retrying is not None:
+            code = clean(retrying["code"] or "unknown")
+            typer.echo(f"retrying     since {_when(retrying['since'])} ({code})")
         typer.echo(f"token        valid until {_when(listing['token']['expires_at'])}")
         domain = listing["owner_domain"]
         if domain is not None:

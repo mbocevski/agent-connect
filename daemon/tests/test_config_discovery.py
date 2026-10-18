@@ -101,6 +101,17 @@ def test_a_directory_is_pinned_with_its_keys(tmp_path: Path, rng: random.Random)
             "plain base URL",
         ),
         ('[[directory]]\nhost = "d.example"\nkeys = ["{a}"]\nport = 1\n', "unknown key"),
+        *(
+            (f'[[directory]]\nhost = "d.example"\nkeys = ["{{a}}"]\nurl = "{url}"\n', "public")
+            for url in (
+                "https://127.0.0.1",
+                "https://localhost",
+                "https://10.0.0.5:8443",
+                "https://[::1]",
+                "https://[fd00::1]",
+                "https://169.254.169.254",
+            )
+        ),
         ("[listing]\ndoor_lifetime_secs = 604801\n", "7200..604800"),
         ("[listing]\ndoor_lifetime_secs = 7199\n", "7200..604800"),
         ("[listing]\ncolour = 1\n", "unknown key"),

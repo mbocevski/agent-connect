@@ -276,6 +276,8 @@ CREATE TABLE IF NOT EXISTS listings (
     stale_since INTEGER,
     last_error TEXT,
     token_warned INTEGER NOT NULL DEFAULT 0,
+    restore_state TEXT,
+    restore_renewal_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (directory, name)
@@ -330,11 +332,14 @@ LISTING_COLUMNS = (
     "stale_since",
     "last_error",
     "token_warned",
+    "restore_state",
+    "restore_renewal_at",
     "created_at",
     "updated_at",
 )
 _LISTING_COUNTERS = frozenset({"seq", "max_signed_seq", "attempts", "token_warned"})
-DOOR_COLUMNS = ("door_id", "directory", "name", "secret", "expires_at", "created_at", "state")
+# Without `secret`: only door_secrets() reads the private keys.
+DOOR_COLUMNS = ("door_id", "directory", "name", "expires_at", "created_at", "state")
 
 
 @dataclass
@@ -1022,9 +1027,8 @@ class Store:
         )
 
     def doors(self, directory: str | None = None, name: str | None = None) -> list[dict[str, Any]]:
-        """Doors (of one listing, or all), the oldest first, with their
-        ``secret`` (the door's private key, encrypted at rest with the rest
-        of this database; None once it is deleted)."""
+        """Doors (of one listing, or all), the oldest first, without their
+        private keys (see :meth:`door_secrets`)."""
         rows = self._all(
             f"SELECT {', '.join(DOOR_COLUMNS)} FROM doors "  # noqa: S608
             "WHERE (? IS NULL OR directory = ?) AND (? IS NULL OR name = ?) "
@@ -1035,6 +1039,18 @@ class Store:
             name,
         )
         return [dict(zip(DOOR_COLUMNS, r, strict=True)) for r in rows]
+
+    def door_secrets(self) -> list[tuple[str, bytes]]:
+        """Every door's private key that is still kept (encrypted at rest
+        with the rest of this database), for loading them once at start."""
+        rows = self._all("SELECT door_id, secret FROM doors WHERE secret IS NOT NULL")
+        return [(str(r[0]), bytes(r[1])) for r in rows]
+
+    def drop_door_secret(self, door_id: str, state: str) -> None:
+        """Delete a door's private key and move it to ``state``."""
+        self._db.execute(
+            "UPDATE doors SET secret = NULL, state = ? WHERE door_id = ?", (state, door_id)
+        )
 
     def update_door(self, door_id: str, **fields: Any) -> None:
         for key in fields:

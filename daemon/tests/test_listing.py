@@ -5,12 +5,12 @@ so a door's whole life runs in a few steps without the network."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import random
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 import agentconnect_core as ac
@@ -130,6 +130,12 @@ class World:
         row = self.engine.store.listing(DIR, name)
         assert row is not None
         return row
+
+    def corrupt_key(self, door_id: str) -> None:
+        """Overwrite a door's stored key (no store method writes one)."""
+        self.engine.store._db.execute(
+            "UPDATE doors SET secret = ? WHERE door_id = ?", (b"not a key", door_id)
+        )
 
     def door_rows(self) -> list[dict[str, Any]]:
         return self.engine.store.doors()
@@ -298,7 +304,12 @@ async def test_publish_registers_a_door_signs_and_posts(world: World) -> None:
     assert [e["type"] for e in (await world.rt.agent.events())["events"]] == ["listing_published"]
     status = (await world.rt.agent.listing_status())["listing"]
     assert status["state"] == "published"
-    assert status["door"] == {"expires_at": out["door_expires_at"], "renews_at": out["renews_at"]}
+    assert status["door"] == {
+        "expires_at": out["door_expires_at"],
+        "renews_at": out["renews_at"],
+        "expiring": False,
+    }
+    assert status["retrying"] is None
     assert status["doors_open"] == 1
     assert status["token"]["warn_at"] == out["token_expires_at"] - 14 * DAY
     assert status["last_error"] is None
@@ -357,7 +368,7 @@ async def test_a_refused_first_publish_closes_its_door(
     row = world.row()
     assert row["state"] == "refused"
     assert row["pending"] is None
-    assert json.loads(row["last_error"])["code"] == code
+    assert json.loads(row["last_error"])["code"] == (code if api_code != "directory" else api_code)
     # Nothing was published, so another listing may be.
     await world.publish(world.body("other-name"))
 
@@ -398,7 +409,7 @@ async def test_a_directory_that_doesnt_answer_gets_the_same_bytes_again(world: W
     assert (out["state"], out["retrying"]) == ("publishing", True)
     assert out["seq"] == world.row()["max_signed_seq"]
     assert world.directory.listing(NAME) is None
-    assert await world.mgr.step() == pytest.approx(60)
+    assert await world.mgr.step() == world.now + 60
     await world.at(world.now + 59)
     assert len(world.directory.posts) == 1  # not due yet
     await world.at(world.now + 1)
@@ -425,9 +436,16 @@ async def test_a_relay_that_doesnt_register_the_door_publishes_nothing(world: Wo
     with pytest.raises(ApiError) as e:
         await world.publish()
     assert (e.value.status, e.value.code) == (502, "relay")
-    assert world.door_rows() == []
+    # No answer: the relay may hold the door, so it is closed before it is forgotten.
+    assert world.doors_in("closing") == [d["door_id"] for d in world.door_rows()]
     assert world.row()["state"] == "refused"
     assert world.directory.posts == []
+    await world.mgr.step()
+    assert world.door_rows() == []
+    world.doors.faults.fail("POST", "/v0/doors", 400, "bad_request", "malformed door_id")
+    with pytest.raises(ApiError):
+        await world.publish()
+    assert world.door_rows() == []  # a refusal: the relay doesn't hold it
 
 
 async def test_a_relay_clock_behind_ours_gets_a_shorter_door(world: World) -> None:
@@ -455,7 +473,7 @@ async def test_renewal_at_exactly_half_life(world: World) -> None:
     await world.publish()
     first = world.listed()
     renews_at = world.row()["next_renewal_at"]
-    assert await world.at(renews_at - 1) == pytest.approx(1)
+    assert await world.at(renews_at - 1) == renews_at
     assert len(world.directory.posts) == 1
     await world.at(renews_at)
     second = world.listed()
@@ -595,7 +613,13 @@ async def test_withdraw_closes_every_door_before_withdrawing(world: World) -> No
     assert all(world.mgr.door(i) is None for i in world.doors.created)
     assert NAME in world.directory.withdrawn
     (event,) = world.events("listing_withdrawn")
-    assert event == {"directory": DIR, "name": NAME, "seq": out["seq"], "doors_close_pending": 0}
+    assert event == {
+        "directory": DIR,
+        "name": NAME,
+        "seq": out["seq"],
+        "doors_close_pending": 0,
+        "forced": False,
+    }
     assert (await world.rt.agent.listing_status())["listing"]["state"] == "withdrawn"
     with pytest.raises(ApiError) as e:
         await world.mgr.withdraw()
@@ -689,10 +713,12 @@ async def test_publishing_again_after_withdrawing_uses_a_higher_seq(world: World
 async def test_a_door_whose_key_doesnt_load_is_dropped(world: World) -> None:
     await world.publish()
     (door_id,) = world.doors.created
-    world.engine.store.update_door(door_id, secret=b"not a key")
+    world.corrupt_key(door_id)
     await world.restart()
-    assert world.door_rows() == []
     assert world.mgr.door(door_id) is None
+    assert world.doors_in("closing") == [door_id]  # the relay may hold it
+    await world.mgr.step()
+    assert world.doors.closed == [door_id]
 
 
 @pytest.mark.parametrize(
@@ -755,13 +781,10 @@ async def test_the_worker_renews_on_its_own(
         fake_clock.advance(renews_at - w.now)
         await w.engine.wait_until(lambda: "listing.after_sign" in w.engine.failpoints.fired)
 
-        # Past the worker's backoff, however far it got when the failure was seen.
-        async def renewed() -> None:
-            while not w.events("listing_renewed"):
-                fake_clock.advance(1)
-                await asyncio.sleep(0)
-
-        await asyncio.wait_for(renewed(), 5)
+        # Past the worker's backoff, wherever it was when the failure was seen:
+        # its timer is set against the clock as it is when it sleeps.
+        fake_clock.advance(2)
+        await w.engine.wait_until(lambda: bool(w.events("listing_renewed")))
         assert w.row()["state"] == "published"
     finally:
         await w.rt.stop(flush=0)
@@ -796,13 +819,14 @@ async def test_publish_needs_the_human_token_and_withdraw_doesnt(world: World) -
     assert gone["state"] == "withdrawn"
 
 
-async def test_a_directory_dropped_from_the_config_stops_renewals(world: World) -> None:
+async def test_a_directory_dropped_from_the_config_is_reported(world: World) -> None:
     await world.publish()
     world.pinned = False
     await world.restart()
     await world.at(world.row()["next_renewal_at"])
     row = world.row()
-    assert (row["state"], row["next_renewal_at"]) == ("stale", None)
+    assert row["state"] == "stale"
+    assert row["retry_at"] is not None  # retried: the table may come back
     assert world.events("listing_stale")[0]["code"] == "unknown_directory"
 
 
@@ -841,7 +865,7 @@ async def test_a_signed_listing_whose_door_key_is_lost_is_signed_again(world: Wo
     with pytest.raises(SimulatedCrash):
         await world.publish()
     lost = world.row()["pending_door"]
-    world.engine.store.update_door(lost, secret=b"garbage")
+    world.corrupt_key(lost)
     await world.restart()
     await world.mgr.step()
     listing = world.listed()
@@ -877,3 +901,268 @@ async def test_an_expired_token_closes_the_open_door(world: World) -> None:
     await world.at(world.row()["token_expires_at"])
     assert world.doors.closed == [door_id]
     assert world.row()["state"] == "expired"
+
+
+# -- review regressions ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("by", ["agent", "human"])
+async def test_a_republish_that_fails_leaves_a_withdrawn_listing_withdrawn(
+    world: World, by: str
+) -> None:
+    await world.publish()
+    if by == "agent":
+        await world.rt.agent.withdraw_listing()
+    else:
+        await world.mgr.withdraw()
+    posts = len(world.directory.posts)
+    world.doors.faults.fail("POST", "/v0/doors", DOWN)
+    with pytest.raises(ApiError):
+        await world.publish(world.body(card={**CARD, "version": "2.0.0"}))
+    assert (world.row()["state"], world.row()["next_renewal_at"]) == ("withdrawn", None)
+    world.directory.faults.fail("POST", "/v0/listings", 413, "too_large")
+    with pytest.raises(ApiError):
+        await world.publish(world.body(card={**CARD, "version": "2.0.0"}))
+    assert world.row()["state"] == "withdrawn"
+    for days in (1, 4, 8):
+        await world.at(world.now + days * DAY)
+    assert NAME in world.directory.withdrawn
+    assert world.directory.listing(NAME) is None
+    assert len(world.directory.posts) == posts + 1  # only the refused republish
+    assert world.door_rows() == []
+    assert not [i for i in world.doors.open_doors() if i in world.doors.created]
+
+
+async def test_a_refused_republish_keeps_a_stale_or_expired_listing_as_it_was(
+    world: World,
+) -> None:
+    await world.publish(world.body(lifetime=20 * DAY))
+    world.directory.faults.fail("POST", "/v0/listings", 403, "token_revoked")
+    await world.at(world.row()["next_renewal_at"])
+    assert (world.row()["state"], world.row()["next_renewal_at"]) == ("stale", None)
+    world.directory.faults.fail("POST", "/v0/listings", 409, "name_held")
+    with pytest.raises(ApiError):
+        await world.publish(world.body(card={**CARD, "version": "3.0.0"}))
+    assert (world.row()["state"], world.row()["next_renewal_at"]) == ("stale", None)
+    await world.at(world.row()["token_expires_at"])
+    assert world.row()["state"] == "expired"
+    world.directory.faults.fail("POST", "/v0/listings", 409, "name_held")
+    with pytest.raises(ApiError):
+        await world.publish(world.body(card={**CARD, "version": "3.0.0"}))
+    assert world.row()["state"] == "expired"
+
+
+def _odd_answer(world: World, *, store: bool) -> None:
+    """The directory answers 201 with a body that isn't JSON (a proxy that
+    rewrites bodies), having stored the listing or not."""
+    publish = world.directory._publish
+
+    def odd(body: bytes) -> httpx.Response:
+        if store:
+            publish(body)
+        return httpx.Response(201, content=b"created")
+
+    world.directory._publish = odd  # ty: ignore[invalid-assignment]
+
+
+async def test_an_unreadable_accept_is_checked_against_the_listing(world: World) -> None:
+    _odd_answer(world, store=True)
+    out = await world.publish()
+    assert out["state"] == "published"
+    assert world.doors.closed == []
+    assert world.listed().door is not None
+    assert world.row()["owner_state"] is None
+
+
+async def test_an_unreadable_accept_that_didnt_land_is_retried(world: World) -> None:
+    _odd_answer(world, store=False)
+    out = await world.publish()
+    assert (out["state"], out["retrying"]) == ("publishing", True)
+    assert world.doors.closed == []
+    assert world.doors_in("registered") == world.doors.created
+
+
+async def test_a_refused_listing_that_was_signed_can_be_withdrawn(world: World) -> None:
+    world.directory.faults.fail("POST", "/v0/listings", 400, "bad_listing")
+    with pytest.raises(ApiError):
+        await world.publish()
+    assert world.row()["state"] == "refused"
+    out = await world.rt.agent.withdraw_listing()
+    assert out["state"] == "withdrawn"
+    assert len(world.directory.withdrawals) == 1
+
+
+async def test_auth_failed_on_a_close_keeps_the_door_until_it_is_closed(world: World) -> None:
+    await world.publish()
+    (door_id,) = world.doors.created
+    world.doors.faults.fail("DELETE", "/v0/doors/", 401, "auth_failed", "timestamp outside")
+    out = await world.mgr.withdraw()
+    assert (out["doors_closed"], out["doors_close_pending"]) == (0, 1)
+    assert world.doors_in("closing") == [door_id]
+    assert world.mgr.door(door_id) is None  # the key goes at once anyway
+    await world.mgr.step()
+    assert world.doors.closed == [door_id]
+    assert world.door_rows() == []
+
+
+async def test_a_lost_registration_answer_never_forgets_the_door(world: World) -> None:
+    create = world.doors._create
+
+    def create_then_drop(body: dict[str, Any]) -> httpx.Response:
+        create(body)
+        msg = "answer lost"
+        raise httpx.ReadTimeout(msg)
+
+    world.doors._create = create_then_drop  # ty: ignore[invalid-assignment]
+    for _ in range(4):
+        with pytest.raises(ApiError) as e:
+            await world.publish()
+        assert e.value.code == "relay"
+    world.doors._create = create  # ty: ignore[invalid-assignment]
+    assert sorted(world.doors_in("closing")) == sorted(world.doors.created)
+    assert all(world.mgr.door(i) is None for i in world.doors.created)
+    await world.mgr.step()
+    assert world.doors.open_doors() == []
+    assert (await world.publish())["state"] == "published"
+
+
+EVIL = "\x1b]0;pwned\x07\x1b[2J" + "A" * 2000
+
+
+async def test_directory_codes_and_owner_states_are_never_passed_through(world: World) -> None:
+    published = world.directory._published
+
+    def odd_state(listing: ac.Listing, status: int) -> httpx.Response:
+        published(listing, status)
+        return httpx.Response(status, json={"seq": listing.seq, "owner_state": EVIL})
+
+    world.directory._published = odd_state  # ty: ignore[invalid-assignment]
+    out = await world.publish()
+    assert out["owner_state"] == "unknown"
+    world.directory.faults.fail("POST", "/v0/listings", 400, EVIL, EVIL)
+    with pytest.raises(ApiError) as e:
+        await world.publish(world.body(card={**CARD, "version": "9"}))
+    assert e.value.code == "directory"
+    assert "\x1b" not in str(e.value)
+    assert len(str(e.value)) < 400
+    world.directory.faults.fail("POST", "/v0/listings", 400, EVIL, EVIL)
+    await world.at(world.row()["next_renewal_at"])
+    (stale,) = [
+        e["data"] for e in (await world.rt.agent.events())["events"] if e["type"] == "listing_stale"
+    ]
+    assert stale["code"] == "directory"
+    status = (await world.rt.agent.listing_status())["listing"]
+    assert status["last_error"]["code"] == "directory"
+    assert status["owner_state"] == "unknown"
+
+
+@pytest.mark.parametrize("code", ["stale_ts", "bad_door", "wrong_relay", "something_new"])
+async def test_a_renewal_refused_for_another_reason_is_retried(world: World, code: str) -> None:
+    await world.publish()
+    first = world.listed().seq
+    world.directory.faults.fail("POST", "/v0/listings", 400, code)
+    await world.at(world.row()["next_renewal_at"])
+    row = world.row()
+    assert row["next_renewal_at"] is not None
+    assert row["retry_at"] is not None
+    (stale,) = world.events("listing_stale")
+    assert (stale["reason"], stale["code"]) == (
+        "publish_failed",
+        code if code != "something_new" else "directory",
+    )
+    await world.at(row["retry_at"])
+    assert world.row()["state"] == "published"
+    assert world.listed().seq > first
+
+
+async def test_a_withdraw_for_a_directory_no_longer_configured_says_so(world: World) -> None:
+    await world.publish()
+    world.pinned = False
+    await world.restart()
+    with pytest.raises(ApiError) as e:
+        await world.mgr.withdraw()
+    assert e.value.code == "unknown_directory"
+    assert world.row()["state"] == "withdrawing"
+    assert NAME not in world.directory.withdrawn
+    assert world.events("listing_withdrawn") == []
+
+
+async def test_signed_relay_requests_never_repeat_across_restarts(world: World) -> None:
+    world.engine.failpoints.arm("door.after_register", "crash")
+    with pytest.raises(SimulatedCrash):
+        await world.publish()
+    await world.restart()
+    await world.mgr.step()  # no time passes, and the relay still takes it
+    assert world.row()["state"] == "published"
+    stamps = world.doors.stamps
+    assert len(stamps) == len(set(stamps)) >= 2
+    assert stamps == sorted(stamps)
+
+
+async def test_a_republish_that_keeps_failing_warns_before_the_old_door_expires(
+    world: World,
+) -> None:
+    await world.publish()
+    old = world.listed().door
+    assert old is not None
+    world.directory.faults.fail("POST", "/v0/listings", DOWN, times=10_000)
+    assert (await world.publish(world.body(card={**CARD, "version": "4.0.0"})))["retrying"]
+    await world.at(old["expires_at"] - DAY - 1)
+    assert world.events("listing_stale") == []
+    assert not (await world.rt.agent.listing_status())["listing"]["door"]["expiring"]
+    await world.at(old["expires_at"] - DAY + 60)
+    (warning,) = world.events("listing_stale")
+    assert (warning["reason"], warning["door_expires_at"]) == ("door_expiring", old["expires_at"])
+    status = (await world.rt.agent.listing_status())["listing"]
+    assert status["door"]["expiring"]
+    assert status["retrying"] == {"since": status["retrying"]["since"], "code": "unreachable"}
+    await world.at(old["expires_at"] + 60)
+    assert [s["reason"] for s in world.events("listing_stale")] == ["door_expiring", "door_expired"]
+
+
+async def test_a_withdrawal_that_is_never_taken_stops_blocking_and_can_be_forced(
+    world: World,
+) -> None:
+    await world.publish()
+    world.directory.faults.fail("POST", "/v0/withdrawals", DOWN, times=10_000)
+    assert (await world.mgr.withdraw())["state"] == "withdrawing"
+    with pytest.raises(ApiError) as e:
+        await world.mgr.preview(world.body("other-name"))
+    assert e.value.code == "listing_exists"
+    await world.at(world.now + 2 * 3600)
+    assert [e["code"] for e in world.events("listing_withdraw_pending")] == ["unreachable"]
+    for _ in range(9):
+        await world.at(world.now + DAY)
+    assert world.row()["state"] == "withdraw_failed"
+    assert world.events("listing_withdraw_failed")
+    await world.mgr.preview(world.body("other-name"))  # no longer blocks
+    with pytest.raises(ApiError) as e:
+        await world.mgr.withdraw(force=True, human=False)
+    assert e.value.code == "human_only"
+    out = await world.mgr.withdraw(force=True, human=True)
+    assert out["state"] == "withdrawn"
+    assert json.loads(world.row()["last_error"])["code"] == "forced"
+    (event,) = world.events("listing_withdrawn")
+    assert event["forced"] is True
+
+
+async def test_overdue_work_runs_at_once(world: World) -> None:
+    await world.publish()
+    world.engine.store.update_listing(DIR, NAME, retry_at=world.now - 5)
+    assert (world.mgr._next_due() or 0) <= world.now
+
+
+async def test_door_queries_dont_read_private_keys(world: World) -> None:
+    await world.publish()
+    assert all("secret" not in d for d in world.engine.store.doors())
+    (door_id,) = world.doors.created
+    assert dict(world.engine.store.door_secrets())[door_id] is not None
+
+
+async def test_the_preview_hash_covers_the_token_and_the_directory(world: World) -> None:
+    shown = await world.mgr.preview(world.body())
+    for other in (world.body("another-name"), world.body(lifetime=5 * DAY)):
+        with pytest.raises(ApiError) as e:
+            await world.mgr.publish({**other, "content_sha256": shown["content_sha256"]})
+        assert e.value.code == "card_changed"
+    assert world.calls == []

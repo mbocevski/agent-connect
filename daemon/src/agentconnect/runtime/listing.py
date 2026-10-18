@@ -9,16 +9,22 @@ and :meth:`publish`); everything after it runs without anyone:
   the relay for this instance's mailbox. Its private key is kept in the
   daemon's encrypted database (and in memory as an ``agentconnect_core.Door``,
   which zeroizes it when dropped) and deleted an hour after the door
-  expires, once every knock it could have received has lapsed.
+  expires, once every knock it could have received has lapsed. A door the
+  relay may hold is never forgotten: until the relay confirms it closed
+  (``door_not_open`` or success), its row stays, ``closing``, without its key.
 * **Renewal.** At half a door's lifetime the discovery worker registers a
   fresh door and publishes the listing again, re-signed by the core with
   only ``door``, ``seq`` and ``issued_at`` changed (``Listing.renew``), so
   a renewal can't change what the human approved. The old door stays
   registered until it expires. A renewal that keeps failing for an hour,
   or a door that expires before a renewal lands, raises ``listing_stale``.
+  Only ``token_revoked``, ``bad_token`` and ``name_held`` stop renewing.
 * **Withdraw.** Either token may withdraw (it only reduces exposure, SPEC
   13.2.3): every door is closed at the relay first, the keys are deleted at
   once, then the signed withdrawal goes to the directory.
+
+A failed publish puts the listing back exactly as it was before the attempt
+(``restore_state``): a withdrawn listing stays withdrawn.
 
 Every step is recorded before the next one starts, so a crash anywhere
 resumes from the database: a door ``registering`` is registered again
@@ -28,6 +34,9 @@ are posted again byte for byte (idempotent at the directory).
 ``seq`` is ``max(max_signed_seq + 1, now)`` and ``max_signed_seq`` is never
 lowered, so a ``seq`` is never reused, not even after a lost answer.
 
+What a directory answers is untrusted: its codes are mapped onto the set
+this daemon knows (``agentconnect.directory_client``), its owner state onto
+the SPEC's states, and its ``detail`` is cleaned before a person sees it.
 Logs carry event types and reason codes only: no directory, name, door id
 or domain (SPEC 8.3, docs/discovery.md).
 """
@@ -37,7 +46,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -46,7 +54,12 @@ import agentconnect_core as ac
 from agentconnect import log
 from agentconnect.backoff import Backoff
 from agentconnect.config import DirectoryConfig
-from agentconnect.directory_client import DirectoryClient, DirectoryError
+from agentconnect.directory_client import (
+    DirectoryClient,
+    DirectoryError,
+    clean_detail,
+    owner_state,
+)
 from agentconnect.ownerfile import Fetcher, OwnerFileFetcher
 from agentconnect.relay import RelayError, b64
 from agentconnect.runtime.engine import Engine, canonical
@@ -57,11 +70,14 @@ LOG = log.get("agentconnect.listing")
 
 TOKEN_WARNING_SECS = 14 * 86_400  # SPEC 13.2.1: warn 14 days before the token expires
 MIN_TOKEN_LEFT_SECS = 7200  # no renewal with less token life left
-STALE_AFTER_SECS = 3600  # a renewal failing this long is reported
+STALE_AFTER_SECS = 3600  # a renewal or withdrawal failing this long is reported
+WITHDRAW_GIVE_UP_SECS = 7 * 86_400  # past every door's life: stop retrying the withdrawal
+DOOR_WARNING_SECS = 86_400  # a door this close to expiry while a republish waits
 RETRY_BASE_SECS = 60
 RETRY_CAP_SECS = 3600
 CLOSE_RETRY_SECS = 300
 EXPIRY_SLACK_SECS = 3600  # a door the relay found too long is retried this much shorter
+MAX_IDLE_PASSES = 3  # passes in a row with work due at once before the worker pauses
 
 #: The card file's fields: the listing's text (``ListingContent``). An Agent
 #: Card's other fields (its interfaces, signatures, extensions) are not text
@@ -81,9 +97,14 @@ CONTENT_FIELDS = frozenset(
 LIVE = frozenset({"publishing", "published", "stale"})
 # States that hold the runtime's one listing (D2): another can't be published.
 HOLDING = LIVE | {"withdrawing"}
-WITHDRAWABLE = HOLDING | {"expired"}
+WITHDRAWABLE = HOLDING | {"expired", "withdraw_failed"}
 PENDING_DOOR = frozenset({"registering", "registered"})
 OPEN_DOOR = frozenset({"current", "retiring"})
+#: SPEC 6.6.1/13.2: the refusals of a renewal that stop renewing. Any other
+#: refusal is retried (with a fresh door and signature) and reported.
+STOP_RENEWING = frozenset({"token_revoked", "bad_token", "name_held"})
+#: Relay answers to a door registration that say the relay doesn't hold it.
+NOT_REGISTERED = frozenset({"bad_request", "quota_exceeded"})
 #: The directory's refusals (directory/README.md) and the status the local
 #: API answers them with; any other refusal is ``502 directory``.
 REFUSAL_STATUS = {
@@ -93,18 +114,15 @@ REFUSAL_STATUS = {
     "unknown_key": 403,
     "bad_signature": 403,
     "wrong_identity": 403,
+    "owner_revoked": 403,
     "wrong_relay": 400,
     "wrong_directory": 400,
     "bad_door": 400,
     "stale_ts": 400,
     "bad_listing": 400,
+    "unknown_directory": 400,
     "too_large": 413,
 }
-
-
-def _clean(text: object) -> str:
-    """Text from a directory, safe in a message a terminal shows."""
-    return "".join("?" if unicodedata.category(c)[0] == "C" else c for c in str(text))[:300]
 
 
 def _warning(code: str, message: str) -> dict[str, str]:
@@ -113,6 +131,10 @@ def _warning(code: str, message: str) -> dict[str, str]:
 
 def _due(at: int | None, now: int) -> bool:
     return at is None or at <= now
+
+
+def _error(code: str, at: int) -> str:
+    return json.dumps({"code": code, "at": at})
 
 
 @dataclass(frozen=True)
@@ -128,7 +150,16 @@ class Draft:
 
     @property
     def sha256(self) -> str:
-        return hashlib.sha256(self.content).hexdigest()
+        """What the human approves: everything that will be signed except the
+        door, ``seq`` and ``issued_at``, which publish chooses."""
+        approved = {
+            "content": json.loads(self.content),
+            "directory": self.entry.host,
+            "name": self.name,
+            "owner_domain": self.owner_domain,
+            "token": json.loads(self.token),
+        }
+        return hashlib.sha256(canonical(approved)).hexdigest()
 
 
 class ListingManager:
@@ -174,18 +205,17 @@ class ListingManager:
         return next((d for d in self._store.doors() if d["door_id"] == door_id), None)
 
     def _load_doors(self) -> None:
-        """The door keys from the database. A row whose key doesn't load (the
-        core checks the key pair) is deleted, and logged without its id."""
-        for row in self._store.doors():
-            if row["secret"] is None:
-                continue
+        """The door keys from the database, once. A key that doesn't load
+        (the core checks the key pair) is dropped and its door closed by the
+        worker; it is logged without its id."""
+        for door_id, secret in self._store.door_secrets():
             try:
-                door = ac.Door.from_secret_bytes(bytes(row["secret"]))
+                door = ac.Door.from_secret_bytes(secret)
             except (ac.AgentConnectError, ac.CoreError):
                 LOG.warning("door_key_unreadable")
-                self._store.delete_door(row["door_id"])
+                self._store.drop_door_secret(door_id, "closing")
                 continue
-            self._doors[str(row["door_id"])] = door
+            self._doors[door_id] = door
 
     def door(self, door_id: str) -> ac.Door | None:
         """The key pair of one of this runtime's doors, while it is kept."""
@@ -360,7 +390,7 @@ class ListingManager:
         if not isinstance(sha, str):
             raise ApiError(400, "bad_request", "content_sha256 must be a string")
         if sha != draft.sha256:
-            msg = "the card changed since it was shown; preview it again"
+            msg = "the card, the token or the directory changed since it was shown; preview again"
             raise ApiError(409, "card_changed", msg)
         async with self._lock:
             self._single(draft)
@@ -387,12 +417,18 @@ class ListingManager:
         }
 
     async def _begin(self, draft: Draft) -> dict[str, Any]:
-        """Record the approved text and token as ``publishing``; a door
-        still waiting from an earlier attempt is dropped."""
+        """Record the approved text and token as ``publishing``, with the
+        state to go back to if this publish fails; a door still waiting from
+        an earlier attempt is closed."""
         host, name, now = draft.entry.host, draft.name, self._now()
         prev = self._store.listing(host, name)
         stale_doors = [d for d in self._store.doors(host, name) if d["state"] in PENDING_DOOR]
         token = draft.token.decode()
+        restore_state, restore_renewal_at = "refused", None
+        if prev is not None and prev["state"] == "publishing":  # a republish over a retry
+            restore_state, restore_renewal_at = prev["restore_state"], prev["restore_renewal_at"]
+        elif prev is not None:
+            restore_state, restore_renewal_at = prev["state"], prev["next_renewal_at"]
         row = {
             **(prev or {}),
             "directory": host,
@@ -410,6 +446,8 @@ class ListingManager:
             "failing_since": None,
             "last_error": None,
             "token_warned": 0 if prev is None or prev["token"] != token else prev["token_warned"],
+            "restore_state": restore_state,
+            "restore_renewal_at": restore_renewal_at,
             "created_at": now if prev is None else prev["created_at"],
             "updated_at": now,
         }
@@ -419,7 +457,7 @@ class ListingManager:
             await self._close_door(d)
         return self._refresh(row)
 
-    # -- one round: door, signature, post ---------------------------------------
+    # -- doors --------------------------------------------------------------------
 
     def _pending_door(self, row: dict[str, Any]) -> dict[str, Any] | None:
         if row["pending_door"] is not None:
@@ -437,6 +475,8 @@ class ListingManager:
         )
 
     def _new_door(self, row: dict[str, Any], expires_at: int | None = None) -> dict[str, Any]:
+        """A fresh door, recorded (``registering``, with its key) before the
+        relay hears of it."""
         now = self._now()
         if expires_at is None:
             expires_at = min(now + self._lifetime(), int(row["token_expires_at"]))
@@ -459,26 +499,30 @@ class ListingManager:
         return found
 
     def _drop_door(self, door_id: str) -> None:
-        """Delete a door's key and row (it was never published, or it is over)."""
+        """Delete a door's key and row: the relay doesn't hold it, or it is over."""
         self._doors.pop(door_id, None)
         self._store.delete_door(door_id)
 
+    def _closing(self, door_id: str) -> None:
+        """The key goes at once; the row stays until the relay confirms."""
+        self._doors.pop(door_id, None)
+        self._store.drop_door_secret(door_id, "closing")
+
     async def _close_door(self, door: dict[str, Any]) -> bool:
         """Close a door at the relay. Its key is deleted at once, whatever the
-        relay says; a door the relay can't be told about yet stays
-        ``closing`` (without its key) and the worker tries again."""
+        relay says. Only success or ``door_not_open`` (unknown, expired or
+        closed already) counts as closed; any other answer (``auth_failed``
+        for a skewed clock, no answer) leaves it ``closing``, and the worker
+        tries again with a fresh signature."""
         door_id = str(door["door_id"])
-        self._doors.pop(door_id, None)
+        self._closing(door_id)
         try:
             await self._engine.rest.close_door(door_id)
             closed = True
         except RelayError as e:
-            # Unknown, expired or already closed; or not ours to close.
-            closed = e.code in ("door_not_open", "auth_failed")
+            closed = e.code == "door_not_open"
         if closed:
             self._store.delete_door(door_id)
-        else:
-            self._store.update_door(door_id, secret=None, state="closing")
         return closed
 
     async def _free_door_slot(self, keep: str, row: dict[str, Any]) -> None:
@@ -523,6 +567,8 @@ class ListingManager:
             door["state"] = "registered"
             return door
 
+    # -- one round: door, signature, post ---------------------------------------
+
     def _sign(self, row: dict[str, Any], door: dict[str, Any]) -> ac.Listing:
         now = self._now()
         seq = max(int(row["max_signed_seq"]) + 1, now)
@@ -547,40 +593,14 @@ class ListingManager:
     async def _round(self, row: dict[str, Any], *, interactive: bool) -> str:
         """Drive one publish or renewal as far as it goes now: ``published``,
         ``retrying`` (the worker goes on later), ``refused`` or ``waiting``."""
-        renewal = row["state"] != "publishing"
-        now = self._now()
-        door = self._pending_door(row)
+        door = await self._door_for(row)
         if door is None:
-            if renewal and int(row["token_expires_at"]) - now < MIN_TOKEN_LEFT_SECS:
-                # The door runs out with the token; a new token is a new publish.
-                self._store.update_listing(row["directory"], row["name"], next_renewal_at=None)
-                return "waiting"
-            door = self._new_door(row)
-        elif (
-            now - int(door["created_at"]) > (int(door["expires_at"]) - int(door["created_at"])) // 2
-        ):
-            # Half the waiting door's life went by without the relay or the
-            # directory: a fresh door (and signature), so a listing never
-            # carries a door about to expire, and at most three are open
-            # (current, retiring and this one).
-            await self._close_door(door)
-            self._store.update_listing(
-                row["directory"], row["name"], pending=None, pending_door=None
-            )
-            row["pending"] = row["pending_door"] = None
-            door = self._new_door(row)
+            return "waiting"
         if door["state"] == "registering":
-            try:
-                door = await self._register(row, door)
-            except RelayError as e:
-                code = e.code
-                if interactive:
-                    self._drop_door(str(door["door_id"]))
-                    await self._restore(row, code)
-                    msg = f"the relay didn't register the door ({code}); nothing was published"
-                    raise ApiError(502, "relay", msg) from None
-                await self._retry_later(row, code)
+            registered = await self._registered(row, door, interactive=interactive)
+            if registered is None:
                 return "retrying"
+            door = registered
         row = self._refresh(row)
         if row["pending"] is None:
             signed = self._sign(row, door)
@@ -594,29 +614,107 @@ class ListingManager:
             )
             self._engine.failpoints.hit("listing.after_sign")
             row = self._refresh(row)
+        return await self._post(row, door, interactive=interactive)
+
+    async def _door_for(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        """The door this round publishes: the one waiting, or a fresh one;
+        None when the token has too little life left to renew."""
+        now = self._now()
+        door = self._pending_door(row)
+        if door is None:
+            if row["state"] != "publishing" and int(row["token_expires_at"]) - now < (
+                MIN_TOKEN_LEFT_SECS
+            ):
+                # The door runs out with the token; a new token is a new publish.
+                self._store.update_listing(row["directory"], row["name"], next_renewal_at=None)
+                return None
+            return self._new_door(row)
+        made, expires = int(door["created_at"]), int(door["expires_at"])
+        if now - made > (expires - made) // 2:
+            # Half the waiting door's life went by without the relay or the
+            # directory: a fresh door (and signature), so a listing never
+            # carries a door about to expire, and at most three are open
+            # (current, retiring and this one).
+            await self._discard_pending(row, door)
+            return self._new_door(row)
+        return door
+
+    async def _registered(
+        self, row: dict[str, Any], door: dict[str, Any], *, interactive: bool
+    ) -> dict[str, Any] | None:
+        """The door, registered; None when the worker tries again later."""
         try:
-            answer = await self._client(row).publish(bytes(row["pending"]))
+            return await self._register(row, door)
+        except RelayError as e:
+            if not interactive:
+                await self._retry_later(row, e.code)
+                return None
+            # The relay may hold the door if its answer was lost: keep the
+            # row until it confirms the close.
+            door_id = str(door["door_id"])
+            if e.code in NOT_REGISTERED:
+                self._drop_door(door_id)
+            else:
+                self._closing(door_id)
+            await self._restore(row, e.code)
+            msg = f"the relay didn't register the door ({e.code}); nothing was published"
+            raise ApiError(502, "relay", msg) from None
+
+    async def _post(self, row: dict[str, Any], door: dict[str, Any], *, interactive: bool) -> str:
+        client: DirectoryClient | None = None
+        try:
+            client = self._client(row)
+            answer = await client.publish(bytes(row["pending"]))
         except DirectoryError as e:
-            if e.transient:
+            if client is not None and e.maybe_accepted and await self._landed(client, row):
+                answer = {}  # it is listed as signed; the answer just can't be read
+            elif (e.transient or e.maybe_accepted) and not (interactive and e.code == "blocked"):
                 await self._retry_later(row, e.code)
                 return "retrying"
-            await self._refused(row, door, e)
-            return self._raise_refusal(interactive, e.code, e.detail)
+            else:
+                return await self._refusal(row, door, e, interactive)
         self._engine.failpoints.hit("listing.after_post")
         await self._published(row, door, answer)
         return "published"
 
-    @staticmethod
-    def _raise_refusal(interactive: bool, code: str, detail: str) -> str:
+    async def _landed(self, client: DirectoryClient, row: dict[str, Any]) -> bool:
+        """Whether the directory lists exactly the bytes posted (it answered
+        with a 2xx that couldn't be read)."""
+        try:
+            return await client.fetch_listing(str(row["name"])) == bytes(row["pending"])
+        except DirectoryError:
+            return False
+
+    async def _discard_pending(self, row: dict[str, Any], door: dict[str, Any]) -> None:
+        await self._close_door(door)
+        self._store.update_listing(row["directory"], row["name"], pending=None, pending_door=None)
+        row["pending"] = row["pending_door"] = None
+
+    async def _refusal(
+        self, row: dict[str, Any], door: dict[str, Any], e: DirectoryError, interactive: bool
+    ) -> str:
+        """A refusal (of known bytes; never an unreadable 2xx). A publish is
+        put back as it was. A renewal stops only for the SPEC's reasons;
+        otherwise it is tried again with a fresh door and signature."""
+        LOG.warning("listing_refused", code=e.code)
+        if row["state"] != "publishing" and e.code not in STOP_RENEWING:
+            await self._discard_pending(row, door)
+            await self._retry_later(row, e.code, report=True)
+            return "retrying"
+        await self._close_door(door)
+        if row["state"] == "publishing":
+            await self._restore(row, e.code)
+        else:
+            await self._stop_renewing(row, e.code)
         if not interactive:
             return "refused"
-        status = REFUSAL_STATUS.get(code)
-        message = f"the directory refused the listing ({code})"
-        if detail:
-            message += f": {_clean(detail)}"
+        status = REFUSAL_STATUS.get(e.code)
+        message = f"the directory refused the listing ({e.code})"
+        if e.detail:
+            message += f": {clean_detail(e.detail)}"
         if status is None:
             raise ApiError(502, "directory", message)
-        raise ApiError(status, code, message)
+        raise ApiError(status, e.code, message)
 
     async def _published(
         self, row: dict[str, Any], door: dict[str, Any], answer: dict[str, Any]
@@ -625,7 +723,7 @@ class ListingManager:
         host, name, now = str(row["directory"]), str(row["name"]), self._now()
         door_id, expires_at = str(door["door_id"]), int(door["expires_at"])
         renews_at = listing.issued_at + (expires_at - listing.issued_at) // 2
-        owner_state = answer.get("owner_state")
+        reported = owner_state(answer)
         renewal = row["state"] != "publishing"
 
         def effects() -> None:
@@ -644,12 +742,14 @@ class ListingManager:
                 pending=None,
                 pending_door=None,
                 next_renewal_at=renews_at,
-                owner_state=owner_state if isinstance(owner_state, str) else row["owner_state"],
+                owner_state=reported if reported is not None else row["owner_state"],
                 retry_at=None,
                 attempts=0,
                 failing_since=None,
                 stale_since=None,
                 last_error=None,
+                restore_state=None,
+                restore_renewal_at=None,
                 updated_at=now,
             )
 
@@ -666,49 +766,46 @@ class ListingManager:
         LOG.info(kind)
 
     def _restored(self, row: dict[str, Any]) -> dict[str, Any]:
-        """The listing as last published (a refused republish keeps it), or
-        ``refused`` when nothing was published yet."""
-        if row["published"] is None:
-            return {"state": "refused", "next_renewal_at": None}
-        previous = ac.verify_listing(bytes(row["published"]))
-        params = json.loads(previous.bytes)["capabilities"]["extensions"][0]["params"]
-        door, issued = previous.door, previous.issued_at
-        renews_at = None if door is None else issued + (int(door["expires_at"]) - issued) // 2
-        return {
-            "state": "published",
-            "content": previous.content.decode(),
-            "token": canonical(params["token"]).decode(),
-            "token_expires_at": previous.token_expires_at,
-            "owner_domain": previous.owner_domain,
-            "seq": previous.seq,
-            "next_renewal_at": renews_at,
+        """The listing as it was before this publish began (``restore_state``):
+        a refused publish never lists anything the human didn't publish
+        again, and a withdrawn, expired or stale listing stays so."""
+        state = row["restore_state"] or "refused"
+        fields: dict[str, Any] = {
+            "state": state,
+            "next_renewal_at": row["restore_renewal_at"] if state in LIVE else None,
+            "restore_state": None,
+            "restore_renewal_at": None,
         }
+        if row["published"] is not None:
+            previous = ac.verify_listing(bytes(row["published"]))
+            params = json.loads(previous.bytes)["capabilities"]["extensions"][0]["params"]
+            fields |= {
+                "content": previous.content.decode(),
+                "token": canonical(params["token"]).decode(),
+                "token_expires_at": previous.token_expires_at,
+                "owner_domain": previous.owner_domain,
+                "seq": previous.seq,
+            }
+        return fields
 
     async def _restore(self, row: dict[str, Any], code: str) -> None:
         now = self._now()
-        fields = self._restored(row) | {
+        fields = self._restored(self._refresh(row)) | {
             "pending": None,
             "pending_door": None,
             "retry_at": None,
             "attempts": 0,
             "failing_since": None,
-            "last_error": json.dumps({"code": code, "at": now}),
+            "last_error": _error(code, now),
             "updated_at": now,
         }
         await self._commit(
             lambda: self._store.update_listing(row["directory"], row["name"], **fields), []
         )
 
-    async def _refused(self, row: dict[str, Any], door: dict[str, Any], e: DirectoryError) -> None:
-        """A permanent refusal: the fresh door is closed and dropped. A
-        refused publish keeps what was published before; a refused renewal
-        stops renewing (the current door keeps working until it expires)
-        and the human is told."""
-        await self._close_door(door)
-        LOG.warning("listing_refused", code=e.code)
-        if row["state"] == "publishing":
-            await self._restore(row, e.code)
-            return
+    async def _stop_renewing(self, row: dict[str, Any], code: str) -> None:
+        """A renewal refused for good: the current door keeps working until it
+        expires, and the human is told."""
         host, name, now = str(row["directory"]), str(row["name"]), self._now()
         since = row["stale_since"] if row["stale_since"] is not None else now
         fields = {
@@ -720,14 +817,14 @@ class ListingManager:
             "attempts": 0,
             "failing_since": None,
             "stale_since": since,
-            "last_error": json.dumps({"code": e.code, "at": now}),
+            "last_error": _error(code, now),
             "updated_at": now,
         }
         data = {
             "directory": host,
             "name": name,
             "reason": "refused",
-            "code": e.code,
+            "code": code,
             "since": since,
             "door_expires_at": self._current_expiry(host, name),
         }
@@ -740,10 +837,12 @@ class ListingManager:
         current = [d for d in self._store.doors(host, name) if d["state"] == "current"]
         return int(current[-1]["expires_at"]) if current else None
 
-    async def _retry_later(self, row: dict[str, Any], code: str) -> None:
-        """No answer (or not now): the same bytes go again after a backoff
-        (60 s doubling to an hour). A renewal failing for an hour makes the
-        listing ``stale``; the old door keeps working until it expires."""
+    async def _retry_later(self, row: dict[str, Any], code: str, *, report: bool = False) -> None:
+        """No answer, or not now: the same request goes again after a backoff
+        (60 s doubling to an hour). A renewal failing for an hour (or at once,
+        with ``report``, for a refusal) makes the listing ``stale``; the old
+        door keeps working until it expires. A withdrawal failing for an hour
+        is reported, and after 7 days it is given up (``withdraw_failed``)."""
         host, name, now = str(row["directory"]), str(row["name"]), self._now()
         attempts = int(row["attempts"]) + 1
         delay = min(RETRY_CAP_SECS, RETRY_BASE_SECS * 2 ** min(attempts - 1, 16))
@@ -752,12 +851,12 @@ class ListingManager:
             "retry_at": now + delay,
             "attempts": attempts,
             "failing_since": failing_since,
-            "last_error": json.dumps({"code": code, "at": now}),
+            "last_error": _error(code, now),
             "updated_at": now,
         }
         events = []
-        renewal = row["state"] in ("published", "stale")
-        if renewal and now - failing_since >= STALE_AFTER_SECS:
+        failing = now - failing_since
+        if row["state"] in ("published", "stale") and (report or failing >= STALE_AFTER_SECS):
             since = row["stale_since"] if row["stale_since"] is not None else now
             fields |= {"state": "stale", "stale_since": since}
             data = {
@@ -770,20 +869,38 @@ class ListingManager:
             }
             cause = f"listing_stale/{host}/{name}/publish_failed/{failing_since}"
             events.append(("listing_stale", cause, data))
+        if row["state"] == "withdrawing" and failing >= STALE_AFTER_SECS:
+            data = {"directory": host, "name": name, "code": code, "since": failing_since}
+            if failing >= WITHDRAW_GIVE_UP_SECS:
+                fields |= {"state": "withdraw_failed", "retry_at": None}
+                cause = f"listing_withdraw_failed/{host}/{name}/{failing_since}"
+                events.append(("listing_withdraw_failed", cause, data))
+            else:
+                cause = f"listing_withdraw_pending/{host}/{name}/{failing_since}"
+                events.append(("listing_withdraw_pending", cause, data))
         LOG.info("listing_retry", code=code, attempts=attempts)
         await self._commit(lambda: self._store.update_listing(host, name, **fields), events)
 
-    # -- withdraw (either token) -------------------------------------------------
+    # -- withdraw (either token; forcing it is the human's) ------------------------
 
-    def _latest(self, states: frozenset[str]) -> dict[str, Any] | None:
-        return next((r for r in self._store.listings() if r["state"] in states), None)
+    def _withdrawable(self) -> dict[str, Any] | None:
+        for row in self._store.listings():
+            if row["state"] in WITHDRAWABLE:
+                return row
+            # A refused publish may still be listed: something was signed.
+            if row["state"] == "refused" and int(row["max_signed_seq"]) > 0:
+                return row
+        return None
 
-    async def withdraw(self) -> dict[str, Any]:
+    async def withdraw(self, *, force: bool = False, human: bool = False) -> dict[str, Any]:
         """Close every door at the relay (keys deleted at once), then send
         the signed withdrawal. Allowed to the agent: it only reduces
-        exposure (SPEC 13.2.3)."""
+        exposure (SPEC 13.2.3). ``force`` (the human only, after a
+        withdrawal the directory never took) ends it locally."""
+        if force and not human:
+            raise ApiError(403, "human_only", "forcing a withdrawal needs the human token")
         async with self._lock:
-            row = self._latest(WITHDRAWABLE)
+            row = self._withdrawable()
             if row is None:
                 raise ApiError(404, "not_found", "there is no listing to withdraw")
             if row["state"] != "withdrawing":
@@ -797,13 +914,21 @@ class ListingManager:
                     retry_at=None,
                     attempts=0,
                     failing_since=None,
+                    restore_state=None,
+                    restore_renewal_at=None,
                     updated_at=self._now(),
                 )
-            answer = await self._withdraw_round(self._refresh(row))
+            answer = await self._withdraw_round(self._refresh(row), force=force)
         self._wake.set()
+        if answer.pop("unknown_directory", False):
+            msg = (
+                "the doors are closed, but the directory is no longer configured, so the "
+                "withdrawal can't be sent: add its [[directory]] table back, or force it"
+            )
+            raise ApiError(400, "unknown_directory", msg)
         return answer
 
-    async def _withdraw_round(self, row: dict[str, Any]) -> dict[str, Any]:
+    async def _withdraw_round(self, row: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
         host, name = str(row["directory"]), str(row["name"])
         closed = 0
         for door in self._store.doors(host, name):
@@ -811,22 +936,25 @@ class ListingManager:
         pending = len(self._store.doors(host, name))
         self._engine.failpoints.hit("withdraw.after_close")
         seq = int(row["max_signed_seq"])
-        error: str | None = None
-        if seq > 0:  # something was signed, so something may be listed
+        answer = {
+            "directory": host,
+            "name": name,
+            "seq": seq,
+            "state": "withdrawing",
+            "doors_closed": closed,
+            "doors_close_pending": pending,
+        }
+        error: str | None = "forced" if force else None
+        if seq > 0 and not force:  # something was signed, so something may be listed
             try:
                 seq = await self._send_withdrawal(row)
             except DirectoryError as e:
-                if e.transient or e.code == "stale_ts":
+                if e.transient or e.code in ("stale_ts", "unknown_directory"):
                     # Sent again with a fresh `ts` (300 s skew at the directory).
                     await self._retry_later(row, e.code)
-                    return {
-                        "directory": host,
-                        "name": name,
-                        "seq": seq,
-                        "state": "withdrawing",
-                        "doors_closed": closed,
-                        "doors_close_pending": pending,
-                    }
+                    if e.code == "unknown_directory":
+                        answer["unknown_directory"] = True
+                    return answer
                 # not_found: nothing was listed. wrong_identity and the rest:
                 # the directory won't take a withdrawal from this identity.
                 error = None if e.code == "not_found" else e.code
@@ -839,21 +967,20 @@ class ListingManager:
             "updated_at": now,
         }
         if error is not None:
-            fields["last_error"] = json.dumps({"code": error, "at": now})
-        data = {"directory": host, "name": name, "seq": seq, "doors_close_pending": pending}
+            fields["last_error"] = _error(error, now)
+        data = {
+            "directory": host,
+            "name": name,
+            "seq": seq,
+            "doors_close_pending": pending,
+            "forced": force,
+        }
         await self._commit(
             lambda: self._store.update_listing(host, name, **fields),
             [("listing_withdrawn", f"listing_withdrawn/{host}/{name}/{seq}", data)],
         )
         LOG.info("listing_withdrawn", doors_close_pending=pending)
-        return {
-            "directory": host,
-            "name": name,
-            "seq": seq,
-            "state": "withdrawn",
-            "doors_closed": closed,
-            "doors_close_pending": pending,
-        }
+        return answer | {"seq": seq, "state": "withdrawn"}
 
     async def _send_withdrawal(self, row: dict[str, Any]) -> int:
         """Withdraw everything up to ``max_signed_seq`` (a publish whose answer
@@ -889,9 +1016,12 @@ class ListingManager:
 
     # -- status (either token) ---------------------------------------------------
 
+    def _latest(self, states: frozenset[str]) -> dict[str, Any] | None:
+        return next((r for r in self._store.listings() if r["state"] in states), None)
+
     def status(self) -> dict[str, Any]:
         """The runtime's listing as it stands: the one it holds, else the
-        latest one in any state."""
+        latest one in any state. No door key is read."""
         rows = self._store.listings()
         if not rows:
             return {"listing": None}
@@ -900,8 +1030,19 @@ class ListingManager:
         current = next((d for d in reversed(doors) if d["state"] == "current"), None)
         door = None
         if current is not None:
-            door = {"expires_at": int(current["expires_at"]), "renews_at": row["next_renewal_at"]}
+            expires = int(current["expires_at"])
+            door = {
+                "expires_at": expires,
+                "renews_at": row["next_renewal_at"],
+                "expiring": expires - now < DOOR_WARNING_SECS,
+            }
         error = json.loads(row["last_error"]) if row["last_error"] else None
+        retrying = None
+        if row["state"] in ("publishing", "withdrawing") and row["failing_since"] is not None:
+            retrying = {
+                "since": int(row["failing_since"]),
+                "code": None if error is None else error["code"],
+            }
         expires_at = int(row["token_expires_at"])
         return {
             "listing": {
@@ -921,6 +1062,7 @@ class ListingManager:
                 "owner_domain": row["owner_domain"],
                 "owner_state": row["owner_state"],
                 "last_error": error,
+                "retrying": retrying,
             }
         }
 
@@ -930,33 +1072,54 @@ class ListingManager:
         """Renew, retry, expire and delete keys when each is due; a pass that
         fails is logged by type and retried after a backoff."""
         backoff = Backoff(base=1.0, cap=300.0, rng=self._engine.options.backoff_rng)
+        busy = 0
         while True:
             self._wake.clear()
             try:
-                delay = await self.step()
+                due = await self.step()
                 backoff.reset()
             except Exception as e:
                 LOG.warning("discovery_step_failed", error=type(e).__name__)
-                delay = backoff.next()
-            await self._wait(delay)
+                due = self._now() + backoff.next()
+            # Work due at once runs at once, but a pass that makes no progress
+            # can't spin: after a few in a row, the worker pauses a second.
+            busy = busy + 1 if due is not None and due <= self._now() else 0
+            if busy > MAX_IDLE_PASSES:
+                due, busy = self._now() + 1, 0
+            await self._wait(due)
 
-    async def _wait(self, delay: float | None) -> None:
+    async def _wait(self, due: float | None) -> None:
+        """Until ``due`` (Unix seconds on the runtime's clock) or a wake-up."""
+        clock = self._engine.clock
         woken = asyncio.ensure_future(self._wake.wait())
-        waits: set[asyncio.Future[Any]] = {woken}
-        if delay is not None:
-            # A deadline, not a retry pause: the fake clock doesn't count it.
-            waits.add(asyncio.ensure_future(self._engine.clock.sleep(delay, deadline=True)))
+        sleep: asyncio.Future[Any] | None = None
         try:
-            await asyncio.sleep(0)  # the timer is set before anyone is told
+            while True:
+                at = clock.unix_millis()
+                if due is not None:
+                    left = due - at / 1000
+                    if left <= 0:
+                        self._engine._pulse()
+                        await asyncio.sleep(0)
+                        return  # due already: the next pass runs now
+                    # A deadline, not a retry pause: the fake clock doesn't count it.
+                    sleep = asyncio.ensure_future(clock.sleep(left, deadline=True))
+                await asyncio.sleep(0)  # the timer is set before anyone is told
+                if sleep is None or sleep.done() or clock.unix_millis() == at:
+                    break
+                sleep.cancel()  # the clock moved before the timer was set: set it again
             self._engine._pulse()  # a pass ended: waiters re-check
+            waits: set[asyncio.Future[Any]] = {woken} if sleep is None else {woken, sleep}
             await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for w in waits:
-                w.cancel()
+            woken.cancel()
+            if sleep is not None:
+                sleep.cancel()
 
     async def step(self) -> float | None:
-        """One pass over the doors and listings. Returns the seconds until
-        the next thing is due (None: nothing is scheduled)."""
+        """One pass over the doors and listings. Returns when the next thing
+        is due (Unix seconds; at or before now when it is overdue), or None
+        when nothing is scheduled."""
         async with self._lock:
             await self._sweep_doors()
             for row in self._store.listings():
@@ -1001,8 +1164,7 @@ class ListingManager:
                     )
                 ],
             )
-        if state != "publishing":
-            await self._door_expired(row)
+        await self._door_checks(row)
         row = self._refresh(row)
         if not _due(row["retry_at"], now):
             return
@@ -1010,27 +1172,41 @@ class ListingManager:
         if row["state"] == "publishing" or (renew_at is not None and now >= renew_at):
             await self._round(row, interactive=False)
 
-    async def _door_expired(self, row: dict[str, Any]) -> None:
-        """The current door ran out before a renewal landed: tell the human."""
+    async def _door_checks(self, row: dict[str, Any]) -> None:
+        """Tell the human when the listed door is about to expire while a
+        republish waits, and when it expired before a renewal landed."""
         host, name, now = str(row["directory"]), str(row["name"]), self._now()
         current = [d for d in self._store.doors(host, name) if d["state"] == "current"]
-        if not current or int(current[-1]["expires_at"]) > now:
+        if not current:
             return
-        door, door_id = current[-1], current[-1]["door_id"]
+        door_id, expires = current[-1]["door_id"], int(current[-1]["expires_at"])
+        publishing = row["state"] == "publishing"
         since = row["stale_since"] if row["stale_since"] is not None else now
-        data = {
-            "directory": host,
-            "name": name,
-            "reason": "door_expired",
-            "since": since,
-            "door_expires_at": int(door["expires_at"]),
-        }
-        await self._commit(
-            lambda: self._store.update_listing(
-                host, name, state="stale", stale_since=since, updated_at=now
-            ),
-            [("listing_stale", f"listing_stale/{host}/{name}/door_expired/{door_id}", data)],
-        )
+        data = {"directory": host, "name": name, "since": since, "door_expires_at": expires}
+        if expires <= now:
+            # A republish that waits stays `publishing`; the human is told all the same.
+            fields = {} if publishing else {"state": "stale", "stale_since": since}
+            await self._commit(
+                lambda: self._store.update_listing(host, name, updated_at=now, **fields),
+                [
+                    (
+                        "listing_stale",
+                        f"listing_stale/{host}/{name}/door_expired/{door_id}",
+                        data | {"reason": "door_expired"},
+                    )
+                ],
+            )
+        elif publishing and expires - now < DOOR_WARNING_SECS:
+            await self._commit(
+                lambda: None,
+                [
+                    (
+                        "listing_stale",
+                        f"listing_stale/{host}/{name}/door_expiring/{door_id}",
+                        data | {"reason": "door_expiring"},
+                    )
+                ],
+            )
 
     async def _expire(self, row: dict[str, Any]) -> None:
         """The token expired: the listing counts as withdrawn everywhere
@@ -1047,6 +1223,8 @@ class ListingManager:
             "retry_at": None,
             "attempts": 0,
             "failing_since": None,
+            "restore_state": None,
+            "restore_renewal_at": None,
             "updated_at": now,
         }
         await self._commit(
@@ -1062,6 +1240,9 @@ class ListingManager:
         LOG.info("listing_token_expired")
 
     def _next_due(self) -> float | None:
+        """When the next thing is due. Overdue work (the clock moved during
+        the pass) counts, so it runs at once; what this pass already handled
+        (an expired current door, a warning given) doesn't."""
         now = self._now()
         times: list[int] = []
         for door in self._store.doors():
@@ -1071,7 +1252,7 @@ class ListingManager:
             else:
                 times.append(expires_at + ac.DOOR_GRACE_SECS)
             if door["state"] == "current":
-                times.append(expires_at)
+                times += [t for t in (expires_at - DOOR_WARNING_SECS, expires_at) if t > now]
         for row in self._store.listings():
             if row["state"] == "withdrawing":
                 times.append(row["retry_at"] or now + RETRY_BASE_SECS)
@@ -1085,8 +1266,7 @@ class ListingManager:
                 times.append(int(row["retry_at"]))
             elif row["next_renewal_at"] is not None:
                 times.append(int(row["next_renewal_at"]))
-        future = [t - now for t in times if t > now]
-        return float(min(future)) if future else None
+        return float(min(times)) if times else None
 
 
 def _url(row: dict[str, Any]) -> str:

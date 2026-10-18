@@ -224,6 +224,10 @@ class FakeDoors:
         self.doors: dict[str, DoorRecord] = {}
         self.created: list[str] = []
         self.closed: list[str] = []
+        # The ts of every signed request, in order; a repeated signature is
+        # refused as the relay's replay cache does.
+        self.stamps: list[int] = []
+        self._seen: set[str] = set()
         self.faults = Faults()
         # Seconds the relay's clock runs behind the daemon's.
         self.behind = 0
@@ -241,8 +245,13 @@ class FakeDoors:
         injected = self.faults.take(request)
         if injected is not None:
             return injected
-        if not request.headers.get("authorization", "").startswith("AgentConnect-Ed25519 "):
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("AgentConnect-Ed25519 "):
             return _error(401, "auth_failed", "missing Authorization header")
+        self.stamps.append(int(auth.split(".")[1]))
+        if auth in self._seen:
+            return _error(401, "auth_failed", "signature already used")
+        self._seen.add(auth)
         path = request.url.path
         if request.method == "POST" and path == "/v0/doors":
             return self._create(json.loads(request.content))

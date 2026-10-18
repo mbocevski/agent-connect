@@ -195,6 +195,8 @@ def _core_error(e: Exception) -> str:
 
 ENVELOPE_KINDS = frozenset({"commit", "proposal", "application", "welcome_wrapped", "join_request"})
 MAX_ID_LEN = 64
+# The last signed relay request's ts (RelayRest), kept across restarts.
+REST_TS_KEY = "relay/rest_ts"
 # An internal frame: finish every pending journal entry (ADR-004).
 REPLAY_JOURNAL = "_replay_journal"
 TransientFailure = (TransientError, FailpointError)
@@ -394,6 +396,8 @@ class Engine:
             self.instance,
             self.clock,
             transport=self.options.relay_transport,
+            last_ts=int(self.store.kv_get(REST_TS_KEY) or "0"),
+            on_ts=lambda ts: self.store.kv_set(REST_TS_KEY, str(ts)),
         )
         self._frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._outbox_wake = asyncio.Event()

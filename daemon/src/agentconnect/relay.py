@@ -253,26 +253,35 @@ class RelayLink:
 class RelayRest:
     """Signed REST calls (SPEC §8.1.1): a fresh ``ts`` for every request."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         base_url: str,
         relay_host: str,
         instance: ac.Instance,
         clock: Clock,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        last_ts: int = 0,
+        on_ts: Callable[[int], None] | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._host = relay_host
         self._instance = instance
         self._clock = clock
         self._transport = transport
-        self._last_ts = 0
+        self._last_ts = last_ts
+        self._on_ts = on_ts
 
     def _ts(self) -> int:
-        # Strictly increasing, so two requests in one second never share a
-        # signature (each signed request is single use at the relay).
+        # Strictly increasing, so two requests never share a signature (each
+        # signed request is single use at the relay, and Ed25519 signs the
+        # same input the same way). `on_ts` stores it before the request
+        # goes out, and the next run starts above it (`last_ts`), so this
+        # holds across a restart in the same second too.
         ts = max(unix_seconds(self._clock), self._last_ts + 1)
         self._last_ts = ts
+        if self._on_ts is not None:
+            self._on_ts(ts)
         return ts
 
     def authorization(self, method: str, path: str, body: bytes) -> str:

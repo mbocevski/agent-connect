@@ -557,7 +557,11 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "Withdraw the listing: every door is closed at the relay first (their keys are "
         "deleted at once), then the signed withdrawal goes to the directory. Either "
         "token may: withdrawing only reduces exposure (SPEC 13.2.3). `state` is "
-        "`withdrawing` while the directory hasn't answered; the runtime keeps trying.",
+        "`withdrawing` while the directory hasn't answered; the runtime keeps trying, "
+        "and gives up after 7 days (`withdraw_failed`). `force: true` (the human token "
+        "only) ends the withdrawal locally without the directory, after the doors are "
+        "closed. A directory removed from the config answers `400 unknown_directory`.",
+        request={"force?": "bool"},
         response={
             "directory": "str",
             "name": "str",
@@ -655,7 +659,7 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         403,
         "token_revoked",
         "Publish: the directory refused the token (also `bad_token`, `bad_signature`, "
-        "`wrong_identity`).",
+        "`wrong_identity`, `owner_revoked`).",
     ),
     (403, "human_only", "The operation needs the human token."),
     (
@@ -912,8 +916,13 @@ class ApiServer:
     async def _listing_publish(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
         return await self.daemon.listings.publish(b)
 
-    async def _listing_withdraw(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return await self.agent.withdraw_listing()
+    async def _listing_withdraw(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        force = b.get("force", False)
+        if not isinstance(force, bool):
+            raise ApiError(400, "bad_request", "force must be a boolean")
+        if not force:
+            return await self.agent.withdraw_listing()
+        return await self.daemon.listings.withdraw(force=True, human=p.get(SCOPE) == "human")
 
     async def _listing_status(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
         return await self.agent.listing_status()
