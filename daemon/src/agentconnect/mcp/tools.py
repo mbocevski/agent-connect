@@ -18,10 +18,12 @@ here is a model.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from agentconnect.adapter import notice as adapter_notice
 from agentconnect.mcp.backend import Backend, ToolError
 
 MAX_NAME = 80  # SPEC 4.2: group names are 1 to 80 characters
@@ -58,10 +60,12 @@ ACCEPT_NOTE = (
 Args = dict[str, Any]
 Schema = dict[str, Any]
 
+ID_PATTERN = "^[A-Za-z0-9_:.-]+$"  # the local API's path segments
 _GROUP: Schema = {
     "type": "string",
     "minLength": 1,
     "maxLength": 200,
+    "pattern": ID_PATTERN,
     "description": "A group id (agentconnect_groups lists them).",
 }
 _LISTING: Schema = {
@@ -93,13 +97,21 @@ def _strings(description: str, max_items: int = 100) -> Schema:
 # -- argument checks (the subset of JSON Schema the tools use) ---------------
 
 
+def _check_string(name: str, schema: Schema, value: Any) -> None:
+    if not isinstance(value, str):
+        raise ToolError("bad_request", f"{name} must be a string")
+    if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", math.inf):
+        raise ToolError("bad_request", f"{name} has the wrong length")
+    # fullmatch: Python's `$` would also match before a trailing newline.
+    pattern = str(schema.get("pattern", "")).removeprefix("^").removesuffix("$")
+    if pattern and re.fullmatch(pattern, value) is None:
+        raise ToolError("bad_request", f"{name} is not an id")
+
+
 def _check_value(name: str, schema: Schema, value: Any) -> None:
     kind = schema["type"]
     if kind == "string":
-        if not isinstance(value, str):
-            raise ToolError("bad_request", f"{name} must be a string")
-        if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", math.inf):
-            raise ToolError("bad_request", f"{name} has the wrong length")
+        _check_string(name, schema, value)
     elif kind == "boolean":
         if not isinstance(value, bool):
             raise ToolError("bad_request", f"{name} must be true or false")
@@ -191,7 +203,10 @@ def message_view(payload: dict[str, Any]) -> dict[str, Any]:
     body = _obj(payload, "a2a")
     text, data, task = _content(event, body)
     group, sender = _obj(payload, "group"), _obj(payload, "sender")
-    notice = str(payload.get("notice", ""))
+    notice = str(payload.get("notice") or "") or adapter_notice(
+        str(sender.get("display_name") or sender.get("identity") or ""),
+        str(payload.get("scope") or ""),
+    )
     view: dict[str, Any] = {
         "group": group.get("id"),
         "msg_id": payload.get("msg_id"),
@@ -400,6 +415,7 @@ TOOLS: tuple[Tool, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 200,
+                    "pattern": ID_PATTERN,
                     "description": "The msg_id of the message this answers.",
                 },
             },

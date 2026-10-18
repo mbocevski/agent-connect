@@ -180,6 +180,18 @@ async def test_knocks_follow_agent_may_knock(cluster: Cluster) -> None:
     assert status == {"listing": None}
     assert (await alice.client.ok("agentconnect_knocks", {}))["knocks"] == []
 
+    # With agent knocks on, the runtime checks the listing as for any caller:
+    # a directory nobody pinned is refused before anything is fetched.
+    bob = await cluster.mcp("bob")
+    assert "agentconnect_knock" in {t["name"] for t in await bob.client.tools()}
+    for tool, args in (
+        ("agentconnect_knock_inspect", {"listing": "dir.example/a/carol", "domain_check": False}),
+        ("agentconnect_knock", {"listing": "dir.example/a/carol", "note": "hi"}),
+    ):
+        refused = await bob.client.call(tool, args)
+        assert refused.is_error, tool
+        assert refused.data["error"]["code"] in {"unknown_directory", "bad_listing_ref"}
+
 
 async def test_peer_content_is_framed_and_marked(cluster: Cluster) -> None:
     alice, bob, gid = await joined_pair(cluster)
@@ -308,6 +320,8 @@ async def test_the_command_serves_stdio_and_stops_on_eof_and_sigterm(
             str(data),
             "--config",
             str(config),
+            "--log-file",
+            str(tmp_path / f"{stop}.log"),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -331,3 +345,6 @@ async def test_the_command_serves_stdio_and_stops_on_eof_and_sigterm(
         assert b"Bearer" not in err
         await client.finished()
         DataDirLock(data).release()  # released
+        logged = (tmp_path / f"{stop}.log").read_text(encoding="utf-8")
+        assert '"mcp_session"' in logged
+        assert "Bearer" not in logged
