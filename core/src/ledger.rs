@@ -20,12 +20,17 @@ use crate::error::{Error, Result};
 /// How many requests a [`MemoryLedger`] holds by default. For knocks it is
 /// well above 32 pending per door times the 4 doors a mailbox may hold,
 /// times the knocks a door can take in its 65-minute window at the relay's
-/// limits; a JoinRequest needs the invite's secret.
+/// limits. For joins, anyone holding a leaked invite link can mint
+/// requests, so the daemon also gives each invite a quota of its own and
+/// forgets an invite's entries once it is revoked or ends.
 pub const DEFAULT_LEDGER_CAPACITY: usize = 65_536;
 
-/// How long past a request's own deadline it is still remembered: the
-/// 300 s a knock's `ts` may run ahead (SPEC §6.6.3 step 3), and the same
-/// for a JoinRequest past its invite's `expires_at` (SPEC §6.2).
+/// How long past a request's own deadline it is still remembered. For a
+/// knock it is the 300 s its `ts` may run ahead of the owner's clock (SPEC
+/// §6.6.3 step 3). A JoinRequest has no such allowance: step 1 refuses it
+/// at the invite's `expires_at` on the inviter's own clock (SPEC §6.2), so
+/// for joins the same 300 s only absorbs a small backward step of that
+/// clock between a purge and the next check.
 pub const LEDGER_GRACE_SECS: u64 = crate::knock::KNOCK_FUTURE_SECS;
 
 /// What an owner remembers about the requests it has seen: every id and

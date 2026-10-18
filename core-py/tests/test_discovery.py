@@ -251,6 +251,20 @@ def test_a_replayed_knock_is_dropped(rng: random.Random) -> None:
     assert len(ledger) == 0
 
 
+def test_a_ledger_of_knocks_takes_only_16_byte_ids(rng: random.Random) -> None:
+    """Review F8: a ledger made for knock ids refuses any other length, as
+    the knock-only ledger did; one without ``id_len`` takes any bytes."""
+    ledger = ac.ReplayLedger(id_len=16)
+    for bad in (rng.randbytes(15), rng.randbytes(17), b""):
+        with pytest.raises(ac.AgentConnectError) as e:
+            ledger.insert(bad, rng.randbytes(32), T0)
+        assert e.value.kind == "malformed"
+    ledger.insert(rng.randbytes(16), rng.randbytes(32), T0)
+    any_ids = ac.ReplayLedger()
+    any_ids.insert(b"a-msg-id", rng.randbytes(32), T0)
+    assert (len(ledger), len(any_ids)) == (1, 1)
+
+
 def test_the_knock_ledger_survives_a_restart(rng: random.Random) -> None:
     """Review N4: after a restart a fresh ledger let the same sealed knock
     in again; and the ledger had no bound."""

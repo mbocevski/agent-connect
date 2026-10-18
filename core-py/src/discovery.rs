@@ -1066,7 +1066,10 @@ impl VerifiedKnock {
     /// full), else records them. Call it for every verified knock before
     /// anything else.
     fn remember_in(&self, ledger: &mut ReplayLedger) -> PyResult<()> {
-        guarded(|| self.0.remember_in(&mut ledger.0).map_err(err))
+        guarded(|| {
+            ledger.check_id(&self.0.knock().knock_id)?;
+            self.0.remember_in(&mut ledger.inner).map_err(err)
+        })
     }
 
     /// The knock's JCS form for the owner's encrypted store while the
