@@ -180,10 +180,14 @@ class RelayProxy:
 
         self.client_filters.append(client)
 
-    def hold_welcome_until_application(self) -> None:
+    def hold_welcome_until_application(self) -> asyncio.Event:
         """Deliver the next Welcome only after the first application message
-        that follows it, as a relay may (they are queued independently)."""
+        that follows it, as a relay may (they are queued independently).
+        The returned event is set once the Welcome is held: send the
+        application message after that, or it may overtake the Welcome and
+        leave it held."""
         state: dict[str, Any] = {"held": None, "done": False}
+        holding = asyncio.Event()
 
         def server(frame: Frame) -> list[Frame]:
             env = frame.get("env") or {}
@@ -191,6 +195,7 @@ class RelayProxy:
                 return [frame]
             if env.get("kind") == "welcome_wrapped" and state["held"] is None:
                 state["held"] = frame
+                holding.set()
                 return []
             if state["held"] is not None and env.get("kind") == "application":
                 state["done"] = True
@@ -198,6 +203,7 @@ class RelayProxy:
             return [frame]
 
         self.server_filters.append(server)
+        return holding
 
     def fork_own_commits(self) -> None:
         """Fork: confirm the daemon's commits locally without forwarding

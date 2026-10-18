@@ -256,7 +256,14 @@ class EmbeddedHost:
             if await dispatch(payload) == "busy":
                 raise _BusyError
 
-        adapter = CallbackAdapter(on_payload, on_payload, self._clock, name=ADAPTER_NAME)
+        adapter = CallbackAdapter(
+            on_payload,
+            on_payload,
+            self._clock,
+            name=ADAPTER_NAME,
+            timeout=self.config.sdk_handler_timeout,
+            rng=self._options.backoff_rng,
+        )
         registered = adapter if self._wrap is None else self._wrap(adapter)
         try:
             runtime = Runtime(

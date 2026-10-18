@@ -42,6 +42,11 @@ class TokenDigest:
 
     __slots__ = ("_digest",)
 
+    # SHA-256, not a password hash, on purpose: the tokens are 256 bits from
+    # secrets.token_urlsafe(32), not passwords people choose, so there is
+    # nothing to brute-force and no stretching (bcrypt, scrypt) to add. The
+    # hash only keeps the value out of memory; compare_digest keeps the
+    # comparison constant-time.
     def __init__(self, token: str) -> None:
         self._digest = hashlib.sha256(token.encode()).digest()
 
@@ -50,8 +55,8 @@ class TokenDigest:
         """Load (or create) the token file at ``path`` and keep its digest."""
         return cls(load_token(path))
 
-    def matches(self, presented: str) -> bool:
-        return hmac.compare_digest(hashlib.sha256(presented.encode()).digest(), self._digest)
+    def matches(self, bearer_token: str) -> bool:
+        return hmac.compare_digest(hashlib.sha256(bearer_token.encode()).digest(), self._digest)
 
     @override
     def __repr__(self) -> str:

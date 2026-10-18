@@ -38,6 +38,8 @@ Example file::
     callback_url = "http://127.0.0.1:8808/"   # where the webhook adapter POSTs
     allow_remote = false            # opt in to a callback that isn't loopback
     timeout_secs = 120              # per request; an agent turn may be slow
+    [sdk]                           # the embedded SDK (docs/sdk.md)
+    handler_timeout_secs = 120      # per handler call; then cancelled and retried
     [a2a]                           # optional: the A2A adapter (docs/adapters/a2a.md)
     local_agent_url = "http://127.0.0.1:9999/"
     local_agent_token_file = "~/.config/agentconnect/agent-token"
@@ -119,6 +121,7 @@ class Config:
     webhook_allow_remote: bool = False
     webhook_timeout: int = 120
     sse_retention: int = 3600
+    sdk_handler_timeout: int = 120
     a2a_local_agent_url: str | None = None
     a2a_local_agent_token_file: Path | None = None
     a2a_card_keys_file: Path | None = None
@@ -336,6 +339,14 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "`120`",
         "How long the daemon waits for each webhook response (1 to 3600). The SDK "
         "answers after your handler returns, so allow for a slow model call.",
+    ),
+    ConfigKey(
+        "sdk.handler_timeout_secs",
+        "sdk_handler_timeout",
+        "`120`",
+        "Embedded SDK only: how long a message or event handler may run (1 to 3600). "
+        "A handler still running then is cancelled and the delivery retried with "
+        "backoff, as for a webhook that timed out. Allow for a slow model call.",
     ),
     ConfigKey(
         "sse.retention_secs",
@@ -595,6 +606,14 @@ def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _sdk(data: Mapping[str, Any]) -> dict[str, Any]:
+    timeout = _typed(_section(data, "sdk"), "handler_timeout_secs", int, 120)
+    if not 1 <= timeout <= 3600:  # noqa: PLR2004
+        msg = "sdk handler_timeout_secs must be 1..3600"
+        raise ConfigError(msg)
+    return {"sdk_handler_timeout": timeout}
+
+
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
@@ -648,7 +667,7 @@ def load_config(
         "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
         "sse_retention": _typed(sse, "retention_secs", int, 3600),
     }
-    values.update(_a2a(data) | _isolation(data) | _policy(policy))
+    values.update(_a2a(data) | _isolation(data) | _policy(policy) | _sdk(data))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"

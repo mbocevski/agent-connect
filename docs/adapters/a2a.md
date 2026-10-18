@@ -272,8 +272,9 @@ A delivery is acknowledged once the agent sent its first event. Until then:
 | The agent is unreachable, times out or returns an HTTP error | retry (with the daemon's backoff) |
 | The agent returns an A2A error | acknowledged and dropped, so one bad message doesn't hold up the queue |
 
-The daemon's delivery queue is shared by all groups, so while the agent is
-unreachable, later deliveries wait.
+Deliveries are in order within each group, and groups don't wait for each
+other: while the agent is unreachable, later deliveries in that group wait,
+and other groups' calls go on.
 
 Stopping the daemon cancels calls to the agent that are still running,
 stops the facade and closes `a2a-seen.db`, even if the daemon is

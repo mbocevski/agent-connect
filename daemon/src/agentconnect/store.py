@@ -1250,7 +1250,7 @@ class Store:
             )
         return cur.rowcount == 1
 
-    def adapter_events(self, adapter: str, limit: int = 100) -> list[tuple[int, dict[str, Any]]]:
+    def adapter_events(self, adapter: str, limit: int = 10_000) -> list[tuple[int, dict[str, Any]]]:
         """Queued events of ``adapter``, oldest first."""
         rows = self._all(
             "SELECT seq, payload FROM adapter_events WHERE adapter = ? ORDER BY seq LIMIT ?",

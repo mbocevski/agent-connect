@@ -21,7 +21,12 @@ async def cancel_and_wait(
     exception in ``ignore``; any other exception is raised (the first, in
     argument order). If the calling task is cancelled meanwhile, its
     ``CancelledError`` propagates: ``gather`` passes the caller's
-    cancellation on and reports the tasks' own as results."""
+    cancellation on and reports the tasks' own as results.
+
+    The calling task itself, if it is among ``tasks``, is skipped: a task
+    can't wait for its own end, and gathering on itself would never return."""
+    current = asyncio.current_task()
+    tasks = tuple(t for t in tasks if t is not current)
     for t in tasks:
         t.cancel()
     results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
-from agentconnect.backoff import Backoff
 from agentconnect.callback import CallbackAdapter
 from agentconnect.clock import FakeClock
 from agentconnect.store import Store
@@ -59,6 +58,7 @@ class Recorder:
         self.events: list[dict[str, Any]] = []
         self.fail_events = 0
         self.fail_messages = 0
+        self.fail_ids: set[str] = set()
 
     async def message(self, payload: dict[str, Any]) -> None:
         if self.fail_messages:
@@ -67,6 +67,9 @@ class Recorder:
         self.messages.append(payload)
 
     async def event(self, payload: dict[str, Any]) -> None:
+        if payload["event_id"] in self.fail_ids:
+            self.fail_ids.discard(payload["event_id"])
+            raise RuntimeError(BODY_TEXT)
         if self.fail_events:
             self.fail_events -= 1
             raise RuntimeError(BODY_TEXT)
@@ -74,8 +77,7 @@ class Recorder:
 
 
 def adapter(rec: Recorder, clock: FakeClock, rng: random.Random) -> CallbackAdapter:
-    backoff = Backoff(base=1.0, cap=4.0, rng=rng)
-    return CallbackAdapter(rec.message, rec.event, clock, backoff=backoff)
+    return CallbackAdapter(rec.message, rec.event, clock, rng=rng)
 
 
 async def test_messages_wait_until_open_and_arrive_as_webhook_payloads(
@@ -137,15 +139,16 @@ async def test_events_are_queued_durably_and_retried_in_order(
         await asyncio.sleep(0)
     assert rec.events == []  # not open yet: they wait in the store
     assert [p["event_id"] for _, p in store.adapter_events("sdk")] == ["e1", "e2"]
-    rec.fail_events = 1
+    rec.fail_ids = {"e1"}
     a.open()
-    await until(lambda: fake_clock.sleepers == 1)  # backing off after the failure
-    assert rec.events == []
+    # g1's event backs off after its failure; the other group's isn't held up.
+    await until(lambda: fake_clock.sleepers == 1 and len(rec.events) == 1)
+    assert [e["event_id"] for e in rec.events] == ["e2"]
+    assert rec.events[0]["group"] is None
     fake_clock.advance(10)
     await until(lambda: len(rec.events) == 2)
-    assert [e["event_id"] for e in rec.events] == ["e1", "e2"]
-    assert rec.events[1]["group"] is None
-    assert store.adapter_events("sdk") == []
+    assert [e["event_id"] for e in rec.events] == ["e2", "e1"]
+    await until(lambda: store.adapter_events("sdk") == [])
     # Paused, a new event waits; reopened, it goes.
     a.pause()
     await a.on_event(GROUP, Event("member_left", "g1", {}, "e3"))
@@ -171,3 +174,47 @@ def test_handled_ids_are_bounded(store: Store) -> None:
         store.handled_add(f"k{n}", keep=3)
     store.handled_add("k4", keep=3)  # a repeat changes nothing
     assert [store.handled_has(f"k{n}") for n in range(5)] == [False, False, True, True, True]
+
+
+async def test_a_handler_past_the_timeout_is_cancelled_and_retried(
+    fake_clock: FakeClock, rng: random.Random
+) -> None:
+    cancelled: list[str] = []
+
+    async def stuck(_payload: dict[str, Any]) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append("message")
+            raise
+
+    a = CallbackAdapter(stuck, stuck, fake_clock, timeout=30, rng=rng)
+    a.open()
+    pending = asyncio.ensure_future(a.deliver(GROUP, SENDER, ["*"], delivery()))
+    await until(a.busy)
+    for _ in range(10):  # the timer starts in its own task
+        await asyncio.sleep(0)
+    assert fake_clock.sleepers == 0  # a deadline, not a retry pause
+    fake_clock.advance(29)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not pending.done()
+    fake_clock.advance(2)
+    assert await pending is DeliveryResult.RETRY
+    assert cancelled == ["message"]
+
+
+async def test_handler_tasks_are_known_while_they_run(
+    fake_clock: FakeClock, rng: random.Random
+) -> None:
+    inside: list[bool] = []
+
+    async def check(_payload: dict[str, Any]) -> None:
+        inside.append(a.in_handler())
+
+    a = CallbackAdapter(check, check, fake_clock, rng=rng)
+    a.open()
+    assert not a.in_handler()
+    assert await a.deliver(GROUP, SENDER, ["*"], delivery()) is DeliveryResult.ACK
+    assert inside == [True]
+    assert await a.drain(1.0)  # nothing in flight

@@ -37,7 +37,7 @@ import typer.main
 
 from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
-from agentconnect_harness.cluster import WAIT, Cluster, Node
+from agentconnect_harness.cluster import Cluster, Node
 from agentconnect_harness.relay import REPO, RelayProcess
 from agentconnect_sdk import AgentConnect, Group
 
@@ -58,6 +58,10 @@ BACKGROUND = {"accept"}
 YES = b"y\n" * 8
 # The whole quickstart spawns about ten CLI processes.
 QUICKSTART_TIMEOUT = 30
+# One CLI command. The background `accept` lasts while the other actor lists
+# and approves (two more CLI processes), which under a parallel, coverage-
+# instrumented run takes longer than a single harness wait.
+COMMAND_TIMEOUT = 20
 
 
 @dataclass(frozen=True)
@@ -293,7 +297,7 @@ class Quickstart:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await asyncio.wait_for(proc.communicate(YES), WAIT)
+        out, err = await asyncio.wait_for(proc.communicate(YES), COMMAND_TIMEOUT)
         text = out.decode()
         assert proc.returncode == 0, f"{step.actor}: {step.line}\n{text}\n{err.decode()}"
         if (m := INVITE_URL.search(text)) is not None:

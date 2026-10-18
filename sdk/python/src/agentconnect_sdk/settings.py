@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from agentconnect.sockets import bind_path
 from agentconnect_sdk.errors import AgentConnectError
 
 API_TOKEN_FILE = "api-token"  # noqa: S105 - a file name
@@ -73,9 +74,13 @@ def load_settings(
     callback = webhook.get("callback_url")
     return Settings(
         data_dir=data_dir,
-        socket=Path(socket).expanduser()
-        if isinstance(socket, str) and socket
-        else data_dir / SOCKET_FILE,
+        # Where the daemon binds it: a path over the platform's limit is
+        # bound at a short private one (agentconnect.sockets).
+        socket=bind_path(
+            Path(socket).expanduser()
+            if isinstance(socket, str) and socket
+            else data_dir / SOCKET_FILE
+        ),
         tcp_port=port if isinstance(port, int) and not isinstance(port, bool) else 0,
         callback_url=callback if isinstance(callback, str) and callback else None,
     )

@@ -238,6 +238,7 @@ async def test_control_close_prompts_the_human_and_never_leaves(group: GroupFixt
     await c.adapter.wait_for(lambda: bool(c.adapter.of_type("close_requested")))
     (event,) = c.adapter.of_type("close_requested")
     assert event.data == {"sender": a.me, "reason": "done here"}
+    await c.adapter.wait_for(lambda: any(d.kind == "control.close" for d in c.adapter.deliveries))
     await c.idle()
     assert [d.body for d in c.adapter.deliveries if d.kind == "control.close"] == [
         {"reason": "done here"}

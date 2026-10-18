@@ -253,6 +253,13 @@ scenarios are in `harness/tests/`.
   adapter, so a scenario's assertions hold on both, and `node.handled`
   records what reached user code; `node.sdk` is the SDK client. A scenario
   that is about one host itself carries `@pytest.mark.hosts("daemon")`.
+- **Waits.** `node.wait(predicate)` wakes on a change pulse from any node of
+  the cluster, since predicates often read another node's state, and it
+  clears the pulses before checking, so no change is missed. A handler's own
+  state (a list an SDK handler appends to) has no pulse: poll it with a loop
+  of `asyncio.sleep(0)` under `asyncio.wait_for`. `FakeClock.sleepers` counts
+  pauses before a retry, not deadlines (`sleep(..., deadline=True)`, such as
+  the handler timeout), so "the runtime is backing off" stays readable.
 - **Fixtures:**
   - `cluster`: `await cluster.node(name, auto_approve=..., identity_of=...)`
     starts a node; `identity_of` makes a replica of another node's

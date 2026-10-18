@@ -354,6 +354,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - The data-directory lock records its holder, so a second runtime's error
   says whether a daemon or an embedded agent has the directory, and its pid.
 - `agentconnect-sdk` depends on `agentconnect` (the runtime and the CLI).
+- Deliveries to adapters (webhook, SSE, A2A and the embedded SDK) run per
+  group: in order within a group, but a slow or failing delivery holds up
+  its own group only, not every group. The embedded SDK's handlers are
+  bounded by `sdk.handler_timeout_secs` (default 120 s): one still running
+  then is cancelled and retried with backoff, as a webhook that times out.
+- A Unix socket path longer than the platform allows (103 bytes, the macOS
+  limit) is bound at `/tmp/agentconnect-<uid>/<hash>.sock`, in a 0700
+  directory the runtime creates and checks; the CLI and the SDK derive the
+  same path. Separate-OS-user mode refuses such a path at startup instead.
 - The multi-node harness runs every scenario on both hosts, the separate
   daemon and the embedded SDK, and the Python suite runs on all cores with
   pytest-xdist (`just test`, `just cov`).

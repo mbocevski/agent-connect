@@ -49,6 +49,7 @@ from typing import Any, Protocol
 
 from agentconnect import log
 from agentconnect.config import Config
+from agentconnect.sockets import MAX_SOCKET_PATH, too_long
 
 LOG = log.get("agentconnect.isolation")
 
@@ -196,6 +197,15 @@ def check_config(cfg: Config, euid: int, agent_uids: set[int], human_uids: set[i
         raise IsolationError(msg)
     if euid in agent_uids:
         msg = "isolation: the daemon's own user can't be an agent user"
+        raise IsolationError(msg)
+    if too_long(cfg.socket_path):
+        # Agents' users reach the socket in the agent directory; a short
+        # private fallback directory would lock them out.
+        msg = (
+            f"isolation: the socket path {cfg.socket_path} is longer than "
+            f"{MAX_SOCKET_PATH} bytes, the most a Unix socket path can be; "
+            "use a shorter isolation.agent_dir"
+        )
         raise IsolationError(msg)
     if cfg.socket_path.parent != cfg.isolation_agent_dir:
         msg = "isolation: api.socket must be in isolation.agent_dir"

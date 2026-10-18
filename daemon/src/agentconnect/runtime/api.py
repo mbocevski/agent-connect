@@ -46,6 +46,7 @@ from agentconnect.runtime.agent import AgentApi, a2a_text
 from agentconnect.runtime.engine import Engine
 from agentconnect.runtime.errors import ApiError, error_reply
 from agentconnect.shapes import Opt
+from agentconnect.sockets import bind_path, prepare_bind_dir
 from agentconnect.sse import SseAdapter, Subscription
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE, TokenDigest
 
@@ -791,8 +792,8 @@ class ApiServer:
 
     def _authorize(self, headers: dict[str, str], human: bool) -> str:
         """Check the bearer token; returns the scope (``agent`` or ``human``)."""
-        auth = headers.get("authorization", "")
-        scheme, _, token = auth.partition(" ")
+        bearer_header = headers.get("authorization", "")
+        scheme, _, token = bearer_header.partition(" ")
         if scheme.lower() != "bearer" or not token:
             raise ApiError(401, "auth_failed", "missing bearer token")
         is_human = self._tokens["human"].matches(token)
@@ -941,7 +942,11 @@ class ApiServer:
             self._port = int(sock[1])
             self.address = f"http://127.0.0.1:{sock[1]}"
         else:
-            path = cfg.socket_path
+            # A configured path over the platform's limit binds at a short
+            # private path the CLI and SDK derive the same way (sockets.py).
+            path = bind_path(cfg.socket_path)
+            if path != cfg.socket_path:
+                prepare_bind_dir(path)
             with contextlib.suppress(FileNotFoundError):
                 if not stat.S_ISSOCK(path.lstat().st_mode):
                     msg = f"{path} exists and is not a socket; refusing to replace it"

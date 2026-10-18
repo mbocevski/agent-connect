@@ -128,6 +128,8 @@ class Node:
     # Embedded host only: the SDK client, and what reached its handlers.
     sdk: AgentConnect | None = None
     handled: list[Message | SdkEvent] = field(default_factory=list)
+    # The cluster's nodes (shared): their changes wake this node's waits too.
+    peers: list[Node] = field(default_factory=list, repr=False, compare=False)
     _serving: asyncio.Task[None] | None = None
 
     def _options(self) -> Options:
@@ -227,7 +229,25 @@ class Node:
         await self.start()
 
     async def wait(self, predicate: Any, within: float = WAIT) -> None:
-        await self.daemon.wait_until(predicate, within)
+        """Wait until ``predicate`` holds. It may read any node's state, so
+        any node's change pulse wakes it, not only this node's."""
+
+        async def loop() -> None:
+            while True:
+                engines = [n.daemon for n in {id(n): n for n in (self, *self.peers)}.values()]
+                pulses = [e._changed for e in engines if hasattr(e, "_changed")]
+                for pulse in pulses:  # clear before checking: no pulse is lost
+                    pulse.clear()
+                if predicate():
+                    return
+                waits = [asyncio.ensure_future(p.wait()) for p in pulses]
+                try:
+                    await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for w in waits:
+                        w.cancel()
+
+        await asyncio.wait_for(loop(), within)
 
     async def wait_texts(self, group_id: str, n: int) -> list[str]:
         await self.adapter.wait_for(lambda: len(self.adapter.texts(group_id)) >= n, WAIT)
@@ -345,6 +365,7 @@ class Cluster:
             host=chosen,
             serve_api=serve_api,
             make_adapters=make_adapters,
+            peers=self.nodes,
         )
         await node.start()
         self.nodes.append(node)

@@ -37,7 +37,8 @@ def test_config_keys_are_section_dot_name_and_documented() -> None:
     for key in config.CONFIG_KEYS:
         section, dot, name = key.key.partition(".")
         assert dot
-        assert section in {"relay", "daemon", "policy", "api", "webhook", "sse", "a2a", "isolation"}
+        sections = {"relay", "daemon", "policy", "api", "webhook", "sse", "sdk", "a2a", "isolation"}
+        assert section in sections
         assert name
         assert key.doc
         assert key.default

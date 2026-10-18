@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from agentconnect.adapter import RecordingAdapter
+from agentconnect.apiclient import ApiClient
 from agentconnect.clock import FakeClock
 from agentconnect.config import Config, load_config
 from agentconnect.identity import Seeded
@@ -20,6 +21,7 @@ from agentconnect.keystore import DataDirLock, FileKeystore
 from agentconnect.relay import RelayError
 from agentconnect.runtime import AdapterRegistry, ApiError, Options, Runtime, error_reply
 from agentconnect.runtime.engine import DaemonError
+from agentconnect.sockets import MAX_SOCKET_PATH, bind_path
 from agentconnect.tokens import HUMAN_TOKEN_FILE, TokenDigest
 
 
@@ -112,14 +114,14 @@ async def test_a_runtime_starts_once_and_stops_idempotently(
     assert rt.api_address is None  # not served yet
     async with rt:
         assert rt.running
-        assert rt.api_address == tmp_path / "s.sock"
+        assert rt.api_address == bind_path(tmp_path / "s.sock")
         assert rt.status()["relay"]["connected"] is False
         with pytest.raises(RuntimeError, match="starts once"):
             await rt.start()
     assert not rt.running
     await rt.stop()
     DataDirLock(tmp_path / "data").release()  # released
-    assert not (tmp_path / "s.sock").exists()
+    assert not bind_path(tmp_path / "s.sock").exists()
 
 
 async def test_a_runtime_without_the_api_and_one_that_never_started(
@@ -159,3 +161,24 @@ async def test_a_cancelled_stop_still_releases(
         await stopping
     assert not rt.running
     DataDirLock(tmp_path / "data").release()
+
+
+async def test_a_socket_path_over_the_platform_limit_binds_a_short_one(
+    tmp_path: Path, rng: random.Random, fake_clock: FakeClock
+) -> None:
+    deep = tmp_path / ("d" * 70) / ("e" * 50)
+    cfg = config(tmp_path).with_overrides(data_dir=deep, api_socket=None)
+    assert len(str(cfg.socket_path)) > MAX_SOCKET_PATH
+    rt = Runtime(
+        cfg,
+        clock=fake_clock,
+        keystore=FileKeystore(deep / "keys"),
+        options=Options(testing=Seeded(rng.getrandbits(63))),
+    )
+    async with rt:
+        bound = Path(str(rt.api_address))
+        assert bound == bind_path(cfg.socket_path)
+        assert len(str(bound)) <= MAX_SOCKET_PATH
+        info = await asyncio.to_thread(ApiClient(cfg).request, "GET", "/v0/status")
+        assert info["identity"] == rt.status()["identity"]
+    assert not await asyncio.to_thread(bound.exists)

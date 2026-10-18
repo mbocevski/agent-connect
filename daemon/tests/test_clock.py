@@ -98,3 +98,15 @@ def test_fake_clock_is_thread_safe() -> None:
     for t in threads:
         t.join()
     assert clock.unix_millis() == 1_600
+
+
+async def test_a_deadline_sleep_is_not_counted_as_a_sleeper() -> None:
+    clock = FakeClock()
+    deadline = asyncio.ensure_future(clock.sleep(10, deadline=True))
+    pause = asyncio.ensure_future(clock.sleep(5))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert clock.sleepers == 1
+    clock.advance(10)
+    await asyncio.gather(deadline, pause)
+    assert clock.sleepers == 0

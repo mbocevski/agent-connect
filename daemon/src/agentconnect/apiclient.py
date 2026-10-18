@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from agentconnect.config import Config
+from agentconnect.sockets import bind_path
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 
 
@@ -30,7 +31,7 @@ class ApiClient:
             self._transport: httpx.BaseTransport = httpx.HTTPTransport()
             self._base = f"http://127.0.0.1:{config.api_tcp_port}"
         else:
-            self._transport = httpx.HTTPTransport(uds=str(config.socket_path))
+            self._transport = httpx.HTTPTransport(uds=str(bind_path(config.socket_path)))
             self._base = "http://agentconnectd"
 
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
