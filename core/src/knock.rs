@@ -1516,6 +1516,32 @@ pub(crate) mod tests {
         }
     }
 
+    /// SPEC 13.1.2: one presentation selector right after an Emoji is text
+    /// in a knock's display name and note, on both ends.
+    #[test]
+    fn knock_text_allows_an_emoji_presentation_selector() {
+        let s = setup("knock-emoji");
+        let key = s.door.public_key();
+        let (_, k) = knock(&s);
+        let heart = "bob \u{2764}\u{FE0F}";
+        s.knocker
+            .create_knock(s.door.id(), key, heart, Some(heart))
+            .unwrap();
+        let mut ok = k.clone();
+        ok.display_name = heart.into();
+        ok.note = Some(heart.into());
+        let parsed = Knock::from_json(&ok.to_json()).unwrap();
+        assert_eq!(parsed.display_name, heart);
+        for text in ["bob\u{FE0F}", "\u{2764}\u{FE0F}\u{FE0F}"] {
+            assert_eq!(
+                s.knocker
+                    .create_knock(s.door.id(), key, text, Some("hi"))
+                    .err(),
+                Some(bad("display_name"))
+            );
+        }
+    }
+
     #[test]
     fn knocks_need_a_well_formed_door_key_and_text() {
         let s = setup("knock-create");

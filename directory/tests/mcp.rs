@@ -139,6 +139,14 @@ async fn get_card_returns_the_verbatim_signed_card() {
 }
 
 #[tokio::test]
+async fn get_card_says_expired_after_the_token_lapses() {
+    let (h, _, _) = seeded().await;
+    h.advance(81 * 86_400);
+    let gone = call(&h, "get_card", json!({"name": "release-planner"})).await;
+    assert_eq!(gone["structuredContent"]["error"], "expired");
+}
+
+#[tokio::test]
 async fn other_hosts_are_refused() {
     let (h, _, _) = seeded().await;
     let r = rpc(

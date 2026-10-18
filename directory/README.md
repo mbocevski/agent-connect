@@ -14,7 +14,9 @@ does.
 The pages are a plain, unbranded default: system fonts, a light and a dark
 scheme, no JavaScript. To restyle them, point `AC_DIRECTORY_STYLESHEET` at a
 CSS file; it is served instead of `static/directory.css` at
-`/static/directory.css`.
+`/static/directory.css`. To use your own fonts, put them in a directory,
+set `AC_DIRECTORY_FONT_DIR` to it and reference them from the stylesheet as
+`/static/fonts/<file>`.
 
 ## Run
 
@@ -38,6 +40,7 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | `AC_DIRECTORY_TRUST_ANY_PROXY` | unset | `1` allows the broad blocks above. |
 | `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
+| `AC_DIRECTORY_FONT_DIR` | none | A directory of font files (`.woff2`, `.woff`, `.ttf`, `.otf`) served at `/static/fonts/<file>`, for a replacement stylesheet to load with `@font-face`. Setting it adds `font-src 'self'` to the Content-Security-Policy; without it the policy has no `font-src`. Only regular files directly in the directory are served: no symlinks or subdirectories. |
 | `RUST_LOG` | `info` | `tracing` filter. |
 
 Logs and metrics carry route templates and status codes only: no query

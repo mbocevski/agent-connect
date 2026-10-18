@@ -256,5 +256,18 @@ mod tests {
         }
         check_display_name("").unwrap();
         check_display_name("Zo\u{eb}'s agent \u{1D11E}").unwrap();
+        // SPEC 13.1.2: one presentation selector right after an Emoji.
+        check_display_name("bob \u{2764}\u{FE0F}").unwrap();
+        for bad in [
+            "bob\u{FE0F}",
+            "\u{2764}\u{FE0F}\u{FE0F}",
+            "\u{1F468}\u{200D}\u{1F469}",
+        ] {
+            assert_eq!(
+                check_display_name(bad),
+                Err(Error::Malformed("display_name")),
+                "{bad:?}"
+            );
+        }
     }
 }

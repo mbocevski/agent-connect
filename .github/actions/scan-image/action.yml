@@ -1,0 +1,72 @@
+name: scan-image
+description: >-
+  Scan a locally built container image with Trivy (OS packages and bundled
+  binaries). Uploads HIGH and CRITICAL findings (fixed or not) to code scanning
+  as SARIF, keeps the full all-severity report as a workflow artifact, then
+  fails on HIGH and CRITICAL vulnerabilities that have a fix. Unfixed findings
+  are never fatal. Accepted CVEs live in .trivyignore.yaml.
+inputs:
+  image:
+    description: Image reference in the local Docker daemon.
+    required: true
+  category:
+    description: Code scanning category for the SARIF upload (one per image).
+    required: true
+  upload:
+    description: Upload the SARIF file ("true" or "false"). Needs security-events write.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    # SARIF step: HIGH and CRITICAL, fixed or not, never fails the job.
+    # limit-severities-for-sarif is required, or the action drops the filter.
+    - name: Scan (SARIF)
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.76.0
+        image-ref: ${{ inputs.image }}
+        format: sarif
+        output: trivy-${{ inputs.category }}.sarif
+        severity: HIGH,CRITICAL
+        limit-severities-for-sarif: "true"
+        exit-code: "0"
+        trivyignores: .trivyignore.yaml
+        hide-progress: "true"
+    - name: Upload SARIF
+      if: ${{ inputs.upload == 'true' }}
+      uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+      with:
+        sarif_file: trivy-${{ inputs.category }}.sarif
+        category: ${{ inputs.category }}
+    # Full report, every severity, kept as an artifact.
+    - name: Scan (full report)
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.76.0
+        image-ref: ${{ inputs.image }}
+        format: table
+        output: trivy-${{ inputs.category }}-full.txt
+        exit-code: "0"
+        trivyignores: .trivyignore.yaml
+        hide-progress: "true"
+        skip-setup-trivy: "true"
+    - name: Upload full report
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: trivy-${{ inputs.category }}
+        path: trivy-${{ inputs.category }}-full.txt
+        retention-days: 30
+    # Gate step: only fixable HIGH and CRITICAL. The vulnerability DB is
+    # already in the cache directory from the step above.
+    - name: Scan (gate on fixable HIGH and CRITICAL)
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.76.0
+        image-ref: ${{ inputs.image }}
+        format: table
+        severity: HIGH,CRITICAL
+        ignore-unfixed: "true"
+        exit-code: "1"
+        trivyignores: .trivyignore.yaml
+        hide-progress: "true"
+        skip-setup-trivy: "true"

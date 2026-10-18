@@ -814,11 +814,75 @@ def test_the_byte_share_shrinks_with_more_senders(policy: SafetyPolicy, store: S
             "expires_at": 10**12,
         }
     )
-    # Two senders waiting: each may hold 1024 bytes.
+    # Two senders waiting: each may hold 1024 bytes. (A sender holding
+    # nothing is within its share, so MALLORY already holds a small message.)
+    sized_hold(store, "m0", MALLORY, "m/i1", 100)
     over = Inbound(G, MALLORY, "m/i1", big(1200), 1200, OWNER, 1, 20, True)
     assert policy.inbound(over) == drop("hold_overflow")
     fits = Inbound(G, MALLORY, "m/i1", big(900), 900, OWNER, 1, 20, True)
     assert policy.inbound(fits) == hold("require_approval")
+
+
+def sized_hold(store: Store, hold_id: str, sender: str, instance: str, size: int) -> None:
+    store.add_held(
+        {
+            "hold_id": hold_id,
+            "group_id": G,
+            "direction": "in",
+            "sender": sender,
+            "instance": instance,
+            "msg_id": hold_id,
+            "kind": "a2a.message",
+            "size": size,
+            "created_at": 0,
+            "expires_at": 10**12,
+        }
+    )
+
+
+def test_a_sender_holding_nothing_is_never_charged_for_its_first_message(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    # The caps at their minimum and 40 identities waiting: the byte share
+    # (1024 // 41) is far below one message, but a sender that holds nothing
+    # is within its share.
+    policy.update(
+        G,
+        {"require_approval": "inbound", "max_held_bytes": 1024, "max_held_bytes_per_sender": 1024},
+    )
+    for who in range(40):
+        sized_hold(store, f"w{who}", f"ac:v0:w{who}", f"w{who}/i1", 1)
+    first = Inbound(G, MALLORY, "m/i1", big(500), 500, OWNER, 1, 20, True)
+    assert policy.inbound(first) == hold("require_approval")
+    sized_hold(store, "m-first", MALLORY, "m/i1", 500)
+    second = Inbound(G, MALLORY, "m/i1", big(500), 500, OWNER, 1, 20, True)
+    assert policy.inbound(second) == drop("hold_overflow"), "a sender holding something is bound"
+
+
+def test_the_global_byte_cap_still_drops_a_first_message_without_a_violation(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    policy.update(
+        G,
+        {"require_approval": "inbound", "max_held_bytes": 1024, "max_held_bytes_per_sender": 1024},
+    )
+    sized_hold(store, "o1", "ac:v0:other", "o/i1", 900)
+    first = Inbound(G, MALLORY, "m/i1", big(500), 500, OWNER, 1, 20, True)
+    dropped = policy.inbound(first)
+    assert dropped == drop("hold_queue_full")
+    assert policy.violation(G, MALLORY, dropped.reason) is None
+
+
+def test_a_full_count_queue_never_charges_a_sender_holding_nothing(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    # Two identities fill a two-message queue; a third waiter's share of it
+    # (2 // 3) is zero, but it holds nothing, so it isn't charged.
+    policy.update(G, {"require_approval": "inbound", "max_held_per_group": 2})
+    for who in range(2):
+        hold_row(store, f"c{who}", f"ac:v0:c{who}", f"c{who}/i1")
+    dropped = policy.inbound(inb(msg(), sender="ac:v0:late", inst="l/i1"))
+    assert dropped == drop("hold_queue_full")
 
 
 # -- N2: the task cover has its own, short window -----------------------------------------
