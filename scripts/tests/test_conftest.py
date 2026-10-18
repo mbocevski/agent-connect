@@ -33,6 +33,30 @@ def test_random_seed_when_unset(project: pytest.Pytester, monkeypatch: pytest.Mo
     result.stdout.re_match_lines([r"AC_TEST_SEED=\d+"])
 
 
+def test_xdist_workers_share_the_run_seed(
+    project: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AC_TEST_SEED", raising=False)
+    out = project.path / "seeds"
+    out.mkdir()
+    project.makepyfile(
+        "import os\n"
+        "import pytest\n"
+        "@pytest.mark.parametrize('n', range(8))\n"
+        "def test_seed(n, test_seed):\n"
+        f"    path = {str(out)!r} + '/' + os.environ.get('PYTEST_XDIST_WORKER', 'main')\n"
+        "    with open(path, 'a') as f:\n"
+        "        f.write(f'{test_seed}\\n')\n"
+    )
+    result = project.runpytest_subprocess("-n", "2")
+    result.assert_outcomes(passed=8)
+    workers = list(out.iterdir())
+    seeds = {line for path in workers for line in path.read_text().split()}
+    assert len(workers) == 2
+    assert len(seeds) == 1
+    result.stdout.fnmatch_lines([f"AC_TEST_SEED={seeds.pop()}"])
+
+
 def test_invalid_seed_is_a_usage_error(
     project: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:

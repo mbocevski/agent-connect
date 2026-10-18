@@ -63,7 +63,7 @@ test-rust:
 
 # The harness (harness/) runs the real relay binary; build it first.
 test-py: build-relay-dev
-    uv run --all-packages --frozen pytest -q
+    uv run --all-packages --frozen pytest -q -n auto
 
 # Regenerate the core test vectors in testdata/ (review the diff before committing)
 vectors:
@@ -85,7 +85,7 @@ nightly-mutants:
     cargo mutants -p agentconnect-core --no-shuffle
 
 nightly-py: build-relay-dev
-    AC_RUN_QUARANTINE=1 HYPOTHESIS_PROFILE=nightly uv run --all-packages --frozen pytest -q
+    AC_RUN_QUARANTINE=1 HYPOTHESIS_PROFILE=nightly uv run --all-packages --frozen pytest -q -n auto
 
 # Rust branch coverage (non-gating, needs a nightly toolchain)
 cov-rust-branch:
@@ -116,7 +116,7 @@ build-relay-dev:
 
 _cov-py-run: build-relay-dev
     mkdir -p target/cov
-    uv run --all-packages --frozen pytest -q --cov --cov-report=term-missing --cov-report=json:target/cov/python.json --cov-fail-under={{ cov_python }}
+    uv run --all-packages --frozen pytest -q -n auto --cov --cov-report=term-missing --cov-report=json:target/cov/python.json --cov-fail-under={{ cov_python }}
 
 
 # CHANGELOG [Unreleased] must change for user-facing commits

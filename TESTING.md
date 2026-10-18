@@ -14,6 +14,8 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 
 `just test` must stay under 60 seconds on a laptop. If it gets slower, move
 the slow test to a higher tier or make it faster. Do not raise the budget.
+The Python suite runs on every core (`pytest -n auto`, pytest-xdist); each
+worker starts its own relay, and every worker uses the controller's seed.
 
 ## Where tests live
 
