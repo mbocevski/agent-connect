@@ -26,8 +26,9 @@ runs:
         args: --release --locked --out ../${{ inputs.out-dir }}
         # Vendored OpenSSL's Configure needs IPC::Cmd and Time::Piece, which
         # manylinux_2_28 does not ship. They only run the build; nothing of
-        # them is in the wheel.
-        before-script-linux: dnf install -y perl-IPC-Cmd perl-Time-Piece
+        # them is in the wheel. Both come from AppStream; EPEL is disabled so
+        # its mirrors can't fail the build.
+        before-script-linux: dnf install -y --disablerepo=epel perl-IPC-Cmd perl-Time-Piece
         docker-options: >-
           -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
           -e HOME=${{ github.workspace }}/.container-home
