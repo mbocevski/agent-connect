@@ -595,61 +595,6 @@ fn negative_result(name: &str) -> PyResult<Vouch> {
     }
 }
 
-/// The owner state (SPEC §13.2.4) from a summary of the fetch history:
-/// the latest fetch (`latest_result`: `"vouches"`, `"does_not_vouch"`,
-/// `"revoked"` or `"failed"`, at `latest_at`), the time a fetch last
-/// vouched, the last negative result (`"does_not_vouch"` or `"revoked"`,
-/// at `last_negative_at`), and whether the human skipped the fetch. A
-/// negative result is sticky until a later fetch vouches. `OwnerChecks`
-/// keeps this summary for you.
-#[pyfunction]
-#[pyo3(signature = (
-    owner_domain,
-    now,
-    latest_result=None,
-    latest_at=None,
-    last_vouched_at=None,
-    last_negative_result=None,
-    last_negative_at=None,
-    skipped=false,
-))]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn owner_state(
-    owner_domain: Option<&str>,
-    now: u64,
-    latest_result: Option<&str>,
-    latest_at: Option<u64>,
-    last_vouched_at: Option<u64>,
-    last_negative_result: Option<&str>,
-    last_negative_at: Option<u64>,
-    skipped: bool,
-) -> PyResult<&'static str> {
-    let latest = match (latest_result, latest_at) {
-        (Some(r), Some(at)) => Some(LatestFetch {
-            at,
-            result: fetch_result(r)?,
-        }),
-        (None, None) => None,
-        _ => return Err(bad_arg("latest_result and latest_at go together")),
-    };
-    let last_negative = match (last_negative_result, last_negative_at) {
-        (Some(r), Some(at)) => Some((at, negative_result(r)?)),
-        (None, None) => None,
-        _ => {
-            return Err(bad_arg(
-                "last_negative_result and last_negative_at go together",
-            ));
-        }
-    };
-    let checks = OwnerChecks {
-        last_vouched_at,
-        last_negative,
-        latest,
-        skipped,
-    };
-    Ok(listing::owner_state(owner_domain, &checks, now).as_str())
-}
-
 /// The fetch history of one listing's owner file. Record every fetch with
 /// `record(at, result)`, persist the summary properties, and ask `state`.
 #[pyclass(module = "agentconnect_core._native")]
@@ -666,8 +611,31 @@ impl OwnerHistory {
         })
     }
 
+    /// Rebuilds a persisted history. Every field is required, exactly as
+    /// the properties return them, so no part of the state can be left out
+    /// (SPEC §13.2.4).
+    #[staticmethod]
+    #[pyo3(signature = (*, last_vouched_at, last_negative, latest, skipped))]
+    fn from_state(
+        last_vouched_at: Option<u64>,
+        last_negative: Option<(u64, String)>,
+        latest: Option<(u64, String)>,
+        skipped: bool,
+    ) -> PyResult<Self> {
+        Ok(Self(OwnerChecks {
+            last_vouched_at,
+            last_negative: last_negative
+                .map(|(at, r)| negative_result(&r).map(|v| (at, v)))
+                .transpose()?,
+            latest: latest
+                .map(|(at, r)| fetch_result(&r).map(|result| LatestFetch { at, result }))
+                .transpose()?,
+            skipped,
+        }))
+    }
+
     /// Folds one fetch (`result` as from `owner_fetch_result`) into the
-    /// history.
+    /// history, in the order fetches complete, with `at` = now.
     fn record(&mut self, at: u64, result: &str) -> PyResult<()> {
         self.0.record(at, fetch_result(result)?);
         Ok(())
@@ -1073,7 +1041,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(parse_owner_file, m)?,
         wrap_pyfunction!(owner_vouch, m)?,
         wrap_pyfunction!(owner_fetch_result, m)?,
-        wrap_pyfunction!(owner_state, m)?,
         wrap_pyfunction!(owner_file_url, m)?,
         wrap_pyfunction!(unwrap_knock_welcome, m)?,
     ] {

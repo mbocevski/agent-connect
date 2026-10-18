@@ -1796,7 +1796,10 @@ name is registered with IANA before v0 is tagged):
   sticky**: failed fetches after it never bring back `verified` or
   `stale`, and only a later fetch that vouches clears it. In particular
   `revoked` lasts until a fetch finds the identity vouched for and no
-  longer revoked.
+  longer revoked. "Later" means later in the order fetches complete: a
+  checker MUST record results in that order and MUST NOT let the times it
+  stores reorder them (a clock that steps back or forward doesn't), and a
+  stored time after the current time counts as the current time.
 
   | State | Condition | Shown as |
   |---|---|---|

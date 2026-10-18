@@ -135,12 +135,64 @@ def test_owner_file_helpers(keys: tuple[ac.DirectoryKey, ac.Identity, bytes]) ->
     assert ac.parse_owner_file(data)["identities"][0]["identity"] == ik.id
     assert ac.owner_vouch(data, ik.id, DIRECTORY, "release-planner") == "vouches"
     assert ac.owner_file_url("example.com") == "https://example.com/.well-known/agentconnect.json"
-    assert ac.owner_state(None, T0) == "unclaimed"
-    assert ac.owner_state("example.com", T0) == "checking"
+    assert ac.OwnerHistory().state(None, T0) == "unclaimed"
+    assert ac.OwnerHistory().state("example.com", T0) == "checking"
+    assert ac.OwnerHistory(skipped=True).state("example.com", T0) == "unchecked"
     with pytest.raises(ac.AgentConnectError):
-        ac.owner_state("example.com", T0, "vouches")
+        ac.OwnerHistory().record(T0, "maybe")
+    # Review N3: there is no summary-argument form that could be fed a
+    # partial history.
+    assert not hasattr(ac, "owner_state")
+
+
+def test_a_negative_owner_result_is_sticky() -> None:
+    """Review M1: a failed fetch after "does not vouch" or "revoked" went
+    back to verified."""
+    t = T0
+    for negative, state in [("does_not_vouch", "failed"), ("revoked", "revoked")]:
+        h = ac.OwnerHistory()
+        h.record(t - 3600, "vouches")
+        h.record(t - 1800, negative)
+        h.record(t, "failed")
+        assert h.state("example.com", t) == state, negative
+        # Only a later vouching fetch clears it.
+        h.record(t + 60, "vouches")
+        assert h.state("example.com", t + 60) == "verified"
+
+
+def test_the_owner_history_follows_arrival_order() -> None:
+    """Review N3: a future-dated vouch outranked every later negative."""
+    t = T0
+    h = ac.OwnerHistory()
+    h.record(t - 3600, "revoked")
+    h.record(t + 10_000_000, "vouches")
+    h.record(t + 60, "revoked")
+    assert h.state("example.com", t + 60) == "revoked"
+    # Recorded times never go back.
+    assert h.latest == (t + 10_000_000, "revoked")
+
+
+def test_an_owner_history_persists_in_full() -> None:
+    """Review N3: the persisted form is the whole state, every field
+    required, so nothing can be left out."""
+    t = T0
+    h = ac.OwnerHistory()
+    h.record(t - 3600, "vouches")
+    h.record(t - 1800, "does_not_vouch")
+    h.record(t, "failed")
+    back = ac.OwnerHistory.from_state(
+        last_vouched_at=h.last_vouched_at,
+        last_negative=h.last_negative,
+        latest=h.latest,
+        skipped=h.skipped,
+    )
+    assert back.state("example.com", t) == h.state("example.com", t) == "failed"
+    with pytest.raises(TypeError):
+        ac.OwnerHistory.from_state(last_vouched_at=t, latest=(t, "failed"), skipped=False)  # ty: ignore[missing-argument]
     with pytest.raises(ac.AgentConnectError):
-        ac.owner_state("example.com", T0, "maybe", T0)
+        ac.OwnerHistory.from_state(
+            last_vouched_at=None, last_negative=(t, "vouches"), latest=None, skipped=False
+        )
 
 
 def test_knock_round_trip(rng: random.Random) -> None:
@@ -177,40 +229,6 @@ def test_knock_round_trip(rng: random.Random) -> None:
     # Debug output never carries the secret.
     assert "welcome_secret" not in repr(pending)
     assert "VerifiedKnock" in repr(verified)
-
-
-def test_a_negative_owner_result_is_sticky() -> None:
-    """Review M1: a failed fetch after "does not vouch" or "revoked" went
-    back to verified."""
-    t = T0
-    # vouched at t-3600, then the file stopped vouching at t-1800, then a
-    # fetch failed at t.
-    for negative, state in [("does_not_vouch", "failed"), ("revoked", "revoked")]:
-        got = ac.owner_state(
-            "example.com",
-            t,
-            "failed",
-            t,
-            last_vouched_at=t - 3600,
-            last_negative_result=negative,
-            last_negative_at=t - 1800,
-        )
-        assert got == state, negative
-        # Only a later vouching fetch clears it.
-        assert (
-            ac.owner_state(
-                "example.com",
-                t,
-                "vouches",
-                t,
-                last_vouched_at=t,
-                last_negative_result=negative,
-                last_negative_at=t - 1800,
-            )
-            == "verified"
-        )
-    assert ac.owner_state("example.com", t) == "checking"
-    assert ac.owner_state("example.com", t, skipped=True) == "unchecked"
 
 
 def test_a_replayed_knock_is_dropped(rng: random.Random) -> None:

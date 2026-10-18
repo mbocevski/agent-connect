@@ -247,20 +247,14 @@ def test_owner_files() -> None:
         for f in s["fetches"]:
             history.record(f["at"], f["result"])
         assert history.state(s["owner_domain"], s["now"]) == s["state"], s["name"]
-        # The summary properties reproduce the state through owner_state.
-        latest = history.latest
-        negative = history.last_negative
-        got = ac.owner_state(
-            s["owner_domain"],
-            s["now"],
-            latest[1] if latest else None,
-            latest[0] if latest else None,
-            history.last_vouched_at,
-            negative[1] if negative else None,
-            negative[0] if negative else None,
+        # The persisted state rebuilds the same history.
+        back = ac.OwnerHistory.from_state(
+            last_vouched_at=history.last_vouched_at,
+            last_negative=history.last_negative,
+            latest=history.latest,
             skipped=history.skipped,
         )
-        assert got == s["state"], s["name"]
+        assert back.state(s["owner_domain"], s["now"]) == s["state"], s["name"]
     # The identities' secrets sign as those identities.
     for entry in v["identities"]:
         ik = ac.Identity.from_secret_bytes(bytes.fromhex(entry["ik_secret"]))

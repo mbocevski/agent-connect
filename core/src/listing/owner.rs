@@ -284,22 +284,23 @@ pub struct OwnerChecks {
 }
 
 impl OwnerChecks {
-    /// Folds one fetch at `at` into the history.
+    /// Folds one fetch into the history, **in the order fetches complete**:
+    /// call it once per fetch, as it completes, with `at` = the current
+    /// time. The newest call wins whatever `at` says, and a time earlier
+    /// than the previous fetch's is raised to it, so a clock that steps
+    /// back can't reorder results. A vouching fetch clears an earlier
+    /// negative one; a negative fetch stays until a later vouching one.
     pub fn record(&mut self, at: u64, result: FetchResult) {
+        let at = self.latest.map_or(at, |l| at.max(l.at));
         match result {
             FetchResult::Fetched(Vouch::Vouches) => {
-                self.last_vouched_at = Some(self.last_vouched_at.map_or(at, |t| t.max(at)));
+                self.last_vouched_at = Some(at);
+                self.last_negative = None;
             }
-            FetchResult::Fetched(v) => {
-                if self.last_negative.is_none_or(|(t, _)| at >= t) {
-                    self.last_negative = Some((at, v));
-                }
-            }
+            FetchResult::Fetched(v) => self.last_negative = Some((at, v)),
             FetchResult::Failed => {}
         }
-        if self.latest.is_none_or(|l| at >= l.at) {
-            self.latest = Some(LatestFetch { at, result });
-        }
+        self.latest = Some(LatestFetch { at, result });
     }
 }
 
@@ -354,27 +355,33 @@ pub fn owner_state(owner_domain: Option<&str>, checks: &OwnerChecks, now: u64) -
     if checks.skipped {
         return OwnerState::Unchecked;
     }
-    // Fold `latest` in too, so a caller that only set `latest` is safe.
-    let mut h = OwnerChecks {
-        latest: None,
-        ..*checks
-    };
-    match checks.latest {
-        Some(l) => h.record(l.at, l.result),
-        None if h.last_vouched_at.is_none() && h.last_negative.is_none() => {
-            return OwnerState::Checking;
-        }
-        None => {}
-    }
-    if let Some((neg_at, neg)) = h.last_negative
-        && h.last_vouched_at.is_none_or(|v| v <= neg_at)
+    if checks.latest.is_none() && checks.last_vouched_at.is_none() && checks.last_negative.is_none()
     {
+        return OwnerState::Checking;
+    }
+    // `record` clears the negative on a later vouch, so a negative that is
+    // present is the newest result whatever its time says. A latest fetch
+    // that the summary fields don't reflect yet counts too.
+    let negative = match checks.latest.map(|l| l.result) {
+        Some(FetchResult::Fetched(Vouch::Vouches)) => None,
+        Some(FetchResult::Fetched(v)) => Some(v),
+        _ => checks.last_negative.map(|(_, v)| v),
+    };
+    if let Some(neg) = negative {
         return match neg {
             Vouch::Revoked { .. } => OwnerState::Revoked,
             _ => OwnerState::Failed,
         };
     }
-    match h.last_vouched_at.map(|t| now.saturating_sub(t)) {
+    let vouched = match checks.latest {
+        Some(LatestFetch {
+            at,
+            result: FetchResult::Fetched(Vouch::Vouches),
+        }) => Some(checks.last_vouched_at.map_or(at, |t| t.max(at))),
+        _ => checks.last_vouched_at,
+    };
+    // No time beyond `now` counts: a vouch dated in the future is "now".
+    match vouched.map(|t| now.saturating_sub(t.min(now))) {
         Some(age) if age <= VERIFIED_FOR_SECS => OwnerState::Verified,
         Some(age) if age <= STALE_AFTER_SECS => OwnerState::Stale,
         _ => OwnerState::Failed,
@@ -582,7 +589,8 @@ mod tests {
                 t + H,
                 OwnerState::Verified,
             ),
-            (vec![(t - H, rev), (t - H, ok)], t, OwnerState::Revoked),
+            // Arrival order: a vouch recorded after a revocation clears it.
+            (vec![(t - H, rev), (t - H, ok)], t, OwnerState::Verified),
             (vec![(t - 2 * H, ok), (t, fail)], t, OwnerState::Verified),
             (vec![(t - 2 * 24 * H, ok), (t, fail)], t, OwnerState::Stale),
             (vec![(t, fail)], t, OwnerState::Failed),
@@ -591,11 +599,12 @@ mod tests {
             let c = history(&steps);
             assert_eq!(owner_state(d, &c, now), expected, "{steps:?}");
         }
-        // Out-of-order records keep the newest of each.
+        // Times that go back are raised to the previous one; the last
+        // recorded result wins.
         let c = history(&[(t, no), (t - H, ok), (t - 2 * H, rev)]);
-        assert_eq!(c.last_negative, Some((t, Vouch::DoesNotVouch)));
+        assert_eq!(c.last_negative, Some((t, REV)));
         assert_eq!(c.latest.map(|l| l.at), Some(t));
-        assert_eq!(owner_state(d, &c, t), OwnerState::Failed);
+        assert_eq!(owner_state(d, &c, t), OwnerState::Revoked);
         // A human who skipped the fetch.
         let skipped = OwnerChecks {
             skipped: true,
@@ -603,6 +612,53 @@ mod tests {
         };
         assert_eq!(owner_state(d, &skipped, t), OwnerState::Unchecked);
         assert_eq!(owner_state(None, &skipped, t), OwnerState::Unclaimed);
+    }
+
+    /// Review N3: the history follows the order fetches are recorded in,
+    /// not the times a caller passes, and no time beyond `now` counts.
+    #[test]
+    fn the_history_trusts_arrival_order_not_timestamps() {
+        const H: u64 = 3600;
+        let d = Some("example.com");
+        let t = 100 * 24 * H;
+        let ok = FetchResult::Fetched(Vouch::Vouches);
+        let rev = FetchResult::Fetched(REV);
+        // Revoked, then a vouch dated far in the future (a clock jump or a
+        // bug), then a real revocation: revoked.
+        let mut c = OwnerChecks::default();
+        c.record(t - H, rev);
+        c.record(t + 10_000_000, ok);
+        c.record(t + 60, rev);
+        assert_eq!(owner_state(d, &c, t + 60), OwnerState::Revoked);
+        // A clock that steps back: the negative recorded after the vouch
+        // wins although its time is earlier.
+        let mut c = OwnerChecks::default();
+        c.record(t, ok);
+        c.record(t - 2 * H, FetchResult::Fetched(Vouch::DoesNotVouch));
+        assert_eq!(owner_state(d, &c, t), OwnerState::Failed);
+        assert_eq!(
+            c.latest.map(|l| l.at),
+            Some(t),
+            "recorded times never go back"
+        );
+        // A vouch recorded in the future counts as now, never later: once
+        // real time is 24 h past `now`, it is stale like any other.
+        let mut c = OwnerChecks::default();
+        c.record(t + 10_000_000, ok);
+        assert_eq!(owner_state(d, &c, t), OwnerState::Verified);
+        let summary = OwnerChecks {
+            last_vouched_at: Some(t + 10_000_000),
+            ..OwnerChecks::default()
+        };
+        assert_eq!(owner_state(d, &summary, t), OwnerState::Verified);
+        // A summary that claims a vouch later than a negative but was
+        // recorded before it isn't trusted: the negative is present.
+        let summary = OwnerChecks {
+            last_vouched_at: Some(t),
+            last_negative: Some((t - H, Vouch::DoesNotVouch)),
+            ..OwnerChecks::default()
+        };
+        assert_eq!(owner_state(d, &summary, t), OwnerState::Failed);
     }
 
     /// Review L2: a file broken as a whole is a failed fetch, so it can't
