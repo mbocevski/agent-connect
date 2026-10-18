@@ -457,6 +457,29 @@ async fn font_requests_that_are_not_plain_font_files_are_404() {
 }
 
 #[tokio::test]
+async fn an_oversized_or_unreadable_font_is_404() {
+    use std::os::unix::fs::PermissionsExt;
+    let (h, dir) = font_harness();
+    let big = std::fs::File::create(dir.path().join("big.woff2")).unwrap();
+    big.set_len(4 * 1024 * 1024 + 1).unwrap();
+    assert_eq!(h.get("/static/fonts/big.woff2").await.status, 404);
+    let max = std::fs::File::create(dir.path().join("max.woff2")).unwrap();
+    max.set_len(4 * 1024 * 1024).unwrap();
+    assert_eq!(h.get("/static/fonts/max.woff2").await.status, 200);
+
+    let locked = dir.path().join("locked.woff2");
+    std::fs::write(&locked, b"font").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads it anyway; everyone else gets the read error branch.
+    let expect = if std::fs::read(&locked).is_ok() {
+        200
+    } else {
+        404
+    };
+    assert_eq!(h.get("/static/fonts/locked.woff2").await.status, expect);
+}
+
+#[tokio::test]
 async fn owner_states_and_the_key_changed_banner_show() {
     let h = Harness::new();
     let (old, new) = (identity(), identity());
