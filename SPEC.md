@@ -184,6 +184,8 @@ GroupMeta = {
 }
 ```
 
+`name` and `purpose` MUST be one-line text (§13.1.2; `purpose` may be
+empty), and receivers MUST reject a `GroupMeta` whose text isn't.
 `purpose` is the **scope** of the conversation. Daemons MUST pass it to their
 adapters with every delivery (§10).
 
@@ -344,8 +346,9 @@ mac_input = "agentconnect/v0/join-request"
 The label is not length-prefixed. `testdata/invite-kdf.json` gives
 `mac_input` and `mac` for sample inputs.
 
-`display_name` is at most 80 characters and MUST NOT contain control
-characters (Unicode category Cc); the inviter MUST reject a request that
+`display_name` is at most 80 characters of one-line text (§13.1.2: no
+control, format, separator, private-use, unassigned or ignorable character,
+no space but U+0020, NFC); the inviter MUST reject a request that
 breaks either rule. The MAC stops the relay from renaming the joiner, but
 the name is still chosen by the joiner, so the inviter's UI MUST present
 it as unverified text.
@@ -1488,10 +1491,15 @@ wrapped for reading (the published form is one canonical line):
   included), Cf (format: bidi controls, zero-width characters, the BOM,
   tags), Zl, Zp, Co (private use), Cs or Cn (unassigned, noncharacters
   included), and the only space separator (Zs) it may contain is U+0020.
-  Receivers MUST reject a listing that breaks this rule. The categories
-  are those of Unicode 17.0.0 for every implementation, so that verifiers
-  agree on which listings exist; a new protocol version may move to a
-  later Unicode version. The same rule applies to the knock's text
+  It also MUST NOT contain a `Default_Ignorable_Code_Point` (blank fillers
+  such as U+3164 and U+115F, U+034F, variation selectors) or U+2800
+  BRAILLE PATTERN BLANK; it MUST NOT start with a combining mark (category
+  M) or have more than 4 combining marks in a row; and it MUST already be
+  in NFC (Unicode Normalization Form C), so one text has one spelling.
+  Receivers MUST reject a listing that breaks this rule. The categories,
+  properties and normalization data are those of Unicode 17.0.0 for every
+  implementation, so that verifiers agree on which listings exist; a new
+  protocol version may move to a later Unicode version. The same rule applies to the knock's text
   (§6.6.2) and a `TokenRevocation.reason` (§13.2.1). Lengths are counted
   in Unicode scalar values:
 

@@ -9,7 +9,7 @@
 use agentconnect_core::encoding::{MAX_SAFE_INTEGER, from_jcs, jcs};
 use agentconnect_core::listing::{
     DirectoryKey, E2eParams, ListingCard, ListingProvider, ListingSkill, SignedListing, TokenGrant,
-    is_text_char,
+    is_text, is_text_char,
 };
 use agentconnect_core::{Identity, Rng};
 use proptest::prelude::*;
@@ -57,10 +57,13 @@ fn json_value() -> impl Strategy<Value = Value> {
 /// (SPEC 13.1.2).
 fn text(max: usize) -> impl Strategy<Value = String> {
     prop::collection::vec(
-        any::<char>().prop_filter("one-line text", |c| is_text_char(*c)),
+        any::<char>().prop_filter("one-line text", |c| {
+            is_text_char(*c) && is_text(&c.to_string())
+        }),
         1..=max,
     )
-    .prop_map(|cs| cs.into_iter().collect())
+    .prop_map(|cs: Vec<char>| cs.into_iter().collect::<String>())
+    .prop_filter("NFC", |s| is_text(s))
 }
 
 fn media_type() -> impl Strategy<Value = String> {

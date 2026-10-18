@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::group::Client;
 use crate::identity::{fingerprint, parse_identity};
 use crate::invite::{NONCE_LEN, hkdf32, open_wrapped_welcome, seal_wrapped_welcome};
-use crate::listing::{is_one_line_text, is_text_char};
+use crate::listing::{is_one_line_text, is_text};
 use crate::mls::{CS, HPKE_PUBLIC_KEY_LEN, KEM_CIPHERTEXT_LEN, LeafInfo};
 use crate::provider::Store;
 use crate::rng::Rng;
@@ -350,7 +350,7 @@ pub const MAX_DISPLAY_NAME_CHARS: usize = 80;
 /// At most 80 characters of single-line text (SPEC §6.6.2, §13.1.2); may
 /// be empty.
 fn check_display_name(name: &str) -> Result<()> {
-    if name.chars().count() <= MAX_DISPLAY_NAME_CHARS && name.chars().all(is_text_char) {
+    if name.chars().count() <= MAX_DISPLAY_NAME_CHARS && is_text(name) {
         Ok(())
     } else {
         Err(bad("display_name"))

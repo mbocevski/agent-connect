@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::token::{ListingToken, TokenJson, TrustedDirectory};
 use super::{
     E2E_EXTENSION_URI, MAX_DOOR_LIFETIME_SECS, PROTOCOL_BINDING, PUBLISH_SKEW_SECS,
-    is_canonical_host, is_listing_name, is_owner_domain, is_text_char, text_ok, verify_ed25519,
+    is_canonical_host, is_listing_name, is_owner_domain, is_text, text_ok, verify_ed25519,
 };
 use crate::encoding::parse_json_unique_keys;
 use crate::encoding::{MAX_SAFE_INTEGER, b64, b64_decode, b64_decode_array, jcs};
@@ -248,7 +248,7 @@ fn check_profile(v: &Value, in_params: bool) -> Result<()> {
         Value::Bool(false) if !in_params => Err(bad("default value (false)")),
         Value::Number(n) if !in_params && n.as_u64() == Some(0) => Err(bad("default value (0)")),
         Value::String(s) if s.is_empty() => Err(bad("empty string")),
-        Value::String(s) if !s.chars().all(is_text_char) => Err(bad("text character")),
+        Value::String(s) if !is_text(s) => Err(bad("text character")),
         Value::Bool(_) | Value::Number(_) | Value::String(_) => Ok(()),
         Value::Array(items) if items.is_empty() => Err(bad("empty array")),
         Value::Array(items) => items.iter().try_for_each(|i| check_profile(i, in_params)),

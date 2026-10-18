@@ -52,10 +52,10 @@ fn mac(join_key: &[u8; 32], input: &MacInput<'_>) -> Hmac<Sha256> {
     m
 }
 
-/// SPEC §6.1: at most 80 characters and no control characters, since the
+/// SPEC §6.1: at most 80 characters of one-line text (§13.1.2), since the
 /// inviter's human approves the join by this name.
 pub(crate) fn check_display_name(name: &str) -> Result<()> {
-    if name.chars().count() > MAX_DISPLAY_NAME_CHARS || name.chars().any(char::is_control) {
+    if name.chars().count() > MAX_DISPLAY_NAME_CHARS || !crate::listing::is_text(name) {
         return Err(Error::Malformed("display_name"));
     }
     Ok(())
@@ -235,5 +235,26 @@ mod tests {
         for (bad, err) in cases {
             assert_eq!(JoinRequest::from_json(bad.as_bytes()), Err(err));
         }
+    }
+
+    /// Review N5: the name the inviter's human approves follows the
+    /// one-line text rule (SPEC §6.1), not only "no Cc".
+    #[test]
+    fn display_names_are_one_line_text() {
+        for bad in [
+            "bo\u{2028}b",
+            "\u{202E}bob",
+            "b\u{200B}ob",
+            "\u{3164}",
+            "bo\u{0301}b\u{0301}",
+        ] {
+            assert_eq!(
+                check_display_name(bad),
+                Err(Error::Malformed("display_name")),
+                "{bad:?}"
+            );
+        }
+        check_display_name("").unwrap();
+        check_display_name("Zo\u{eb}'s agent \u{1D11E}").unwrap();
     }
 }

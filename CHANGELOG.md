@@ -38,8 +38,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   bindings), the one implementation the directory and the daemon verify
   through. Signed listings: the closed AgentCard schema and text limits,
   one-line text everywhere (no control, format, separator, private-use or
-  unassigned characters of Unicode 17.0.0, and no space but U+0020; the
-  same for knock display names and notes),
+  unassigned characters of Unicode 17.0.0, no default-ignorable or blank
+  characters, no space but U+0020, at most 4 combining marks in a row, and
+  NFC; the same for knock display names and notes, JoinRequest display
+  names and group names and purposes),
   the canonical JCS profile (non-canonical bytes are rejected), and the
   single `EdDSA` JWS by the identity key, which a2a-sdk's own verifier
   accepts; the token's binding to the listing is checked as part of
