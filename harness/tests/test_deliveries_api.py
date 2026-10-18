@@ -115,14 +115,19 @@ async def test_a_caller_that_leaves_leases_nothing(cluster: Cluster) -> None:
 
 async def test_a_stopping_server_ends_waiting_polls(cluster: Cluster) -> None:
     """A long poll doesn't hold up the runtime's stop: the poll ends at
-    once (the connection closes), and the caller attaches again."""
+    once, with nothing (or, where the server closes its clients, Python
+    3.13 and later, with the connection), and the caller attaches again."""
     owner, _peer, _gid, queue = await owner_and_peer(cluster)
     async with client(owner) as api:
         polling = asyncio.ensure_future(api.get("/v0/deliveries", params={"timeout": 60}))
         await until(lambda: queue.waiting == 1)
         await asyncio.wait_for(owner.runtime.stop(flush=0), WAIT)
-        with pytest.raises(httpx.TransportError):
-            await asyncio.wait_for(polling, WAIT)
+        try:
+            resp = await asyncio.wait_for(polling, WAIT)
+        except httpx.TransportError:
+            pass
+        else:
+            assert resp.json()["deliveries"] == []
         assert queue.waiting == 0
 
 
