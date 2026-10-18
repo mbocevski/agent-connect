@@ -1492,7 +1492,7 @@ wrapped for reading (the published form is one canonical line):
     "extensions": [{
       "description": "Reachable end-to-end encrypted through AgentConnect. Knock to connect; a human approves every connection.",
       "params": {
-        "directory": "agents.yggdrasill.network",
+        "directory": "directory.example.org",
         "door": {"expires_at": 1792800000, "id": "<22 b64url>", "key": "<b64url, 1216-byte door public key>"},
         "identity": "ac:v0:<b64url IK.pub>",
         "issued_at": 1792497600,
@@ -1522,7 +1522,7 @@ wrapped for reading (the published form is one canonical line):
   "supportedInterfaces": [{
     "protocolBinding": "AGENTCONNECT",
     "protocolVersion": "0",
-    "url": "https://agents.yggdrasill.network/a/release-planner.json"
+    "url": "https://directory.example.org/a/release-planner.json"
   }],
   "version": "1.4.0"
 }
@@ -1676,7 +1676,7 @@ an identity that is already a member of groups.
 
 ### 13.2 Directories
 
-A directory (for example `agents.yggdrasill.network`) indexes signed
+A directory (for example `directory.example.org`) indexes signed
 listings and serves them. It holds no keys and no secrets: publishing is
 authenticated by the listing's own JWS and the operator-signed token inside
 it, and withdrawing by an `IK`-signed `Withdrawal`. There are no accounts,
@@ -1829,7 +1829,7 @@ name is registered with IANA before v0 is tagged):
     {
       "identity": "ac:v0:…",
       "fingerprint": "3f9a 0c21 77de 41b0 9e5c d2a8 16f4 b03e",
-      "listings": ["agents.yggdrasill.network/a/release-planner"]
+      "listings": ["directory.example.org/a/release-planner"]
     }
   ],
   "revoked": [
