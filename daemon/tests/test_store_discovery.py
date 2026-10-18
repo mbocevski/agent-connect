@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import agentconnect_core as ac
@@ -73,6 +73,31 @@ def test_the_tables_appear_in_an_existing_database_and_survive_reopening(
 def _store(tmp_path: Path, rng: random.Random) -> tuple[Path, bytes, Store]:
     path, key = tmp_path / "d.sqlite3", rng.randbytes(32)
     return path, key, Store(path, key)
+
+
+def test_the_agents_events_get_a_sequence_of_their_own(tmp_path: Path, rng: random.Random) -> None:
+    path, key, s = _store(tmp_path, rng)
+    for i, (kind, agent) in enumerate(
+        [("a", True), ("held", False), ("b", True), ("held", False), ("c", True)]
+    ):
+        s.add_event(None, kind, {}, i, f"e{i}", agent=agent)
+    assert [e["seq"] for e in s.events()] == [1, 2, 3, 4, 5]
+    assert [(e["seq"], e["type"]) for e in s.agent_events()] == [(1, "a"), (2, "b"), (3, "c")]
+    assert [e["type"] for e in s.agent_events(after=2)] == ["c"]
+    assert not s.add_event(None, "a", {}, 9, "e0")  # the same event again: nothing new
+    assert s.agent_visible("e0")
+    assert not s.agent_visible("e1")
+    assert not s.agent_visible("missing")
+    # A database from before the agent's sequence is numbered once, in order.
+    s._db.execute("UPDATE events SET agent_seq = NULL")
+    s.kv_set("schema/agent_seq", "0")
+    s.close()
+    s = Store(path, key)
+    s.number_agent_events(frozenset({"held"}))
+    assert [(e["seq"], e["type"]) for e in s.agent_events()] == [(1, "a"), (2, "b"), (3, "c")]
+    s.number_agent_events(frozenset())  # done already: nothing changes
+    assert len(s.agent_events()) == 3
+    s.close()
 
 
 def _request(rid: str, **kw: Any) -> dict[str, Any]:
@@ -203,6 +228,8 @@ def test_listings_seen_keep_the_newest_1024_of_90_days(tmp_path: Path, rng: rand
 
 
 @settings(max_examples=40, deadline=None)
+# A knock id remembered again after the ledger forgot it, before the table was purged.
+@example(steps=[("remember", 0, 0, 0), ("restart", 1), ("remember", 0, 1, 0)])
 @given(
     steps=st.lists(
         st.one_of(

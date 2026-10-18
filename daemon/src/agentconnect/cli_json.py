@@ -118,6 +118,8 @@ KNOCKS: dict[str, Any] = {
     "name": "str",
     "fingerprint": "str",
     "owner_state": "str",
+    "display_name": "str",
+    "description": "str",
     "status": "str",
     "created_at": "int",
     "gives_up_at": "int",
@@ -305,7 +307,7 @@ SCHEMAS: dict[str, Any] = {
         "owner": KNOCK_OWNER,
         "group_id": "null",
     },
-    "knocks": {"knocks": [KNOCKS]},
+    "knocks": {"knocks": [KNOCKS], "untrusted": "bool"},
     "events (one object per line)": {
         "seq": "int",
         "group_id": Opt("str"),
@@ -382,6 +384,7 @@ NOTES: dict[str, str] = {
     ),
     "knocks": (
         "`status` is `queued`, `sent`, `joined` (with `group_id`), `lapsed` (no answer) "
-        "or `failed`."
+        "or `failed`. `display_name` and `description` are the listing's card text, "
+        "written by its owner: `untrusted`."
     ),
 }

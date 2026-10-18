@@ -422,6 +422,7 @@ class Engine:
         )
         # Encrypted under a key the core derives from db_key (ADR-003).
         self.store = Store(daemon_db, db_key)
+        self.store.number_agent_events(HUMAN_EVENTS)
         self.link = RelayLink(
             config.relay_ws,
             config.relay_host,
@@ -716,7 +717,8 @@ class Engine:
         """Record an event (in the current transaction, if any); the event to
         notify, or None if the adapter already has it."""
         event_id = self._event_id(group_id, kind, cause, data)
-        new = self.store.add_event(group_id, kind, data, self.now(), event_id)
+        agent = kind not in HUMAN_EVENTS and not self.hidden_from_agent(group_id)
+        new = self.store.add_event(group_id, kind, data, self.now(), event_id, agent=agent)
         LOG.info("event", type=kind, group=log.hid(group_id), event_id=log.hid(event_id))
         if not new and self.store.event_notified(event_id):
             return None  # regenerated after a crash, and the adapter already has it
@@ -806,8 +808,13 @@ class Engine:
         try:
             self.failpoints.hit("event.after_record")
             # The policy's own events are for the human only: an agent that
-            # heard of a hold could tell the sender (SPEC 10.2).
-            if adapter is not None and event.type not in HUMAN_EVENTS:
+            # heard of a hold could tell the sender (SPEC 10.2). So are the
+            # knocks and an approved knock's group until the knocker is in.
+            if (
+                adapter is not None
+                and event.type not in HUMAN_EVENTS
+                and self.store.agent_visible(event.event_id)
+            ):
                 view = None if event.group_id is None else self._view(event.group_id)
                 await adapter.on_event(view, event)
             self.failpoints.hit("event.after_notify")
@@ -1058,6 +1065,14 @@ class Engine:
             self.client.journal_purge(now - HOP_MEMORY_SECS)
         await self.expire_held()
         self.safety.purge()
+
+    def hidden_from_agent(self, group_id: str | None) -> bool:
+        """Whether the agent can't see this group: an approved knock's group
+        until its Add and Welcome went out (or for good, if they never did)."""
+        if group_id is None:
+            return False
+        request = self.store.knock_request_for_group(group_id)
+        return request is not None and str(request["status"]) != "approved"
 
     def _may_join(self) -> bool:
         """Whether a Welcome may still come: a join or a knock is pending."""
@@ -2302,8 +2317,13 @@ class Engine:
             return await self._run_proposal(row, group)
         return "failed"
 
-    async def _request(self, frame: dict[str, Any], msg_id: str) -> dict[str, Any]:
-        return await self.link.request(frame, msg_id)
+    async def _request(
+        self,
+        frame: dict[str, Any],
+        msg_id: str,
+        on_sent: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        return await self.link.request(frame, msg_id, on_sent=on_sent)
 
     async def _run_frame(self, row: OutboxRow) -> str:
         frame, msg_id = row.payload["frame"], row.payload["msg_id"]
@@ -3066,10 +3086,13 @@ class Engine:
         addressee: list[str] | None = None,
     ) -> SendReceipt:
         """What adapters get through ``on_outbound``: agent-originated only.
+        A group the agent can't see yet (``hidden_from_agent``) is not found.
         ``reply_to`` names the ``msg_id``s of the deliveries this answers;
         ``addressee`` names who is triggered (SPEC 9.3). The answer is the
         ``msg_id``, a :class:`SendReceipt` whose ``held`` says the group's
         ``require_approval`` holds the message for the human."""
+        if self.hidden_from_agent(group_id):
+            raise DaemonError("not_found", "no such active group")
         msg_id, status = self.queue_message(
             group_id,
             body,

@@ -549,7 +549,11 @@ class Store:
         self._depth = 0
         # Columns added after the first schema (development files).
         columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('events')")}
-        for column, decl in (("event_id", "TEXT"), ("notified", "INTEGER NOT NULL DEFAULT 0")):
+        for column, decl in (
+            ("event_id", "TEXT"),
+            ("notified", "INTEGER NOT NULL DEFAULT 0"),
+            ("agent_seq", "INTEGER"),
+        ):
             if column not in columns:
                 self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {decl}")
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
@@ -576,6 +580,7 @@ class Store:
             )
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
+            "CREATE UNIQUE INDEX IF NOT EXISTS events_agent_seq ON events (agent_seq);"
             "CREATE INDEX IF NOT EXISTS inbox_pending ON inbox (state, group_id, seq);"
             "CREATE INDEX IF NOT EXISTS adapter_events_group "
             "ON adapter_events (adapter, group_id, seq);"
@@ -1215,11 +1220,13 @@ class Store:
 
     def ledger_add(self, knock_id: str, kp_ref: str, forget_after: int) -> None:
         """Remember a knock that passed the owner's checks 1-5 (SPEC 6.6.3
-        step 6), in the transaction that records what happened to it."""
+        step 6), in the transaction that records what happened to it. A row
+        for the same ``knock_id`` can only be one the ledger already forgot
+        (a live one makes the knock a replay), so it is replaced whole."""
         self._db.execute(
             "INSERT INTO knock_ledger (knock_id, kp_ref, forget_after) VALUES (?, ?, ?) "
             "ON CONFLICT(knock_id) DO UPDATE SET "
-            "forget_after = MAX(forget_after, excluded.forget_after)",
+            "kp_ref = excluded.kp_ref, forget_after = excluded.forget_after",
             (knock_id, kp_ref, forget_after),
         )
 
@@ -1447,17 +1454,29 @@ class Store:
         return None if row is None else dict(zip(SEEN_COLUMNS, row, strict=True))
 
     def put_listing_seen(self, row: dict[str, Any], *, keep_since: int) -> None:
-        """Record a listing this runtime saw, and keep only the
-        :data:`MAX_LISTINGS_SEEN` most recent, none seen before ``keep_since``."""
+        """Record a listing this runtime saw. The listings it knocked on (a
+        knock row is kept a week after it ends) or is in a group with are
+        kept; of the others (inspected only) the :data:`MAX_LISTINGS_SEEN`
+        most recent, none seen before ``keep_since``. So inspecting many
+        listings can't push out the rollback mark of one that matters."""
+        unpinned = (
+            "NOT EXISTS (SELECT 1 FROM knocks k WHERE k.directory = listings_seen.directory "
+            "AND k.name = listings_seen.name) AND NOT EXISTS (SELECT 1 FROM listed_peers p "
+            "WHERE p.directory = listings_seen.directory AND p.name = listings_seen.name)"
+        )
         with self.tx() as db:
             db.execute(
                 f"INSERT OR REPLACE INTO listings_seen ({', '.join(SEEN_COLUMNS)}) "  # noqa: S608
                 f"VALUES ({', '.join('?' for _ in SEEN_COLUMNS)})",
                 [row.get(c) for c in SEEN_COLUMNS],
             )
-            db.execute("DELETE FROM listings_seen WHERE seen_at < ?", (keep_since,))
             db.execute(
-                "DELETE FROM listings_seen WHERE rowid NOT IN (SELECT rowid FROM listings_seen "
+                f"DELETE FROM listings_seen WHERE seen_at < ? AND {unpinned}",  # noqa: S608
+                (keep_since,),
+            )
+            db.execute(
+                f"DELETE FROM listings_seen WHERE {unpinned} AND rowid NOT IN "  # noqa: S608
+                f"(SELECT rowid FROM listings_seen WHERE {unpinned} "
                 "ORDER BY seen_at DESC, rowid DESC LIMIT ?)",
                 (MAX_LISTINGS_SEEN,),
             )
@@ -1752,22 +1771,51 @@ class Store:
 
     # -- events -------------------------------------------------------------
 
-    def add_event(
+    def add_event(  # noqa: PLR0913
         self,
         group_id: str | None,
         kind: str,
         data: dict[str, Any],
         now: int,
         event_id: str,
+        *,
+        agent: bool = True,
     ) -> bool:
         """Record an event, not yet notified. ``False`` if an event with this
-        id is already recorded (the same cause, regenerated after a crash)."""
+        id is already recorded (the same cause, regenerated after a crash).
+        An event the agent may see (``agent``) also gets the next number of
+        the agent's own sequence, so the events it may not see leave no gap
+        in what it reads."""
         cur = self._db.execute(
-            "INSERT OR IGNORE INTO events (group_id, type, data, at, event_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (group_id, kind, json.dumps(data), now, event_id),
+            "INSERT OR IGNORE INTO events (group_id, type, data, at, event_id, agent_seq) "
+            "VALUES (?, ?, ?, ?, ?, CASE WHEN ? THEN "
+            "(SELECT COALESCE(MAX(agent_seq), 0) + 1 FROM events) END)",
+            (group_id, kind, json.dumps(data), now, event_id, int(agent)),
         )
         return cur.rowcount == 1
+
+    def number_agent_events(self, hidden: frozenset[str]) -> None:
+        """Once, for a database from before the agent's own sequence: number
+        the events the agent may see (every type but ``hidden``) in order."""
+        if self.kv_get("schema/agent_seq") == "1":
+            return
+        with self.tx():
+            rows = self._all(
+                "SELECT seq FROM events WHERE agent_seq IS NULL "
+                "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq",
+                json.dumps(sorted(hidden)),
+            )
+            start = self._one("SELECT COALESCE(MAX(agent_seq), 0) FROM events")
+            n = int(start[0]) if start is not None else 0
+            for (seq,) in rows:
+                n += 1
+                self._db.execute("UPDATE events SET agent_seq = ? WHERE seq = ?", (n, seq))
+            self.kv_set("schema/agent_seq", "1")
+
+    def agent_visible(self, event_id: str) -> bool:
+        """Whether the agent may see this event (it has an agent sequence number)."""
+        row = self._one("SELECT agent_seq FROM events WHERE event_id = ?", event_id)
+        return row is not None and row[0] is not None
 
     # -- SSE feed -----------------------------------------------------------
 
@@ -1919,21 +1967,31 @@ class Store:
         }
 
     def events(
-        self,
-        after: int = 0,
-        limit: int = 200,
-        group_id: str | None = None,
-        exclude: Sequence[str] = (),
+        self, after: int = 0, limit: int = 200, group_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Events after ``after``, oldest first; ``exclude`` leaves out types."""
+        """Every event after ``after`` (the human's view), oldest first."""
         rows = self._all(
             "SELECT seq, group_id, type, data, at, event_id FROM events WHERE seq > ? "
-            "AND (? IS NULL OR group_id = ?) "
-            "AND type NOT IN (SELECT value FROM json_each(?)) ORDER BY seq LIMIT ?",
+            "AND (? IS NULL OR group_id = ?) ORDER BY seq LIMIT ?",
             after,
             group_id,
             group_id,
-            json.dumps(list(exclude)),
+            limit,
+        )
+        return [self._event(r) for r in rows]
+
+    def agent_events(
+        self, after: int = 0, limit: int = 200, group_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """The events the agent may see, by the agent's own sequence: ``seq``
+        is that number, gap-free, so nothing tells it how many events it
+        doesn't see."""
+        rows = self._all(
+            "SELECT agent_seq, group_id, type, data, at, event_id FROM events "
+            "WHERE agent_seq > ? AND (? IS NULL OR group_id = ?) ORDER BY agent_seq LIMIT ?",
+            after,
+            group_id,
+            group_id,
             limit,
         )
         return [self._event(r) for r in rows]

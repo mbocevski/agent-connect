@@ -86,12 +86,10 @@ SEEN_RETENTION_SECS = 90 * 86_400
 INSPECT_CACHE_SECS = 600
 MAX_INSPECTED = 32
 MAX_TRACKED = 10_000  # senders and doors with a rate window, at most
-MAX_WELCOME_TRIES = 8  # SPEC 6.6.2: at most 8 pending knocks
 MAX_PURPOSE_CHARS = 500
 NOT_ONE_LINE = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn"})
 DOOR_KEY_LEN = 1216
 MAX_IDLE_PASSES = 3
-PURGE_NOW_KEY = "knock/purge_now"
 REQUEST_ID_INFO = b"agentconnect/knock-request"
 #: ``[https://]<host>/a/<name>[.json]``: nothing else is a listing reference.
 LISTING_REF = re.compile(
@@ -126,6 +124,10 @@ RELAY_CODES = frozenset(
         "internal",
     }
 )
+
+
+#: Answers to a Welcome that say "not now": the outbox tries again.
+RETRY_WELCOME = frozenset({"internal", "rate_limited", "quota_exceeded"})
 
 
 def relay_code(code: str) -> str:
@@ -196,6 +198,9 @@ class KnockService:
         self._failures = _Windows(HOUR_SECS)  # per sender mailbox: knocks that failed a check
         self._inspected: OrderedDict[str, Checked] = OrderedDict()
         self._wake = asyncio.Event()
+        # One knock at a time: the limits are checked and the knock recorded
+        # with no other knock in between, however many requests arrive at once.
+        self._knock_lock = asyncio.Lock()
         self.dropped = 0  # knocks dropped since start (the human's listing status)
         self._max_pending = config.knock_max_pending_per_door
         self._ledger = ac.KnockLedger(config.knock_ledger_capacity)
@@ -537,7 +542,6 @@ class KnockService:
                     "approving",
                     now,
                     keep_secret=True,
-                    keep_name=True,
                     group_id=group_id,
                     purpose=purpose,
                 ):
@@ -647,21 +651,33 @@ class KnockService:
                 await engine._request({"t": "send", "env": welcome}, str(welcome["msg_id"]))
             except RelayError as e:
                 code = relay_code(e.code)
+                if code in RETRY_WELCOME:
+                    # Not now: the outbox sends it again (the same msg_id)
+                    # after a backoff, until the deadline above.
+                    LOG.info("knock_welcome_retry", code=code)
+                    raise TransientError(group.group_id, code) from None
                 LOG.info("knock_welcome_not_sent", code=code)
                 self.add_failed(request_id, code)
                 return
             engine.failpoints.hit("knock_add.after_welcome")
             payload["welcome_sent"] = True
             store.update_outbox(row_seq, payload=payload)
+        event = None
         with store.tx():
-            if req["display_name"]:
-                # The knocker's claim, shown as unverified like every name.
-                store.set_display_name(
-                    group.group_id, str(req["identity"]), str(req["display_name"])
+            if store.decide_knock_request(
+                request_id, "approved", self._now(), expect=("approving",)
+            ):
+                # The group is the agent's from now on: it hears of the knocker
+                # here, once (the member_joined of the Add was the human's).
+                event = engine._record(
+                    group.group_id,
+                    "member_joined",
+                    f"knock={request_id}/member_joined",
+                    {"identity": str(req["identity"])},
                 )
-            store.decide_knock_request(request_id, "approved", self._now(), expect=("approving",))
             payload["consume_queued"] = True  # nothing to consume: the follow-ups are done
             store.update_outbox(row_seq, payload=payload)
+        engine._notify_soon([] if event is None else [event])
         LOG.info("knock_welcome_sent")
 
     def add_failed(self, request_id: str, code: str) -> None:
@@ -950,9 +966,20 @@ class KnockService:
         """Knock on a listing (SPEC 6.6.2): checked again, then built by the
         core and queued. The knock waits for an answer until ``gives_up_at``;
         only a Welcome is an answer."""
-        engine, store, config = self._engine, self._store, self._engine.config
-        if not human and not config.knock_agent_may_knock:
+        if not human and not self._engine.config.knock_agent_may_knock:
             raise ApiError(403, "human_only", "knocking needs the human token here")
+        async with self._knock_lock:
+            return await self._knock(ref, listing_sha256, display_name, note, domain_check)
+
+    async def _knock(
+        self,
+        ref: str,
+        listing_sha256: str | None,
+        display_name: str | None,
+        note: str | None,
+        domain_check: bool | None,
+    ) -> dict[str, Any]:
+        engine, store, config = self._engine, self._store, self._engine.config
         entry, name = self._ref(ref)
         now = self._now()
         self._limits(now)
@@ -1074,10 +1101,14 @@ class KnockService:
             await self._fail(k, "stale")
             return "failed"
         resent = bool(k["sent_once"])
-        if not resent:
-            store.update_knock(knock_id, sent_once=1)
+
+        def written() -> None:
+            # The frame reached the socket: from now on it may have arrived.
+            if not resent:
+                store.update_knock(knock_id, sent_once=1)
+
         try:
-            await engine._request(payload["frame"], str(payload["msg_id"]))
+            await engine._request(payload["frame"], str(payload["msg_id"]), on_sent=written)
         except RelayError as e:
             # The relay answers any retry within 10 minutes with
             # rate_limited, whether or not the first copy was delivered.
@@ -1141,21 +1172,29 @@ class KnockService:
                 LOG.info("knock_lapsed")
 
     def knocks(self) -> list[dict[str, Any]]:
-        """This runtime's knocks, the newest last."""
-        return [
-            {
-                "knock_id": k["knock_id"],
-                "directory": k["directory"],
-                "name": k["name"],
-                "fingerprint": ac.fingerprint(ac_identity_key(str(k["identity"]))),
-                "owner_state": k["owner_state"],
-                "status": k["status"],
-                "created_at": k["created_at"],
-                "gives_up_at": k["gives_up_at"],
-                "group_id": k["group_id"],
-            }
-            for k in self._store.knocks()
-        ]
+        """This runtime's knocks, the newest last, with what each knocked on:
+        the listing's name, fingerprint, owner state, and its card's name and
+        description (the listing owner's text, untrusted). So a knock an
+        agent started can be read by its human afterwards (SPEC 6.6.2)."""
+        out = []
+        for k in self._store.knocks():
+            content = json.loads(ac.verify_listing(bytes(k["listing"])).content)
+            out.append(
+                {
+                    "knock_id": k["knock_id"],
+                    "directory": k["directory"],
+                    "name": k["name"],
+                    "fingerprint": ac.fingerprint(ac_identity_key(str(k["identity"]))),
+                    "owner_state": k["owner_state"],
+                    "display_name": str(content.get("name", "")),
+                    "description": str(content.get("description", "")),
+                    "status": k["status"],
+                    "created_at": k["created_at"],
+                    "gives_up_at": k["gives_up_at"],
+                    "group_id": k["group_id"],
+                }
+            )
+        return out
 
     # -- the knocker: the Welcome ----------------------------------------------
 
@@ -1166,7 +1205,8 @@ class KnockService:
         engine, store = self._engine, self._store
         sender, msg_id = str(env["sender"]), str(env["msg_id"])
         now = self._now()
-        for k in store.knocks("queued", "sent")[:MAX_WELCOME_TRIES]:
+        # Every waiting knock: knock() keeps them to knock.max_outgoing (at most 8).
+        for k in store.knocks("queued", "sent"):
             knock_id = str(k["knock_id"])
             secret = store.knock_secret(knock_id)
             if secret is None or now > int(k["gives_up_at"]):
@@ -1302,13 +1342,12 @@ class KnockService:
     # -- timers -------------------------------------------------------------------
 
     def _purge(self) -> None:
-        """The ledger forgets knocks past ``forget_after`` (with a now that
-        never moves back), and ended knocks and decided requests go after a
-        week."""
-        store = self._store
-        now = max(self._now(), int(store.kv_get(PURGE_NOW_KEY) or "0"))
+        """The ledger forgets knocks past ``forget_after``, and ended knocks
+        and decided requests go after a week. Always at the clock's now:
+        nothing is kept from a pass that ran while the clock was ahead, so a
+        clock put right never forgets an entry before its time again."""
+        store, now = self._store, self._now()
         with store.tx():
-            store.kv_set(PURGE_NOW_KEY, str(now))
             store.ledger_purge(now)
             store.purge_knock_requests(self._now() - RETENTION_SECS)
             store.purge_knocks(self._now() - RETENTION_SECS)

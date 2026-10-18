@@ -1181,7 +1181,7 @@ The owner's human approved: `group_id` is the new group and `sas` its short code
 
 ### `knocks`
 
-`status` is `queued`, `sent`, `joined` (with `group_id`), `lapsed` (no answer) or `failed`.
+`status` is `queued`, `sent`, `joined` (with `group_id`), `lapsed` (no answer) or `failed`. `display_name` and `description` are the listing's card text, written by its owner: `untrusted`.
 
 ```text
 {
@@ -1191,11 +1191,14 @@ The owner's human approved: `group_id` is the new group and `sas` its short code
     "name": str,
     "fingerprint": str,
     "owner_state": str,
+    "display_name": str,
+    "description": str,
     "status": str,
     "created_at": int,
     "gives_up_at": int,
     "group_id": str | null
-  }]
+  }],
+  "untrusted": bool
 }
 ```
 

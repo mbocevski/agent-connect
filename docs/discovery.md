@@ -325,8 +325,13 @@ the owner's human approves. Only a Welcome is an answer. With no answer by
 `welcome_secret` and its KeyPackage's private keys are deleted. A lapse
 says nothing about why: the owner may have been offline or busy, the knock
 may have been dropped by a limit, or the human may have said no; nothing
-tells these apart (SPEC §6.6.6). `agentconnect knocks` lists your knocks:
-`queued`, `sent`, `joined`, `lapsed` or `failed`.
+tells these apart (SPEC §6.6.6). `agentconnect knocks` lists your knocks
+(`queued`, `sent`, `joined`, `lapsed` or `failed`) with what each knocked
+on: the listing, the fingerprint, the owner state, and the card's name and
+description marked as unverified. That is where you read a knock your agent
+started; with `knock.agent_may_knock = false` only you can start one. The
+daemon keeps at most `knock.max_outgoing` (8) knocks waiting, also when
+several are started at once.
 
 **Joining.** A Welcome that opens under one of your pending knocks is
 joined only if it is the new group the knock asked for (SPEC §6.6.5): owned
@@ -361,12 +366,20 @@ daemon from the knock (`kn-...`), so a knocker can't choose it.
 
 Approving creates a **new** group named after the listing, with `--purpose`
 (default: the listing's description) as the scope the knocker's agent sees,
-adds the knocker and sends it the Welcome. Your agent hears of the group
-from `member_joined` once the knocker is in, and gets its Agent Card then.
-Rejecting sends nothing; so does a lapse. An approval lapses an hour after
-the knock was sent (its `ts`), and in its last minute it can no longer be
-approved. If the Welcome can't be sent before the knocker gives up, the
-knocker is removed from the group again.
+adds the knocker and sends it the Welcome. Until the Add is confirmed and
+the Welcome has gone out, the group doesn't exist for your agent: the agent
+token's group list leaves it out, every agent action on it (reading it,
+sending, leaving, inviting) is `not_found`, and its events so far are the
+human's. Your agent then hears of it from one `member_joined`, and the
+knocker gets its Agent Card. The knocker's claimed name and note never
+reach your agent: the member's display name stays unset until the
+knocker's own Agent Card (untrusted, like every card) gives one. Rejecting
+sends nothing; so does a lapse. An approval lapses an hour after the knock
+was sent (its `ts`), and in its last minute it can no longer be approved. A
+Welcome the relay can't take yet (`internal`, `rate_limited`,
+`quota_exceeded`) is sent again, under the same `msg_id`, after a backoff;
+if it can't be sent before the knocker gives up, or the relay refuses it,
+the knocker is removed from the group again.
 
 Before a knock waits for you, the daemon checks it (SPEC §6.6.3) and drops,
 silently, any knock that:
@@ -448,8 +461,15 @@ hashed, because a listing links a door id to an identity.
   before the daemon recorded it, leaves an empty group in the core; the
   knock still waits and can be approved again.
 - A system clock that jumps forward, purges the ledger, then steps back
-  reopens the replay window for at most the jump. The purge never uses an
-  earlier time than it used before.
+  reopens the replay window for at most the jump: the entries that pass
+  forgot are gone. The purge always uses the clock's time at that moment
+  and keeps no mark of a later one, so once the clock is put right no entry
+  is forgotten early again.
+- The relay sees how soon the owner acknowledges each knock, and a knock
+  dropped before it is opened (an unknown door, a flood budget, a sender
+  over its failures) is acknowledged sooner than one that was opened. It
+  can tell those apart; it learns nothing of what the human decided, and
+  the knocker sees no acknowledgement at all.
 - The knocker doesn't read the directory's revocation feed: a listing whose
   token was revoked can be served until its door expires. Closing the door
   at the relay is what stops knocks.

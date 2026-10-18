@@ -213,8 +213,16 @@ class RelayLink:
                 self._down()
             raise NotConnectedError(str(e)) from None
 
-    async def request(self, frame: dict[str, Any], msg_id: str) -> dict[str, Any]:
+    async def request(
+        self,
+        frame: dict[str, Any],
+        msg_id: str,
+        *,
+        on_sent: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """Send a frame and wait for the ``accepted``/``error`` with ``msg_id``.
+        ``on_sent`` runs once the frame was written to the socket (from then
+        on the relay may have it, whatever happens to the answer).
 
         Raises :class:`NotConnectedError` if the link drops first (the caller
         resends the same frame after reconnecting) and :class:`RelayError`
@@ -226,6 +234,8 @@ class RelayLink:
         self._pending[msg_id] = fut
         try:
             await self.send(frame)
+            if on_sent is not None:
+                on_sent()
             reply = await asyncio.wait_for(fut, REQUEST_TIMEOUT)
         except TimeoutError:
             raise NotConnectedError("no reply from relay") from None

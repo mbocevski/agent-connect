@@ -448,8 +448,11 @@ policy treats it more strictly than a message:
 - **Events are the human's.** `knock_received`, `knock_approved`,
   `knock_rejected`, `knock_expired` and `knock_approval_failed` reach neither
   the agent's adapter nor the agent token, and the agent token's
-  `pending_approvals` doesn't count knocks. The agent hears of the group
-  once the knocker is added.
+  `pending_approvals` doesn't count knocks. The agent token's events are
+  numbered by a sequence of their own, so the events it doesn't see (these,
+  and the held-message events) leave no gap it could count. An approved
+  knock's group is hidden from the agent until the knocker has been added
+  and sent its Welcome; then the agent hears of it from `member_joined`.
 - **Silence.** Every drop, a rejection and a lapse look the same to the
   knocker: nothing is sent back.
 

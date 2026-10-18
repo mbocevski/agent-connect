@@ -105,6 +105,19 @@ def knock_audit(node: Node) -> list[str]:
     return [r["reason"] for r in node.daemon.store.audit(limit=1000) if r["kind"] == "knock"]
 
 
+async def agent_sees_the_group_once_the_knocker_is_in(owner: Node, k: Node, gid: str) -> None:
+    """The owner's agent: a gap-free sequence, the group first seen through
+    its ``member_joined``, and no claimed name on the knocker."""
+    seen = (await owner.runtime.agent.events())["events"]
+    assert [e["seq"] for e in seen] == list(range(1, len(seen) + 1))
+    first = next(e for e in seen if e["group_id"] == gid)
+    assert first["type"] == "member_joined"
+    # The knocker's claimed name is the human's to read, not the agent's.
+    agent_view = await owner.runtime.agent.group_info(gid)
+    (knocker_member,) = [m for m in agent_view["members"] if m["identity"] == k.me]
+    assert knocker_member["display_name"] is None
+
+
 async def test_knock_approve_and_talk(
     cluster: Cluster, directory: DirectoryProcess, rng: random.Random
 ) -> None:
@@ -157,8 +170,10 @@ async def test_knock_approve_and_talk(
     assert await k.wait_texts(gid, 1) == ["hello knocker"]
     k.daemon.send_message(gid, {"text": "hello owner"})
     assert await owner.wait_texts(gid, 1) == ["hello owner"]
-    # The owner's agent hears of the group once the knocker is in.
+    # The owner's agent hears of the group once the knocker is in, once, and
+    # nothing of the group before that (its events of the Add are the human's).
     assert [e.data["identity"] for e in owner.adapter.of_type("member_joined")] == [k.me]
+    await agent_sees_the_group_once_the_knocker_is_in(owner, k, gid)
     row = owner.daemon.store.knock_request(request["request_id"])
     assert row is not None
     assert (row["status"], row["note"]) == ("approved", None)

@@ -110,7 +110,7 @@ class Fake:
             "GET /v0/events?after=1": {"events": []},
             f"GET /v0/groups/{GID}": GROUP,
             "GET /v0/approvals": {"approvals": [KNOCK_APPROVAL], "messages": []},
-            "GET /v0/knocks": {"knocks": []},
+            "GET /v0/knocks": {"knocks": [], "untrusted": True},
         }
         self.calls: list[tuple[bool, str, Any]] = []
         self.pauses: list[float] = []
@@ -308,20 +308,25 @@ def test_knocks_lists_this_agents_knocks(fake: Fake) -> None:
         "name": "release-planner" + BIDI,
         "fingerprint": "3f9a",
         "owner_state": "unclaimed",
+        "display_name": "Release planner",
+        "description": "Plans" + BIDI,
         "status": "joined",
         "created_at": 1_790_000_000,
         "gives_up_at": 1_790_003_900,
         "group_id": GID,
     }
-    fake.routes["GET /v0/knocks"] = {"knocks": [row]}
+    fake.routes["GET /v0/knocks"] = {"knocks": [row], "untrusted": True}
     result = fake.run("knocks")
     assert result.exit_code == 0
+    assert "identity  3f9a" in result.output
+    assert "owner     unclaimed (this daemon's check)" in result.output
+    assert 'about     "Plans?"' in result.output
     assert "release-planner? on directory.example.org" in result.output
     assert f"[joined, group {GID}]" in result.output
     code, data = fake.json("knocks")
     assert code == 0
     assert conforms(data, SCHEMAS["knocks"])
-    fake.routes["GET /v0/knocks"] = {"knocks": []}
+    fake.routes["GET /v0/knocks"] = {"knocks": [], "untrusted": True}
     assert "No knocks." in fake.run("knocks").output
 
 

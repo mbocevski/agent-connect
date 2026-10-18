@@ -7,6 +7,7 @@ clock, without a network."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 from collections.abc import Callable
@@ -21,15 +22,16 @@ from agentconnect.config import Config, DirectoryConfig
 from agentconnect.identity import Seeded
 from agentconnect.keystore import FileKeystore
 from agentconnect.ownerfile import OwnerFetch
-from agentconnect.relay import RelayError, b64, unb64
+from agentconnect.relay import NotConnectedError, RelayError, b64, unb64
 from agentconnect.runtime import ApiError, Options, Runtime
-from agentconnect.runtime.engine import DaemonError, Engine, _envelope_problem
+from agentconnect.runtime.engine import DaemonError, Engine, TransientError, _envelope_problem
 from agentconnect.runtime.knocks import (
     GIVE_UP_SECS,
     LAPSE_SECS,
     KnockService,
     knock_request_id,
 )
+from agentconnect.store import MAX_LISTINGS_SEEN
 from agentconnect_harness.fake_directory import FakeDirectory
 
 TESTDATA = Path(__file__).resolve().parents[2] / "testdata"
@@ -900,8 +902,15 @@ async def test_the_agent_may_be_kept_from_knocking(world: World) -> None:
     assert (await k.knocks.knock(ref, human=True))["status"] == "queued"
 
 
-async def run_frame(k: Node, answer: Exception | None) -> str:
-    async def request(_frame: dict[str, Any], _msg_id: str) -> dict[str, Any]:
+async def run_frame(k: Node, answer: Exception | None, *, written: bool = True) -> str:
+    """Run the knock's outbox row against a relay that answers ``answer``
+    (``None``: accepted). ``written``: the frame reached the socket first."""
+
+    async def request(
+        _frame: dict[str, Any], _msg_id: str, on_sent: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        if written and on_sent is not None:
+            on_sent()
         if answer is not None:
             raise answer
         return {"t": "accepted"}
@@ -1088,14 +1097,21 @@ async def test_an_add_is_built_only_for_its_own_waiting_group(world: World) -> N
     assert owner.knocks.build_add(unb64(gid), intent)["welcome"] is not None
 
 
-async def after_add(owner: Node, request: dict[str, Any], answer: Exception | None) -> str:
-    """Approve, build the Add and run its follow-ups with ``answer`` from the relay."""
+async def after_add(
+    owner: Node, request: dict[str, Any], answer: Exception | None, *, added: bool = False
+) -> str:
+    """Approve, build the Add and run its follow-ups with ``answer`` from the
+    relay. ``added``: the Add was merged (the knocker is a member)."""
     gid = owner.engine.approve(request["request_id"])["group_id"]
+    if added:
+        owner.engine.store.set_members(
+            gid, {owner.engine.me: ("owner", []), request["identity"]: ("member", [])}
+        )
     intent = {"type": "knock_add", "request_id": request["request_id"]}
     built = owner.knocks.build_add(unb64(gid), intent)
     sent: list[dict[str, Any]] = []
 
-    async def request_(frame: dict[str, Any], _msg_id: str) -> dict[str, Any]:
+    async def request_(frame: dict[str, Any], _msg_id: str, **_kw: Any) -> dict[str, Any]:
         sent.append(frame)
         if answer is not None:
             raise answer
@@ -1258,3 +1274,324 @@ async def test_a_door_key_the_core_refuses_leaves_nothing(world: World) -> None:
         await k.knocks.knock(ref)
     assert e.value.code == "listing_invalid"
     assert k.engine.store.knocks() == []
+
+
+# -- review findings: regressions --------------------------------------------------
+
+
+async def test_the_agents_event_sequence_has_no_gaps_for_the_humans_events(world: World) -> None:
+    """M1: the agent token's ``seq`` is its own, so the events it doesn't see
+    (knocks, holds) leave no trace in it."""
+    owner = world.node("owner")
+    engine = owner.engine
+    await engine.emit(None, "listing_renewed", cause="before", seq=1)
+    request, _ = await held(world, owner)
+    engine.reject(request["request_id"])
+    door = world.door()
+    door_id = owner.add_door(door)
+    await owner.deliver(door_id, world.sealed(door))
+    world.clock.advance(LAPSE_SECS)
+    await owner.knocks.step()  # knock_expired
+    await engine.emit(None, "message_held", cause="hold", hold_id="h")
+    await engine.emit(None, "listing_renewed", cause="after", seq=2)
+    human = [e["type"] for e in engine.store.events(limit=100)]
+    assert {"knock_received", "knock_rejected", "knock_expired", "message_held"} <= set(human)
+    seen = (await owner.rt.agent.events())["events"]
+    assert [e["type"] for e in seen] == ["listing_renewed", "listing_renewed"]
+    assert [e["seq"] for e in seen] == [1, 2]
+    # The agent resumes after the seq it last saw, and gets nothing twice.
+    assert [e["data"]["seq"] for e in (await owner.rt.agent.events(after=1))["events"]] == [2]
+    assert (await owner.rt.agent.events(after=2))["events"] == []
+
+
+async def test_concurrent_knocks_keep_the_outgoing_limit(world: World) -> None:
+    """M2: knocks that run at the same time are counted against each other."""
+    k = world.node("knocker", knock_max_outgoing=2)
+    refs = []
+    for i in range(5):
+        owner = ac.Identity._generate_for_testing(world.rng.getrandbits(63))
+        world.publish(owner, world.door(), name=f"listing-{i}")
+        refs.append(f"{DIR}/a/listing-{i}")
+    results = await asyncio.gather(*(k.knocks.knock(r) for r in refs), return_exceptions=True)
+    queued = [r for r in results if isinstance(r, dict)]
+    refused = [r for r in results if isinstance(r, ApiError)]
+    assert len(queued) == 2
+    assert {e.code for e in refused} == {"too_many_knocks"}
+    assert len(k.engine.store.knocks("queued", "sent")) == 2
+
+
+async def test_concurrent_knocks_keep_the_hourly_limit(world: World) -> None:
+    k = world.node("knocker", knock_per_hour=3)
+    refs = []
+    for i in range(5):
+        owner = ac.Identity._generate_for_testing(world.rng.getrandbits(63))
+        world.publish(owner, world.door(), name=f"listing-{i}")
+        refs.append(f"{DIR}/a/listing-{i}")
+    results = await asyncio.gather(*(k.knocks.knock(r) for r in refs), return_exceptions=True)
+    assert len([r for r in results if isinstance(r, dict)]) == 3
+    assert {e.code for e in results if isinstance(e, ApiError)} == {"rate_limited"}
+
+
+async def test_no_ninth_knock_can_wait_so_every_welcome_is_tried(world: World) -> None:
+    """M2: at most 8 knocks wait (SPEC 6.6.2), however they are started, so the
+    Welcome of every one of them is tried."""
+    k = world.node("knocker")
+    refs = []
+    for i in range(9):
+        owner = ac.Identity._generate_for_testing(world.rng.getrandbits(63))
+        world.publish(owner, world.door(), name=f"listing-{i}")
+        refs.append(f"{DIR}/a/listing-{i}")
+    results = await asyncio.gather(*(k.knocks.knock(r) for r in refs), return_exceptions=True)
+    assert len([r for r in results if isinstance(r, dict)]) == 8
+    assert len(k.engine.store.knocks("queued", "sent")) == 8
+
+
+@pytest.mark.parametrize("code", ["internal", "rate_limited", "quota_exceeded"])
+async def test_a_welcome_the_relay_can_take_later_is_retried(world: World, code: str) -> None:
+    """L1: a transient answer to the Welcome keeps the approval; the outbox
+    sends it again under the same msg_id."""
+    owner = world.node("owner")
+    request, _ = await held(world, owner)
+    with pytest.raises(TransientError):
+        await after_add(owner, request, RelayError(code))
+    row = owner.engine.store.knock_request(request["request_id"])
+    assert row is not None
+    assert row["status"] == "approving"
+    assert owner.engine.store.knock_request_secret(request["request_id"]) is not None
+    assert owner.events("knock_approval_failed") == []
+
+
+async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(world: World) -> None:
+    """L2: a purge that ran during a forward jump leaves no mark that makes
+    later purges forget live entries."""
+    owner = world.node("owner")
+    start = world.clock.now()
+    world.clock.advance(86_400)
+    await owner.knocks.step()
+    world.clock.set(start)  # the clock is put right again
+    door = world.door()
+    door_id = owner.add_door(door)
+    bob = world.knocker_client()
+    await owner.deliver(door_id, world.sealed(door, bob))
+    sealed = world.sealed(door, bob)
+    await owner.deliver(door_id, sealed)  # dropped: bob already waits
+    assert owner.audit()[-1] == "knock_identity_pending"
+    await owner.knocks.step()
+    assert len(owner.engine.store.ledger_rows(world.now)) == 2
+    await owner.deliver(door_id, sealed)  # the relay replays it
+    assert owner.audit()[-1] == "knock_replay"
+
+
+async def test_the_owners_agent_sees_the_group_only_once_the_knocker_is_in(world: World) -> None:
+    """L3: while the approval's Add and Welcome are under way, the group is
+    hidden from the agent, and the agent can't act on it."""
+    owner = world.node("owner")
+    request, _ = await held(world, owner)
+    gid = owner.engine.approve(request["request_id"])["group_id"]
+    agent = owner.rt.agent
+    assert (await agent.list_groups())["groups"] == []
+    for call in (
+        agent.group_info(gid),
+        agent.send(gid, text="hello"),
+        agent.leave(gid),
+        agent.create_invite(gid),
+        agent.safety(gid),
+        agent.set_policy(gid, require_verified=True),
+        owner.engine.adapter_send(gid, {"text": "hi"}),
+    ):
+        with pytest.raises(DaemonError) as e:
+            await call
+        assert e.value.code == "not_found"
+    assert owner.engine.group_info(gid)["origin"]["kind"] == "knock"  # the human's view
+    assert [g["group_id"] for g in owner.engine.list_groups()] == [gid]
+
+
+async def test_the_knockers_claimed_name_doesnt_reach_the_owners_agent(world: World) -> None:
+    """L4: the name is the human's to read in the approval; the member's
+    display name stays unset (an Agent Card may set it, framed untrusted)."""
+    owner = world.node("owner")
+    request, _ = await held(world, owner)
+    gid = await after_add(owner, request, None, added=True)
+    info = await owner.rt.agent.group_info(gid)
+    (knocker,) = [m for m in info["members"] if m["identity"] == request["identity"]]
+    assert knocker["display_name"] is None
+    row = owner.engine.store.knock_request(request["request_id"])
+    assert row is not None
+    assert row["display_name"] is None
+
+
+async def test_the_human_can_read_what_an_agent_knocked_on(world: World) -> None:
+    """L5: the listing's name, fingerprint, owner state and description."""
+    k, owner, _, ref = await ready(world)
+    await k.rt.agent.knock(ref)
+    out = await k.rt.agent.knocks()
+    assert out["untrusted"] is True
+    (row,) = out["knocks"]
+    assert row["fingerprint"] == owner.fingerprint
+    assert row["owner_state"] == "unclaimed"
+    assert (row["display_name"], row["description"]) == (CARD["name"], CARD["description"])
+
+
+async def test_inspects_cant_evict_the_rollback_mark_of_a_listing_knocked_on(
+    world: World,
+) -> None:
+    """L6: the listings this runtime knocked on (or is in a group with) keep
+    their mark, however many other listings are inspected."""
+    k, owner, door, ref = await ready(world)
+    first = world.directory.listed[NAME]
+    world.publish(owner, door, seq=5)
+    await k.knocks.knock(ref)
+    store = k.engine.store
+    for i in range(MAX_LISTINGS_SEEN + 5):
+        store.put_listing_seen(
+            {"directory": DIR, "name": f"other-{i}", "seen_at": world.now + 1 + i},
+            keep_since=0,
+        )
+    assert store.listing_seen(DIR, NAME) is not None
+    k.engine.store.end_knock(k.knocks.knocks()[0]["knock_id"], "lapsed", world.now)
+    world.directory.serve[NAME] = first
+    with pytest.raises(ApiError) as e:
+        await k.knocks.inspect(ref)
+    assert e.value.code == "listing_rolled_back"
+
+
+async def test_a_knock_that_never_left_isnt_taken_as_maybe_delivered(world: World) -> None:
+    """L7: ``sent_once`` is set once the frame reached the socket."""
+    k, _, _, ref = await ready(world)
+    sent = await k.knocks.knock(ref)
+    with pytest.raises(NotConnectedError):
+        await run_frame(k, NotConnectedError("down"), written=False)
+    row = k.engine.store.knock(sent["knock_id"])
+    assert row is not None
+    assert row["sent_once"] == 0
+    assert await run_frame(k, RelayError("rate_limited")) == "failed"
+    assert k.events("knock_failed") == [{"knock_id": sent["knock_id"], "code": "rate_limited"}]
+
+
+# -- the knock's KeyPackage, and Welcomes from a broken owner ----------------------
+
+
+class RemoteOwner:
+    """The listed agent's instance, outside any runtime: it opens the knock
+    the knocker queued and answers with a Welcome, well formed or not."""
+
+    def __init__(self, world: World, k: Node) -> None:
+        self.world, self.k = world, k
+        self.identity = ac.Identity._generate_for_testing(world.rng.getrandbits(63))
+        self.client = self._client(self.identity)
+        self.door = world.door()
+        world.publish(self.identity, self.door)
+
+    def _client(self, identity: ac.Identity) -> ac.Client:
+        instance = identity._create_instance_for_testing(
+            self.world.rng.getrandbits(63), self.world.now
+        )
+        client = ac.Client._for_testing(
+            None, instance.to_secret_bytes(), self.world.rng.getrandbits(63)
+        )
+        client._set_time_for_testing(self.world.now)
+        return client
+
+    def stranger(self) -> ac.Client:
+        return self._client(ac.Identity._generate_for_testing(self.world.rng.getrandbits(63)))
+
+    def received(self, client: ac.Client | None = None) -> ac.VerifiedKnock:
+        (row,) = [r for r in self.k.engine.store.outbox() if r.payload.get("knock_id")]
+        sealed = unb64(row.payload["frame"]["env"]["ct"])
+        opened = self.door.open_knock(self.door.id, sealed, self.world.now)
+        return (client or self.client).verify_knock(opened)
+
+    async def welcome(self, gid: bytes, wrapped: bytes) -> None:
+        env = {
+            "v": 0,
+            "kind": "welcome_wrapped",
+            "group_id": b64(gid),
+            "msg_id": b64(self.world.rng.randbytes(16)),
+            "sender": "owner-mailbox",
+            "to": [self.k.engine.mailbox],
+            "ct": b64(wrapped),
+        }
+        await self.k.engine._handle_frame({"t": "deliver", "env": env})
+
+
+async def knocked(world: World) -> tuple[Node, RemoteOwner, str, bytes]:
+    k = world.node("knocker")
+    owner = RemoteOwner(world, k)
+    sent = await k.knocks.knock(f"{DIR}/a/{NAME}")
+    secret = k.engine.store.knock_secret(sent["knock_id"])
+    assert secret is not None
+    return k, owner, str(sent["knock_id"]), secret
+
+
+async def test_a_good_welcome_joins(world: World) -> None:
+    k, owner, knock_id, _ = await knocked(world)
+    verified = owner.received()
+    gid = owner.client.create_group(NAME, "Plans.")
+    await owner.welcome(gid, owner.client.add_knock(gid, verified)["welcome"])
+    assert k.knocks.knocks()[0]["status"] == "joined"
+    assert k.engine.store.group(b64(gid)) is not None
+    assert k.engine.store.knock_secret(knock_id) is None
+
+
+@pytest.mark.parametrize("end", ["lapse", "failure"])
+async def test_an_ended_knocks_keypackage_keys_are_gone_from_the_core(
+    world: World, end: str
+) -> None:
+    """The KeyPackage's private keys are deleted from the MLS store: a Welcome
+    built for it can no longer be joined, even with the knock's secret."""
+    k, owner, _, secret = await knocked(world)
+    verified = owner.received()
+    if end == "lapse":
+        world.clock.advance(GIVE_UP_SECS)
+        await k.knocks.step()
+        world.clock.advance(-GIVE_UP_SECS)
+    else:
+        assert await run_frame(k, RelayError("door_not_open")) == "failed"
+    owner.client._set_time_for_testing(world.now)
+    gid = owner.client.create_group(NAME, "Plans.")
+    wrapped = owner.client.add_knock(gid, verified)["welcome"]
+    k.engine.client._set_time_for_testing(world.now)
+    with pytest.raises(ac.AgentConnectError):
+        k.engine.client.join_knock(
+            ac.PendingKnock.from_secret_bytes(secret), owner.identity.id, NAME, wrapped
+        )
+
+
+async def _broken(world: World, owner: RemoteOwner, how: str) -> tuple[bytes, bytes]:
+    """A fresh-looking Welcome from a broken owner: ``(group id, wrapped)``."""
+    if how == "wrong_owner":  # another identity's group answers the knock
+        other = owner.stranger()
+        verified = owner.received(other)
+        gid = other.create_group(NAME, "Plans.")
+        return gid, bytes(other.add_knock(gid, verified)["welcome"])
+    client = owner.client
+    verified = owner.received()
+    gid = client.create_group(NAME, "Plans.")
+    extra: list[ac.VerifiedKnock] = []
+    if how == "late_epoch":
+        out = client.update(gid)
+        client.confirm_pending_commit(gid, out["msg_id"])
+    elif how == "admin":
+        policy = json.loads(client.policy(gid))
+        policy["admins"] = [owner.stranger().identity]
+        out = client.set_policy(
+            gid, json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
+        )
+        client.confirm_pending_commit(gid, out["msg_id"])
+    elif how == "three_leaves":
+        third = world.knocker_client()
+        sealed, _ = third.create_knock(owner.door.id, owner.door.public_key, "x", ts=world.now)
+        extra.append(client.verify_knock(owner.door.open_knock(owner.door.id, sealed, world.now)))
+    out = client._add_knock_unchecked_for_testing(gid, verified, extra)
+    return gid, bytes(out["welcome"])
+
+
+@pytest.mark.parametrize("how", ["three_leaves", "late_epoch", "wrong_owner", "admin"])
+async def test_a_welcome_from_a_broken_owner_is_refused(world: World, how: str) -> None:
+    k, owner, knock_id, _ = await knocked(world)
+    gid, wrapped = await _broken(world, owner, how)
+    await owner.welcome(gid, wrapped)
+    assert k.events("knock_failed") == [{"knock_id": knock_id, "code": "welcome_invalid"}]
+    assert [e["reason"] for e in k.events("relay_misbehaviour")] == ["knock_welcome_mismatch"]
+    assert k.engine.store.group(b64(gid)) is None
+    assert k.engine.store.knock_secret(knock_id) is None

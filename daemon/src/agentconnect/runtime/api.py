@@ -630,16 +630,22 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/knocks",
         "_knocks",
         "This daemon's own knocks, oldest first: `queued`, `sent`, `joined` (with "
-        "`group_id`), `lapsed` or `failed`.",
-        response={"knocks": [KNOCKS]},
+        "`group_id`), `lapsed` or `failed`, each with what it knocked on: the listing's "
+        "name, fingerprint and owner state, and its card's name and description (the "
+        "listing owner's text, so `untrusted`). A knock the agent started is readable by "
+        "its human here (SPEC 6.6.2).",
+        response={"knocks": [KNOCKS], "untrusted": "bool"},
     ),
     RouteSpec(
         "GET",
         "/v0/events",
         "_events",
-        "Daemon events in order, at most 200 per call. The agent token doesn't see the "
-        "safety policy's events (`message_held`, `held_expired`, `repeated_violations`): "
-        "they would tell the agent, and so a peer, what the policy did. Nor does it see "
+        "Daemon events in order, at most 200 per call. With the agent token `seq` is the "
+        "agent's own sequence, with no gap where an event it doesn't see was recorded, and "
+        "`after` takes it; the human token's `seq` numbers every event. The agent token "
+        "doesn't see the safety policy's events (`message_held`, `held_expired`, "
+        "`repeated_violations`): they would tell the agent, and so a peer, what the "
+        "policy did. Nor does it see "
         "the knocks your listing received (`knock_received`, `knock_approved`, "
         "`knock_rejected`, `knock_expired`, `knock_approval_failed`). With "
         "`Accept: text/event-stream` it is instead a Server-Sent Events stream "
@@ -868,10 +874,14 @@ class ApiServer:
             return await self.agent.status()
         return self.daemon.status()
 
-    async def _list_groups(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+    async def _list_groups(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        if p.get(SCOPE) == "human":
+            return {"groups": self.daemon.list_groups()}
         return await self.agent.list_groups()
 
     async def _group_info(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        if p.get(SCOPE) == "human":
+            return self.daemon.group_info(p["gid"])
         return await self.agent.group_info(p["gid"])
 
     async def _list_approvals(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
@@ -900,6 +910,8 @@ class ApiServer:
         return {"status": "removing"}
 
     async def _safety(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        if p.get(SCOPE) == "human":
+            return self.daemon.safety_settings(p["gid"])
         return await self.agent.safety(p["gid"])
 
     async def _set_safety(self, p: dict[str, str], b: dict[str, Any]) -> Any:

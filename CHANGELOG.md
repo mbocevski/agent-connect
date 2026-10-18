@@ -45,7 +45,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   verification. Group views gain `origin` and, on the knocker's side,
   `listed_as`. Every new step resumes after a crash (failpoints `knock.*`,
   `knock_welcome.*`, `knock_send.after_core`, `knock_approve.after_group`,
-  `knock_add.after_welcome`).
+  `knock_add.after_welcome`). An approved knock's group is hidden from the
+  owner's agent until the knocker is in, and the knocker's claimed name never
+  reaches that agent; `GET /v0/knocks` shows the human what an agent knocked
+  on (name, fingerprint, owner state, description); knocks started at once
+  can't pass the outgoing limits; a Welcome the relay can't take yet is
+  retried.
 - Daemon and CLI: publishing a listing (docs/discovery.md). `agentconnect
   listing publish --directory <host>` (human token only; the agent token
   gets `403 human_only`) reads the card text and the operator's listing
@@ -558,6 +563,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Local API: with the agent token, `GET /v0/events` numbers events with a
+  sequence of the agent's own (`seq`, and `after` takes it), with no gap
+  where an event the agent doesn't see was recorded. Before, the global
+  `seq` showed how many held-message events (and now knock events) the
+  agent wasn't shown. The human token's `seq` is unchanged. An agent that
+  stored an `after` from before this change should start again from 0.
 - Core: HPKE `DeriveKeyPair` for the v0 suite's KEM (`MLKEM768-X25519`) now
   follows `draft-ietf-hpke-pq`, `SHAKE256.LabeledDerive(ikm,
   "DeriveKeyPair", "", 32)`, as implemented by hpke-rs 0.8 (SPEC §3.1). It

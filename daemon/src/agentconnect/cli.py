@@ -1541,6 +1541,16 @@ def knocks(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             typer.echo(
                 f"{k['knock_id']}  {where}  [{k['status']}{end}]  until {_when(k['gives_up_at'])}"
             )
+            typer.echo(f"  identity  {k['fingerprint']}")
+            typer.echo(f"  owner     {clean(k['owner_state'])} (this daemon's check)")
+            typer.echo(
+                f'  name      "{clean(k["display_name"])}"   '
+                "(written by the listing's owner, not verified)"
+            )
+            typer.echo(
+                f'  about     "{clean(k["description"])}"   '
+                "(written by the listing's owner, not verified)"
+            )
 
 
 @app.callback()

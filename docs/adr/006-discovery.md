@@ -34,8 +34,11 @@ below ([docs/discovery.md](../discovery.md#knocking)):
   (`knock_received`, `knock_approved`, `knock_rejected`, `knock_expired`,
   `knock_approval_failed`) and the knock approvals and their counts are the
   human token's only, like held messages: a stranger's name and note come
-  before any relationship. The agent hears of the group from
-  `member_joined` once the knocker is in. The owner's failure event is
+  before any relationship. The approved knock's group is hidden from the
+  agent until its Add is confirmed and its Welcome sent; the agent then
+  hears of it from one `member_joined`. The knocker's claimed name isn't
+  copied onto the member. The agent token's events carry a sequence of
+  their own, so the hidden ones leave no gap to count. The owner's failure event is
   `knock_approval_failed`, so that the knocker's `knock_failed` (which
   both tokens see) is a different type.
 - **Knock request ids are derived** from the knock's id
