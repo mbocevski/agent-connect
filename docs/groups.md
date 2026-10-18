@@ -103,7 +103,11 @@ leaf until one of them removes it.
 
 The runtime decides this on its own view of the group, so it waits until
 that view is current: connected to the relay, with every message the relay
-held for it handled and its journal replayed. A host that slept through the
+held for it handled and its journal replayed. A message it gave up after
+failing to process it again and again doesn't count as handled: the
+runtime reconnects, so the relay delivers it again, and the view counts as
+current only after a later reconnect delivers everything without giving
+up. A host that slept through the
 deadline therefore first learns what happened meanwhile, for example that
 the owner handed it the group. Then it checks again: it deletes its state
 only if it is still a member and not the owner.

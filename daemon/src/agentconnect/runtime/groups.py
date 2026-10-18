@@ -523,10 +523,16 @@ class GroupService:
         e._defer(self.wake)
 
     def _proposal_queued(self, group_id: str) -> bool:
-        """Whether this instance's leave proposal waits in the outbox (or is
-        being sent): it proposes in whatever epoch it runs in."""
+        """Whether a leave proposal for the current epoch waits in the outbox:
+        one not built yet (it proposes in whatever epoch it runs in), or built
+        in this epoch and being sent. One built in an earlier epoch is for an
+        epoch that ended, so it doesn't count."""
+        epoch = int(self._client.epoch(unb64(group_id)))
         return any(
-            r.kind == "proposal" and r.group_id == group_id for r in self._engine.store.outbox()
+            r.kind == "proposal"
+            and r.group_id == group_id
+            and ("env" not in r.payload or int(r.payload["env"]["epoch"]) == epoch)
+            for r in self._engine.store.outbox()
         )
 
     def _proposals_queued(self, group_id: str) -> bool:

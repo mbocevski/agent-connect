@@ -334,15 +334,19 @@ async def test_a_timed_out_leave_survives_a_crash_at_the_deletion(
 
 
 @pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("mode", ["crash", "raise"])
 async def test_a_removal_replayed_from_an_older_daemons_journal_is_the_leave(
     group: GroupFixture,
     advance: Advance,
     malicious_relay: Proxy,
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
 ) -> None:
     """A journal entry written by a daemon from before the core reported
     leaves (no marker in its context) may hold a summary whose `left` reads
-    back empty: replayed, a leaving instance reports a leave."""
+    back empty: a leaving instance reports a leave, whether the entry is
+    replayed after a restart (crash) or the frame is processed again and the
+    core hands back the journalled event (raise)."""
     (a, b, c), gid = await group(3)
     for n in (a, b):
         malicious_relay(n).drop_deliveries(lambda env: env.get("kind") == "proposal")
@@ -362,11 +366,11 @@ async def test_a_removal_replayed_from_an_older_daemons_journal_is_the_leave(
 
     real = engine_mod.journal_context
     monkeypatch.setattr(engine_mod, "journal_context", older)
-    fired = daemon_point(c, "receive.after_core", "crash")
+    fired = daemon_point(c, "receive.after_core", mode)
     a.daemon.remove_member(gid, c.me)
     await until(fired)
     monkeypatch.setattr(engine_mod, "journal_context", real)
-    await c.restart()
+    await recover(c, advance, mode, fired)
     await until(lambda: status(c, gid) == "left")
     assert [e["confirmed"] for e in events(c, "left")] == [True]
     assert events(c, "removed") == []

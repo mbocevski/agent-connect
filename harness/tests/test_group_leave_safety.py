@@ -10,6 +10,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from agentconnect.runtime.engine import MAX_TRANSIENT_RETRIES
 from agentconnect.runtime.groups import LEAVE_COMMIT_GRACE_SECS, update_threshold
 from agentconnect_harness.cluster import Cluster, Node, converged, status
 from agentconnect_harness.proxy import Frame, RelayProxy
@@ -242,3 +243,115 @@ async def test_a_leaver_is_never_the_one_to_commit_leaves(
     await a.wait(lambda: status(a, gid) == "left" and status(c, gid) == "left")
     assert data(a, "commit_failed") == []
     assert {"identity": c.me, "by": a.me} in data(a2, "member_left")
+
+
+def give_up_next_frame(node: Node) -> None:
+    """Arm the next received frame to fail transiently until the inbound
+    worker gives it up (unacked), and drive its retries."""
+    node.daemon.failpoints.arm("receive.before_core", "raise", times=MAX_TRANSIENT_RETRIES)
+
+
+async def test_a_frame_given_up_in_the_drain_is_not_caught_up(
+    cluster: Cluster, advance: Advance, malicious_relay: Proxy, partition: Cut, heal: Cut
+) -> None:
+    """The transfer commit reaches the sleeping leaver in its reconnect
+    drain, but processing it fails until the inbound worker gives it up: the
+    leaver hasn't caught up, so it doesn't time out, and once the commit is
+    redelivered it finds itself the owner."""
+    (a, b, c), gid = await build(cluster, 3, groups_leave_timeout_secs=LEAVE_TIMEOUT)
+    for n in (a, c):
+        malicious_relay(n).drop_deliveries(proposal)
+    assert await b.daemon.leave(gid) == "leaving"
+    await b.idle()
+    await partition(b)
+    a.daemon.set_policy(gid, owner=b.me, admins=[])
+    await a.wait(lambda: owner(a, gid) == b.me)
+    await advance(LEAVE_TIMEOUT + 60)
+    give_up_next_frame(b)
+    await heal(b)
+    for _ in range(20):
+        if owner(b, gid) == b.me:
+            break
+        assert status(b, gid) == "active"
+        await advance(60)
+    await b.wait(lambda: any(d["timed_out"] for d in data(b, "leave_blocked")))
+    assert data(b, "processing_failed")
+    assert status(b, gid) == "active"
+    assert data(b, "left") == []
+
+
+async def test_a_live_frame_given_up_after_catching_up_is_not_caught_up(
+    cluster: Cluster, advance: Advance, malicious_relay: Proxy
+) -> None:
+    """Caught up, the leaver fails to process the live commit that hands it
+    the group: its view misses it again, so the deadline deletes nothing."""
+    (a, b, c), gid = await build(cluster, 3, groups_leave_timeout_secs=LEAVE_TIMEOUT)
+    for n in (a, c):
+        malicious_relay(n).drop_deliveries(proposal)
+    assert await b.daemon.leave(gid) == "leaving"
+    await b.idle()
+    assert b.daemon.caught_up()
+    give_up_next_frame(b)
+    a.daemon.set_policy(gid, owner=b.me, admins=[])
+    await a.wait(lambda: owner(a, gid) == b.me)
+    await b.wait(lambda: "receive.before_core" in b.daemon.failpoints.fired)
+    for _ in range(40):
+        if owner(b, gid) == b.me:
+            break
+        assert status(b, gid) == "active"
+        await advance(300)
+    await advance(LEAVE_TIMEOUT)
+    await b.wait(lambda: any(d["timed_out"] for d in data(b, "leave_blocked")))
+    assert data(b, "processing_failed")
+    assert status(b, gid) == "active"
+    assert data(b, "left") == []
+
+
+async def test_a_commit_during_the_proposal_send_still_ends_the_leave(
+    group: GroupFixture, malicious_relay: Proxy
+) -> None:
+    """A commit lands while the leave proposal waits for the relay's
+    `accepted`: that proposal is for the epoch that ended, so the leaver
+    proposes again in the new one, and the leave completes with no other
+    commit and no timeout."""
+    (a, b, c), gid = await group(3)
+    dropped = {"a": 0, "b": 0}
+    for name, n in (("a", a), ("b", b)):
+
+        def drop_first(frame: Frame, name: str = name) -> list[Frame]:
+            env = frame.get("env") or {}
+            if frame.get("t") == "deliver" and proposal(env) and not dropped[name]:
+                dropped[name] += 1  # it arrives after the commit: stale
+                return []
+            return [frame]
+
+        malicious_relay(n).server_filters.append(drop_first)
+    sent: list[str] = []
+    held: list[Frame] = []
+
+    def watch(frame: Frame) -> list[Frame]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "send" and proposal(env):
+            sent.append(str(env["msg_id"]))
+        return [frame]
+
+    def hold_accept(frame: Frame) -> list[Frame]:
+        if frame.get("t") == "accepted" and frame.get("msg_id") in sent and not held:
+            held.append(frame)
+            return []
+        return [frame]
+
+    malicious_relay(c).client_filters.append(watch)
+    malicious_relay(c).server_filters.append(hold_accept)
+    await c.daemon.leave(gid)
+    await c.wait(lambda: bool(held))
+    epoch = c.epoch(gid)
+    b.daemon.update(gid)
+    await c.wait(lambda: c.epoch(gid) == epoch + 1)
+    await malicious_relay(c).inject(held[0])
+    await c.wait(lambda: status(c, gid) == "left")
+    await converged([a, b], gid)
+    assert len(sent) == 2  # one proposal per epoch
+    for n in (a, b):
+        assert data(n, "member_left") == [{"identity": c.me, "by": a.me}]
+        assert len(data(n, "member_leaving")) == 1  # the first one was dropped

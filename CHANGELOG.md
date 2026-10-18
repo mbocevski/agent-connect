@@ -23,8 +23,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `groups.leave_timeout_secs` (new `[groups]` table; 7 days by default,
   at least an hour) with `left` and `confirmed: false`, in one
   transaction, and only once the runtime has caught up with the relay
-  (connected, the reconnect drain handled, the journal replayed) and is
-  then still a member and not the owner; an instance of the owner never
+  (connected, the reconnect drain handled with no frame given up, the
+  journal replayed) and is then still a member and not the owner; giving a
+  frame up reconnects, so the relay delivers it again; an instance of the owner never
   times out and reports `leave_blocked` with `timed_out` instead. A leaver
   proposes once per epoch and never commits others' leaves itself, and a
   group that is out of sync commits and times out no leaves. A removal

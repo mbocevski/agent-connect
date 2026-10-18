@@ -494,6 +494,10 @@ class Engine:
         # The relay connection (RelayLink.connections) whose reconnect drain
         # the inbound worker has handled: until then the view may be stale.
         self._caught_up = 0
+        # The connection during which the inbound worker last gave a frame up:
+        # the view misses it until the relay redelivers it, so only a later
+        # connection's drain can be caught up.
+        self._gave_up = 0
         self.running = False
         self._closed = False
         from agentconnect.runtime.groups import GroupService  # noqa: PLC0415 - import cycle
@@ -666,7 +670,8 @@ class Engine:
 
     def caught_up(self) -> bool:
         """Whether this runtime's view is as current as the relay can make
-        it: connected, the reconnect drain handled, the journal replayed."""
+        it: connected, the reconnect drain handled with no frame given up
+        (during it or since), the journal replayed."""
         return (
             self.link.connected
             and self._caught_up == self.link.connections
@@ -929,8 +934,11 @@ class Engine:
                         await self._sleep(backoff.next())
                         continue
                     # Give up for now; unacked, the relay redelivers it after
-                    # the next reconnect.
+                    # the next reconnect, which this asks for. Until a later
+                    # drain completes, the view misses it: not caught up.
+                    self._caught_up, self._gave_up = 0, self.link.connections
                     await self.emit(group_id, "processing_failed", reason=reason)
+                    await self.link.kick()
                 except Exception:
                     LOG.exception("inbound_failed", t=frame.get("t"))
                 backoff.reset()
@@ -1020,7 +1028,9 @@ class Engine:
         elif t == "deliver" and isinstance(frame.get("env"), dict):
             await self._handle_env(frame["env"])
         elif t == CAUGHT_UP:
-            self._caught_up = int(frame.get("connection") or 0)
+            connection = int(frame.get("connection") or 0)
+            if connection > self._gave_up:  # a drain with no frame given up
+                self._caught_up = connection
             self.groups.wake()
         elif t == "queue_overflow":
             group_id = str(frame.get("group_id", ""))
@@ -1331,7 +1341,8 @@ class Engine:
                 own=etype == "own_commit_confirmed",
             )
         elif etype == "removed":
-            await self.groups.on_removed(group_id, event, legacy=bool(event.get("legacy_summary")))
+            legacy = self._journalled_by_an_older_daemon(journal_key(sender, msg_id))
+            await self.groups.on_removed(group_id, event, legacy=legacy)
         elif etype == "leave_proposed":
             await self.groups.on_leave_proposed(group_id, event["member"])
         self.store.record_inbox(sender, msg_id, group_id, "done", now)
@@ -1360,10 +1371,24 @@ class Engine:
                 await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
             else:
                 event = {**entry["event"], "replayed": True}
-                if not ctx.get(SUMMARY_REPORTS_LEAVES):
-                    event["legacy_summary"] = True
                 path = "receive" if ctx.get("from_relay", True) else "confirm"
                 await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
+
+    def _journalled_by_an_older_daemon(self, key: str) -> bool:
+        """Whether the journal entry being finished was written by a daemon
+        from before ``SUMMARY_REPORTS_LEAVES``: its summary may predate the
+        core's ``left``, which then reads back empty. The entry is still pending
+        while its effects are recorded, whether it is replayed after a restart
+        or the core hands it back for the frame processed again. Only asked
+        for a removal of this instance, so the lookup costs nothing elsewhere."""
+        for entry in self.client.journal_pending():
+            if entry["key"] == key:
+                try:
+                    ctx = json.loads(entry["context"])
+                except (ValueError, TypeError):
+                    return False
+                return isinstance(ctx, dict) and not ctx.get(SUMMARY_REPORTS_LEAVES)
+        return False
 
     def _received_hop(self, group_id: str, inner: dict[str, Any]) -> int:
         """The SPEC 10.3 hop of a received message: what it claims, and at
