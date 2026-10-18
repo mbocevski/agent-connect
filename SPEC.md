@@ -393,7 +393,8 @@ The inviter instance A MUST:
    `signature_key` (§2). The KeyPackage MUST NOT carry KeyPackage
    extensions and MUST NOT be a last-resort KeyPackage.
    It MUST also be **unused** (see "KeyPackage reuse" below).
-4. Approve the join, either automatically (when policy allows) or through its
+4. Drop the request silently if it is a replay ("Replays" below). Otherwise
+   approve the join, either automatically (when policy allows) or through its
    human. Approval MUST time out after 1 hour by default, and a timeout
    rejects the join. The rejection is silent: nothing is sent to the joiner
    (a rejection message would tell a link thief its request was seen), whose
@@ -429,6 +430,27 @@ a leaf nobody controls. A KeyPackage is therefore single-use (RFC 9420
 - There is no cap on a KeyPackage's lifetime beyond this reuse tracking.
   The MLS `lifetime` field is checked by the MLS library as usual (RFC 9420
   §10.1), and an unused KeyPackage stays acceptable until it expires there.
+
+**Replays.** Reuse tracking covers an Add that was merged. A JoinRequest
+that was rejected, that lapsed, or that was dropped by a limit or by local
+policy leaves its KeyPackage unused, and the approval timeout of step 4
+runs from receipt, so a copy delivered again would pass every check and
+reach the human again, for as long as its invite is open. Therefore:
+
+- The inviter MUST remember the KeyPackageRef of **every** JoinRequest that
+  passes steps 1–3, and the envelope `msg_id` it arrived under, whatever
+  happens to it next (held for approval, approved, rejected, dropped by a
+  limit or by local policy, lapsed), until its invite's `expires_at` +
+  300 s. After that, step 1 refuses any copy.
+- It MUST silently drop a JoinRequest whose KeyPackageRef or `msg_id` it
+  remembers: no approval, nothing to the joiner, nothing to its agent. It
+  MAY record the drop in a metadata-only audit log.
+- This record MUST survive a restart (the inviter persists it in its
+  encrypted store), and it MUST be bounded without ever forgetting an
+  entry before its time: when it is full, the inviter drops new
+  JoinRequests silently until entries expire.
+
+§6.6.3 step 6 is the same rule for knocks.
 
 ### 6.3 Processing the Welcome (joiner)
 
@@ -615,8 +637,8 @@ this order:
    survive a restart (the owner persists it in its encrypted store), and it
    MUST be bounded without ever forgetting an entry before its time: when
    it is full, the owner drops new knocks silently until entries expire.
-   On top of that: at most one pending approval per knocker identity per
-   door.
+   (§6.2, "Replays", is the same rule for JoinRequests.) On top of that:
+   at most one pending approval per knocker identity per door.
 7. Apply the local limits: at most 32 pending knocks per door; the rest are
    dropped. Local policy (§10.6) may only tighten these limits.
 8. Queue a **human** approval. It shows the listing name, the knocker's
@@ -1468,7 +1490,7 @@ daemon offers:
 | Attacker | Capability | Mitigation | Residual risk |
 |---|---|---|---|
 | Honest-but-curious relay | Sees all envelopes | MLS E2E; padding | **Metadata:** membership size and churn, timing, message sizes (bucketed), mailbox ids |
-| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; single-use KeyPackages stop JoinRequest replays (§6.2); MLS signatures and epochs; replay protection via generation counters and `msg_id`; own commits confirmed only by `msg_id` or exact bytes (§8.3); routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
+| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; single-use KeyPackages and the inviter's replay record stop JoinRequest replays (§6.2); MLS signatures and epochs; replay protection via generation counters and `msg_id`; own commits confirmed only by `msg_id` or exact bytes (§8.3); routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
 | **Link leaked before use** (chat/email provider, inbox access, LLM logs, tampered landing page) | Joins as a member | Use limits and the "already used" warning; inviter approval; **SAS** | **Becomes a member if approved. Full MITM if the relay colludes and the SAS isn't compared.** |
 | Link leaked after exhaustion or expiry | — | The secret only authenticates joins | None |
 | Malicious member | Reads everything while a member; injects content | Roles and policy; removal (new epoch); endpoint policy (§10) | Everything it saw while it was a member |
