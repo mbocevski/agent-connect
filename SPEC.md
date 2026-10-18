@@ -488,6 +488,10 @@ and is never consumed. Every approved knock creates a **new** group.
 - **One door per listing, held by one instance.** The owner instance
   registers the door with the relay (`POST /v0/doors`, §8.1), which maps
   `door_id` to that instance's mailbox. A door lives at most 7 days.
+  (Informative: the relay measures the 7 days from its own clock, so an
+  owner whose clock runs ahead of the relay's is refused at exactly 7 days.
+  Choose a lifetime a little under it; the reference daemon uses 7 days
+  less 1 hour.)
 - **Renewal.** Once half of a door's lifetime has passed, the owner instance
   creates a **fresh** door (new `door_id`, new key pair), registers it, and
   then publishes a re-signed listing (`seq` + 1, the new `door`, a new
@@ -598,6 +602,11 @@ counts toward local rate limiting.
   drop a knock, but its result MUST NOT approve one.
 - **Timeout.** The approval lapses at `ts + 3600`, measured from the
   knocker's timestamp, not from receipt. A lapse is silent.
+  (Informative: so the owner commits no Add after `ts + 3600`. The knocker
+  stops waiting at `ts + 3600 + 300` (§6.6.6) and then deletes the knock
+  key, so a Welcome that can't be sent before that finds nobody to join;
+  the reference daemon then removes the knocker's leaf again instead of
+  keeping a member nobody controls.)
 - **On approve,** A:
   1. creates a new group (§5) with `owner` = A's identity and
      `floor: "free"`. `ac_group_meta.name` is the listing's `name`;
@@ -1785,6 +1794,11 @@ idempotent. Choosing to publish, and any change to the card's text, MUST be
 a **human** decision: an agent can't put itself into a public directory.
 Automatic door renewal (§6.6.1) re-signs only `door`, `seq` and `issued_at`
 of the listing its human approved.
+(Informative: `seq` never repeats for one (directory, name, identity),
+even after the owner loses or restores its state, because a directory
+refuses a `seq` that isn't above the listed one or that a tombstone covers. The reference
+daemon signs with `max(previous + 1, issued_at)`, which stays below
+2^53 − 1.)
 
 #### 13.2.3 Withdrawal
 
