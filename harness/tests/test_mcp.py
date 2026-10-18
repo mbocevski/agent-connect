@@ -394,7 +394,9 @@ async def test_the_ack_follows_the_written_result(cluster: Cluster) -> None:
     alice, bob, gid = await joined_pair(cluster)
     await alice.client.ok("agentconnect_send", {"group": gid, "text": "hello"})
     await bob.client.ok("agentconnect_wait", {"timeout_s": 300})
-    await bob.wait(lambda: not bob.engine.store.adapter_event_groups("mcp"))
+    # The ack runs in a task of its own after the write; nothing pulses the
+    # engine for it, so poll (TESTING.md).
+    await asyncio.wait_for(_until(lambda: not bob.engine.store.adapter_event_groups("mcp")), WAIT)
 
 
 @pytest.mark.timeout(60)
