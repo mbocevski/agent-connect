@@ -767,7 +767,7 @@ MLS commits (§9).
 | `DELETE /v0/invites/{invite_id}` | Revoke the invite. Inviter mailbox only. |
 | `GET /i/{invite_id}` | Landing page (HTML). It MUST NOT read the fragment. |
 | `POST /v0/doors` | Register a door (§6.6.1). Body: `{"door_id", "expires_at", "owner_mailbox"}`; unknown fields are rejected. The owner chooses `door_id` (16 random bytes, base64url). Mailbox auth required. `expires_at` is in the future and at most 7 days away. Answers `201 {"door_id", "expires_at"}`. |
-| `DELETE /v0/doors/{door_id}` | Close the door now. Owner mailbox only. Answers `204`. Closing changes nothing for a door that is already closed or expired, which answers `door_not_open`. |
+| `DELETE /v0/doors/{door_id}` | Close the door now. Owner mailbox only. Answers `204`, also for a door the owner already closed (closing is idempotent). A door the relay doesn't hold, including one purged after it expired, answers `door_not_open`. |
 | `GET /healthz`, `GET /metrics` | Operations |
 
 There is no `GET` for doors (`405`): everything a knocker needs is in the
@@ -1009,7 +1009,7 @@ Mapping of the cases above:
 |---|---|
 | `invite.consume` or `DELETE` by a mailbox that is not the inviter | `auth_failed` |
 | Unknown, exhausted, expired or revoked invite (consume, `join`, `GET`) | `invite_not_open` |
-| Unknown, expired or closed door (`knock`, `DELETE /v0/doors/{door_id}`) | `door_not_open` (HTTP 404 on REST) |
+| `knock` on an unknown, expired or closed door; `DELETE /v0/doors/{door_id}` on a door the relay doesn't hold | `door_not_open` (HTTP 404 on REST) |
 | `POST /v0/doors` whose `owner_mailbox` isn't the caller; `DELETE /v0/doors/{door_id}` by a mailbox that is not the door's owner; an unsigned or replayed door request | `auth_failed` |
 | `knock` over the per-(door, sender) or per-sender limit (§8.3) | `rate_limited` |
 | `POST /v0/doors` with 4 doors already open for the mailbox | `quota_exceeded` (HTTP 429) |
