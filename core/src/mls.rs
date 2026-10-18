@@ -243,6 +243,25 @@ pub(crate) fn precheck_key_package(bytes: &[u8]) -> Result<()> {
     check_tree_keys(std::iter::once(rest.to_vec()), std::iter::empty())
 }
 
+/// The leaf `signature_key` of a serialised KeyPackage, read from the raw
+/// bytes after [`precheck_key_package`]. It validates nothing else (no
+/// signature, certificate or lifetime): only for checks that come after
+/// [`validate_key_package`], or for test vectors whose KeyPackages expire.
+#[cfg(test)]
+pub(crate) fn key_package_signature_key(bytes: &[u8]) -> Result<[u8; 32]> {
+    precheck_key_package(bytes)?;
+    // version(2) ‖ suite(2) ‖ init_key<V> ‖ encryption_key<V> ‖ signature_key<V>
+    let mut rest = &bytes[4..];
+    for _ in 0..2 {
+        VLBytes::tls_deserialize(&mut rest).map_err(|_| Error::InvalidKeyPackage("encoding"))?;
+    }
+    let sig =
+        VLBytes::tls_deserialize(&mut rest).map_err(|_| Error::InvalidKeyPackage("encoding"))?;
+    sig.as_slice()
+        .try_into()
+        .map_err(|_| Error::CredentialMismatch("leaf signature key length"))
+}
+
 /// What a validated leaf tells us about its instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LeafInfo {

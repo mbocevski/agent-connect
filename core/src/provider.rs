@@ -212,6 +212,12 @@ impl MemoryStore {
         Self::default()
     }
 
+    /// How many MLS values the store holds (key packages, keys, groups).
+    #[cfg(test)]
+    pub(crate) fn mls_value_count(&self) -> usize {
+        self.mls.values.read().map_or(0, |v| v.len())
+    }
+
     fn mls_values(&self) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<Vec<u8>, Vec<u8>>>> {
         self.mls
             .values

@@ -10,6 +10,12 @@ extend-exclude = [
     "testdata/invite-urls.json",
     "testdata/padding-vectors.json",
     "testdata/sas-vectors.json",
+    "testdata/listings.json",
+    "testdata/listing-tokens.json",
+    "testdata/withdrawals.json",
+    "testdata/owner-files.json",
+    "testdata/knocks.json",
+    "core/fuzz/Cargo.lock",
 ]
 
 [default.extend-words]

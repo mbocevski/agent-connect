@@ -73,6 +73,49 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`rate_limited`). Past 10 per door per minute, or when the owner's queue
   is full, a knock is dropped but still answered `accepted`. There are no
   delivery receipts and no reject frame.
+- Core: discovery (`agentconnect_core::listing` and `::knock`, with Python
+  bindings), the one implementation the directory and the daemon verify
+  through. Signed listings: the closed AgentCard schema and text limits,
+  one-line text everywhere (no control, format, separator, private-use or
+  unassigned characters of Unicode 17.0.0, no default-ignorable or blank
+  characters, no space but U+0020, at most 4 combining marks in a row, and
+  NFC; the same for knock display names and notes, JoinRequest display
+  names and group names and purposes),
+  the canonical JCS profile (non-canonical bytes are rejected), and the
+  single `EdDSA` JWS by the identity key, which a2a-sdk's own verifier
+  accepts; the token's binding to the listing is checked as part of
+  parsing. Operator listing tokens checked against pinned directory keys
+  (90-day lifetime, not-before, expiry, revocation), token revocations,
+  `seq` and tombstones per (directory, name, identity) with
+  `SignedListing::replaces`, `tombstoned_by` and a `NameRecord` that keeps
+  each name's token high-water mark and
+  tombstones for directories and mirrors, so a superseded key can't take a
+  name back,
+  withdrawals, and the owner well-known file with its owner states (a
+  negative result is sticky until a later fetch vouches, and a file that
+  doesn't parse counts as a failed fetch; `OwnerHistory` in Python). Doors
+  (HPKE key pairs in the v0 suite, checked when loaded), sealed and signed
+  knocks, the owner's checks 1 to 5, a `KnockLedger` that drops replayed
+  knocks by `knock_id` and KeyPackage until they lapse (bounded, never
+  evicting a live entry, and exportable so the daemon persists it), and the knock
+  Welcome wrap. A knock to a door key HPKE refuses leaves no KeyPackage
+  behind, and `Client::forget_knock` deletes a lapsed knock's KeyPackage. Vectors in `testdata/`
+  (`listings.json`, `listing-tokens.json`, `withdrawals.json`,
+  `owner-files.json`, `knocks.json`), property tests and a `core/fuzz`
+  target for the parsers. Every core error has a stable kind
+  (`Error::kind()`, `AgentConnectError.kind` in Python: `signature`,
+  `unknown_key`, `expired`, `revoked`, `token_mismatch`, `door_expired`,
+  `stale_timestamp` and so on), so callers never match on messages.
+- Protocol: discovery (ADR-006). SPEC gains signed listings, a closed A2A
+  AgentCard profile carrying the `e2e` extension
+  (`https://yggdrasill.network/ext/agentconnect/e2e/v0`) and one `EdDSA`
+  JWS by the identity key (§13.1); directories with operator-signed
+  listing tokens, token revocations, signed withdrawals, the owner
+  `/.well-known/agentconnect.json` file and its states, and the cache and
+  mirror rules (§13.2); doors and sealed, signed knocks that become new
+  two-member groups on human approval only (§6.6); the `knock` envelope
+  and frame, `POST`/`DELETE /v0/doors` and `door_not_open` (§7.1, §8); and
+  the new threat-model rows (§12).
 - Linux arm64 and macOS arm64 support. CI runs the fast tier on both and
   builds the relay container image for `linux/amd64` and `linux/arm64`.
   Releases add an aarch64 manylinux 2.28 `agentconnect-core` wheel, an

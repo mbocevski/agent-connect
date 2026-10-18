@@ -29,9 +29,9 @@ pub const MAX_TTL: Duration = Duration::from_hours(7 * 24);
 const JOIN_INFO: &[u8] = b"agentconnect/v0/join";
 const WELCOME_INFO: &[u8] = b"agentconnect/v0/welcome";
 const WELCOME_AAD_LABEL: &[u8] = b"agentconnect/v0/welcome";
-const NONCE_LEN: usize = 12;
+pub(crate) const NONCE_LEN: usize = 12;
 
-fn hkdf32(ikm: &[u8], salt: &[u8], info: &[u8]) -> Zeroizing<[u8; 32]> {
+pub(crate) fn hkdf32(ikm: &[u8], salt: &[u8], info: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut out = Zeroizing::new([0u8; 32]);
     // 32 bytes is far below HKDF-SHA256's 8160-byte limit, so this can't fail.
     if Hkdf::<Sha256>::new(Some(salt), ikm)
@@ -139,17 +139,7 @@ impl InviteSecret {
         nonce: &[u8; NONCE_LEN],
         welcome: &[u8],
     ) -> Result<Vec<u8>> {
-        let crypto = CryptoProvider::new().map_err(|_| Error::Rng)?;
-        let ct = crypto
-            .aead_encrypt(
-                AeadType::ChaCha20Poly1305,
-                self.welcome_key().as_slice(),
-                welcome,
-                nonce,
-                &self.welcome_aad(),
-            )
-            .map_err(|_| Error::Internal("welcome AEAD encryption failed"))?;
-        Ok([nonce.as_slice(), &ct].concat())
+        seal_wrapped_welcome(&self.welcome_key(), &self.welcome_aad(), nonce, welcome)
     }
 
     /// Opens a `WrappedWelcome` (SPEC §6.3, first check).
@@ -159,21 +149,41 @@ impl InviteSecret {
     /// [`Error::WelcomeAuth`] if the input is too short or doesn't
     /// authenticate under this invite's `welcome_key`.
     pub fn unwrap_welcome(&self, wrapped: &[u8]) -> Result<Vec<u8>> {
-        if wrapped.len() < NONCE_LEN + 16 {
-            return Err(Error::WelcomeAuth);
-        }
-        let (nonce, ct) = wrapped.split_at(NONCE_LEN);
-        let crypto = CryptoProvider::new().map_err(|_| Error::Rng)?;
-        crypto
-            .aead_decrypt(
-                AeadType::ChaCha20Poly1305,
-                self.welcome_key().as_slice(),
-                ct,
-                nonce,
-                &self.welcome_aad(),
-            )
-            .map_err(|_| Error::WelcomeAuth)
+        open_wrapped_welcome(&self.welcome_key(), &self.welcome_aad(), wrapped)
     }
+}
+
+/// The SPEC §6.4 `WrappedWelcome` under any `welcome_key` and AAD:
+/// `nonce(12) ‖ ChaCha20-Poly1305(key, nonce, aad, welcome)`. Invites and
+/// knocks (§6.6) differ only in the key and the AAD.
+pub(crate) fn seal_wrapped_welcome(
+    key: &[u8; 32],
+    aad: &[u8],
+    nonce: &[u8; NONCE_LEN],
+    welcome: &[u8],
+) -> Result<Vec<u8>> {
+    let crypto = CryptoProvider::new().map_err(|_| Error::Rng)?;
+    let ct = crypto
+        .aead_encrypt(AeadType::ChaCha20Poly1305, key, welcome, nonce, aad)
+        .map_err(|_| Error::Internal("welcome AEAD encryption failed"))?;
+    Ok([nonce.as_slice(), &ct].concat())
+}
+
+/// Opens a [`seal_wrapped_welcome`] output.
+///
+/// # Errors
+///
+/// [`Error::WelcomeAuth`] if `wrapped` is shorter than nonce plus tag or
+/// doesn't authenticate.
+pub(crate) fn open_wrapped_welcome(key: &[u8; 32], aad: &[u8], wrapped: &[u8]) -> Result<Vec<u8>> {
+    if wrapped.len() < NONCE_LEN + 16 {
+        return Err(Error::WelcomeAuth);
+    }
+    let (nonce, ct) = wrapped.split_at(NONCE_LEN);
+    let crypto = CryptoProvider::new().map_err(|_| Error::Rng)?;
+    crypto
+        .aead_decrypt(AeadType::ChaCha20Poly1305, key, ct, nonce, aad)
+        .map_err(|_| Error::WelcomeAuth)
 }
 
 impl fmt::Debug for InviteSecret {

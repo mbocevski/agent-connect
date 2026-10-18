@@ -415,6 +415,77 @@ impl<S: Store> Client<S> {
         )
     }
 
+    /// A fresh KeyPackage (TLS bytes) for this instance; its private keys
+    /// go to this client's store.
+    pub(crate) fn new_key_package(&self) -> Result<Vec<u8>> {
+        let tx = Tx::begin(self.store())?;
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities())
+            .leaf_node_extensions(leaf_extensions(self.instance.cert())?)
+            .build(CS, &self.provider, &self.signer(), self.credential())
+            .map_err(mls)?;
+        tx.commit()?;
+        bundle.key_package().tls_serialize_detached().map_err(mls)
+    }
+
+    /// SPEC §6.2 step 3 on a peer's KeyPackage, before the MLS group sees
+    /// it: everything [`validate_key_package`] checks, the mailbox id is
+    /// the one derived from its leaf signature key, and it is unused.
+    /// Returns the KeyPackage, its `KeyPackageRef` and the leaf.
+    pub(crate) fn check_peer_key_package(
+        &self,
+        bytes: &[u8],
+        mailbox_id: &str,
+    ) -> Result<(KeyPackage, Vec<u8>, LeafInfo)> {
+        let (key_package, info) = validate_key_package(self.provider.crypto(), bytes)?;
+        if leaf_mailbox(&info) != mailbox_id {
+            return Err(Error::CredentialMismatch(
+                "mailbox_id != key package signature key",
+            ));
+        }
+        let kp_ref = key_package_ref(self, &key_package)?;
+        if records::key_package_used(self.provider.records(), &kp_ref)? {
+            return Err(Error::KeyPackageReused);
+        }
+        Ok((key_package, kp_ref, info))
+    }
+
+    /// Deletes the private keys of a KeyPackage this instance made, given
+    /// its TLS bytes: for a knock that lapsed (SPEC §6.6.6) or any other
+    /// KeyPackage that will never be used. Deleting one that isn't stored
+    /// is not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Storage`], or an MLS error computing its reference.
+    pub fn delete_key_package(&self, key_package: &[u8]) -> Result<()> {
+        use openmls_traits::storage::StorageProvider as _;
+        let kp_ref = openmls::ciphersuite::hash_ref::make_key_package_ref(
+            key_package,
+            CS,
+            self.provider.crypto(),
+        )
+        .map_err(mls)?;
+        let tx = Tx::begin(self.store())?;
+        self.provider
+            .storage()
+            .delete_key_package(&kp_ref)
+            .map_err(storage)?;
+        tx.commit()
+    }
+
+    /// The memory store, for tests that count what it holds.
+    #[cfg(test)]
+    pub(crate) fn store_for_testing(&self) -> &S {
+        self.store()
+    }
+
+    /// Records `kp_ref` as used, as merging an Add of it would.
+    #[cfg(test)]
+    pub(crate) fn mark_key_package_used_for_testing(&self, kp_ref: &[u8]) -> Result<()> {
+        records::mark_key_packages_used(self.provider.records(), &[kp_ref.to_vec()])
+    }
+
     /// Creates a JoinRequest for an invite (SPEC §6.1). The KeyPackage's
     /// private keys go to this client's store.
     ///
@@ -428,14 +499,7 @@ impl<S: Store> Client<S> {
         display_name: &str,
     ) -> Result<JoinRequest> {
         check_display_name(display_name)?;
-        let tx = Tx::begin(self.store())?;
-        let bundle = KeyPackage::builder()
-            .leaf_node_capabilities(capabilities())
-            .leaf_node_extensions(leaf_extensions(self.instance.cert())?)
-            .build(CS, &self.provider, &self.signer(), self.credential())
-            .map_err(mls)?;
-        tx.commit()?;
-        let key_package = bundle.key_package().tls_serialize_detached().map_err(mls)?;
+        let key_package = self.new_key_package()?;
         let mailbox_id = self.instance.mailbox_id();
         let mut request = JoinRequest {
             invite_id: *invite.id(),
@@ -473,17 +537,8 @@ impl<S: Store> Client<S> {
         if !request.mac_ok(&invite.secret().join_key()) {
             return Err(Error::BadMac);
         }
-        let (key_package, info) =
-            validate_key_package(self.provider.crypto(), &request.key_package)?;
-        if leaf_mailbox(&info) != request.mailbox_id {
-            return Err(Error::CredentialMismatch(
-                "mailbox_id != key package signature key",
-            ));
-        }
-        let kp_ref = key_package_ref(self, &key_package)?;
-        if records::key_package_used(self.provider.records(), &kp_ref)? {
-            return Err(Error::KeyPackageReused);
-        }
+        let (key_package, kp_ref, info) =
+            self.check_peer_key_package(&request.key_package, &request.mailbox_id)?;
         Ok(VerifiedJoinRequest {
             invite_id: request.invite_id,
             display_name: request.display_name.clone(),

@@ -44,6 +44,11 @@ what it does not protect against.
 | **Mailbox** | The relay-side queue for one instance. It is addressed by `mailbox_id` = base64url(SHA-256(SK.pub))[0..22]. |
 | **Invite** | A use-limited capability to join one group, made of a public `invite_id` and a secret `invite_secret`. |
 | **Owner / admin / member** | Group roles (§9). |
+| **Listing** | A signed A2A AgentCard with the `e2e` extension (§13.1). |
+| **Directory** | A server that indexes and serves listings (§13.2). |
+| **Door** | A relay-registered public handle `door_id` with an HPKE key, that accepts knocks (§6.6). |
+| **Knock** | A sealed, signed request for a new group through a door (§6.6). |
+| **Listing token** | An operator-signed authorisation to list one identity under one name (§13.2). |
 
 ## 3. Cryptographic profile
 
@@ -179,6 +184,8 @@ GroupMeta = {
 }
 ```
 
+`name` and `purpose` MUST be one-line text (§13.1.2; `purpose` may be
+empty), and receivers MUST reject a `GroupMeta` whose text isn't.
 `purpose` is the **scope** of the conversation. Daemons MUST pass it to their
 adapters with every delivery (§10).
 
@@ -192,6 +199,26 @@ ASCII strings and `‖` means concatenation.
 | `join_key` | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/join", L = 32) |
 | `welcome_key` (§6.4) | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/welcome", L = 32) |
 | `sas_bytes` | HKDF(ikm = epoch_authenticator, salt = group_id, info = "agentconnect/v0/sas" ‖ u64be(epoch), L = 6) |
+| knock `welcome_key` (§6.6) | HKDF(ikm = welcome_secret, salt = knock_id, info = "agentconnect/v0/knock-welcome", L = 32) |
+
+`knock_id` and `door_id` are the raw 16 bytes here, not base64url.
+
+Other labels:
+
+| Label | Use |
+|---|---|
+| `agentconnect/v0/knock` ‖ door_id | HPKE `info` of a `SealedKnock` (§6.6) |
+| `agentconnect/v0/knock` | Prefix of the knock signature input, signed by the knocker's `SK` (§6.6) |
+| `agentconnect/v0/knock-welcome` ‖ knock_id | AAD of the knock-wrapped Welcome (§6.6) |
+| `agentconnect/v0/listing-withdraw` | Prefix of a `Withdrawal` signature input, signed by `IK` (§13.2) |
+| `agentconnect/v0/listing-token` | Prefix of a `ListingToken` signature input, signed by the directory operator's `DK` (§13.2) |
+| `agentconnect/v0/listing-token-revoke` | Prefix of a `TokenRevocation` signature input, signed by `DK` (§13.2) |
+
+Every signature by an identity key `IK` is an instance certificate (§3.3),
+a listing JWS (§13.1) or a withdrawal (§13.2). The instance certificate and
+the withdrawal inputs start with their `agentconnect/v0/` labels, and a JWS
+signing input starts with the base64url of `{"` (`eyJ`), so no `IK`
+signature of one kind verifies as another.
 
 ## 4. Invites
 
@@ -319,8 +346,9 @@ mac_input = "agentconnect/v0/join-request"
 The label is not length-prefixed. `testdata/invite-kdf.json` gives
 `mac_input` and `mac` for sample inputs.
 
-`display_name` is at most 80 characters and MUST NOT contain control
-characters (Unicode category Cc); the inviter MUST reject a request that
+`display_name` is at most 80 characters of one-line text (§13.1.2: no
+control, format, separator, private-use, unassigned or ignorable character,
+no space but U+0020, NFC); the inviter MUST reject a request that
 breaks either rule. The MAC stops the relay from renaming the joiner, but
 the name is still chosen by the joiner, so the inviter's UI MUST present
 it as unverified text.
@@ -426,7 +454,9 @@ WrappedWelcome = nonce(12) ‖ ChaCha20-Poly1305(welcome_key, nonce, aad = "agen
   MLS Welcome message. A `WrappedWelcome` shorter than nonce plus tag (28
   bytes) MUST be rejected.
 - This is the only Welcome format in v0. The envelope kind is always
-  `welcome_wrapped`; an unwrapped `welcome` MUST be rejected.
+  `welcome_wrapped`; an unwrapped `welcome` MUST be rejected. The Welcome
+  of an approved knock (§6.6) has the same format, with the knock's
+  `welcome_key` and AAD in place of the invite's.
 - The AEAD is independent of the MLS ciphersuite: it binds the Welcome to the
   invite; MLS protects the group secrets inside it.
 
@@ -436,6 +466,187 @@ Each new member instance SHOULD send its A2A Agent Card (`kind:
 a2a.agent_card`, §7.2) to the group. Existing members SHOULD resend theirs,
 addressed to the new member. Agent Cards are never published to the relay.
 A received card is as trustworthy as the member that sent it (§10.5).
+
+### 6.6 Knocking on a door
+
+A **door** is a public, relay-registered address that accepts **knocks**.
+A listing (§13.1) carries its door. A **knock** asks the door's owner for a
+new two-member group. It is sealed to the door's key and signed by the
+knocker's instance key. **Approving a knock** creates that group and sends a
+wrapped Welcome; rejection and timeout send nothing.
+
+A door is not an invite (§4): it has no secret, is not bound to a group,
+and is never consumed. Every approved knock creates a **new** group.
+
+#### 6.6.1 Doors
+
+- The **door key** is an HPKE (RFC 9180) key pair of the v0 suite's own
+  HPKE algorithms: KEM `MLKEM768-X25519` (§3.1), KDF HKDF-SHA256, AEAD
+  AES-128-GCM. Its public key is 1216 bytes. The private key stays in the
+  owning instance's encrypted store (§12).
+- `door_id` is 16 random bytes, base64url without padding (22 characters).
+- **One door per listing, held by one instance.** The owner instance
+  registers the door with the relay (`POST /v0/doors`, §8.1), which maps
+  `door_id` to that instance's mailbox. A door lives at most 7 days.
+- **Renewal.** Once half of a door's lifetime has passed, the owner instance
+  creates a **fresh** door (new `door_id`, new key pair), registers it, and
+  then publishes a re-signed listing (`seq` + 1, the new `door`, a new
+  `issued_at`). The old door stays registered until its own `expires_at`.
+  Its private key MUST be deleted 1 hour after that `expires_at`, once every
+  knock it could have received has lapsed. If the listing can't be
+  published, the old door is kept until it expires and the owner's human is
+  told. Renewal re-signs only `door`, `seq` and `issued_at`; any change to
+  the card's text is a new publish, which is a human decision (§13.2).
+- **Closing.** `DELETE /v0/doors/{door_id}` closes a door at once. From then
+  on the relay answers every knock on it with `door_not_open`.
+
+#### 6.6.2 The knock
+
+The knocker instance B fetches the listing and verifies it (§13.1, §13.2).
+It checks that the listing's `relay` is the relay it is configured for
+(§4.4), that `door` is present, and that `door.expires_at` is in the future.
+It SHOULD fetch the owner's well-known file itself (§13.2) and MUST show its
+human the listing name, the fingerprint, the owner state and the
+description, marked as unverified text. Then it builds:
+
+```text
+Knock = {
+  "v": 0,
+  "door_id": "<22 b64url>",
+  "knock_id": "<16 random bytes, b64url>",
+  "ts": <unix seconds>,
+  "display_name": "<≤ 80 chars of one-line text>",
+  "note": "<1 to 500 chars of one-line text; optional>",
+  "key_package": "<b64url MLS KeyPackage, v0 suite, with ac_instance_cert, fresh, used for this knock only>",
+  "mailbox_id": "<B's mailbox>",
+  "welcome_secret": "<32 random bytes, b64url>",
+  "sig": "<b64url Ed25519(SK_B, "agentconnect/v0/knock" || JCS(knock without "sig"))>"
+}
+SealedKnock = enc(1120) ‖ HPKE.Seal(door.key, info = "agentconnect/v0/knock" ‖ door_id, aad = "", JCS(Knock))
+```
+
+- The `Knock` is a JCS object (§3.2) with exactly these fields; `note` is
+  absent rather than empty. `display_name` and `note` MUST be one-line text
+  as defined in §13.1.2 (no Cc, Cf, Zl, Zp, Co, Cs or Cn character of
+  Unicode 17.0.0, and no space but U+0020): the owner's human approves by
+  them, so they must not split lines or reorder what is shown next to
+  them. A knock that breaks this fails check 2 (§6.6.3).
+  `SealedKnock` is HPKE base mode (RFC 9180
+  §5.1.1), single-shot: `enc` is the 1120-byte KEM ciphertext and the rest
+  is the AEAD ciphertext. In `info`, `door_id` is the raw 16 bytes.
+- `sig` is made with the KeyPackage's leaf signature key `SK_B`, and the
+  KeyPackage's instance certificate binds `SK_B` to B's identity (§3.3).
+  It binds every field to B, including `door_id`, so a knock can't be
+  redirected to another door, and a relay that saw one of B's KeyPackages
+  can't knock in B's name.
+- The seal hides B's identity, display name, note and KeyPackage from the
+  relay. The relay sees a sender mailbox, a `door_id`, a size and a time.
+- `welcome_secret` plays the invite secret's role for the Welcome wrap.
+  Only B and the door's owner know it.
+- A knocker MUST check that `door.key` is exactly 1216 bytes, and that HPKE
+  accepts it as a key of the suite, before it builds the KeyPackage: a knock
+  that fails MUST leave no KeyPackage private keys behind.
+- An instance has at most 8 pending knocks.
+- B sends the sealed knock as `{"t": "knock", "door_id", "env"}` (§8.2).
+  Knocking is not a human-only action: an agent MAY start one. Approving
+  one is human-only (§6.6.4).
+
+#### 6.6.3 The owner's checks
+
+The owner instance A, which holds the door, MUST perform these checks, in
+this order:
+
+1. Find the door by the envelope's `door_id`. It MUST be a door A holds a
+   key for and that expired at most 1 hour ago.
+2. Check that the sealed knock is longer than 1120 bytes, and open the
+   seal. Check that the plaintext is canonical JCS with exactly the fields
+   of `Knock`, that `v` is 0, that the field values have the forms above,
+   and that its `door_id` equals the envelope's.
+3. Check that `ts` is within [now − 3600 s, now + 300 s].
+4. Check the KeyPackage as in §6.2 step 3: v0 ciphersuite, HPKE key
+   lengths (§3.1), signature, instance certificate, capabilities, no
+   KeyPackage extensions, not last resort, **unused** (§6.2, "KeyPackage
+   reuse"), and `mailbox_id` derived from its leaf `signature_key` (§2).
+5. Verify `sig` under that leaf `signature_key` (strict Ed25519).
+6. Drop replays and deduplicate. The owner MUST remember the `knock_id`
+   and the KeyPackageRef of **every** knock that passes steps 1–5, whatever
+   happens to it next (queued, approved, rejected, dropped by a limit or by
+   local policy, lapsed), until `ts + 3600 + 300`, and MUST silently drop a
+   knock whose `knock_id` or KeyPackageRef it remembers. The relay sees
+   every sealed knock and could otherwise redeliver one the human already
+   rejected, for as long as its `ts` passes step 3. This record MUST
+   survive a restart (the owner persists it in its encrypted store), and it
+   MUST be bounded without ever forgetting an entry before its time: when
+   it is full, the owner drops new knocks silently until entries expire.
+   On top of that: at most one pending approval per knocker identity per
+   door.
+7. Apply the local limits: at most 32 pending knocks per door; the rest are
+   dropped. Local policy (§10.6) may only tighten these limits.
+8. Queue a **human** approval. It shows the listing name, the knocker's
+   display name and note as unverified text, and the knocker's
+   fingerprint (§2).
+
+Every failure drops the knock **silently**. A knock that fails steps 1–5
+counts toward local rate limiting.
+
+#### 6.6.4 Approval
+
+- **Every knock needs its human's approval. There is no automatic approval
+  in v0.** An implementation MUST NOT offer a configuration that approves
+  knocks, and MUST NOT let an agent approve one: no agent-callable
+  operation, SDK call or tool may approve a knock. Local policy (§10.6) MAY
+  drop a knock, but its result MUST NOT approve one.
+- **Timeout.** The approval lapses at `ts + 3600`, measured from the
+  knocker's timestamp, not from receipt. A lapse is silent.
+- **On approve,** A:
+  1. creates a new group (§5) with `owner` = A's identity and
+     `floor: "free"`. `ac_group_meta.name` is the listing's `name`;
+     `purpose` is chosen by A's human and defaults to the listing's
+     description;
+  2. sends `group.create`;
+  3. commits `Add(B.key_package)`;
+  4. wraps the Welcome as a `WrappedWelcome` (§6.4) under the knock
+     `welcome_key` (§3.5), with
+     `aad = "agentconnect/v0/knock-welcome" ‖ knock_id` (`knock_id` raw);
+  5. sends it to the knock's `mailbox_id` as `welcome_wrapped`;
+  6. deletes the knock's `welcome_secret`.
+
+  There is no consume step.
+- An owner MUST NOT send anything to a knocker except the Welcome of an
+  approved knock. In particular there is no reject message.
+
+#### 6.6.5 The knocker's checks on the Welcome
+
+B processes the Welcome with the checks of §6.3, except that the comparison
+with `InviteMeta` is replaced by these:
+
+- The Welcome unwraps under the `welcome_key` of one of B's pending knocks.
+  B tries each pending knock in turn, as it does for pending joins.
+- `ac_group_policy.owner` and `ac_group_meta.created_by` both equal the
+  listing's `identity`.
+- The group has exactly two leaves: B's own, and one leaf of the listed
+  identity whose instance certificate verifies.
+- `ac_group_meta.name` equals the listing's `name`.
+
+A Welcome that unwraps but fails these checks MUST be dropped and MUST
+raise `relay_misbehaviour`: only the knock's two ends know the key, so
+either the owner is broken or the knock key leaked. After a successful
+join, B deletes the knock's `welcome_secret`. The new member starts
+`unverified`, as every new member does (§11): the listing's identity is not
+a substitute for comparing the SAS.
+
+#### 6.6.6 What the knocker learns
+
+| When | It learns |
+|---|---|
+| On sending | `accepted`, `door_not_open` or `rate_limited` (§8.3). `accepted` also covers per-door overflow and a full owner queue. |
+| While pending | Nothing: no delivery receipt, no visible ack, no reject frame. |
+| On approval | A Welcome arrives. |
+| At `ts + 3600 + 300` with no Welcome | "No answer." B deletes the knock's `welcome_secret` and its KeyPackage's private keys and reports the knock as lapsed, never as rejected. |
+
+Until the deadline, every outcome other than approval produces the same
+observation, so a rejection is indistinguishable from a timeout, an
+offline owner, a dropped knock or a failed check.
 
 ## 7. Messages
 
@@ -447,8 +658,9 @@ padding.
 ```text
 Envelope = {
   "v": 0,
-  "kind": "commit" | "proposal" | "application" | "welcome_wrapped" | "join_request",
-  "group_id": "...",           // absent for join_request
+  "kind": "commit" | "proposal" | "application" | "welcome_wrapped" | "join_request" | "knock",
+  "group_id": "...",           // absent for join_request and knock
+  "door_id": "...",            // knock only (§6.6)
   "epoch": <u64>,              // commit, proposal, application; equals the MLS PrivateMessage epoch
   "msg_id": "<16 random bytes>",
   "sender": "<mailbox_id>",
@@ -457,10 +669,16 @@ Envelope = {
     "add": ["<mailbox_id>"],
     "remove": ["<mailbox_id>"]
   },
-  "ct": "<b64url MLS message, WrappedWelcome or JoinRequest JSON>"
+  "ct": "<b64url MLS message, WrappedWelcome, JoinRequest JSON or SealedKnock>"
 }
 ```
 
+- A `knock` envelope is `{v: 0, kind: "knock", door_id, msg_id, sender,
+  ct}`: `group_id`, `epoch`, `to` and `routing` MUST be absent, and its `ct`
+  is a `SealedKnock` (§6.6.2) of at most 16 KiB once decoded. No other kind
+  may carry `door_id`. It is delivered only to the
+  mailbox that registered the door, so an instance that never registered a
+  door never receives one.
 - Application ciphertext MUST be padded inside MLS (`PrivateMessage` padding)
   up to the next of these bucket sizes: 256 B, 1 KiB, 4 KiB, 16 KiB, 64 KiB,
   256 KiB, 1 MiB. The bucket is the AEAD ciphertext length: plaintext plus
@@ -483,8 +701,9 @@ Envelope = {
   message is not processed in the envelope's group.
 - A receiver MUST drop, before any MLS processing, an envelope whose fields
   don't have the types above (for example an `epoch` that isn't an
-  integer, or `routing` that isn't an object of mailbox lists). The relay
-  controls every one of them.
+  integer, `routing` that isn't an object of mailbox lists, or a `door_id`
+  that isn't canonical base64url of 16 bytes). The relay controls every one
+  of them.
 - After processing a commit, members MUST check its `routing` hints against
   the commit's actual Add and Remove proposals. A mismatch MUST raise a
   `relay_misbehaviour` alert. The relay could be dropping or misrouting
@@ -572,16 +791,22 @@ MLS commits (§9).
 | `GET /v0/invites/{invite_id}` | Get `InviteMeta`. Public. |
 | `DELETE /v0/invites/{invite_id}` | Revoke the invite. Inviter mailbox only. |
 | `GET /i/{invite_id}` | Landing page (HTML). It MUST NOT read the fragment. |
+| `POST /v0/doors` | Register a door (§6.6.1). Body: `{"door_id", "expires_at", "owner_mailbox"}`; unknown fields are rejected. The owner chooses `door_id` (16 random bytes, base64url). Mailbox auth required. `expires_at` is in the future and at most 7 days away. Answers `201 {"door_id", "expires_at"}`. |
+| `DELETE /v0/doors/{door_id}` | Close the door now. Owner mailbox only. Answers `204`, also for a door the owner already closed (closing is idempotent). A door the relay doesn't hold, including one purged after it expired, answers `door_not_open`. |
 | `GET /healthz`, `GET /metrics` | Operations |
 
+There is no `GET` for doors (`405`): everything a knocker needs is in the
+signed listing (§13.1).
+
 REST errors are JSON `{"code": "<§8.4 code>", "detail": "..."}` with the HTTP
-status 400 (`bad_request`), 401 (`auth_failed`), 404 (`invite_not_open`), 413
-(`too_large`), 429 (`rate_limited`) or 500 (`internal`).
+status 400 (`bad_request`), 401 (`auth_failed`), 404 (`invite_not_open`,
+`door_not_open`), 413 (`too_large`), 429 (`rate_limited`, `quota_exceeded`)
+or 500 (`internal`).
 
 #### 8.1.1 Signed requests
 
-`POST` and `DELETE /v0/invites…` are authenticated with the instance key
-`SK`, the same key as the WebSocket (§8.2):
+`POST` and `DELETE /v0/invites…` and `/v0/doors…` are authenticated with the
+instance key `SK`, the same key as the WebSocket (§8.2):
 
 ```text
 Authorization: AgentConnect-Ed25519 <b64url SK.pub>.<ts>.<b64url sig>
@@ -600,7 +825,8 @@ zeros). `testdata/relay-auth.json` lists examples.
 
 `ts` is decimal unix seconds, `PATH` is the request path without query, and
 `body` is empty for `DELETE`. The authenticated mailbox is derived from
-`SK.pub` as in §2. For `POST`, `inviter_mailbox` MUST equal it (else
+`SK.pub` as in §2. For `POST /v0/invites`, `inviter_mailbox` MUST equal it,
+and for `POST /v0/doors`, `owner_mailbox` MUST equal it (else
 `auth_failed`).
 
 - The relay MUST reject a request whose `ts` differs from its clock by more
@@ -632,6 +858,7 @@ zeros). `testdata/relay-auth.json` lists examples.
    - `{"t": "group.create", "group_id": "...", "epoch": 0, "msg_id": "..."}`
    - `{"t": "invite.consume", "invite_id": "...", "msg_id": "..."}`
    - `{"t": "join", "invite_id": "...", "env": Envelope(kind=join_request)}`, sent from the joiner's mailbox.
+   - `{"t": "knock", "door_id": "...", "env": Envelope(kind=knock)}`, sent from the knocker's mailbox (§6.6). The envelope's `door_id` MUST equal the frame's. A `knock` envelope inside `send` or `join` is `bad_request`. There is no new server frame: the owner receives the envelope verbatim in a normal `deliver` (store and forward, with the 7-day TTL of §8.3), and the knocker gets `accepted` or `error` for the envelope's `msg_id`.
 3. **Server → client frames**
    - `{"t": "deliver", "env": Envelope}`
    - `{"t": "accepted", "msg_id": "..."}`
@@ -721,6 +948,41 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   mailbox. If a mailbox doesn't exist yet, the relay creates it.
 - **`join`:** forwarded to the invite's `inviter_mailbox` if the invite is
   open. It is rate-limited per invite: 10 per minute by default.
+- **Doors and `knock`:** the relay keeps a door registry
+  `{door_id → (owner_mailbox, expires_at, open)}`, filled by
+  `POST /v0/doors` and closed by `DELETE /v0/doors/{door_id}` (§8.1). A
+  mailbox has at most 4 open doors (so renewal can overlap); a fifth is
+  refused with `quota_exceeded`. A `door_id` that is already registered,
+  including a closed door's, is `bad_request`: a closed door keeps its id
+  until its `expires_at`, so a public id can't be registered again. The
+  relay forwards knocks and never parses `ct`:
+  - The envelope MUST be a `knock` envelope (§7.1) whose `ct` is at most
+    16 KiB once decoded (`too_large` otherwise) and whose `sender` is the
+    authenticated mailbox.
+  - If the door is unknown, expired or closed, the answer is
+    `door_not_open`. That state is public anyway: the signed listing
+    carries the expiry, and closing is the owner's public act.
+  - These limits are answered with `rate_limited`, which tells the knocker
+    only about its own behaviour: more than 1 knock per (door, sender
+    mailbox) per 10 minutes, and more than 20 knocks per sender mailbox per
+    hour across all doors. A knock is charged to these limits only if both
+    have room.
+  - Then these conditions are answered with **`accepted`**, and the knock
+    is dropped: more than 10 knocks per door per minute, and an owner queue
+    that is full (unlike `join`; no `queue_overflow` marker is queued).
+    Other answers would reveal how busy the door is and whether its owner's
+    queue is full.
+  - Otherwise the knock is queued for the door's `owner_mailbox` and
+    delivered like any message.
+  - A knock retried within 10 minutes is `rate_limited`, whether or not the
+    first was delivered. After that, a repeat of the same `msg_id` is
+    `accepted` but not delivered twice (the `msg_id` rule under "Storage").
+    Daemons SHOULD NOT retry a knock answered with `rate_limited`.
+  - Public metrics MUST NOT separate forwarded knocks from dropped ones.
+  - Mailboxes cost nothing, so per-mailbox limits can be evaded by creating
+    more. The relay MAY also limit knocks per source address, in memory
+    only and never logged. The owner's per-identity and per-door caps
+    (§6.6.3) are the backstop.
 - **`invite.consume`:** accepted only from the inviter mailbox. It decrements
   `uses_left`. The decrement MUST be atomic: of two concurrent consumes of the
   last use, exactly one succeeds.
@@ -756,13 +1018,15 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   instance that stays unresponsive. A direct send to a full mailbox (a `join`
   to the inviter) is instead refused with `quota_exceeded`.
 - **Logging:** the relay MUST NOT log `ct`, and MUST NOT log fragments or
-  secrets. Identifiers in logs SHOULD be hashed.
+  secrets. Identifiers in logs SHOULD be hashed. Door and knock paths MUST
+  NOT log any identifier, hashed or not: a listing links a door id to an
+  identity, and a hash of a public id is no protection.
 
 ### 8.4 Error codes
 
 `auth_failed`, `epoch_conflict`, `not_member`, `unknown_group`,
-`invite_not_open`, `rate_limited`, `too_large`, `quota_exceeded`,
-`bad_request`, `internal`.
+`invite_not_open`, `door_not_open`, `rate_limited`, `too_large`,
+`quota_exceeded`, `bad_request`, `internal`.
 
 Mapping of the cases above:
 
@@ -770,6 +1034,13 @@ Mapping of the cases above:
 |---|---|
 | `invite.consume` or `DELETE` by a mailbox that is not the inviter | `auth_failed` |
 | Unknown, exhausted, expired or revoked invite (consume, `join`, `GET`) | `invite_not_open` |
+| `knock` on an unknown, expired or closed door; `DELETE /v0/doors/{door_id}` on a door the relay doesn't hold | `door_not_open` (HTTP 404 on REST) |
+| `POST /v0/doors` whose `owner_mailbox` isn't the caller; `DELETE /v0/doors/{door_id}` by a mailbox that is not the door's owner; an unsigned or replayed door request | `auth_failed` |
+| `knock` over the per-(door, sender) or per-sender limit (§8.3) | `rate_limited` |
+| `POST /v0/doors` with 4 doors already open for the mailbox | `quota_exceeded` (HTTP 429) |
+| `POST /v0/doors` with a registered (or closed) `door_id`, or an `expires_at` that is past or more than 7 days away | `bad_request` |
+| `knock` whose decoded `ct` is over 16 KiB | `too_large` |
+| `knock` envelope inside `send` or `join`; a frame and envelope `door_id` that differ | `bad_request` |
 | Commit that would take a group above 50 instances | `quota_exceeded` |
 | `join` while the inviter's queue is full | `quota_exceeded` |
 | Send from a non-member; welcome from a non-member | `not_member` |
@@ -1038,6 +1309,14 @@ and no more: its name, description and skills are untrusted content
 - A signature with no pinned key proves nothing beyond the sender's MLS
   authentication.
 
+A listing (§13.1) is self-certifying. Its JWS is checked against the key its
+`kid` names, which proves only authorship. This is not a key a peer
+supplies in the sense above: the listing names its own key, and after a
+knock (§6.6) the member's MLS identity MUST equal the listing's `identity`.
+A card received in a group from a member whose identity matches a listing
+the human knocked on MAY be shown as "matches listing `<name>`". It is
+still untrusted content.
+
 ### 10.6 Local policy
 
 This section is informative. Beyond the minimums above, a member's own
@@ -1127,6 +1406,7 @@ daemon offers:
 - Membership integrity
 - Invite secrets
 - Endpoint keys
+- Listing integrity: only `IK` can say what its listing says (§13.1)
 
 | Attacker | Capability | Mitigation | Residual risk |
 |---|---|---|---|
@@ -1142,6 +1422,14 @@ daemon offers:
 | Malicious or prompt-injected peer agent | Social-engineers the local agent | Untrusted framing, scope, limits (§10.1, §10.2), approval hooks (§10.6) | Behavioural; can't be solved with cryptography |
 | Agent loops | Runaway costs or spam | Loop guard, rate limits, floor modes | Bounded by the limits |
 | Malicious software distributor | Backdoored daemon | Open source, reproducible builds, signed releases with provenance | Users who don't verify |
+| Spam lister | Publishes junk or lookalike listings | Listing only by operator-issued token, bound to one name and identity (§13.2). Per-address publish limits. Instant operator revocation | Whatever the operator lets through. Curation is a judgement, not a cryptographic check |
+| Impersonator (claims another org's name or text) | Signs a card that copies a real agent's name, description or skills | The signature binds the card to its own `IK` only. The owner domain is shown only when `/.well-known/agentconnect.json` lists the key, and `provider.organization` only next to a verified domain. Names are ASCII slugs. "Key changed" banner for 30 days. The knocker's daemon fetches the domain file itself. Then the SAS | Humans who trust the name or text over the fingerprint and domain. An attacker who controls the owner's web server can vouch for its own key |
+| Scraper / enumerator | Downloads every listing, tracks door rotations and owner domains over time | Listings are public by design. Rate limits. Listings carry no mailbox id, no relay secret and no contact data beyond what the owner signed. Doors rotate weekly | The set of listed identities and their published text, and a weekly rotation cadence. Listing makes an identity public |
+| Malicious directory operator | Hides, delays or reorders listings. Serves stale versions. Fakes owner badges. Ignores withdrawals. Logs who reads what. Issues tokens to identities of its own | Listings and withdrawals are signed by `IK`, and tokens are checked against a key pinned in the daemon, so it **can't forge or alter** a listing. The knocker re-verifies the JWS, the token and the expiry, and fetches the domain file itself. Rollback is bounded by the door's 7-day expiry (a listing without a door by its token's expiry, at most 90 days), by the owner closing the door at the relay, and by token revocation | Censorship and delay. Stale but validly signed listings until their door expires, or for a listing without a door until its token expires. Reader metadata. Names are operator-assigned, so a name proves nothing about who holds it |
+| Relay and directory colluding (same operator) | Joins reads of a listing to knocks on its door, and knocks to their mailboxes | Knocks are sealed (§6.6), so the relay sees a sender mailbox, a door and a time. Directories log no addresses (§13.2) | Who knocked on whom and when, if both sides keep data they're told not to keep. **Metadata**, as for the relay |
+| Stale door (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones, per identity, and the name's token high-water mark stop older listings and superseded keys from being re-published (§13.2.2) | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry. A listing without a door can be re-served until its token expires, without being knockable |
+| Knock flooder | Sends many knocks to tire the owner's human, or to crowd out real knocks | Relay limits per (door, sender), per sender, and per door, where overflow is dropped silently (§8.3). Owner caps: one pending knock per identity per door, 32 per door (§6.6.3). The 1 h lapse. Local policy (§10.6) drops | Denial of service on a popular door. Mailboxes are free, so the relay limits slow Sybils down rather than stop them |
+| Prompt injection through card text | Card name, description, skills and examples are attacker-controlled and are read by agents through MCP, Markdown, `llms.txt` and knocks | Cards are untrusted content (§10.1, §10.5). Directories MUST present card text as data (§13.2). Single-line fields with length caps (§13.1). No links from card text are rendered. Knock approval is human. Knocking only asks to talk | Behavioural: an agent that obeys card text anyway. Can't be solved with cryptography |
 
 **Encrypted-at-rest storage.** A daemon keeps its MLS state (epoch secrets,
 signature and HPKE private keys, the ratchet tree) in a SQLCipher database
@@ -1178,6 +1466,7 @@ SAS checks above.
 - Endpoint compromise
 - Confidentiality from the model provider
 - Deniability
+- Directory availability and censorship resistance
 
 ## 13. Versioning and extensibility
 
@@ -1185,9 +1474,481 @@ SAS checks above.
   extensions. Peers MUST reject a `v` they don't support.
 - The ciphersuite is fixed for each protocol version. Changing it requires a
   new protocol version.
-- Future work: an A2A extension URI
-  `https://yggdrasill.network/ext/agentconnect/e2e/v0`, so A2A Agent Cards
-  can advertise AgentConnect reachability.
+- Every label is under `agentconnect/v0/`, the extension URI below ends in
+  `/v0`, and every protocol object carries `"v": 0`. A new protocol version
+  changes these together.
+
+### 13.1 The `e2e` extension and signed listings
+
+A **listing** is an A2A v1.0 `AgentCard` in proto3 JSON form (camelCase
+field names) that advertises AgentConnect reachability. It carries exactly
+one extension, with URI `https://yggdrasill.network/ext/agentconnect/e2e/v0`,
+and exactly one JWS signature by the agent's identity key `IK`. Example,
+wrapped for reading (the published form is one canonical line):
+
+```json
+{
+  "capabilities": {
+    "extensions": [{
+      "description": "Reachable end-to-end encrypted through AgentConnect. Knock to connect; a human approves every connection.",
+      "params": {
+        "directory": "directory.example.org",
+        "door": {"expires_at": 1792800000, "id": "<22 b64url>", "key": "<b64url, 1216-byte door public key>"},
+        "identity": "ac:v0:<b64url IK.pub>",
+        "issued_at": 1792497600,
+        "name": "release-planner",
+        "owner_domain": "example.com",
+        "relay": "connect.yggdrasill.network",
+        "seq": 7,
+        "token": {"...": "ListingToken, §13.2"},
+        "v": 0
+      },
+      "required": true,
+      "uri": "https://yggdrasill.network/ext/agentconnect/e2e/v0"
+    }]
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "description": "Plans release trains and drafts schedules from a list of changes.",
+  "name": "Release planner",
+  "provider": {"organization": "Example Ltd", "url": "https://example.com"},
+  "signatures": [{"protected": "<b64url JCS protected header>", "signature": "<b64url Ed25519>"}],
+  "skills": [{
+    "description": "Turns a change list into a dated release plan.",
+    "id": "release-planning",
+    "name": "Release planning",
+    "tags": ["release planning", "scheduling"]
+  }],
+  "supportedInterfaces": [{
+    "protocolBinding": "AGENTCONNECT",
+    "protocolVersion": "0",
+    "url": "https://directory.example.org/a/release-planner.json"
+  }],
+  "version": "1.4.0"
+}
+```
+
+#### 13.1.1 Extension params
+
+| Field | Rule |
+|---|---|
+| `v` | `0`. |
+| `identity` | The listed identity, `ac:v0:<b64url IK.pub>` (§2). |
+| `name` | The listing name (slug): 3 to 32 characters of `[a-z0-9-]`, starting and ending with a letter or digit. It equals the `name` in `token`. |
+| `directory` | The directory host the listing is for, in the canonical host form of §8.1.1. It equals the `directory` in `token`. |
+| `relay` | The relay host a knock goes through, in canonical host form. v0 is single-relay (§4.4): a knocker MUST refuse a listing whose relay is not its own. |
+| `seq` | A positive integer. It increases with every listing this identity signs for this name: `seq` belongs to (directory, name, identity), and a new identity for a name starts its own (§13.2.2). |
+| `issued_at` | Unix seconds. Informational, apart from the publish check (§13.2.2). |
+| `door` | Optional. When it is absent the door is closed: the listing is "not taking new connections". `id` is the `door_id` (§6.6.1). `key` is the door's HPKE public key, exactly 1216 bytes, in base64url. `expires_at` is after `issued_at` and at most 7 days (604800 s) after it. |
+| `owner_domain` | Optional. A lower-case ASCII DNS name in A-label form, with at least two labels, no port, no IP literal and no trailing dot. |
+| `token` | The operator-issued `ListingToken` (§13.2.1), as a JSON object. It MUST bind this listing: its `directory`, `name` and `identity` equal the params, and its `owner_domain`, if set, equals the listing's `owner_domain`. This needs no key, so it is part of checking §13.1. |
+
+#### 13.1.2 Rules on the card
+
+- **Exactly one interface.** `supportedInterfaces` has exactly one entry,
+  with `protocolBinding` `AGENTCONNECT`, `protocolVersion` `"0"`, and `url`
+  equal to the listing's canonical URL `https://<directory>/a/<name>.json`.
+  It is stable across door rotations. Plaintext A2A endpoints are not
+  allowed in v0 listings: they would lead around the end-to-end path.
+- **Exactly one extension,** the `e2e` extension above, with
+  `required: true`. A2A clients that don't speak it can't reach the agent,
+  and A2A says to fail rather than guess.
+- **`provider`.** If present, `owner_domain` MUST be set and `provider.url`
+  MUST be `https://<owner_domain>` or a path under it (`https://<owner_domain>/…`),
+  with no query or fragment. A directory shows `provider.organization` only
+  next to a verified owner domain (§13.2.4).
+- **Text.** All text is attacker-controlled (§10.5). Every string anywhere
+  in a listing is **one-line text**: it MUST NOT contain a character whose
+  Unicode 17.0.0 general category is Cc (controls, tabs and newlines
+  included), Cf (format: bidi controls, zero-width characters, the BOM,
+  tags), Zl, Zp, Co (private use), Cs or Cn (unassigned, noncharacters
+  included), and the only space separator (Zs) it may contain is U+0020.
+  It also MUST NOT contain a `Default_Ignorable_Code_Point` (blank fillers
+  such as U+3164 and U+115F, U+034F, variation selectors) or U+2800
+  BRAILLE PATTERN BLANK; it MUST NOT start with a combining mark (category
+  M) or have more than 4 combining marks in a row; and it MUST already be
+  in NFC (Unicode Normalization Form C), so one text has one spelling.
+  Receivers MUST reject a listing that breaks this rule. The categories,
+  properties and normalization data are those of Unicode 17.0.0 for every
+  implementation, so that verifiers agree on which listings exist; a new
+  protocol version may move to a later Unicode version. The same rule applies to the knock's text
+  (§6.6.2) and a `TokenRevocation.reason` (§13.2.1). Lengths are counted
+  in Unicode scalar values:
+
+  | Field | Limit |
+  |---|---|
+  | `name` | 80 |
+  | `description` | 500 |
+  | `version` | 32 |
+  | `provider.organization` | 80 |
+  | `provider.url` | 256 |
+  | extension `description` | 500 |
+  | `skills` | 1 to 16 entries |
+  | skill `id`, `name` | 80 each |
+  | skill `description` | 500 |
+  | skill `tags` | 1 to 8 entries of at most 32 |
+  | skill `examples` | at most 4 entries of at most 200 |
+  | `defaultInputModes`, `defaultOutputModes`, skill `inputModes`, `outputModes` | 1 to 8 media types of at most 127 printable ASCII characters each (the skill lists are optional) |
+  | The whole canonical card | 32 KiB |
+
+- **Closed schema.** Only these fields may appear, and receivers MUST
+  reject anything else, as §3.2 does for extensions:
+  - `AgentCard`: `name`, `description`, `version`, `provider`,
+    `capabilities`, `defaultInputModes`, `defaultOutputModes`, `skills`,
+    `supportedInterfaces` and `signatures`. All but `provider` are
+    required.
+  - `provider`: `organization` and `url`, both required.
+  - `capabilities`: `extensions` (required), and optionally `streaming` and
+    `pushNotifications`, which are then `true`.
+  - The extension: `uri`, `required`, `params` (all required) and an
+    optional `description`.
+  - `params`: the fields of §13.1.1, and in `door` exactly `id`, `key` and
+    `expires_at`.
+  - A skill: `id`, `name`, `description`, `tags` (all required), and
+    optionally `examples`, `inputModes` and `outputModes`.
+  - The interface: `url`, `protocolBinding` and `protocolVersion`.
+  - A signature: `protected` and `signature`.
+
+  In particular `securitySchemes`, `securityRequirements` (on the card or
+  on a skill), `iconUrl`, `documentationUrl`,
+  `capabilities.extendedAgentCard`, an interface `tenant` and a signature's
+  unprotected `header` MUST be absent in v0: they are URLs or
+  authentication hooks that lead outside the encrypted path.
+
+#### 13.1.3 Canonical form
+
+Listings use JCS (RFC 8785) with the integer rules of §3.2, plus a profile
+that makes every conforming verifier, and A2A's own, compute the same bytes:
+
+1. A listing MUST NOT contain an empty string, an empty array, an empty
+   object or `null` anywhere. Outside `params` it MUST NOT set a field to
+   its proto3 default (`false`, `0`); optional fields are left out instead.
+   With these rules, A2A's "omit default values" step and its removal of
+   empty values change nothing.
+2. Integers are non-negative and at most 2^53 − 1; floats are not allowed.
+   A2A tooling reads `params` as a protobuf `Struct`, whose numbers are
+   doubles; JCS writes an integral double and the integer the same way, so
+   both sides produce the same bytes.
+3. The **published bytes** are the JCS form of the whole card, `signatures`
+   included. A receiver MUST reject a listing that isn't byte-for-byte
+   canonical. One accepted byte string per listing means no parser
+   differentials, and its SHA-256 is a stable cache key.
+4. The **signed payload** is JCS(card without `signatures`), as A2A
+   specifies for Agent Card signatures.
+
+#### 13.1.4 Signature
+
+- `signatures` has **exactly one** entry, with no unprotected `header`.
+- `protected` is the base64url (no padding) of the JCS of exactly
+  `{"alg":"EdDSA","kid":"ac:v0:<b64url IK.pub>","typ":"JOSE"}` (RFC 7515,
+  RFC 8037). There is no `jku`, `jwk`, `x5u`, `x5c` or `crit`, and `kid`
+  MUST equal `params.identity`.
+- `signature` is the base64url of Ed25519(IK, ASCII(`protected` ‖ "." ‖
+  base64url(JCS(card without `signatures`)))). This is a JWS with a
+  detached payload (RFC 7515 Appendix F).
+- A receiver verifies it with the key encoded in `kid`, with strict Ed25519
+  verification (as for §3.3). It accepts only `EdDSA` and ignores any key
+  location. The listing is **self-certifying** (§10.5): it proves that the
+  holder of the named `IK` wrote it, and nothing else.
+
+A receiver MUST check everything in §13.1, then the token (§13.2.1) against
+a directory key it pinned. A knocker also checks the door (§6.6.2).
+
+#### 13.1.5 Fingerprint and what a listing proves
+
+A listing is shown to humans with the §2 fingerprint of `params.identity`,
+unchanged: a 128-bit truncation of the hash of `IK`, for human comparison.
+Machines compare the full `ac:v0:` identity.
+
+- A listing **proves** that the card was signed by the key with that
+  fingerprint, so a directory can't forge or alter it. With a `verified`
+  owner state (§13.2.4) it also shows that whoever controls the owner
+  domain's web server vouches for that key.
+- It does **not** prove that the agent does what its card says, that it's
+  safe to hand it anything, or who is on the other end. The fingerprint is
+  not a SAS: only comparing the group's short code (§11) shows there is
+  nobody in the middle.
+
+A listed identity is public: anyone can tell that a member with that
+identity in any group is the listed agent. An identity used for listing
+SHOULD be dedicated to it, and an implementation SHOULD warn before it lists
+an identity that is already a member of groups.
+
+### 13.2 Directories
+
+A directory (for example `directory.example.org`) indexes signed
+listings and serves them. It holds no keys and no secrets: publishing is
+authenticated by the listing's own JWS and the operator-signed token inside
+it, and withdrawing by an `IK`-signed `Withdrawal`. There are no accounts,
+passwords, sessions or bearer tokens.
+
+#### 13.2.1 Listing tokens
+
+```text
+ListingToken = {
+  "v": 0,
+  "token_id": "<16 random bytes, b64url>",
+  "directory": "<directory host>",
+  "name": "<listing name>",
+  "identity": "ac:v0:…",
+  "owner_domain": "<domain>",           // optional: pins the domain the listing may claim
+  "issued_at": <unix seconds>,
+  "expires_at": <unix seconds>,
+  "key_id": "<b64url SHA-256(DK.pub)[0..16]>",
+  "sig": "<b64url Ed25519(DK, "agentconnect/v0/listing-token" || JCS(token without "sig"))>"
+}
+
+TokenRevocation = {
+  "v": 0,
+  "token_id": "<b64url>",
+  "revoked_at": <unix seconds>,
+  "reason": "<1 to 200 chars of one-line text>",
+  "key_id": "<b64url>",
+  "sig": "<b64url Ed25519(DK, "agentconnect/v0/listing-token-revoke" || JCS(revocation without "sig"))>"
+}
+```
+
+Both are JCS objects with exactly these fields (`owner_domain` optional),
+and receivers MUST reject them otherwise (§3.2).
+
+- **Issuer.** `DK` is the directory operator's Ed25519 token key, held by
+  the operator's offline tool and never by the directory server. Daemons
+  pin its public key per directory in their configuration and MUST NOT
+  fetch it from a URL a listing names (§10.5). The directory is configured
+  with the same public key and MAY publish it at
+  `/.well-known/agentconnect-directory.json`, for information only. At most
+  two `key_id`s are valid for one directory at a time, so `DK` can be
+  rotated.
+- **Scope.** One directory, one name and one identity, plus optionally one
+  owner domain. The token is not a secret: copying it lets nobody publish,
+  because only `IK` can sign the listing.
+- **Checks.** A token is valid for a listing when all of these hold:
+  - its `key_id` names a pinned `DK` and `sig` verifies under it (strict
+    Ed25519);
+  - its `directory`, `name` and `identity` equal the listing's params, and
+    its `owner_domain`, if set, equals the listing's `owner_domain`;
+  - `issued_at` < `expires_at` ≤ `issued_at` + 90 days (7776000 s);
+  - `issued_at` ≤ now + 300 s (the token is valid already);
+  - now < `expires_at`;
+  - its `token_id` has not been revoked.
+
+  A listing whose token has expired is treated as withdrawn. A daemon warns
+  its human 14 days before its own token expires.
+- **Rotation.** When the operator issues a token for a new identity under a
+  name, it MUST revoke the previous identity's token for that name in the
+  same step, and it MUST NOT renew or re-issue a token for a superseded
+  identity: a token issued later would win the name back (§13.2.2).
+- **Revocation.** The operator signs a `TokenRevocation` and posts it
+  (`POST /v0/revocations`). The directory stores the `token_id` and
+  withdraws the listing in the same transaction.
+
+#### 13.2.2 Publishing
+
+`POST /v0/listings` with the listing's published bytes as the body. A
+directory MUST accept it only if all of these hold:
+
+- the listing passes §13.1;
+- the token is valid (§13.2.1), and its `directory` is this directory's
+  host;
+- its token is no older than the name's **high-water mark**: the newest
+  token `issued_at` the directory has ever accepted for this name (and the
+  identity it was issued to). On a tie, only that identity passes;
+- if a listing of this name is stored, the new one replaces it:
+  - from the same identity, only with a greater `seq`;
+  - from another identity, only if the new listing's token was issued
+    later (`token.issued_at` strictly greater) than the stored listing's.
+    A new identity for a name needs a new token from the operator and
+    starts its own `seq`;
+- no tombstone of the **same identity** for this name has a `seq` at or
+  above the new listing's. A tombstone never blocks another identity;
+- `issued_at` ≤ now + 300 s;
+- if a door is present, its `expires_at` is in the future; `relay` is a
+  relay this directory lists.
+
+A directory MUST keep, per (directory, name), the high-water mark and every
+identity's highest tombstoned `seq` for as long as it keeps the name,
+**including after** the name's listing is withdrawn, its token expires or
+is revoked, or nothing is stored for it. `seq` and tombstones therefore
+belong to (directory, name, identity), and the order of the tokens' `issued_at`
+decides between identities. A key that is no longer the name's, even one
+that signs at the largest `seq` under a token that is still valid, can't
+take the name back: its token is older than the mark. A stolen key can at
+worst block its own identity's future listings.
+
+A directory MUST re-check a stored listing's token (expiry and revocation)
+and door expiry whenever it serves the listing. A listing whose token has
+expired or been revoked is served as withdrawn; one whose door has expired
+is served with the door shown closed.
+
+The owner check (§13.2.4) then runs. Re-posting the same bytes is
+idempotent. Choosing to publish, and any change to the card's text, MUST be
+a **human** decision: an agent can't put itself into a public directory.
+Automatic door renewal (§6.6.1) re-signs only `door`, `seq` and `issued_at`
+of the listing its human approved.
+
+#### 13.2.3 Withdrawal
+
+```text
+Withdrawal = {
+  "v": 0,
+  "directory": "<directory host>",
+  "name": "<listing name>",
+  "identity": "ac:v0:…",
+  "seq": <the highest seq withdrawn>,
+  "ts": <unix seconds>,
+  "sig": "<b64url Ed25519(IK, "agentconnect/v0/listing-withdraw" || JCS(withdrawal without "sig"))>"
+}
+```
+
+- `POST /v0/withdrawals`. The directory checks that the object is canonical
+  JCS with exactly these fields, that `sig` verifies under the key in
+  `identity` (strict Ed25519), that `directory` is its own host, and that
+  `ts` is within 300 s of its clock. A withdrawal applies to the listing of
+  `name` only if that listing's `identity` equals the withdrawal's and its
+  `seq` is at most the withdrawal's `seq`. In one transaction the directory
+  deletes the listing, writes a tombstone `(name, identity, seq)` and
+  appends the signed withdrawal to the feed. The tombstone blocks only that
+  identity's listings of the name (§13.2.2). A repeat of the same
+  withdrawal changes nothing.
+- An owner closes the door at the relay (`DELETE /v0/doors/{door_id}`)
+  **before** it withdraws. Closing at the relay is what makes withdrawal
+  instant everywhere: from then on every knock gets `door_not_open`,
+  whatever any cache, mirror or hostile directory still shows.
+- Withdrawing only reduces exposure, so an agent MAY do it.
+
+#### 13.2.4 Owner verification
+
+A listing's `owner_domain` claim counts only if the domain publishes, over
+HTTPS, `https://<owner_domain>/.well-known/agentconnect.json` (RFC 8615; the
+name is registered with IANA before v0 is tagged):
+
+```json
+{
+  "v": 0,
+  "identities": [
+    {
+      "identity": "ac:v0:…",
+      "fingerprint": "3f9a 0c21 77de 41b0 9e5c d2a8 16f4 b03e",
+      "listings": ["directory.example.org/a/release-planner"]
+    }
+  ],
+  "revoked": [
+    {"identity": "ac:v0:…", "revoked_at": 1792000000, "reason": "superseded"}
+  ]
+}
+```
+
+- **Format.** The file is I-JSON (RFC 7493) of at most 64 KiB, with no
+  duplicate keys, and an object at the top with `"v": 0`. It is edited by
+  hand, so it need not be JCS. `identities` and `revoked` are optional
+  arrays. Unknown fields are ignored at every level, so that a hosting
+  team's own notes don't break verification.
+  - In `identities`, `identity` is required. `fingerprint` is optional;
+    if present it MUST match `identity` (§2). `listings` is optional; if
+    present, the domain vouches for that key only in the listed
+    `<directory>/a/<name>` listings. An entry that breaks any of these
+    rules is invalid and vouches for nothing; the rest of the file still
+    counts.
+  - In `revoked`, `identity` is required, `revoked_at` is Unix seconds and
+    `reason` is `superseded` or `compromised`. An entry whose `identity` is
+    valid counts as a revocation even if its other fields are not.
+  - A file that is not I-JSON, is too large, has duplicate keys, or has a
+    `v` other than 0 vouches for nothing, and for the owner state it counts
+    as a **failed fetch**, not as a file that doesn't vouch. A broken edit
+    therefore neither turns a verified owner into `failed` at once nor
+    clears an earlier revocation: it ages like an unreachable server. Hosts
+    that revoke a key should check that their file still parses.
+- **The fetch.** `https`, port 443, a valid WebPKI certificate, no
+  redirects, `Content-Type: application/json`, a 5 s timeout, and only
+  public addresses after DNS resolution: loopback, private, link-local and
+  ULA addresses are refused.
+- There is no signature on the file: the HTTPS origin proves what is being
+  claimed, "whoever controls this domain's web server vouches for this key".
+- **Who checks.** A directory checks on every publish, every 6 hours
+  afterwards, and when a withdrawal or revocation names the identity. A
+  knocker's daemon fetches the file itself before it knocks and shows the
+  result to its human; a directory's badge is only the operator's opinion.
+  That fetch tells the owner's web server that someone is about to knock,
+  so the daemon MUST let its human skip it; the owner state is then
+  `unchecked`.
+- **States.** A fetch *vouches* when the file lists the identity in a valid
+  entry (and the listing, if the entry has `listings`) and the identity is
+  not in `revoked`. A fetch is *negative* when it gets a file that parses
+  but doesn't vouch, or that lists the identity in `revoked`. A checker
+  MUST keep, per listing, the time of the last fetch that vouched and the
+  time and kind of the last negative fetch. **A negative result is
+  sticky**: failed fetches after it never bring back `verified` or
+  `stale`, and only a later fetch that vouches clears it. In particular
+  `revoked` lasts until a fetch finds the identity vouched for and no
+  longer revoked. A directory MUST withdraw a listing whose owner state
+  becomes `revoked` (as it does for a withdrawal: 410 and a feed entry), so
+  for a directory a later vouch matters only for a new publish of the
+  name, which then starts with its own owner check. A knocker's daemon,
+  which checks at knock time, uses the whole rule. "Later" means later in
+  the order fetches complete: a
+  checker MUST record results in that order and MUST NOT let the times it
+  stores reorder them (a clock that steps back or forward doesn't), and a
+  stored time after the current time counts as the current time.
+
+  | State | Condition | Shown as |
+  |---|---|---|
+  | `verified` | The last fetch that vouched was at most 24 h ago and is later than the last negative fetch | "owner verified · `<domain>`", plus `provider.organization` |
+  | `unclaimed` | No `owner_domain` | "no verified owner"; the organization is hidden |
+  | `stale` | The last fetch that vouched was between 24 h and 7 days ago, is later than the last negative fetch, and later fetches failed | "owner last confirmed `<date>` · `<domain>`", muted; the organization is hidden |
+  | `failed` | The last negative fetch doesn't vouch and no fetch has vouched since, or no fetch vouched in the last 7 days | "`<domain>` does not vouch for this key"; badge and organization hidden; left out of search, still served at its URL |
+  | `revoked` | The last negative fetch revokes the identity and no fetch has vouched since | Withdrawn: 410 at every URL, and a revocation entry in the feed |
+  | `checking` | No fetch has completed yet | "checking"; nothing about the owner |
+  | `unchecked` | The human skipped the fetch (a daemon's choice; see "Who checks") | Nothing about the owner |
+
+- **Rotation.** A new key is a new identity, so it needs a new token. The
+  owner adds the new identity to the file, publishes the new listing under
+  the same name (the operator issues the token for the new identity and
+  revokes the old identity's token, §13.2.1), and then moves the old
+  identity to `revoked` with `superseded`. For 30 days a
+  directory shows "key changed on `<date>`" on that listing.
+- **Revocation** (`compromised`). A directory withdraws every listing of the
+  identity at its next check. To make it immediate, the owner also closes
+  the door and sends a withdrawal, or the operator revokes the token.
+
+#### 13.2.5 Caches and mirrors
+
+- Listings are served with `Cache-Control: public, max-age=60,
+  must-revalidate`, an `ETag` (the SHA-256 of the published bytes) and
+  `Vary: Accept`. After a withdrawal, every URL of the listing returns
+  `410 Gone` with `Cache-Control: max-age=60`, and a CDN in front of the
+  directory is purged.
+- `GET /v0/withdrawals?after=<cursor>` lists withdrawals and token
+  revocations in order, as the signed objects. Each is signed by the owner
+  or the operator, so a mirror verifies it without trusting the directory.
+  A conforming mirror polls at least every 60 s and applies an entry before
+  it serves the listing again. It re-verifies every listing (§13.1 and the
+  token), keeps the same per-name state as a directory (the high-water
+  mark and each identity's tombstoned `seq`, §13.2.2) from everything it
+  has seen, and MUST NOT serve a listing that §13.2.2's rules would refuse
+  against that state: one under a token older than the name's mark, one
+  that doesn't replace the listing it last served for the name (`seq` is
+  compared per identity), or one its own identity's tombstone covers.
+- For a cache that doesn't conform, the worst case is bounded by the door's
+  signed expiry (at most 7 days), or for a listing without a door by its
+  token's expiry (at most 90 days), and a closed door already refuses
+  knocks.
+
+#### 13.2.6 What a directory must not do
+
+- A directory MUST NOT connect to the relay, hold relay credentials or check
+  doors: "door open" means only that the signed door hasn't expired. It
+  MUST NOT store mailbox ids, and a listing carries none: `door.id` is a
+  random handle that only the relay maps to a mailbox.
+- It MUST NOT hold keys or secrets beyond the pinned public `DK`s.
+- Its logs and metrics MUST NOT carry identifiers: no addresses, no query
+  strings or search terms, no names or identities. Routes are logged as
+  templates. Per-address rate limits live in memory only. It stores nothing
+  about readers or searchers.
+- It MUST present card text as data: machine-readable results (for example
+  MCP tools) carry `untrusted: true` and the verbatim signed listing for the
+  caller to verify; Markdown puts card text inside fenced blocks; HTML
+  escapes it and never renders it as a link; `llms.txt` lists names and URLs
+  only.
 
 ## 14. Sequence diagrams
 
@@ -1255,10 +2016,14 @@ A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice
 2. Whether to require Updates on every membership change, in addition to the
    cadence in §3.1.
 3. Multi-relay federation. Out of scope for v0.
-4. Interop with AGNTCY SLIM (also MLS-based), and an A2A extension (§13).
+4. Interop with AGNTCY SLIM (also MLS-based).
 
 Decided by the maintainer (2026-10-17), now normative:
 
+- The A2A extension is `https://yggdrasill.network/ext/agentconnect/e2e/v0`,
+  carried by signed listings with one A2A JWS signature (`alg: EdDSA`) by
+  the identity key; directories, doors and knocks follow ADR-006 (§6.6,
+  §13.1, §13.2).
 - Pending leave proposals are committed by the lowest-index leaf that isn't
   itself leaving (§9.2).
 - `trust_state.self` is `verified` only when every other current member is
@@ -1323,6 +2088,8 @@ Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 
 - RFC 9420, *The Messaging Layer Security (MLS) Protocol*
 - RFC 5869 (HKDF), RFC 8785 (JCS), RFC 7493 (I-JSON), RFC 2119 / RFC 8174
+- RFC 7515 (JWS), RFC 8037 (EdDSA in JOSE), RFC 9180 (HPKE), RFC 8615
+  (well-known URIs)
 - draft-ietf-mls-pq-ciphersuites (MLS post-quantum ciphersuites) and draft-ietf-hpke-pq (hybrid KEMs for HPKE)
 - A2A Protocol Specification v1.0, <https://a2a-protocol.org/v1.0.0/specification/>
 - draft-chapman-a2a-mls-03 (MLS carried inside A2A)
