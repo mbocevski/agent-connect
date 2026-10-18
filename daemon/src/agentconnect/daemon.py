@@ -167,6 +167,7 @@ OUTBOUND_PROBLEMS = {
     "file_too_large": ("too_large", "file part larger than the group's max_file_bytes"),
     "rate_limited": ("rate_limited", "over the SPEC 10.2 message rate"),
     "hold_overflow": ("rate_limited", "too many messages already wait for the human's approval"),
+    "hold_queue_full": ("rate_limited", "the group's approval queue is full"),
     "task_pending": ("forbidden", "the task's first update waits for the human's approval"),
     "task_rejected": ("forbidden", "the human rejected this task"),
     "not_for_agents": (
@@ -1809,7 +1810,7 @@ class Daemon:
                 payload = item["payload"] or {}
                 self._enqueue("app", group_id, payload)
                 self.safety.transcribe(group_id, "out", self.me, item["msg_id"], payload["inner"])
-            if item["task_id"] is not None:
+            if item["task_id"] is not None and item["direction"] == "in":
                 self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=True)
             self._audit_hold(item, "approved")
         self._delivery_wake.set()
@@ -1844,7 +1845,7 @@ class Daemon:
                 row = self.store.inbox_row(int(item["inbox_seq"]))
                 if row is not None and row.state == "held":
                     self.store.set_inbox_state(row.seq, "dropped")
-            if item["task_id"] is not None:
+            if item["task_id"] is not None and item["direction"] == "in":
                 self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=False)
             self._audit_hold(item, status)
             if status == "expired":

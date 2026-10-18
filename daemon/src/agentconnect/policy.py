@@ -449,6 +449,28 @@ def task_of(inner: dict[str, Any]) -> str | None:
     return None
 
 
+TERMINAL_STATES = frozenset(
+    {
+        "TASK_STATE_COMPLETED",
+        "TASK_STATE_FAILED",
+        "TASK_STATE_CANCELED",
+        "TASK_STATE_REJECTED",
+        "completed",
+        "failed",
+        "canceled",
+        "rejected",
+    }
+)
+
+
+def task_ended(inner: dict[str, Any]) -> bool:
+    """Whether a task status update reports a terminal state."""
+    body = inner.get("body")
+    status = body.get("status") if isinstance(body, dict) else None
+    state = status.get("state") if isinstance(status, dict) else None
+    return bool(inner.get("kind") == "a2a.task_status" and state in TERMINAL_STATES)
+
+
 def verification_holds(require_verified: bool, trust_state: Mapping[str, Any]) -> bool:
     """SPEC 10.4: with ``require_verified``, deliveries wait until
     ``trust_state.self`` is ``verified``."""
@@ -635,6 +657,7 @@ class SafetyPolicy:
                 inner=m.inner,
                 size=m.size,
                 settings=settings,
+                direction="out",
             )
             if decision is not None:
                 return decision
@@ -649,34 +672,53 @@ class SafetyPolicy:
         inner: dict[str, Any],
         size: int,
         settings: Settings,
+        direction: str = "in",
     ) -> Decision | None:
         """What ``require_approval`` does with one message: hold it, drop it,
-        or nothing (``None``: a task the human already approved).
+        or nothing (``None``: a peer's task the human approved).
 
-        A task is decided once, on its first update: the later updates of a
-        task waiting for approval are dropped (``task_pending``), those of
-        an approved task go through, and those of a rejected or expired one
-        are dropped (``task_rejected``). The held messages are capped per
-        group, per sender instance and in bytes; past a cap a message is
-        dropped (``hold_overflow``), never held."""
-        task = task_of(inner)
+        **Tasks, inbound only.** A peer's task is decided on its first update.
+        While that waits, later updates are dropped (``task_pending``).
+        Approving it lets the task's inbound updates through until
+        ``approval_ttl_secs`` have passed or the task ends; rejecting it (or
+        letting it expire) drops them (``task_rejected``) for as long. After
+        that window the next update is a new first update. Nothing covers the
+        agent's own sends: each is held.
+
+        **Caps, per direction.** At most ``max_held_per_sender`` per sender
+        instance and per identity (all its instances): past it the message
+        is dropped as ``hold_overflow``, a violation. When the group's
+        queue (``max_held_per_group``, ``max_held_bytes``) is full, the
+        message is dropped too, but only a sender holding at least its fair
+        share (the group cap divided by the senders waiting, at most the
+        per-sender cap) is charged (``hold_overflow``); anyone else gets
+        ``hold_queue_full``, which isn't a violation."""
+        task = task_of(inner) if direction == "in" else None
+        now = self._now()
         if task is not None:
-            state = self.store.task_state(group_id, sender, task)
-            if state == "approved":
-                return None
-            if state == "pending":
-                return drop("task_pending")
-            if state == "rejected":
-                return drop("task_rejected")
-        total, mine, held_bytes = self.store.held_load(group_id, instance)
-        if (
-            total >= settings.max_held_per_group
-            or mine >= settings.max_held_per_sender
-            or held_bytes + size > settings.max_held_bytes
-        ):
+            decided = self.store.task_decision(group_id, sender, task)
+            state, at = decided if decided is not None else ("", -math.inf)
+            if now - at < settings.approval_ttl_secs:
+                if state == "approved":
+                    if task_ended(inner):
+                        self.store.forget_task(group_id, sender, task)
+                    return None
+                if state == "pending":
+                    return drop("task_pending")
+                if state == "rejected":
+                    return drop("task_rejected")
+        total, mine, ours, held_bytes, senders = self.store.held_load(
+            group_id, direction, instance, sender
+        )
+        cap = settings.max_held_per_sender
+        if mine >= cap or ours >= cap:
             return drop("hold_overflow")
+        if total >= settings.max_held_per_group or held_bytes + size > settings.max_held_bytes:
+            waiting = senders + (0 if ours else 1)
+            share = min(settings.max_held_per_group // max(waiting, 1), cap)
+            return drop("hold_overflow" if ours >= share else "hold_queue_full")
         if task is not None:
-            self.store.set_task_state(group_id, sender, task, "pending", self._now())
+            self.store.set_task_state(group_id, sender, task, "pending", now)
         return hold("require_approval")
 
     def decide_task(self, group_id: str, sender: str, task: str, *, approved: bool) -> None:

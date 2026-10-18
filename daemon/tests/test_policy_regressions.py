@@ -329,14 +329,33 @@ def test_holds_are_capped_per_sender_group_and_bytes(policy: SafetyPolicy, store
     for n in range(2):
         held_row(store, n)
     assert policy.inbound(inb(msg())) == drop("hold_overflow")
-    assert policy.inbound(inb(msg(), inst="m/i2")) == hold("require_approval")
-    held_row(store, 9, "m/i2")
-    assert policy.inbound(inb(msg(), inst="m/i3")) == drop("hold_overflow"), "group cap"
+    assert policy.inbound(inb(msg(), inst="m/i2")) == drop("hold_overflow"), "per identity too"
+    other = "ac:v0:other"
+    assert policy.inbound(inb(msg(), sender=other, inst="o/i1")) == hold("require_approval")
+    store.add_held(
+        {
+            "hold_id": "o1",
+            "group_id": G,
+            "direction": "in",
+            "sender": other,
+            "instance": "o/i1",
+            "msg_id": "o1",
+            "kind": "a2a.message",
+            "size": 100,
+            "created_at": 0,
+            "expires_at": 10**10,
+        }
+    )
+    third = "ac:v0:third"
+    assert policy.inbound(inb(msg(), sender=third, inst="t/i1")) == drop("hold_queue_full")
     store.set_held_status("h0-m/i1", "approved")
     store.set_held_status("h1-m/i1", "approved")
     held_row(store, 7, "m/i4", size=1950)
-    assert policy.inbound(inb(msg(), inst="m/i5")) == drop("hold_overflow"), "bytes cap"
+    assert policy.inbound(inb(msg(), sender=third, inst="t/i1")) == drop("hold_queue_full"), (
+        "the bytes cap"
+    )
     assert "hold_overflow" in VIOLATIONS
+    assert "hold_queue_full" not in VIOLATIONS
 
 
 # -- M5: the notice can't be written by the peer it frames ----------------------------
@@ -430,13 +449,11 @@ def test_a_too_deep_card_is_malformed(policy: SafetyPolicy) -> None:
     assert policy.inbound(inb(card, owner=MALLORY)) == drop("malformed")
 
 
-def test_an_approved_outbound_task_is_not_held_again(policy: SafetyPolicy) -> None:
+def test_every_outbound_task_update_is_held(policy: SafetyPolicy) -> None:
     policy.update(G, {"require_approval": "outbound"})
     update = task("mine")
     assert policy.outbound(out(update)) == hold("require_approval")
-    assert policy.outbound(out(update)) == drop("task_pending")
-    policy.decide_task(G, ME, "mine", approved=True)
-    assert policy.outbound(out(update)).delivered
+    assert policy.outbound(out(update)) == hold("require_approval"), "no task_pending outbound"
 
 
 # -- N3: a part carries one content member ---------------------------------------
@@ -519,3 +536,97 @@ def test_a_changed_card_is_held_with_inbound_approval(policy: SafetyPolicy) -> N
     policy.update(G, {"require_approval": "inbound"})
     assert policy.inbound(unchanged) == as_context("not_content")
     assert policy.inbound(changed) == hold("card_changed")
+
+
+# -- N1: overflow costs only the overflowing sender -----------------------------------
+
+
+def hold_row(store: Store, hold_id: str, sender: str, instance: str, direction: str = "in") -> None:
+    store.add_held(
+        {
+            "hold_id": hold_id,
+            "group_id": G,
+            "direction": direction,
+            "sender": sender,
+            "instance": instance,
+            "msg_id": hold_id,
+            "kind": "a2a.message",
+            "size": 100,
+            "created_at": 0,
+            "expires_at": 10**12,
+        }
+    )
+
+
+def test_one_identity_can_not_fill_the_queue_with_replicas(
+    policy: SafetyPolicy, store: Store, fake_clock: FakeClock
+) -> None:
+    policy.update(G, {"require_approval": "both"})
+    held = 0
+    for r in range(5):
+        for i in range(20):
+            d = policy.inbound(inb(msg(), inst=f"m/i{r}"))
+            if d.verdict is Verdict.HOLD_FOR_APPROVAL:
+                hold_row(store, f"m{r}-{i}", MALLORY, f"m/i{r}")
+                held += 1
+            else:
+                assert d == drop("hold_overflow")
+        fake_clock.advance(61)  # stay under the identity's message rate
+    assert held == 20, "the per-sender cap counts the identity, not each replica"
+
+
+def test_a_full_queue_charges_only_who_is_over_its_share(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    policy.update(G, {"require_approval": "both"})
+    for who in range(5):  # five hostile identities, 20 holds each: the group's 100
+        for i in range(20):
+            hold_row(store, f"h{who}-{i}", f"ac:v0:h{who}", f"h{who}/i1")
+    honest = policy.inbound(inb(msg(), sender="ac:v0:alice", inst="a/i1"))
+    assert honest == drop("hold_queue_full")
+    assert all(policy.violation(G, "ac:v0:alice", honest.reason) is None for _ in range(20))
+    assert policy.violations(G, "ac:v0:alice") == 0, "an honest sender is never charged"
+    hostile = policy.inbound(inb(msg(), sender="ac:v0:h0", inst="h0/i2"))
+    assert hostile == drop("hold_overflow"), "a sender over its share is"
+    # The local agent's sends have their own queue.
+    assert policy.outbound(out(msg())) == hold("require_approval")
+
+
+# -- N2: an approved task covers only its inbound updates, for a while ------------------
+
+
+def art(tid: str, text: str) -> dict[str, Any]:
+    return {
+        "kind": "a2a.task_artifact",
+        "origin": "agent",
+        "body": {"taskId": tid, "artifact": {"parts": [{"text": text}]}},
+    }
+
+
+def test_task_approval_covers_inbound_updates_until_the_window_closes(
+    policy: SafetyPolicy, fake_clock: FakeClock
+) -> None:
+    policy.update(G, {"require_approval": "both", "approval_ttl_secs": 600})
+    assert policy.inbound(inb(task("t1"))) == hold("require_approval")
+    policy.decide_task(G, MALLORY, "t1", approved=True)
+    assert policy.inbound(inb(art("t1", "partial"))).delivered
+    fake_clock.advance(601)
+    assert policy.inbound(inb(art("t1", "late"))) == hold("require_approval"), (
+        "past approval_ttl_secs the next update is a new first update"
+    )
+    policy.decide_task(G, MALLORY, "t1", approved=True)
+    done = task("t1")
+    done["body"]["status"] = {"state": "TASK_STATE_COMPLETED"}
+    assert policy.inbound(inb(done)).delivered
+    assert policy.inbound(inb(art("t1", "after the end"))) == hold("require_approval"), (
+        "the task's end closes the window"
+    )
+
+
+def test_no_inbound_approval_covers_outbound_sends(policy: SafetyPolicy) -> None:
+    policy.update(G, {"require_approval": "both"})
+    assert policy.outbound(out(task("mine"))) == hold("require_approval")
+    policy.decide_task(G, ME, "mine", approved=True)
+    leak = out(art("mine", "SECRET=" + "A" * 1000))
+    assert policy.outbound(leak) == hold("require_approval")
+    assert policy.outbound(out(art("mine", "more"))) == hold("require_approval")

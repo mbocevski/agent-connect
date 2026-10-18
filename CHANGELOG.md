@@ -66,6 +66,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   CLI prints every peer-controlled string with control characters
   replaced, the audit log records unknown kinds as `unknown`, and the
   SPEC 10.1 notice quotes and cleans the sender's name and the scope.
+- Held messages: each direction has its own queue, the per-sender cap also
+  counts all instances of an identity, and a full group queue drops a new
+  message as `hold_queue_full` (no violation) unless its sender holds its
+  fair share already. Approving a peer task's first update covers only that
+  task's inbound updates, for `approval_ttl_secs` or until the task ends;
+  the agent's own task updates are each held.
 - Held messages: the queue is capped per group (100), per sender instance
   (20) and in bytes (8 MiB; `policy.max_held_per_group`,
   `max_held_per_sender`, `max_held_bytes`), and a message over a cap is

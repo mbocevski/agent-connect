@@ -288,21 +288,35 @@ callers race to expire, approve or reject it. When the group ends (you
 leave or are removed), its held messages are dropped, and each of your
 agent's held sends fails with `send_failed` code `group_gone`.
 
-**Tasks are decided whole.** A task's status and artifact updates aren't
-held one by one. The first update of a task is held like any message; the
-updates that follow while it waits are dropped (`task_pending`). Approving
-it approves the task: its later updates go through without a hold.
-Rejecting it, or letting it expire, rejects the task: its later updates are
-dropped (`task_rejected`). A task's intermediate updates sent before the
-decision are lost, the final ones after it aren't. Neither counts as a
-violation.
+**A peer's task is decided on its first update.** A task's status and
+artifact updates from a peer aren't held one by one. The first update of
+the task is held like any message; the updates that follow while it waits
+are dropped (`task_pending`), so intermediate updates sent before your
+decision are lost. Approving it lets the task's later inbound updates
+through without a hold, for `approval_ttl_secs` (one hour) or until the task
+ends, whichever comes first; after that, the next update is held again as
+a new first update. Rejecting it, or letting it expire, drops the task's
+updates (`task_rejected`) for as long. None of these count as violations.
 
-**The held queue is capped.** At most `max_held_per_group` messages (100)
-wait in one group, `max_held_per_sender` (20) from one sender instance, and
-`max_held_bytes` (8 MiB) in all in one group. A message over a cap is
-dropped, not held (`hold_overflow`), and counts as a violation, so a peer
-can't bury the messages you want to approve or fill the disk. Like the
-limits, the caps can only be lowered.
+The approval covers only what the peer sends on that task. It never covers
+your agent's own messages: with `outbound` or `both`, every message,
+status update and artifact your agent sends is held on its own, task or
+not, so approving a peer's "working" update can't let your agent stream
+something past you.
+
+**The held queue is capped.** Each direction has its own queue, so what
+peers send can never block your agent's sends. In each, at most
+`max_held_per_sender` (20) messages wait from one sender, counted both per
+instance and for all instances of an identity, so replicas don't multiply
+it; a message over that is dropped (`hold_overflow`) and counts as a
+violation. At most `max_held_per_group` (100) and `max_held_bytes`
+(8 MiB) wait in one group's queue. When it is full, a new message is
+dropped, not held, but only a sender that already holds its fair share
+(the group cap divided by the senders waiting, at most the per-sender cap)
+is charged with `hold_overflow`; anyone else gets `hold_queue_full`, which
+is no violation. So one peer can't bury the messages you want to approve,
+fill the disk, or get an honest member reported. Like the limits, the caps
+can only be lowered.
 
 Messages are released in the order they are approved, so approving a later
 message first changes the order the agent sees.

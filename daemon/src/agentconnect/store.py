@@ -594,16 +594,42 @@ class Store:
         )
         return cur.rowcount == 1
 
-    def held_load(self, group_id: str, instance: str) -> tuple[int, int, int]:
-        """Pending holds of a group: how many, how many from ``instance``, and
-        their bytes."""
+    def held_load(
+        self, group_id: str, direction: str, instance: str, identity: str
+    ) -> tuple[int, int, int, int, int]:
+        """Pending holds of a group in one direction: how many, how many from
+        ``instance``, how many from ``identity`` (all its instances), their
+        bytes, and how many identities have one."""
         row = self._one(
-            "SELECT COUNT(*), COALESCE(SUM(instance = ?), 0), COALESCE(SUM(size), 0) FROM held "
-            "WHERE group_id = ? AND status = 'pending'",
+            "SELECT COUNT(*), COALESCE(SUM(instance = ?), 0), COALESCE(SUM(sender = ?), 0), "
+            "COALESCE(SUM(size), 0), COUNT(DISTINCT sender) FROM held "
+            "WHERE group_id = ? AND direction = ? AND status = 'pending'",
             instance,
+            identity,
             group_id,
+            direction,
         )
-        return (0, 0, 0) if row is None else (int(row[0]), int(row[1]), int(row[2]))
+        if row is None:
+            return 0, 0, 0, 0, 0
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3]), int(row[4])
+
+    def task_decision(self, group_id: str, sender: str, task_id: str) -> tuple[str, int] | None:
+        """A task's state (``pending``, ``approved``, ``rejected``) and when it
+        was set, or None."""
+        row = self._one(
+            "SELECT state, at FROM task_decisions WHERE group_id = ? AND sender = ? "
+            "AND task_id = ?",
+            group_id,
+            sender,
+            task_id,
+        )
+        return None if row is None else (str(row[0]), int(row[1]))
+
+    def forget_task(self, group_id: str, sender: str, task_id: str) -> None:
+        self._db.execute(
+            "DELETE FROM task_decisions WHERE group_id = ? AND sender = ? AND task_id = ?",
+            (group_id, sender, task_id),
+        )
 
     def task_state(self, group_id: str, sender: str, task_id: str) -> str | None:
         """``pending``, ``approved`` or ``rejected``: the human's decision on a
