@@ -310,6 +310,13 @@ pub(crate) fn is_public_address(ip: &str) -> PyResult<bool> {
     Ok(core::net::is_public_ip(addr))
 }
 
+/// Checks a pinned directory as every verification does (SPEC §13.2.1):
+/// a canonical host and one or two distinct Ed25519 public keys.
+#[pyfunction]
+pub(crate) fn check_directory_keys(directory: &str, directory_keys: Vec<Vec<u8>>) -> PyResult<()> {
+    guarded(|| trusted(directory, &directory_keys).map(|_| ()))
+}
+
 /// Whether `s` is a listing name (SPEC §13.1.1).
 #[pyfunction]
 pub(crate) fn is_listing_name(s: &str) -> bool {
@@ -1200,6 +1207,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(sign_listing_content, m)?,
         wrap_pyfunction!(is_public_address, m)?,
         wrap_pyfunction!(is_listing_name, m)?,
+        wrap_pyfunction!(check_directory_keys, m)?,
         wrap_pyfunction!(verify_listing_token, m)?,
         wrap_pyfunction!(check_token_binding, m)?,
         wrap_pyfunction!(verify_token_revocation, m)?,

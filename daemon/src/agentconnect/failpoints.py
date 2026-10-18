@@ -27,12 +27,19 @@ Action = Literal["raise", "crash"]
 #: relay ack). ``event.after_record`` and ``event.after_notify`` surround
 #: telling the adapter about a recorded event; ``delivery.after_adapter`` is
 #: after the adapter accepted a message, before the inbox records that.
+#: Publishing a listing (docs/discovery.md): ``door.after_register`` (the
+#: relay has the door, the daemon doesn't record it yet), ``listing.after_sign``
+#: (signed and stored, not posted) and ``listing.after_post`` (the directory
+#: accepted it, not recorded yet); ``withdraw.after_close`` is after closing
+#: the doors, before the withdrawal is sent.
 PATHS = ("receive", "confirm", "welcome")
 STEPS = ("before_core", "after_core", "in_tx", "after_tx", "after_consume")
 POINTS = frozenset(
     {f"{path}.{step}" for path in PATHS for step in STEPS}
     | {"invite.after_register", "event.after_record", "event.after_notify"}
     | {"held_timer.expire", "delivery.after_adapter"}
+    | {"door.after_register", "listing.after_sign", "listing.after_post"}
+    | {"withdraw.after_close"}
 )
 
 

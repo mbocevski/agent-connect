@@ -10,8 +10,10 @@ each in a 0600 file in the data directory:
 
 * ``api-token`` (scope ``agent``): everything an agent integration may do;
 * ``human-token`` (scope ``human``): additionally approving JoinRequests
-  and held messages, marking members verified, removing members, and
-  changing or reading the group's safety policy, audit log and transcript.
+  and held messages, marking members verified, removing members,
+  changing or reading the group's safety policy, audit log and transcript,
+  and publishing a listing (SPEC 13.2.2: an agent can't put itself into a
+  public directory; withdrawing is allowed to either token).
 
 Approval and verification are human decisions (SPEC §6.2, §11). An agent
 that could approve joins or mark the SAS as compared would defeat both
@@ -40,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from agentconnect import log
-from agentconnect.cli_json import HELD
+from agentconnect.cli_json import HELD, LISTING
 from agentconnect.isolation import PeerGate
 from agentconnect.runtime.agent import AgentApi, a2a_text
 from agentconnect.runtime.engine import Engine
@@ -184,6 +186,14 @@ _GROUP_INFO: dict[str, Any] = {
 _HELD: dict[str, Any] = HELD
 
 _SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}
+
+_WARNINGS: list[Any] = [{"code": "str", "message": "str"}]
+_LISTING_REQUEST: dict[str, Any] = {
+    "directory": "str",
+    "card": "object",
+    "token": "object",
+    "owner_domain?": Opt("str"),
+}
 
 ROUTE_SPECS: tuple[RouteSpec, ...] = (
     RouteSpec(
@@ -490,6 +500,90 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         human=True,
     ),
     RouteSpec(
+        "POST",
+        "/v0/listing/preview",
+        "_listing_preview",
+        "Check a listing before publishing it ([discovery.md](discovery.md)): the card "
+        "text (`card`, the card file's contents) and the operator's `token` are verified "
+        "against the pinned `[[directory]]`, and the answer shows what would be signed, "
+        "with `content_sha256` to pass to `publish`. With an owner domain, the daemon "
+        "fetches that domain's owner file and returns the entry it should list "
+        "(`owner_file_entry`). Nothing is registered, signed or sent to the directory.",
+        request=_LISTING_REQUEST,
+        response={
+            "directory": "str",
+            "name": "str",
+            "identity": "str",
+            "fingerprint": "str",
+            "content": "object",
+            "content_sha256": "str",
+            "owner_domain": Opt("str"),
+            "token": {"token_id": "str", "issued_at": "int", "expires_at": "int", "key_id": "str"},
+            "owner_file_entry": Opt("object"),
+            "warnings": _WARNINGS,
+        },
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/listing/publish",
+        "_listing_publish",
+        "Publish the listing the preview showed (`content_sha256` must match): register "
+        "a fresh door at the relay, sign and post. The runtime renews the door from then "
+        "on. A directory that doesn't answer is retried with the same signed bytes "
+        "(`retrying: true`, `state` `publishing`); a refusal answers with the "
+        "directory's code. Publishing is a human decision (SPEC 13.2.2).",
+        request={**_LISTING_REQUEST, "content_sha256": "str"},
+        response={
+            "directory": "str",
+            "name": "str",
+            "url": "str",
+            "seq": "int",
+            "state": "str",
+            "door_expires_at": Opt("int"),
+            "renews_at": Opt("int"),
+            "token_expires_at": "int",
+            "owner_domain": Opt("str"),
+            "owner_state": Opt("str"),
+            "warnings": _WARNINGS,
+            "retrying": "bool",
+        },
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/listing/withdraw",
+        "_listing_withdraw",
+        "Withdraw the listing: every door is closed at the relay first (their keys are "
+        "deleted at once), then the signed withdrawal goes to the directory. Either "
+        "token may: withdrawing only reduces exposure (SPEC 13.2.3). `state` is "
+        "`withdrawing` while the directory hasn't answered; the runtime keeps trying, "
+        "and gives up after 7 days (`withdraw_failed`). `force: true` (the human token "
+        "only, and only while a withdrawal is `withdrawing` or `withdraw_failed`; else "
+        "`409 not_withdrawing`) ends it here without the directory, after the doors are "
+        "closed: `state` is then `withdrawn_locally` and `forced` is true, and the "
+        "directory may go on listing it. A directory removed from the config answers "
+        "`400 unknown_directory`.",
+        request={"force?": "bool"},
+        response={
+            "directory": "str",
+            "name": "str",
+            "seq": "int",
+            "state": "str",
+            "doors_closed": "int",
+            "doors_close_pending": "int",
+            "forced": "bool",
+        },
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/listing",
+        "_listing_status",
+        "The runtime's listing, if it has one: its state, door, token expiry and last "
+        "error. `owner_state` is what the directory last reported, for information only.",
+        response={"listing": Opt(LISTING)},
+    ),
+    RouteSpec(
         "GET",
         "/v0/events",
         "_events",
@@ -534,7 +628,43 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "The invite is for a different relay than this daemon's (SPEC 4.4). Nothing "
         "was fetched or sent.",
     ),
+    (
+        400,
+        "unknown_directory",
+        "Publish: the directory has no `[[directory]]` table, so no keys are pinned for it.",
+    ),
+    (400, "bad_token", "Publish: the token is not a listing token (malformed)."),
+    (
+        400,
+        "bad_card",
+        "Publish: the card is not valid listing text, or holds fields of a full Agent Card.",
+    ),
+    (
+        400,
+        "bad_listing",
+        "Publish: the directory refused the listing as malformed. Also `wrong_relay`, "
+        "`wrong_directory`, `bad_door` and `stale_ts`: the directory's codes "
+        "(directory/README.md).",
+    ),
     (401, "auth_failed", "The bearer token is missing or wrong."),
+    (
+        403,
+        "token_invalid",
+        "Publish: the token doesn't verify under the pinned keys: expired, not valid "
+        "yet, bad signature, or for another directory.",
+    ),
+    (403, "unknown_key", "Publish: the token is signed by a key not pinned for the directory."),
+    (
+        403,
+        "token_not_for_identity",
+        "Publish: the token was issued for another identity (or owner domain).",
+    ),
+    (
+        403,
+        "token_revoked",
+        "Publish: the directory refused the token (also `bad_token`, `bad_signature`, "
+        "`wrong_identity`, `owner_revoked`).",
+    ),
     (403, "human_only", "The operation needs the human token."),
     (
         403,
@@ -554,10 +684,27 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (409, "stale_epoch", "The group changed since the epoch you passed."),
     (409, "expired", "The invite or request has expired."),
     (409, "invite_not_open", "The invite was used up, revoked or never open."),
+    (
+        409,
+        "listing_exists",
+        "Publish: the runtime already has another listing; withdraw it first.",
+    ),
+    (
+        409,
+        "not_withdrawing",
+        "Withdraw: `force` only ends a withdrawal the directory hasn't taken.",
+    ),
+    (409, "card_changed", "Publish: the card or token changed since the preview."),
+    (
+        409,
+        "name_held",
+        "Publish: the directory holds the name for a newer token or a higher `seq`.",
+    ),
     (413, "too_large", "The headers or the body (over 1 MiB) are too large."),
     (429, "rate_limited", "Too many requests."),
     (500, "internal", "An unexpected failure; the daemon logs it."),
     (502, "relay", "The relay reported an error."),
+    (502, "directory", "Publish: the directory refused the listing with a code of its own."),
     (503, "busy", "Too many open connections."),
 )
 
@@ -771,6 +918,23 @@ class ApiServer:
         if epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool)):
             raise ApiError(400, "bad_request", "epoch must be an integer")
         return {"status": await self.daemon.sas_mismatch(p["gid"], epoch)}
+
+    async def _listing_preview(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        return await self.daemon.listings.preview(b)
+
+    async def _listing_publish(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        return await self.daemon.listings.publish(b)
+
+    async def _listing_withdraw(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        force = b.get("force", False)
+        if not isinstance(force, bool):
+            raise ApiError(400, "bad_request", "force must be a boolean")
+        if not force:
+            return await self.agent.withdraw_listing()
+        return await self.daemon.listings.withdraw(force=True, human=p.get(SCOPE) == "human")
+
+    async def _listing_status(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return await self.agent.listing_status()
 
     async def _events(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         """Events as JSON (``after``), or, with ``Accept: text/event-stream``,

@@ -106,12 +106,17 @@ What works on `main` today:
   stream that the agent reads and resumes after a disconnect
   ([docs/adapters/webhook.md](docs/adapters/webhook.md)).
   <!-- component: webhook-adapter -->
-- **Discovery, core and relay side**: signed listings, listing tokens,
-  withdrawals and owner verification files, checked in one place in the
-  core ([ADR-006](docs/adr/006-discovery.md); [SPEC.md](SPEC.md) §6.6 and §13). An
-  agent's owner can register a door at the relay, and the relay forwards
-  sealed knocks (requests to talk) to the door's mailbox without reading
-  them, within per-door and per-sender limits.
+- **Discovery**: signed listings, listing tokens, withdrawals and owner
+  verification files, checked in one place in the core
+  ([ADR-006](docs/adr/006-discovery.md); [SPEC.md](SPEC.md) §6.6 and §13).
+  A person can publish their agent's listing in a pinned directory with
+  `agentconnect listing publish` (human token); the runtime registers the
+  listing's door at the relay, renews it before it expires and deletes old
+  door keys on its own, and `listing withdraw` closes the doors and takes
+  the listing down ([docs/discovery.md](docs/discovery.md)). The relay
+  forwards sealed knocks (requests to talk) to the door's mailbox without
+  reading them, within per-door and per-sender limits. The daemon doesn't
+  knock or answer knocks yet.
   <!-- component: discovery -->
 - **Directory** (`directory/`, Rust): a service that indexes signed listings
   and serves them as search, HTML and Markdown pages, the exact signed card
@@ -120,9 +125,9 @@ What works on `main` today:
   keys ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
-What is coming: the daemon and CLI side of discovery (publishing a listing,
-knocking on a door, and approving knocks), which the core and relay already
-support, and support for more agent platforms. With no adapter configured, a
+What is coming: knocking on a listing and approving knocks in the daemon
+and CLI, which the core and relay already support, and support for more
+agent platforms. With no adapter configured, a
 received message waits in the daemon's inbound queue.
 
 Platform support:
