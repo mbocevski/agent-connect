@@ -31,6 +31,7 @@ STEPS = ("before_core", "after_core", "in_tx", "after_tx", "after_consume")
 POINTS = frozenset(
     {f"{path}.{step}" for path in PATHS for step in STEPS}
     | {"invite.after_register", "event.after_record", "event.after_notify"}
+    | {"held_timer.expire"}
 )
 
 

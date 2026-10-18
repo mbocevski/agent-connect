@@ -1896,24 +1896,36 @@ class Daemon:
 
     async def _held_timer(self) -> None:
         """Expire held messages when their window ends, traffic or not (the
-        plaintext of a held message must not outlive it)."""
+        plaintext of a held message must not outlive it). A failure is logged
+        by type only and retried after a backoff; the timer keeps running."""
+        backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         while True:
-            self._held_wake.clear()
-            pending = self.store.held_items()
-            if not pending:
-                await self._held_wake.wait()
-                continue
-            delay = min(int(item["expires_at"]) for item in pending) - self.now()
-            if delay > 0:
-                sleep = asyncio.ensure_future(self.clock.sleep(delay))
-                woken = asyncio.ensure_future(self._held_wake.wait())
-                try:
-                    await asyncio.wait({sleep, woken}, return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    for waiter in (sleep, woken):
-                        waiter.cancel()
-                continue
-            await self.expire_held()
+            try:
+                await self._held_timer_step()
+                backoff.reset()
+            except Exception as e:
+                LOG.warning("held_timer_failed", error=type(e).__name__)
+                await self._sleep(backoff.next())
+
+    async def _held_timer_step(self) -> None:
+        """Wait for the next expiry (or a new hold), then expire what is due."""
+        self._held_wake.clear()
+        pending = self.store.held_items()
+        if not pending:
+            await self._held_wake.wait()
+            return
+        delay = min(int(item["expires_at"]) for item in pending) - self.now()
+        if delay > 0:
+            sleep = asyncio.ensure_future(self.clock.sleep(delay))
+            woken = asyncio.ensure_future(self._held_wake.wait())
+            try:
+                await asyncio.wait({sleep, woken}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in (sleep, woken):
+                    waiter.cancel()
+            return
+        self.failpoints.hit("held_timer.expire")
+        await self.expire_held()
 
     def safety_settings(self, group_id: str) -> dict[str, Any]:
         group = self._group_or_raise(group_id)

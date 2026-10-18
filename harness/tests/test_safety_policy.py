@@ -677,3 +677,25 @@ async def test_a_changed_card_waits_and_unknown_fields_never_reach_the_agent(
     again = raw_send(b, gid, {"name": "renamed"}, "a2a.agent_card")
     assert await settled(a, b, again) == "done", "an unchanged card is not held"
     assert events(a, "repeated_violations") == []
+
+
+async def test_the_expiry_timer_survives_a_failure(
+    group: GroupFixture,
+    advance: Advance,
+    partition: Callable[[Node], Awaitable[None]],
+) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.update_safety(gid, {"require_approval": "inbound", "approval_ttl_secs": 60})
+    sent = b.daemon.send_message(gid, {"text": "stale"})
+    assert await settled(a, b, sent) == "held"
+    await partition(a)  # no traffic: only the timer can expire it
+    a.daemon.failpoints.arm("held_timer.expire", "raise", times=1)
+    await advance(61)
+    await a.wait(lambda: "held_timer.expire" in a.daemon.failpoints.fired)
+    assert events(a, "held_expired") == [], "the first attempt failed"
+    for _ in range(10):
+        if events(a, "held_expired"):
+            break
+        await advance(60)
+    (expired,) = events(a, "held_expired")
+    assert expired["msg_id"] == sent

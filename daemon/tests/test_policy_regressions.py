@@ -630,3 +630,57 @@ def test_no_inbound_approval_covers_outbound_sends(policy: SafetyPolicy) -> None
     leak = out(art("mine", "SECRET=" + "A" * 1000))
     assert policy.outbound(leak) == hold("require_approval")
     assert policy.outbound(out(art("mine", "more"))) == hold("require_approval")
+
+
+@pytest.mark.parametrize(
+    ("kind", "body"),
+    [
+        ("control.close", {"reason": 5}),
+        ("control.floor", {}),
+        ("control.floor", {"holder": "not-an-identity"}),
+        ("control.capabilities", {"adapters": "a2a", "accepts": []}),
+        ("control.capabilities", {"adapters": [5], "accepts": []}),
+        ("a2a.agent_card", {"name": " "}),
+        ("a2a.agent_card", {"name": "x", "skills": {}}),
+        ("a2a.agent_card", {"name": "x", "skills": ["s"]}),
+        ("a2a.agent_card", {"name": "x", "skills": [{"id": "s", "tags": "t"}]}),
+        ("a2a.agent_card", {"name": "x", "capabilities": []}),
+        ("a2a.agent_card", {"name": "x", "capabilities": {"extensions": {}}}),
+        ("a2a.agent_card", {"name": "x", "capabilities": {"extensions": [5]}}),
+        (
+            "a2a.agent_card",
+            {"name": "x", "capabilities": {"extensions": [{"uri": "u", "params": []}]}},
+        ),
+        ("a2a.task_cancel", {"id": ""}),
+        ("a2a.task_cancel", {"id": "t", "metadata": []}),
+        ("a2a.task_cancel", {"id": "t", "tenant": 5}),
+    ],
+)
+def test_wrong_types_in_known_fields_are_malformed(kind: str, body: dict[str, Any]) -> None:
+    assert normalize(kind, body) is None
+
+
+def test_known_card_fields_are_kept_in_shape() -> None:
+    card = {
+        "name": "x",
+        "version": "1",
+        "defaultInputModes": ["text/plain"],
+        "skills": [{"id": "s", "name": "n", "tags": ["t"], "inputModes": ["text/plain"]}],
+        "capabilities": {
+            "streaming": True,
+            "extensions": [{"uri": "u", "description": "d", "required": 1, "params": {}}],
+        },
+    }
+    shaped = normalize("a2a.agent_card", card)
+    assert shaped is not None
+    assert shaped["capabilities"]["extensions"] == [
+        {"uri": "u", "description": "d", "required": True, "params": {}}
+    ]
+    assert shaped["skills"][0]["tags"] == ["t"]
+    assert normalize("a2a.task_cancel", {"id": "t", "tenant": "x", "metadata": {}}) == {
+        "id": "t",
+        "tenant": "x",
+        "metadata": {},
+    }
+    assert normalize("control.floor", {"holder": None}) == {"holder": None}
+    assert normalize("a2a.message", {"parts": []}) == {"parts": []}

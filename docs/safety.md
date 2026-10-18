@@ -283,7 +283,8 @@ A held message waits `approval_ttl_secs` (default one hour). After that it
 is dropped without telling the sender, and the daemon raises
 `held_expired` (and `send_failed` with code `expired` for an outbound one).
 A timer expires each hold when its window ends, with or without traffic, so
-held plaintext doesn't outlive it; each hold is decided once, however many
+held plaintext doesn't outlive it (a failure is logged and retried after a
+backoff, and the timer keeps running); each hold is decided once, however many
 callers race to expire, approve or reject it. When the group ends (you
 leave or are removed), its held messages are dropped, and each of your
 agent's held sends fails with `send_failed` code `group_gone`.

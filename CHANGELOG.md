@@ -66,6 +66,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   CLI prints every peer-controlled string with control characters
   replaced, the audit log records unknown kinds as `unknown`, and the
   SPEC 10.1 notice quotes and cleans the sender's name and the scope.
+- The held-message expiry timer logs a failure by type, backs off and keeps
+  running (failpoint `held_timer.expire`).
 - Held messages: each direction has its own queue, the per-sender cap also
   counts all instances of an identity, and a full group queue drops a new
   message as `hold_queue_full` (no violation) unless its sender holds its
