@@ -164,6 +164,35 @@ def test_wrong_secret_and_bad_inputs(rng: random.Random) -> None:
     a._set_time_for_testing(None)
 
 
+def test_a_join_request_seen_before_is_a_replay(rng: random.Random) -> None:
+    """SPEC 6.2 "Replays": the inviter remembers a verified request by its
+    request id and KeyPackageRef until its invite expires (plus the grace),
+    and a full ledger refuses (``busy``) without evicting."""
+    a, b = make_client(rng), make_client(rng)
+    invite = a.create_invite("relay.example", 86_400)
+    link = ac.parse_invite_url(invite.url)
+    request = b.create_join_request(link, "b")
+    first = a.verify_join_request(request, invite)
+    assert first.forget_after == invite.expires_at + ac.LEDGER_GRACE_SECS
+    ledger = ac.ReplayLedger(capacity=2)
+    first.remember_in(ledger, b"msg-1")  # then the human rejects it
+    again = a.verify_join_request(request, invite)
+    for request_id in (b"msg-1", b"msg-2"):
+        with pytest.raises(ac.AgentConnectError) as e:
+            again.remember_in(ledger, request_id)
+        assert e.value.kind == "replay"
+    other = a.verify_join_request(b.create_join_request(link, "b"), invite)
+    other.remember_in(ledger, b"msg-3")
+    third = a.verify_join_request(b.create_join_request(link, "b"), invite)
+    with pytest.raises(ac.AgentConnectError) as e:
+        third.remember_in(ledger, b"msg-4")
+    assert e.value.kind == "busy"
+    assert sorted(i for i, _, _ in ledger.entries()) == [b"msg-1", b"msg-3"]
+    ledger.purge(first.forget_after + 1)
+    assert len(ledger) == 0
+    assert ac.ReplayLedger().capacity == ac.DEFAULT_LEDGER_CAPACITY
+
+
 def test_persistence_and_invite_parts(rng: random.Random, tmp_path: Path) -> None:
     db = tmp_path / "b.sqlite"
     identity = ac.Identity._generate_for_testing(rng.getrandbits(64))
@@ -228,6 +257,37 @@ def test_peek_header_rejects_what_process_rejects(rng: random.Random, bad: bytes
     gid = a.create_group(NAME, PURPOSE)
     with pytest.raises(ac.AgentConnectError, match="malformed"):
         a.process(gid, bad)
+
+
+def test_group_policy_vectors(rng: random.Random) -> None:
+    """The policies of testdata/group-policy.json (SPEC 9.1) through set_policy.
+
+    Its authorization cases (SPEC 9.2) are checked by core/src/vectors.rs;
+    the bindings have no call that evaluates a commit's facts on their own.
+    """
+    testdata = Path(__file__).resolve().parents[2] / "testdata"
+    vectors = json.loads((testdata / "group-policy.json").read_text(encoding="utf-8"))
+    a = make_client(rng)
+    gid = a.create_group(NAME, PURPOSE)
+
+    def own(policy: str) -> bytes:
+        # The vector's owner becomes this client, the group's only member.
+        return policy.replace(json.loads(policy)["owner"], a.identity).encode()
+
+    assert a.policy(gid) == own(vectors["default"])
+    for case in vectors["valid"]:
+        if "pending" in case:
+            # A SPEC rule the core doesn't implement yet: drop the mark when
+            # it does, and this policy is accepted.
+            with pytest.raises(ac.AgentConnectError, match="malformed group policy"):
+                a.set_policy(gid, own(case["policy"]))
+            continue
+        a.set_policy(gid, own(case["policy"]))
+        a.discard_pending_commit(gid)
+    for case in vectors["invalid"]:
+        with pytest.raises(ac.AgentConnectError) as err:
+            a.set_policy(gid, case["policy"].encode())
+        assert str(err.value) == case["error"], case["name"]
 
 
 def _b64(raw: bytes) -> str:

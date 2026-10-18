@@ -25,12 +25,18 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import agentconnect_core as ac
 from agentconnect.keystore import private_file
 
 SqlParam = None | int | float | str | bytes
+#: The owner's replay ledgers (SPEC 6.2 "Replays", 6.6.3 step 6): table and id column.
+Ledger = Literal["knock", "join"]
+LEDGERS: dict[str, tuple[str, str]] = {
+    "knock": ("knock_ledger", "knock_id"),
+    "join": ("join_ledger", "request_id"),
+}
 
 
 class _Cursor:
@@ -299,6 +305,14 @@ CREATE TABLE IF NOT EXISTS knock_ledger (
     forget_after INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS knock_ledger_until ON knock_ledger (forget_after);
+CREATE TABLE IF NOT EXISTS join_ledger (
+    request_id TEXT PRIMARY KEY,
+    invite_id TEXT NOT NULL,
+    kp_ref TEXT NOT NULL,
+    forget_after INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS join_ledger_until ON join_ledger (forget_after);
+CREATE INDEX IF NOT EXISTS join_ledger_invite ON join_ledger (invite_id);
 CREATE TABLE IF NOT EXISTS knock_requests (
     request_id TEXT PRIMARY KEY,
     knock_id TEXT NOT NULL UNIQUE,
@@ -1245,30 +1259,72 @@ class Store:
 
     # -- knocks: the owner's ledger and approvals, the knocker's knocks -------
 
-    def ledger_add(self, knock_id: str, kp_ref: str, forget_after: int) -> None:
-        """Remember a knock that passed the owner's checks 1-5 (SPEC 6.6.3
-        step 6), in the transaction that records what happened to it. A row
-        for the same ``knock_id`` can only be one the ledger already forgot
-        (a live one makes the knock a replay), so it is replaced whole."""
+    def ledger_add(
+        self,
+        entry_id: str,
+        kp_ref: str,
+        forget_after: int,
+        *,
+        ledger: Ledger = "knock",
+        invite_id: str | None = None,
+    ) -> None:
+        """Remember a request that passed the owner's checks (SPEC 6.2
+        "Replays" for joins, with its ``invite_id``; 6.6.3 step 6 for
+        knocks), in the transaction that records what happened to it. A row
+        for the same id can only be one the ledger already forgot (a live one
+        makes the request a replay), so it is replaced whole."""
+        if ledger == "join":
+            self._db.execute(
+                "INSERT INTO join_ledger (request_id, invite_id, kp_ref, forget_after) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(request_id) DO UPDATE SET "
+                "invite_id = excluded.invite_id, kp_ref = excluded.kp_ref, "
+                "forget_after = excluded.forget_after",
+                (entry_id, invite_id or "", kp_ref, forget_after),
+            )
+            return
         self._db.execute(
             "INSERT INTO knock_ledger (knock_id, kp_ref, forget_after) VALUES (?, ?, ?) "
             "ON CONFLICT(knock_id) DO UPDATE SET "
             "kp_ref = excluded.kp_ref, forget_after = excluded.forget_after",
-            (knock_id, kp_ref, forget_after),
+            (entry_id, kp_ref, forget_after),
         )
 
-    def ledger_rows(self, now: int) -> list[tuple[str, str, int]]:
-        """``(knock_id, kp_ref, forget_after)`` of every knock still remembered at ``now``."""
+    def join_ledger_count(self, invite_id: str) -> int:
+        """How many join requests of this invite the ledger remembers that
+        are not being added or added: those are in the approvals table, and
+        their KeyPackages are tracked once merged, so they don't count
+        against the invite's share."""
+        row = self._one(
+            "SELECT count(*) FROM join_ledger WHERE invite_id = ? AND request_id NOT IN "
+            "(SELECT request_id FROM approvals WHERE status IN ('approving', 'approved'))",
+            invite_id,
+        )
+        return 0 if row is None else int(row[0])
+
+    def join_ledger_forget(self, invite_id: str) -> int:
+        """Forget an invite's join requests: it was revoked or has expired,
+        both final, so step 1 refuses any copy (SPEC 6.2 "Replays")."""
+        return self._db.execute(
+            "DELETE FROM join_ledger WHERE invite_id = ?", (invite_id,)
+        ).rowcount
+
+    def ledger_rows(self, now: int, *, ledger: Ledger = "knock") -> list[tuple[str, str, int]]:
+        """``(id, kp_ref, forget_after)`` of every request still remembered at ``now``."""
+        table, key = LEDGERS[ledger]
         rows = self._all(
-            "SELECT knock_id, kp_ref, forget_after FROM knock_ledger WHERE forget_after >= ? "
-            "ORDER BY forget_after, knock_id",
+            f"SELECT {key}, kp_ref, forget_after FROM {table} WHERE forget_after >= ? "  # noqa: S608
+            f"ORDER BY forget_after, {key}",
             now,
         )
         return [(str(r[0]), str(r[1]), int(r[2])) for r in rows]
 
-    def ledger_purge(self, now: int) -> int:
-        """Forget knocks whose ``forget_after`` is before ``now``."""
-        return self._db.execute("DELETE FROM knock_ledger WHERE forget_after < ?", (now,)).rowcount
+    def ledger_purge(self, now: int, *, ledger: Ledger = "knock") -> int:
+        """Forget requests whose ``forget_after`` is before ``now``."""
+        table, _ = LEDGERS[ledger]
+        return self._db.execute(
+            f"DELETE FROM {table} WHERE forget_after < ?",  # noqa: S608
+            (now,),
+        ).rowcount
 
     def add_knock_request(self, row: dict[str, Any], knock: bytes) -> None:
         """A knock waiting for the human (``pending``), with its secret."""
@@ -1595,6 +1651,17 @@ class Store:
             kp_ref,
         )
         return None if row is None else str(row[0])
+
+    def pending_approvals_for(self, invite_id: str, since: int) -> int:
+        """Join requests of this invite waiting for the human, received at
+        or after ``since`` (older ones have lapsed)."""
+        row = self._one(
+            "SELECT count(*) FROM approvals WHERE invite_id = ? AND status = 'pending' "
+            "AND received_at >= ?",
+            invite_id,
+            since,
+        )
+        return 0 if row is None else int(row[0])
 
     def uses_taken(self, invite_id: str) -> int:
         """Approvals that hold one of the invite's uses (approving or done)."""

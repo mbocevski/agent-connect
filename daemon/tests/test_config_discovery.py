@@ -182,3 +182,25 @@ def test_knock_limits_may_be_lowered(tmp_path: Path) -> None:
 def test_knock_limits_may_only_be_lowered(tmp_path: Path, line: str, match: str) -> None:
     with pytest.raises(ConfigError, match=match):
         _load(tmp_path, f"[knock]\n{line}\n")
+
+
+def test_join_limits_default_to_their_bounds_and_may_only_be_lowered(tmp_path: Path) -> None:
+    """The join flood limits (SPEC 6.2 "Replays"): 32 pending requests and a
+    ledger share of at most 1024 per invite, lowered but never raised."""
+    cfg = load_config(tmp_path / "none.toml", {"HOME": str(tmp_path)})
+    assert (cfg.policy_max_pending_joins_per_invite, cfg.policy_join_ledger_per_invite) == (
+        32,
+        1024,
+    )
+    cfg = _load(
+        tmp_path, "[policy]\nmax_pending_joins_per_invite = 1\njoin_ledger_per_invite = 64\n"
+    )
+    assert (cfg.policy_max_pending_joins_per_invite, cfg.policy_join_ledger_per_invite) == (1, 64)
+    for line, match in (
+        ("max_pending_joins_per_invite = 33", "1..32"),
+        ("max_pending_joins_per_invite = 0", "1..32"),
+        ("join_ledger_per_invite = 1025", "64..1024"),
+        ("join_ledger_per_invite = 63", "64..1024"),
+    ):
+        with pytest.raises(ConfigError, match=match):
+            _load(tmp_path, f"[policy]\n{line}\n")

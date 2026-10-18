@@ -1652,9 +1652,10 @@ fn knock_vectors() {
         assert_eq!(o.knock().key_package, k.key_package);
         assert_ne!(o.knock().knock_id, k.knock_id);
         let kp_ref = hex_decode(ru["key_package_ref"].as_str().unwrap(), "x").unwrap();
-        let mut ledger = crate::knock::MemoryKnockLedger::default();
-        crate::knock::KnockLedger::remember(&mut ledger, &k.knock_id, &kp_ref, now + 3900).unwrap();
-        assert!(crate::knock::KnockLedger::seen(&ledger, &o.knock().knock_id, &kp_ref).unwrap());
+        let mut ledger = crate::ledger::MemoryLedger::default();
+        crate::ledger::ReplayLedger::remember(&mut ledger, &k.knock_id, &kp_ref, now + 3900)
+            .unwrap();
+        assert!(crate::ledger::ReplayLedger::seen(&ledger, &o.knock().knock_id, &kp_ref).unwrap());
         let bs = &raw["bad_signature"];
         let forged = door.open_knock(&door_id, &d(&bs["sealed"]), now).unwrap();
         assert_eq!(
@@ -1695,4 +1696,785 @@ fn knock_vectors() {
     let stored: Value =
         serde_json::from_str(&std::fs::read_to_string(path(name)).unwrap()).unwrap();
     check(&stored);
+}
+
+// ---- Group policy (SPEC 9.1, 9.2) ----
+
+use std::collections::BTreeMap;
+
+use crate::policy::{
+    CommitFacts, Floor, GroupPolicy, InvitePermission, LoopGuard, MAX_AGENT_TURNS, MAX_GROUP_SIZE,
+    OWNER_MUST_TRANSFER, Removal, RemovePermission, authorize,
+};
+
+/// `group-policy.json`: the expected errors.
+const NOT_INVITE: &str = "unauthorized commit: committer may not invite";
+const NOT_REMOVE: &str = "unauthorized commit: committer may not remove members";
+const NOT_POLICY: &str = "unauthorized commit: committer may not change this policy";
+
+/// What a commit does, as stored in `group-policy.json`: committer, Adds,
+/// Removes (identity, proposed by the removed leaf), the policy the commit
+/// introduces, and leaves and identities before and after it.
+fn facts(
+    committer: &str,
+    adds: &[&str],
+    removes: &[(&str, bool)],
+    new_policy: Option<&str>,
+    leaves: [usize; 2],
+    identities: [&[&str]; 2],
+) -> Value {
+    json!({
+        "committer": committer,
+        "adds": adds,
+        "removes": removes.iter().map(|(identity, self_proposed)| {
+            json!({"identity": identity, "self_proposed": self_proposed})
+        }).collect::<Vec<_>>(),
+        "new_policy": new_policy,
+        "leaves_before": leaves[0],
+        "leaves_after": leaves[1],
+        "identities_before": identities[0],
+        "identities_after": identities[1],
+    })
+}
+
+fn strings(v: &Value) -> impl Iterator<Item = String> + '_ {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_owned())
+}
+
+/// Checks a `group-policy.json` value against the core. A case marked
+/// `pending` names a SPEC rule the core doesn't implement yet; it must not
+/// pass, so the mark is dropped together with the change that implements it.
+fn check_group_policy(v: &Value) {
+    let owner = v["identities"]["owner"].as_str().unwrap();
+    assert_eq!(
+        s(&GroupPolicy::default_for(owner).to_json().unwrap()),
+        v["default"].as_str().unwrap()
+    );
+    let mut policies = BTreeMap::new();
+    for p in v["valid"].as_array().unwrap() {
+        let name = p["name"].as_str().unwrap();
+        let parsed = GroupPolicy::from_json(p["policy"].as_str().unwrap().as_bytes());
+        if p.get("pending").is_some() {
+            assert!(parsed.is_err(), "{name} parses now; drop `pending`");
+        } else {
+            parsed.as_ref().unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        policies.insert(name.to_owned(), parsed.ok());
+    }
+    for p in v["invalid"].as_array().unwrap() {
+        let name = p["name"].as_str().unwrap();
+        let e = GroupPolicy::from_json(p["policy"].as_str().unwrap().as_bytes()).expect_err(name);
+        assert_eq!(e.to_string(), p["error"].as_str().unwrap(), "{name}");
+        assert_eq!(e.kind().as_str(), p["kind"].as_str().unwrap(), "{name}");
+    }
+    let policy = |name: &Value| policies[name.as_str().unwrap()].clone();
+    for c in v["authorization"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let f = &c["facts"];
+        let usize_of = |key: &str| usize::try_from(f[key].as_u64().unwrap()).unwrap();
+        let got = (|| {
+            let in_force = policy(&c["policy"])?;
+            let new_policy = match &f["new_policy"] {
+                Value::Null => None,
+                n => Some(policy(n)?),
+            };
+            let facts = CommitFacts {
+                committer: f["committer"].as_str().unwrap().to_owned(),
+                adds: strings(&f["adds"]).collect(),
+                removes: f["removes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| Removal {
+                        identity: r["identity"].as_str().unwrap().to_owned(),
+                        self_proposed: r["self_proposed"].as_bool().unwrap(),
+                    })
+                    .collect(),
+                new_policy,
+                identities_before: strings(&f["identities_before"]).collect(),
+                members_after: usize_of("leaves_after"),
+                identities_after: strings(&f["identities_after"]).collect(),
+            };
+            Some(match authorize(&in_force, &facts) {
+                Ok(()) => "ok".to_owned(),
+                Err(e) => e.to_string(),
+            })
+        })();
+        let want = c["result"].as_str().unwrap();
+        if c.get("pending").is_some() {
+            assert_ne!(
+                got.as_deref(),
+                Some(want),
+                "{name} passes now; drop `pending`"
+            );
+        } else {
+            assert_eq!(got.as_deref(), Some(want), "{name}");
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::many_single_char_names)]
+fn group_policy_vectors() {
+    let name = "group-policy.json";
+    let (seed, rng) = vector_rng(name);
+    let [o, a, m, j] = [0; 4].map(|_| Identity::generate(&rng).unwrap().id());
+    let (o, a, m, j) = (o.as_str(), a.as_str(), m.as_str(), j.as_str());
+
+    let base = GroupPolicy::default_for(o);
+    let with_admin = GroupPolicy {
+        admins: vec![a.to_owned()],
+        ..base.clone()
+    };
+    let admins_manage = GroupPolicy {
+        invite: InvitePermission::Admins,
+        remove: RemovePermission::Admins,
+        ..with_admin.clone()
+    };
+    let members_invite = GroupPolicy {
+        invite: InvitePermission::Members,
+        ..base.clone()
+    };
+    let members_invite_mention = GroupPolicy {
+        floor: Floor::Mention,
+        ..members_invite.clone()
+    };
+    let valid = [
+        ("default", base.clone()),
+        ("admin", with_admin.clone()),
+        ("admins invite and remove", admins_manage),
+        ("members invite", members_invite.clone()),
+        ("members invite, mention", members_invite_mention.clone()),
+        (
+            "moderated by the admin",
+            GroupPolicy {
+                floor: Floor::Moderated,
+                floor_moderator: Some(a.to_owned()),
+                ..with_admin.clone()
+            },
+        ),
+        (
+            "require verified",
+            GroupPolicy {
+                require_verified: true,
+                ..with_admin.clone()
+            },
+        ),
+        (
+            "transferred to the member",
+            GroupPolicy {
+                owner: m.to_owned(),
+                ..with_admin.clone()
+            },
+        ),
+        (
+            "smallest limits",
+            GroupPolicy {
+                max_members: 1,
+                loop_guard: LoopGuard { max_agent_turns: 0 },
+                ..base.clone()
+            },
+        ),
+        (
+            "largest limits",
+            GroupPolicy {
+                max_members: MAX_GROUP_SIZE,
+                loop_guard: LoopGuard {
+                    max_agent_turns: MAX_AGENT_TURNS,
+                },
+                ..base.clone()
+            },
+        ),
+    ];
+    let pinned = |p: &GroupPolicy| {
+        s(&GroupPolicy {
+            floor_pinned: true,
+            ..p.clone()
+        }
+        .to_json()
+        .unwrap())
+    };
+    let mut valid: Vec<Value> = valid
+        .iter()
+        .map(|(n, p)| json!({"name": n, "policy": s(&p.to_json().unwrap())}))
+        .collect();
+    valid.extend(
+        [
+            ("members invite, pinned", pinned(&members_invite)),
+            (
+                "members invite, mention, pinned",
+                pinned(&members_invite_mention),
+            ),
+            ("admin, pinned", pinned(&with_admin)),
+        ]
+        .map(|(n, p)| json!({"name": n, "policy": p})),
+    );
+    // Written before `floor_pinned` existed: the key is absent, and the
+    // policy reads as unpinned (D4).
+    let legacy = s(&with_admin.to_json().unwrap()).replace("\"floor_pinned\":false,", "");
+    assert!(!legacy.contains("floor_pinned"));
+    assert_eq!(
+        GroupPolicy::from_json(legacy.as_bytes()).unwrap(),
+        with_admin
+    );
+    valid.push(json!({"name": "admin, written before floor_pinned", "policy": legacy}));
+
+    let canonical = s(&base.to_json().unwrap());
+    let edit = |from: &str, to: &str| {
+        assert!(canonical.contains(from), "{from}");
+        canonical.replacen(from, to, 1)
+    };
+    let quoted = |id: &str| format!("\"{id}\"");
+    let invalid: Vec<Value> = [
+        ("version 1", edit("\"v\":0", "\"v\":1")),
+        ("owner not an identity", edit(&quoted(o), "\"owner\"")),
+        (
+            "admin not an identity",
+            edit("\"admins\":[]", "\"admins\":[\"ac:v0:x\"]"),
+        ),
+        (
+            "duplicate admin",
+            edit(
+                "\"admins\":[]",
+                &format!("\"admins\":[{},{}]", quoted(a), quoted(a)),
+            ),
+        ),
+        (
+            "moderator not an identity",
+            edit(
+                "\"floor_moderator\":null",
+                "\"floor_moderator\":\"ac:v0:x\"",
+            ),
+        ),
+        (
+            "max_members 0",
+            edit("\"max_members\":50", "\"max_members\":0"),
+        ),
+        (
+            "max_members 51",
+            edit("\"max_members\":50", "\"max_members\":51"),
+        ),
+        (
+            "max_agent_turns 101",
+            edit("\"max_agent_turns\":20", "\"max_agent_turns\":101"),
+        ),
+        (
+            "max_agent_turns beyond I-JSON",
+            edit(
+                "\"max_agent_turns\":20",
+                "\"max_agent_turns\":9007199254740992",
+            ),
+        ),
+        (
+            "unknown floor",
+            edit("\"floor\":\"free\"", "\"floor\":\"open\""),
+        ),
+        (
+            "unknown invite",
+            edit("\"invite\":\"owner\"", "\"invite\":\"anyone\""),
+        ),
+        (
+            "members may not remove",
+            edit("\"remove\":\"owner\"", "\"remove\":\"members\""),
+        ),
+        (
+            "floor_pinned not a boolean",
+            edit(
+                "\"floor_moderator\":null",
+                "\"floor_moderator\":null,\"floor_pinned\":1",
+            ),
+        ),
+        ("unknown field", edit("\"v\":0", "\"v\":0,\"z\":1")),
+        (
+            "missing loop_guard",
+            edit(",\"loop_guard\":{\"max_agent_turns\":20}", ""),
+        ),
+        ("not canonical", edit("\"v\":0", "\"v\": 0")),
+    ]
+    .into_iter()
+    .map(|(n, p)| {
+        let e = GroupPolicy::from_json(p.as_bytes()).expect_err(n);
+        json!({"name": n, "policy": p, "error": e.to_string(), "kind": e.kind().as_str()})
+    })
+    .collect();
+
+    let three: &[&str] = &[o, a, m];
+    let two: &[&str] = &[o, m];
+    let none: &[&str] = &[];
+    let none_removed: &[(&str, bool)] = &[];
+    let owner_must_transfer = format!("unauthorized commit: {OWNER_MUST_TRANSFER}");
+    let cases: Vec<(&str, &str, Value, &str, Option<&str>)> = vec![
+        (
+            "the owner adds a member",
+            "default",
+            facts(o, &[j], none_removed, None, [3, 4], [three, &[o, a, m, j]]),
+            "ok",
+            None,
+        ),
+        (
+            "a member may not add under invite owner",
+            "admin",
+            facts(m, &[j], none_removed, None, [3, 4], [three, &[o, a, m, j]]),
+            NOT_INVITE,
+            None,
+        ),
+        (
+            "an admin may not add under invite owner",
+            "admin",
+            facts(a, &[j], none_removed, None, [3, 4], [three, &[o, a, m, j]]),
+            NOT_INVITE,
+            None,
+        ),
+        (
+            "an admin adds under invite admins",
+            "admins invite and remove",
+            facts(a, &[j], none_removed, None, [3, 4], [three, &[o, a, m, j]]),
+            "ok",
+            None,
+        ),
+        (
+            "a member may not add under invite admins",
+            "admins invite and remove",
+            facts(m, &[j], none_removed, None, [3, 4], [three, &[o, a, m, j]]),
+            NOT_INVITE,
+            None,
+        ),
+        (
+            "a member adds under invite members",
+            "members invite, mention",
+            facts(m, &[j], none_removed, None, [3, 4], [three, &[o, a, m, j]]),
+            "ok",
+            None,
+        ),
+        (
+            "a member adds its own replica whatever invite says",
+            "admin",
+            facts(m, &[m], none_removed, None, [3, 4], [three, three]),
+            "ok",
+            None,
+        ),
+        (
+            "the owner removes a member",
+            "admin",
+            facts(o, none, &[(m, false)], None, [3, 2], [three, &[o, a]]),
+            "ok",
+            None,
+        ),
+        (
+            "an admin may not remove under remove owner",
+            "admin",
+            facts(a, none, &[(m, false)], None, [3, 2], [three, &[o, a]]),
+            NOT_REMOVE,
+            None,
+        ),
+        (
+            "an admin removes a member under remove admins",
+            "admins invite and remove",
+            facts(a, none, &[(m, false)], None, [3, 2], [three, &[o, a]]),
+            "ok",
+            None,
+        ),
+        (
+            "an admin may not remove the owner",
+            "admins invite and remove",
+            facts(a, none, &[(o, false)], None, [3, 2], [three, &[a, m]]),
+            "unauthorized commit: only the owner may remove the owner",
+            None,
+        ),
+        (
+            "a member removes its own dead replica",
+            "admin",
+            facts(m, none, &[(m, false)], None, [4, 3], [three, three]),
+            "ok",
+            None,
+        ),
+        (
+            "removing another identity's replica needs remove permission",
+            "admin",
+            facts(a, none, &[(m, false)], None, [4, 3], [three, three]),
+            NOT_REMOVE,
+            None,
+        ),
+        (
+            "any member commits a leave",
+            "admin",
+            facts(a, none, &[(m, true)], None, [3, 2], [three, &[o, a]]),
+            "ok",
+            None,
+        ),
+        (
+            "the owner's last instance may not leave",
+            "admin",
+            facts(m, none, &[(o, true)], None, [3, 2], [three, &[a, m]]),
+            owner_must_transfer.as_str(),
+            None,
+        ),
+        (
+            "one of two owner instances leaves",
+            "admin",
+            facts(m, none, &[(o, true)], None, [4, 3], [three, three]),
+            "ok",
+            None,
+        ),
+        (
+            "the former owner leaves after a transfer",
+            "transferred to the member",
+            facts(a, none, &[(o, true)], None, [3, 2], [three, &[a, m]]),
+            "ok",
+            None,
+        ),
+        (
+            "the owner changes the policy",
+            "admin",
+            facts(
+                o,
+                none,
+                none_removed,
+                Some("require verified"),
+                [3, 3],
+                [three, three],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "an admin may not change more than the floor",
+            "admin",
+            facts(
+                a,
+                none,
+                none_removed,
+                Some("require verified"),
+                [3, 3],
+                [three, three],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "an admin changes the floor and moderator",
+            "admin",
+            facts(
+                a,
+                none,
+                none_removed,
+                Some("moderated by the admin"),
+                [3, 3],
+                [three, three],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "a member may not change the floor",
+            "admin",
+            facts(
+                m,
+                none,
+                none_removed,
+                Some("moderated by the admin"),
+                [3, 3],
+                [three, three],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "an unchanged policy is a no-op",
+            "admin",
+            facts(m, none, none_removed, Some("admin"), [3, 3], [three, three]),
+            "ok",
+            None,
+        ),
+        (
+            "the owner transfers ownership to a member",
+            "admin",
+            facts(
+                o,
+                none,
+                none_removed,
+                Some("transferred to the member"),
+                [3, 3],
+                [three, three],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "the new owner must be a member",
+            "admin",
+            facts(
+                o,
+                none,
+                none_removed,
+                Some("transferred to the member"),
+                [2, 2],
+                [&[o, a], &[o, a]],
+            ),
+            "unauthorized commit: new owner is not a member",
+            None,
+        ),
+        (
+            "an admin may not transfer ownership",
+            "admin",
+            facts(
+                a,
+                none,
+                none_removed,
+                Some("transferred to the member"),
+                [3, 3],
+                [three, three],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "the inviter switches the floor with the third identity",
+            "members invite",
+            facts(
+                m,
+                &[j],
+                none_removed,
+                Some("members invite, mention"),
+                [2, 3],
+                [two, &[o, m, j]],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "no floor switch once the group had three identities",
+            "members invite",
+            facts(
+                m,
+                &[j],
+                none_removed,
+                Some("members invite, mention"),
+                [3, 4],
+                [three, &[o, a, m, j]],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "no floor switch without an Add",
+            "members invite",
+            facts(
+                m,
+                none,
+                none_removed,
+                Some("members invite, mention"),
+                [3, 3],
+                [three, three],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "the floor switch changes only the floor",
+            "members invite",
+            facts(
+                m,
+                &[j],
+                none_removed,
+                Some("require verified"),
+                [2, 3],
+                [two, &[o, m, j]],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "the group may not exceed max_members",
+            "default",
+            facts(
+                o,
+                &[j],
+                none_removed,
+                None,
+                [50, 51],
+                [three, &[o, a, m, j]],
+            ),
+            "unauthorized commit: group would exceed max_members",
+            None,
+        ),
+        (
+            "the group must fit the new policy's max_members",
+            "default",
+            facts(
+                o,
+                none,
+                none_removed,
+                Some("smallest limits"),
+                [2, 2],
+                [two, two],
+            ),
+            "unauthorized commit: group would exceed max_members",
+            None,
+        ),
+        (
+            "a replica doesn't switch the floor of a one-to-one group",
+            "members invite",
+            facts(
+                m,
+                &[m],
+                none_removed,
+                Some("members invite, mention"),
+                [2, 3],
+                [two, two],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "the floor switch counts identities, not instances",
+            "members invite",
+            facts(
+                m,
+                &[j],
+                none_removed,
+                Some("members invite, mention"),
+                [3, 4],
+                [two, &[o, m, j]],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "no floor switch while the floor is pinned",
+            "members invite, pinned",
+            facts(
+                m,
+                &[j],
+                none_removed,
+                Some("members invite, mention, pinned"),
+                [2, 3],
+                [two, &[o, m, j]],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "the owner changes a pinned floor",
+            "members invite, pinned",
+            facts(
+                o,
+                none,
+                none_removed,
+                Some("members invite, mention, pinned"),
+                [2, 2],
+                [two, two],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "an admin pins the floor",
+            "admin",
+            facts(
+                a,
+                none,
+                none_removed,
+                Some("admin, pinned"),
+                [3, 3],
+                [three, three],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "a member may not pin the floor",
+            "admin",
+            facts(
+                m,
+                none,
+                none_removed,
+                Some("admin, pinned"),
+                [3, 3],
+                [three, three],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "an admin unpins the floor",
+            "admin, pinned",
+            facts(a, none, none_removed, Some("admin"), [3, 3], [three, three]),
+            "ok",
+            None,
+        ),
+        (
+            "a member may not unpin the floor",
+            "admin, pinned",
+            facts(m, none, none_removed, Some("admin"), [3, 3], [three, three]),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "the floor switch may not also unpin the floor",
+            "members invite, pinned",
+            facts(
+                m,
+                &[j],
+                none_removed,
+                Some("members invite, mention"),
+                [2, 3],
+                [two, &[o, m, j]],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "a policy written before floor_pinned is the same policy",
+            "admin",
+            facts(
+                m,
+                none,
+                none_removed,
+                Some("admin, written before floor_pinned"),
+                [3, 3],
+                [three, three],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "an admin may not remove one of the owner's instances",
+            "admins invite and remove",
+            facts(a, none, &[(o, false)], None, [4, 3], [three, three]),
+            "unauthorized commit: only the owner may remove the owner",
+            None,
+        ),
+    ];
+    let authorization: Vec<Value> = cases
+        .into_iter()
+        .map(|(n, policy, facts, result, pending)| {
+            let mut c = json!({"name": n, "policy": policy, "facts": facts, "result": result});
+            if let Some(p) = pending {
+                c["pending"] = p.into();
+            }
+            c
+        })
+        .collect();
+
+    let mut fresh = header(
+        "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, and leaves and identities before and after) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies, and the policy-change cases through check_policy_change, through the bindings.",
+        &seed,
+    );
+    fresh["identities"] = json!({"owner": o, "admin": a, "member": m, "joiner": j});
+    fresh["default"] = s(&base.to_json().unwrap()).into();
+    fresh["valid"] = valid.into();
+    fresh["invalid"] = invalid.into();
+    fresh["authorization"] = authorization.into();
+    // The generator runs on every check, so a fresh vector must pass the
+    // same checks as the stored one.
+    check_group_policy(&fresh);
+    check_or_write(name, &fresh);
+    let stored: Value =
+        serde_json::from_str(&std::fs::read_to_string(path(name)).unwrap()).unwrap();
+    check_group_policy(&stored);
 }

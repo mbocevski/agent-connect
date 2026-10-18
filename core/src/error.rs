@@ -134,6 +134,15 @@ pub enum Error {
     /// `relay_misbehaviour`. The KeyPackage is spent.
     #[error("knock Welcome mismatch: {0}")]
     KnockWelcome(&'static str),
+    /// A knock or JoinRequest whose id or `KeyPackageRef` the owner's
+    /// replay ledger remembers (SPEC §6.2, §6.6.3 step 6): drop it
+    /// silently.
+    #[error("replayed")]
+    Replayed,
+    /// The replay ledger is full and evicts nothing live: the request is
+    /// refused until entries expire.
+    #[error("replay ledger full")]
+    LedgerFull,
     /// An error reported by OpenMLS.
     #[error("MLS error: {0}")]
     Mls(String),
@@ -192,7 +201,7 @@ pub enum ErrorKind {
     Superseded,
     /// A bounded store that is full; the input is refused, not queued.
     Busy,
-    /// A knock or KeyPackage already seen (a replay).
+    /// A knock, JoinRequest or KeyPackage already seen (a replay).
     Replay,
     /// A KeyPackage already used in an Add.
     KeyPackageReused,
@@ -258,12 +267,10 @@ fn reason_kind(reason: &str) -> ErrorKind {
         | "ts out of range"
         | "issued_at is in the future"
         | "issued_at goes back" => K::StaleTimestamp,
-        "replayed" => K::Replay,
         "token older than the name's newest"
         | "does not replace the stored listing"
         | "tombstoned"
         | "seq does not increase" => K::Superseded,
-        "ledger full" => K::Busy,
         "seal does not open" => K::Authentication,
         _ => K::Malformed,
     }
@@ -293,6 +300,8 @@ impl Error {
             Self::WelcomeAuth | Self::BadMac => K::Authentication,
             Self::InviteExpired => K::Expired,
             Self::KnockWelcome(_) => K::WelcomeMismatch,
+            Self::Replayed => K::Replay,
+            Self::LedgerFull => K::Busy,
             _ => K::Other,
         }
     }
@@ -346,13 +355,13 @@ mod tests {
                 Error::InvalidListing("issued_at is in the future"),
                 K::StaleTimestamp,
             ),
-            (Error::InvalidKnock("replayed"), K::Replay),
+            (Error::Replayed, K::Replay),
             (Error::InvalidListing("tombstoned"), K::Superseded),
             (
                 Error::InvalidListing("seq does not increase"),
                 K::Superseded,
             ),
-            (Error::InvalidKnock("ledger full"), K::Busy),
+            (Error::LedgerFull, K::Busy),
             (Error::InvalidKnock("lapsed"), K::Expired),
             (Error::KnockWelcome("name"), K::WelcomeMismatch),
             (Error::InvalidKnock("seal does not open"), K::Authentication),

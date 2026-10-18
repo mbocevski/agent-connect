@@ -1,0 +1,1209 @@
+{
+  "authorization": [
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "the owner adds a member",
+      "policy": "default",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "a member may not add under invite owner",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not invite"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "an admin may not add under invite owner",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not invite"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "an admin adds under invite admins",
+      "policy": "admins invite and remove",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "a member may not add under invite admins",
+      "policy": "admins invite and remove",
+      "result": "unauthorized commit: committer may not invite"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "a member adds under invite members",
+      "policy": "members invite, mention",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "a member adds its own replica whatever invite says",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "the owner removes a member",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "an admin may not remove under remove owner",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not remove members"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "an admin removes a member under remove admins",
+      "policy": "admins invite and remove",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "an admin may not remove the owner",
+      "policy": "admins invite and remove",
+      "result": "unauthorized commit: only the owner may remove the owner"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 4,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "a member removes its own dead replica",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 4,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "removing another identity's replica needs remove permission",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not remove members"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+            "self_proposed": true
+          }
+        ]
+      },
+      "name": "any member commits a leave",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+            "self_proposed": true
+          }
+        ]
+      },
+      "name": "the owner's last instance may not leave",
+      "policy": "admin",
+      "result": "unauthorized commit: the owner must transfer ownership before leaving"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 4,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+            "self_proposed": true
+          }
+        ]
+      },
+      "name": "one of two owner instances leaves",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 3,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+            "self_proposed": true
+          }
+        ]
+      },
+      "name": "the former owner leaves after a transfer",
+      "policy": "transferred to the member",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "require verified",
+        "removes": []
+      },
+      "name": "the owner changes the policy",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "require verified",
+        "removes": []
+      },
+      "name": "an admin may not change more than the floor",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "moderated by the admin",
+        "removes": []
+      },
+      "name": "an admin changes the floor and moderator",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "moderated by the admin",
+        "removes": []
+      },
+      "name": "a member may not change the floor",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin",
+        "removes": []
+      },
+      "name": "an unchanged policy is a no-op",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "transferred to the member",
+        "removes": []
+      },
+      "name": "the owner transfers ownership to a member",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 2,
+        "new_policy": "transferred to the member",
+        "removes": []
+      },
+      "name": "the new owner must be a member",
+      "policy": "admin",
+      "result": "unauthorized commit: new owner is not a member"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "transferred to the member",
+        "removes": []
+      },
+      "name": "an admin may not transfer ownership",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 2,
+        "new_policy": "members invite, mention",
+        "removes": []
+      },
+      "name": "the inviter switches the floor with the third identity",
+      "policy": "members invite",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": "members invite, mention",
+        "removes": []
+      },
+      "name": "no floor switch once the group had three identities",
+      "policy": "members invite",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "members invite, mention",
+        "removes": []
+      },
+      "name": "no floor switch without an Add",
+      "policy": "members invite",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 2,
+        "new_policy": "require verified",
+        "removes": []
+      },
+      "name": "the floor switch changes only the floor",
+      "policy": "members invite",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 51,
+        "leaves_before": 50,
+        "new_policy": null,
+        "removes": []
+      },
+      "name": "the group may not exceed max_members",
+      "policy": "default",
+      "result": "unauthorized commit: group would exceed max_members"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 2,
+        "new_policy": "smallest limits",
+        "removes": []
+      },
+      "name": "the group must fit the new policy's max_members",
+      "policy": "default",
+      "result": "unauthorized commit: group would exceed max_members"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 2,
+        "new_policy": "members invite, mention",
+        "removes": []
+      },
+      "name": "a replica doesn't switch the floor of a one-to-one group",
+      "policy": "members invite",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 4,
+        "leaves_before": 3,
+        "new_policy": "members invite, mention",
+        "removes": []
+      },
+      "name": "the floor switch counts identities, not instances",
+      "policy": "members invite",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 2,
+        "new_policy": "members invite, mention, pinned",
+        "removes": []
+      },
+      "name": "no floor switch while the floor is pinned",
+      "policy": "members invite, pinned",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 2,
+        "leaves_before": 2,
+        "new_policy": "members invite, mention, pinned",
+        "removes": []
+      },
+      "name": "the owner changes a pinned floor",
+      "policy": "members invite, pinned",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin, pinned",
+        "removes": []
+      },
+      "name": "an admin pins the floor",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin, pinned",
+        "removes": []
+      },
+      "name": "a member may not pin the floor",
+      "policy": "admin",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin",
+        "removes": []
+      },
+      "name": "an admin unpins the floor",
+      "policy": "admin, pinned",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin",
+        "removes": []
+      },
+      "name": "a member may not unpin the floor",
+      "policy": "admin, pinned",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+          "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 2,
+        "new_policy": "members invite, mention",
+        "removes": []
+      },
+      "name": "the floor switch may not also unpin the floor",
+      "policy": "members invite, pinned",
+      "result": "unauthorized commit: committer may not change this policy"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 3,
+        "new_policy": "admin, written before floor_pinned",
+        "removes": []
+      },
+      "name": "a policy written before floor_pinned is the same policy",
+      "policy": "admin",
+      "result": "ok"
+    },
+    {
+      "facts": {
+        "adds": [],
+        "committer": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+        "identities_after": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "identities_before": [
+          "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+          "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+          "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ"
+        ],
+        "leaves_after": 3,
+        "leaves_before": 4,
+        "new_policy": null,
+        "removes": [
+          {
+            "identity": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0",
+            "self_proposed": false
+          }
+        ]
+      },
+      "name": "an admin may not remove one of the owner's instances",
+      "policy": "admins invite and remove",
+      "result": "unauthorized commit: only the owner may remove the owner"
+    }
+  ],
+  "default": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}",
+  "description": "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, and leaves and identities before and after) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies, and the policy-change cases through check_policy_change, through the bindings.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "identities": {
+    "admin": "ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU",
+    "joiner": "ac:v0:6FAqqzhya-OTIL7WDAsac0xZb6tkd8M9l_DUOYEwXAY",
+    "member": "ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ",
+    "owner": "ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0"
+  },
+  "invalid": [
+    {
+      "error": "unsupported protocol version",
+      "kind": "unsupported_version",
+      "name": "version 1",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":1}"
+    },
+    {
+      "error": "invalid group context: policy owner",
+      "kind": "malformed",
+      "name": "owner not an identity",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"owner\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "invalid group context: policy admins",
+      "kind": "malformed",
+      "name": "admin not an identity",
+      "policy": "{\"admins\":[\"ac:v0:x\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "invalid group context: policy admins",
+      "kind": "malformed",
+      "name": "duplicate admin",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\",\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "invalid group context: policy floor_moderator",
+      "kind": "malformed",
+      "name": "moderator not an identity",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":\"ac:v0:x\",\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "invalid group context: policy max_members",
+      "kind": "malformed",
+      "name": "max_members 0",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":0,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "invalid group context: policy max_members",
+      "kind": "malformed",
+      "name": "max_members 51",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":51,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "invalid group context: policy max_agent_turns",
+      "kind": "malformed",
+      "name": "max_agent_turns 101",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":101},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "max_agent_turns beyond I-JSON",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":9007199254740992},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "unknown floor",
+      "policy": "{\"admins\":[],\"floor\":\"open\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "unknown invite",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"anyone\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "members may not remove",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"members\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "floor_pinned not a boolean",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":1,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "unknown field",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0,\"z\":1}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "missing loop_guard",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "error": "malformed group policy",
+      "kind": "malformed",
+      "name": "not canonical",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\": 0}"
+    }
+  ],
+  "seed": "0c473aee6daef60fe060f9753b7475656b27af8c1fd64247076a5886709bb633",
+  "valid": [
+    {
+      "name": "default",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "admin",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "admins invite and remove",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"admins\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"admins\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "members invite",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "members invite, mention",
+      "policy": "{\"admins\":[],\"floor\":\"mention\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "moderated by the admin",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"moderated\",\"floor_moderator\":\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\",\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "require verified",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":true,\"v\":0}"
+    },
+    {
+      "name": "transferred to the member",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:l6qY7jkdX2wR9DxkRZxptE4sv3vfUsZEUuwY9THsspQ\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "smallest limits",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":0},\"max_members\":1,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "largest limits",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":false,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":100},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "members invite, pinned",
+      "policy": "{\"admins\":[],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "members invite, mention, pinned",
+      "policy": "{\"admins\":[],\"floor\":\"mention\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"members\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "admin, pinned",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"free\",\"floor_moderator\":null,\"floor_pinned\":true,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    },
+    {
+      "name": "admin, written before floor_pinned",
+      "policy": "{\"admins\":[\"ac:v0:kt__M6QRrlwJCFZF1cIFNf7pTJ0_WsDCernHtQhYsWU\"],\"floor\":\"free\",\"floor_moderator\":null,\"invite\":\"owner\",\"loop_guard\":{\"max_agent_turns\":20},\"max_members\":50,\"owner\":\"ac:v0:RplfcYFt5iWajGqVVetsUvy8y-a4SCpv-_MJXuLGHY0\",\"remove\":\"owner\",\"require_verified\":false,\"v\":0}"
+    }
+  ]
+}
