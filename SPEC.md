@@ -509,9 +509,11 @@ and is never consumed. Every approved knock creates a **new** group.
 The knocker instance B fetches the listing and verifies it (§13.1, §13.2).
 It checks that the listing's `relay` is the relay it is configured for
 (§4.4), that `door` is present, and that `door.expires_at` is in the future.
-It SHOULD fetch the owner's well-known file itself (§13.2) and MUST show its
-human the listing name, the fingerprint, the owner state and the
-description, marked as unverified text. Then it builds:
+It SHOULD fetch the owner's well-known file itself (§13.2) and MUST make the
+listing name, the fingerprint, the owner state and the description
+available to its human when it knocks, marked as unverified text: shown
+before the human confirms a knock the human starts, and recorded where the
+human can read it for a knock an agent starts. Then it builds:
 
 ```text
 Knock = {
@@ -555,6 +557,11 @@ SealedKnock = enc(1120) ‖ HPKE.Seal(door.key, info = "agentconnect/v0/knock" �
 - B sends the sealed knock as `{"t": "knock", "door_id", "env"}` (§8.2).
   Knocking is not a human-only action: an agent MAY start one. Approving
   one is human-only (§6.6.4).
+- (Informative.) A knock sent again under the same `msg_id` after its
+  answer was lost (the connection dropped) is answered `rate_limited`
+  within 10 minutes whether or not the first copy was delivered (§8.3), so
+  B treats that answer as "maybe delivered" and keeps waiting until the
+  deadline, as for `accepted`.
 
 #### 6.6.3 The owner's checks
 
@@ -1368,6 +1375,14 @@ daemon offers:
   `file` parts are accepted and how large they may be, an alert when one
   sender keeps breaking the limits (the daemon never removes a member on
   its own), a metadata-only audit log, and an opt-in transcript.
+- **Knocks** (§6.6). Lower limits than §6.6.2 and §6.6.3 require, never
+  higher: at most one pending approval per knocker identity on a listing
+  (the reference daemon counts it per listing, across its doors), at most
+  32 pending knocks per door, at most 8 pending knocks of one's own, and
+  budgets that drop a flood before a sealed knock is opened. Policy can
+  only hold a knock for the human or drop it; nothing in it approves one
+  (§6.6.4). A switch makes outgoing knocks need the human: with it on, an
+  agent can't start one.
 
 `docs/safety.md` describes them.
 
@@ -1452,7 +1467,11 @@ daemon offers:
 signature and HPKE private keys, the ratchet tree) in a SQLCipher database
 (ADR-002), and its own records (groups, members, Agent Cards, JoinRequests,
 events, and the inbox and outbox, which hold message plaintext while a
-message is in flight) in a second SQLCipher database (ADR-003). Every page of
+message is in flight) in a second SQLCipher database (ADR-003). The second
+database also holds the discovery secrets: door private keys (§6.6.1), the
+`welcome_secret` and KeyPackage of every knock sent and every knock waiting
+for approval, and the owner's knock ledger (§6.6.3 step 6), each deleted as
+soon as it is no longer needed. Every page of
 each file, its journal and its WAL is encrypted and authenticated, so the
 schema, key names and row counts are hidden too. The MLS store's key is a
 32-byte random key held in the daemon's keystore (the OS keyring, or a 0600
