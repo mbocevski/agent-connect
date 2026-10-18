@@ -467,6 +467,13 @@ audit row with `group_id` empty, `direction` `in` and `kind` `knock`:
 The human's decisions are rows of their own (`approved`, `rejected`,
 `expired`). Never a name, a note or the door.
 
+A join request for one of your invites that the daemon has seen before (SPEC
+§6.2, "Replays") is dropped the same way, silently, with one audit row: the
+invite's group, `direction` `in`, `kind` `join_request`, `sender` the
+joiner's identity, `msg_id` the envelope's, `size` the request's,
+`decision` `drop` and reason `join_replay`, or `join_ledger_full` when
+the replay ledger is full and refuses new requests until old entries expire.
+
 ## Transcript
 
 A full transcript is off by default. With `transcript` on for a group, the

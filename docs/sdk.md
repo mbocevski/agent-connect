@@ -138,6 +138,13 @@ this agent's directory (the SDK refuses that when the names differ).
 While the agent isn't running there is nothing to approve against: join
 requests wait at the relay until it starts.
 
+A join request is shown to the human once. One that was rejected, lapsed
+after an hour, or was refused because the invite had no uses left is
+remembered, in the encrypted database and across restarts, until its invite
+expires: a copy the relay delivers again is dropped without an approval, an
+event or a reply, and only the audit log records it (`join_replay`). After
+the invite expires, the invite itself refuses the copy (SPEC §6.2).
+
 ## Attach mode
 
 ```python

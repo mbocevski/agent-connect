@@ -86,6 +86,7 @@ from agentconnect.relay import (
     b64,
     unb64,
 )
+from agentconnect.runtime import ledger as replay
 from agentconnect.runtime.registry import AdapterRegistry
 from agentconnect.schemas import normalize
 from agentconnect.store import GroupRow, OutboxRow, Store
@@ -476,6 +477,8 @@ class Engine:
         self.listings = ListingManager(self)
         # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
         self.knocks = KnockService(self)
+        # The inviter's JoinRequest replay ledger (SPEC 6.2, "Replays").
+        self._join_ledger = self._load_join_ledger()
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -1063,6 +1066,8 @@ class Engine:
         self.store.forget_hops(now - HOP_MEMORY_SECS)
         with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
             self.client.journal_purge(now - HOP_MEMORY_SECS)
+        # After the invites above: an entry outlives its invite's expiry.
+        replay.purge(self.store, "join", self._join_ledger, now)
         await self.expire_held()
         self.safety.purge()
 
@@ -1147,8 +1152,7 @@ class Engine:
             await self.knocks.on_knock(env)
             return
         if kind == "join_request":
-            await self._on_join_request(env)
-            self.store.record_inbox(sender, msg_id, None, "done", now)
+            await self._on_join_request(env)  # records the inbox row
         elif kind == "welcome_wrapped":
             await self._on_welcome_env(env)
             return
@@ -1658,63 +1662,118 @@ class Engine:
         )
 
     async def _on_join_request(self, env: dict[str, Any]) -> None:
-        if str(env["msg_id"]).startswith(KNOCK_REQUEST_PREFIX):
+        """An invite's JoinRequest (SPEC 6.2). Steps 1-3 are checked, then
+        the request is remembered in the join replay ledger before anything
+        else happens to it, so a request that was decided, lapsed or dropped
+        can't come back while its invite is open ("Replays"). A replay is
+        dropped silently: no approval, no event, nothing to the joiner, one
+        audit row with the reason code. The ledger row, the approval, its
+        event and the inbox row are one transaction."""
+        sender, msg_id = str(env["sender"]), str(env["msg_id"])
+
+        def ignore(event: str, **fields: Any) -> None:
+            LOG.info(event, **fields)
+            self.store.record_inbox(sender, msg_id, None, "done", self.now())
+
+        if msg_id.startswith(KNOCK_REQUEST_PREFIX):
             # A join's request id is its msg_id, which the joiner (or the
             # relay) picks: it must never look like a knock's.
-            LOG.info("join_request_malformed")
+            ignore("join_request_malformed")
             return
         raw = unb64(str(env.get("ct", "")))
         try:
             invite_id = str(json.loads(raw)["invite_id"])
         except (ValueError, KeyError, TypeError):
-            LOG.info("join_request_malformed")
+            ignore("join_request_malformed")
             return
         invite = self.store.invite(invite_id)
         obj = None if invite is None or invite["status"] != "open" else self._invite_object(invite)
         if invite is None or obj is None:
-            LOG.info("join_request_unknown_invite", invite=log.hid(invite_id))
+            ignore("join_request_unknown_invite", invite=log.hid(invite_id))
             return
         if self._invite_closed(invite):
             # SPEC 6.2 step 1: no uses left (or expired). The joiner sees the
             # SPEC 4.3 "already used" warning when its join lapses.
-            LOG.info("join_request_invite_used", invite=log.hid(invite_id))
+            ignore("join_request_invite_used", invite=log.hid(invite_id))
             return
         try:
             verified = self.client.verify_join_request(raw, obj)
         except (ac.AgentConnectError, ac.CoreError) as e:
-            LOG.info("join_request_rejected", invite=log.hid(invite_id), reason=str(e)[:60])
+            ignore("join_request_rejected", invite=log.hid(invite_id), reason=str(e)[:60])
             return
+        group_id, request_id = str(invite["group_id"]), msg_id
         kp_ref = b64(verified.key_package_ref)
-        if self.store.open_approval_for(kp_ref) is not None:
-            # The same JoinRequest again under a fresh msg_id (a relay
-            # replay): one approval per KeyPackage.
-            LOG.info("join_request_replayed", invite=log.hid(invite_id))
-            return
-        request_id = str(env["msg_id"])
-        self.store.add_approval(
-            {
-                "request_id": request_id,
-                "invite_id": invite_id,
-                "group_id": invite["group_id"],
-                "request": b64(raw),
-                "identity": verified.identity,
-                "display_name": verified.display_name,
-                "mailbox_id": verified.mailbox_id,
-                "received_at": self.now(),
-                "kp_ref": kp_ref,
-            }
-        )
-        await self.emit(
-            invite["group_id"],
-            "pending_approval",
-            request_id=request_id,
-            identity=verified.identity,
-            display_name=verified.display_name,
-            display_name_verified=False,
-        )
-        if self.config.auto_approve:
+
+        def drop_it(reason: str) -> str:
+            self.safety.audit(
+                group_id,
+                "in",
+                sender=verified.identity,
+                msg_id=msg_id,
+                kind="join_request",
+                size=len(raw),
+                decision=Verdict.DROP,
+                reason=reason,
+            )
+            self.store.record_inbox(sender, msg_id, None, "dropped", self.now())
+            LOG.info("join_request_dropped", invite=log.hid(invite_id), reason=reason)
+            return "dropped"
+
+        async def body() -> str:
+            refused = replay.remember(
+                self.store,
+                "join",
+                self._join_ledger,
+                lambda ledger: verified.remember_in(ledger, replay.entry_key("join", request_id)),
+                entry_id=request_id,
+                kp_ref=verified.key_package_ref,
+                forget_after=verified.forget_after,
+            )
+            if refused is not None:
+                return drop_it(refused)
+            if (
+                self.store.approval(request_id) is not None
+                or self.store.open_approval_for(kp_ref) is not None
+            ):
+                # Past the ledger's window the request id or the KeyPackage
+                # may still be taken: one approval per id and per KeyPackage.
+                return drop_it("join_replay")
+            self.store.add_approval(
+                {
+                    "request_id": request_id,
+                    "invite_id": invite_id,
+                    "group_id": group_id,
+                    "request": b64(raw),
+                    "identity": verified.identity,
+                    "display_name": verified.display_name,
+                    "mailbox_id": verified.mailbox_id,
+                    "received_at": self.now(),
+                    "kp_ref": kp_ref,
+                }
+            )
+            await self.emit(
+                group_id,
+                "pending_approval",
+                request_id=request_id,
+                identity=verified.identity,
+                display_name=verified.display_name,
+                display_name_verified=False,
+            )
+            self.store.record_inbox(sender, msg_id, None, "done", self.now())
+            return "held"
+
+        try:
+            held = await self._apply("join_request", body) == "held"
+        except BaseException:
+            # The in-memory ledger has no remove: rebuild it from the store.
+            self._join_ledger = self._load_join_ledger()
+            raise
+        if held and self.config.auto_approve:
             # Joins only: nothing approves a knock but the human (SPEC 6.6.4).
             self._approve_join(request_id)
+
+    def _load_join_ledger(self) -> ac.ReplayLedger:
+        return replay.load(self.store, "join", ac.DEFAULT_LEDGER_CAPACITY, self.now())
 
     async def check_joins(self) -> None:
         """SPEC 4.3: a pending join whose invite was used up or revoked

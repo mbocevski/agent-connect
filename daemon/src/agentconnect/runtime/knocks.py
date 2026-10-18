@@ -58,6 +58,7 @@ from agentconnect.directory_client import DirectoryClient, DirectoryError
 from agentconnect.ownerfile import Fetcher, OwnerFetch, OwnerFileFetcher
 from agentconnect.policy import KnockInbound, SafetyPolicy, Verdict
 from agentconnect.relay import RelayError, b64, unb64
+from agentconnect.runtime import ledger as replay
 from agentconnect.runtime.engine import (
     KNOCK_REQUEST_PREFIX,
     DaemonError,
@@ -231,16 +232,11 @@ class KnockService:
             self._engine.client._set_time_for_testing(None)
 
     def _load_ledger(self) -> None:
-        """The replay ledger from the database (SPEC 6.6.3 step 6). It holds
-        every live entry, even past a lowered capacity: a knock seen before a
-        restart must never pass after it."""
-        now = self._now()
-        self._store.ledger_purge(now)
-        rows = self._store.ledger_rows(now)
-        ledger = ac.ReplayLedger(max(self._engine.config.knock_ledger_capacity, len(rows)))
-        for knock_id, kp_ref, forget_after in rows:
-            ledger.insert(unb64(knock_id), unb64(kp_ref), forget_after)
-        self._ledger = ledger
+        """The replay ledger from the database (SPEC 6.6.3 step 6,
+        :mod:`agentconnect.runtime.ledger`)."""
+        self._ledger = replay.load(
+            self._store, "knock", self._engine.config.knock_ledger_capacity, self._now()
+        )
 
     def waiting(self) -> bool:
         """Whether a sent knock may still be answered (frames for a group
@@ -338,17 +334,17 @@ class KnockService:
 
         async def body() -> str:
             now = self._now()
-            try:
-                verified.remember_in(self._ledger)
-            except ac.AgentConnectError as e:
-                return drop_it(
-                    {"replay": "knock_replay", "busy": "knock_ledger_full"}.get(
-                        e.kind, f"knock_check:{e.kind}"
-                    )
-                )
-            store.ledger_add(
-                b64(verified.knock_id), b64(verified.key_package_ref), verified.forget_after
+            refused = replay.remember(
+                store,
+                "knock",
+                self._ledger,
+                verified.remember_in,
+                entry_id=b64(verified.knock_id),
+                kp_ref=verified.key_package_ref,
+                forget_after=verified.forget_after,
             )
+            if refused is not None:
+                return drop_it(refused)
             if identity == engine.me:
                 return drop_it("knock_self")
             if store.knock_request(request_id) is not None:
@@ -1352,10 +1348,9 @@ class KnockService:
         clock put right never forgets an entry before its time again."""
         store, now = self._store, self._now()
         with store.tx():
-            store.ledger_purge(now)
+            replay.purge(store, "knock", self._ledger, now)
             store.purge_knock_requests(self._now() - RETENTION_SECS)
             store.purge_knocks(self._now() - RETENTION_SECS)
-        self._ledger.purge(now)
 
     async def step(self) -> float | None:
         """One pass: lapse what is due, purge, and say when next."""

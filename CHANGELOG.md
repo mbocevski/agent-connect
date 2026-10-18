@@ -790,6 +790,28 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core, daemon and SPEC: an invite JoinRequest that was rejected, lapsed
+  or dropped could be delivered again by the relay (or anyone holding the
+  envelope) and passed every check again, so a request the human rejected
+  could come back in front of them while a multi-use invite stayed open.
+  The inviter now remembers every JoinRequest that passed its checks, by
+  its envelope `msg_id` and its KeyPackageRef, until its invite's
+  `expires_at` plus 300 s, and drops a replay silently: no approval, no
+  event, nothing to the joiner, one audit row (`join_replay`). The approval
+  timeout runs from receipt, so the invite's expiry is the bound a replay
+  can't reset; after it the invite refuses the copy. The record is
+  persisted in a new `join_ledger` table of the encrypted database in the
+  transaction that records the approval, reloaded on start, bounded (when
+  full, new requests are dropped as `join_ledger_full` and nothing live is
+  evicted) and purged on the clock's current time. SPEC §6.2 states the
+  rule ("Replays"), as §6.6.3 step 6 does for knocks. The core's replay
+  ledger is shared by both: `agentconnect_core::ledger` (`ReplayLedger`,
+  `MemoryLedger`, `LEDGER_GRACE_SECS`) replaces the knock-only
+  `KnockLedger` and `MemoryKnockLedger`, with `Error::Replayed` and
+  `Error::LedgerFull` for the `replay` and `busy` kinds;
+  `VerifiedJoinRequest` gains `forget_after` and `remember_in`, and Python
+  gets `ReplayLedger` in place of `KnockLedger`. New daemon failpoints
+  `join_request.in_tx` and `join_request.after_tx`.
 - Dependencies: RUSTSEC-2026-0329 (`libcrux-hmac-drbg` 0.0.1),
   RUSTSEC-2026-0330 and RUSTSEC-2026-0331 (`libcrux-kem` 0.0.9) are cleared
   and no longer ignored by `cargo deny`. `openmls_traits`,

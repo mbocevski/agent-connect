@@ -25,12 +25,18 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import agentconnect_core as ac
 from agentconnect.keystore import private_file
 
 SqlParam = None | int | float | str | bytes
+#: The owner's replay ledgers (SPEC 6.2 "Replays", 6.6.3 step 6): table and id column.
+Ledger = Literal["knock", "join"]
+LEDGERS: dict[str, tuple[str, str]] = {
+    "knock": ("knock_ledger", "knock_id"),
+    "join": ("join_ledger", "request_id"),
+}
 
 
 class _Cursor:
@@ -299,6 +305,12 @@ CREATE TABLE IF NOT EXISTS knock_ledger (
     forget_after INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS knock_ledger_until ON knock_ledger (forget_after);
+CREATE TABLE IF NOT EXISTS join_ledger (
+    request_id TEXT PRIMARY KEY,
+    kp_ref TEXT NOT NULL,
+    forget_after INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS join_ledger_until ON join_ledger (forget_after);
 CREATE TABLE IF NOT EXISTS knock_requests (
     request_id TEXT PRIMARY KEY,
     knock_id TEXT NOT NULL UNIQUE,
@@ -1245,30 +1257,39 @@ class Store:
 
     # -- knocks: the owner's ledger and approvals, the knocker's knocks -------
 
-    def ledger_add(self, knock_id: str, kp_ref: str, forget_after: int) -> None:
-        """Remember a knock that passed the owner's checks 1-5 (SPEC 6.6.3
-        step 6), in the transaction that records what happened to it. A row
-        for the same ``knock_id`` can only be one the ledger already forgot
-        (a live one makes the knock a replay), so it is replaced whole."""
+    def ledger_add(
+        self, entry_id: str, kp_ref: str, forget_after: int, *, ledger: Ledger = "knock"
+    ) -> None:
+        """Remember a request that passed the owner's checks (SPEC 6.2
+        "Replays" for joins, 6.6.3 step 6 for knocks), in the transaction
+        that records what happened to it. A row for the same id can only be
+        one the ledger already forgot (a live one makes the request a
+        replay), so it is replaced whole."""
+        table, key = LEDGERS[ledger]
         self._db.execute(
-            "INSERT INTO knock_ledger (knock_id, kp_ref, forget_after) VALUES (?, ?, ?) "
-            "ON CONFLICT(knock_id) DO UPDATE SET "
+            f"INSERT INTO {table} ({key}, kp_ref, forget_after) VALUES (?, ?, ?) "  # noqa: S608
+            f"ON CONFLICT({key}) DO UPDATE SET "
             "kp_ref = excluded.kp_ref, forget_after = excluded.forget_after",
-            (knock_id, kp_ref, forget_after),
+            (entry_id, kp_ref, forget_after),
         )
 
-    def ledger_rows(self, now: int) -> list[tuple[str, str, int]]:
-        """``(knock_id, kp_ref, forget_after)`` of every knock still remembered at ``now``."""
+    def ledger_rows(self, now: int, *, ledger: Ledger = "knock") -> list[tuple[str, str, int]]:
+        """``(id, kp_ref, forget_after)`` of every request still remembered at ``now``."""
+        table, key = LEDGERS[ledger]
         rows = self._all(
-            "SELECT knock_id, kp_ref, forget_after FROM knock_ledger WHERE forget_after >= ? "
-            "ORDER BY forget_after, knock_id",
+            f"SELECT {key}, kp_ref, forget_after FROM {table} WHERE forget_after >= ? "  # noqa: S608
+            f"ORDER BY forget_after, {key}",
             now,
         )
         return [(str(r[0]), str(r[1]), int(r[2])) for r in rows]
 
-    def ledger_purge(self, now: int) -> int:
-        """Forget knocks whose ``forget_after`` is before ``now``."""
-        return self._db.execute("DELETE FROM knock_ledger WHERE forget_after < ?", (now,)).rowcount
+    def ledger_purge(self, now: int, *, ledger: Ledger = "knock") -> int:
+        """Forget requests whose ``forget_after`` is before ``now``."""
+        table, _ = LEDGERS[ledger]
+        return self._db.execute(
+            f"DELETE FROM {table} WHERE forget_after < ?",  # noqa: S608
+            (now,),
+        ).rowcount
 
     def add_knock_request(self, row: dict[str, Any], knock: bytes) -> None:
         """A knock waiting for the human (``pending``), with its secret."""
