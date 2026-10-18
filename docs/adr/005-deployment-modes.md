@@ -462,8 +462,10 @@ made per mode.
   data directory with the same identity key `IK`, its own instance key and
   `instance_id`, its own mailbox, MLS leaf and databases, and joins each
   group through its own invite. Every replica receives every message;
-  `body.metadata.instance` targets one. Each replica's human verifies on that
-  replica: verified flags are per instance (SPEC §11).
+  `body.metadata.instance` targets one. Each replica keeps its own verified
+  flags, one per member identity (SPEC §11), and its human verifies on that
+  replica: verifying a peer on one replica doesn't mark it verified on
+  another.
 - **Provisioning a replica** needs the identity key in a second data
   directory with a fresh instance. Nothing does that today. The follow-up
   adds a human-only CLI command (identity export and import, never over the

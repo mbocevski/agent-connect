@@ -170,9 +170,9 @@ def test_generated_doors_follow_the_client_seed(rng: random.Random) -> None:
 
 
 def test_the_ledger_capacity_refuses_loading_more(rng: random.Random) -> None:
-    ledger = ac.KnockLedger(2)
+    ledger = ac.ReplayLedger(2)
     assert ledger.capacity == 2
-    assert ac.KnockLedger().capacity == ac.DEFAULT_LEDGER_CAPACITY
+    assert ac.ReplayLedger().capacity == ac.DEFAULT_LEDGER_CAPACITY
     ids = [rng.randbytes(16) for _ in range(3)]
     for i in ids[:2]:
         ledger.insert(i, rng.randbytes(32), T0 + 3900)

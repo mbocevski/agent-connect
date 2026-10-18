@@ -25,6 +25,7 @@ use crate::invite::{Invite, InviteMeta, InviteSecret};
 use crate::join::{JoinRequest, check_display_name, join_request_mac};
 use crate::journal::{self, JournalEntry, Journaled, Stored, Tx, WELCOME_SCOPE, keeps_state};
 use crate::knock::{KNOCK_FUTURE_SECS, Knock, KnockExpectation, KnockSecret, VerifiedKnock};
+use crate::ledger::{LEDGER_GRACE_SECS, ReplayLedger, remember_once};
 use crate::mls::{
     CS, GroupContextInfo, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities,
     check_group_context, check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
@@ -220,6 +221,7 @@ pub struct VerifiedJoinRequest {
     mailbox_id: String,
     key_package: KeyPackage,
     key_package_ref: Vec<u8>,
+    forget_after: u64,
     info: LeafInfo,
 }
 
@@ -253,6 +255,31 @@ impl VerifiedJoinRequest {
     #[must_use]
     pub fn mailbox_id(&self) -> &str {
         &self.mailbox_id
+    }
+
+    /// Until when the inviter must remember this request: its invite's
+    /// `expires_at` plus [`LEDGER_GRACE_SECS`]. The approval timeout
+    /// (SPEC §6.2 step 4) runs from receipt, so a replay would restart it;
+    /// the invite's expiry is the one deadline no copy can pass.
+    #[must_use]
+    pub fn forget_after(&self) -> u64 {
+        self.forget_after
+    }
+
+    /// SPEC §6.2, "Replays": if `ledger` has seen `request_id` (the id
+    /// of the approval this request would wait in) or this request's
+    /// `KeyPackageRef`, the request is a replay; otherwise both are
+    /// recorded until [`VerifiedJoinRequest::forget_after`]. Call it for
+    /// every request that passed steps 1–3, before anything else happens to
+    /// it (held for the human, approved, rejected, dropped, lapsed), so a
+    /// request the human rejected can't be put in front of them again.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Replayed`] (kind `replay`): drop it silently.
+    /// [`Error::LedgerFull`] (kind `busy`): drop it too. A ledger error.
+    pub fn remember_in(&self, ledger: &mut impl ReplayLedger, request_id: &[u8]) -> Result<()> {
+        remember_once(ledger, request_id, &self.key_package_ref, self.forget_after)
     }
 }
 
@@ -551,6 +578,7 @@ impl<S: Store> Client<S> {
             mailbox_id: request.mailbox_id.clone(),
             key_package,
             key_package_ref: kp_ref,
+            forget_after: invite.expires_at().saturating_add(LEDGER_GRACE_SECS),
             info,
         })
     }

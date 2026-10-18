@@ -312,7 +312,7 @@ async def test_a_knock_id_used_before_is_dropped_past_the_ledgers_window(world: 
     # The ledger forgot the knock (as it does after ts + 3900); its request
     # row is kept for a week, and its id stays taken.
     owner.engine.store.ledger_purge(world.now + 10_000)
-    owner.knocks._ledger = ac.KnockLedger()
+    owner.knocks._ledger = ac.ReplayLedger()
     await owner.deliver(door_id, sealed)
     assert owner.audit()[-1] == "knock_replay"
     assert owner.knocks.approvals() == []
@@ -323,7 +323,7 @@ async def test_a_full_ledger_drops_without_forgetting(world: World) -> None:
     door = world.door()
     door_id = owner.add_door(door)
     await owner.deliver(door_id, world.sealed(door))
-    owner.knocks._ledger = ac.KnockLedger(1)
+    owner.knocks._ledger = ac.ReplayLedger(1)
     rows = owner.engine.store.ledger_rows(world.now)
     for knock_id, kp_ref, until in rows:
         owner.knocks._ledger.insert(unb64(knock_id), unb64(kp_ref), until)
@@ -341,9 +341,33 @@ async def test_the_ledger_loads_past_a_lowered_capacity(world: World) -> None:
             store.ledger_add(b64(world.rng.randbytes(16)), b64(world.rng.randbytes(32)), until)
         store.ledger_add(b64(world.rng.randbytes(16)), b64(world.rng.randbytes(32)), world.now - 1)
     await owner.restart(knock_ledger_capacity=1024)
+    # Loaded in full: the load purges nothing, the timer pass does.
+    assert len(owner.knocks._ledger) == 1031
+    assert owner.knocks._ledger.capacity == 1031
+    owner.knocks._purge()
     assert len(owner.knocks._ledger) == 1030
-    assert owner.knocks._ledger.capacity == 1030
     assert len(owner.engine.store.ledger_rows(0)) == 1030  # the expired row was purged
+
+
+async def test_a_clock_ahead_at_boot_forgets_no_knock(world: World) -> None:
+    """The load purged on the start-time clock: a clock that was ahead at
+    start and put right before the next knock forgot a rejected one."""
+    owner = world.node("owner")
+    door = world.door()
+    door_id = owner.add_door(door)
+    sealed = world.sealed(door)
+    await owner.deliver(door_id, sealed)
+    (request,) = owner.knocks.approvals()
+    owner.engine.reject(request["request_id"])
+    start = world.clock.now()
+    await owner.rt.stop(flush=0)
+    world.clock.advance(86_400)
+    owner.rt = owner._runtime()
+    assert len(owner.knocks._ledger) == 1
+    world.clock.set(start)
+    await owner.deliver(door_id, sealed)
+    assert owner.audit() == ["knock", "knock_replay"]
+    assert owner.knocks.approvals() == []
 
 
 async def test_a_rolled_back_record_rebuilds_the_ledger(world: World) -> None:

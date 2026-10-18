@@ -104,6 +104,13 @@ MAX_KNOCKS_OPENED_PER_MINUTE = 10
 DEFAULT_KNOCK_FAILURES_PER_HOUR = 10
 MAX_KNOCK_FAILURES_PER_HOUR = 100
 MIN_LEDGER_CAPACITY = 1024
+# An invite's share of the join replay ledger (SPEC 6.2 "Replays"):
+# max(4 x max_uses, 64), at most policy.join_ledger_per_invite.
+MIN_JOIN_LEDGER_PER_INVITE = 64
+MAX_JOIN_LEDGER_PER_INVITE = 1024
+# JoinRequests of one invite that may wait for the human at once (as knocks
+# per door, SPEC 6.6.3 step 7).
+MAX_PENDING_JOINS_PER_INVITE = 32
 
 
 class ConfigError(ValueError):
@@ -219,6 +226,8 @@ class Config:
     policy_transcript_max_bytes: int = DEFAULT_TRANSCRIPT_MAX_BYTES
     policy_audit_max_rows_per_group: int = DEFAULT_AUDIT_GROUP_ROWS
     policy_audit_max_rows_per_sender: int = DEFAULT_AUDIT_SENDER_ROWS
+    policy_max_pending_joins_per_invite: int = MAX_PENDING_JOINS_PER_INVITE
+    policy_join_ledger_per_invite: int = MAX_JOIN_LEDGER_PER_INVITE
     policy_transcript_max_rows_per_sender: int = KNOB["transcript_max_rows_per_sender"].default
     policy_transcript_max_group_bytes: int = KNOB["transcript_max_group_bytes"].default
     policy_audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
@@ -321,6 +330,24 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         shown_default(DEFAULT_AUDIT_SENDER_ROWS),
         "Audit rows one sender keeps in a group at most (100 to 2000), so a sender "
         "flooding the log pushes out only its own rows.",
+    ),
+    ConfigKey(
+        "policy.max_pending_joins_per_invite",
+        "policy_max_pending_joins_per_invite",
+        shown_default(MAX_PENDING_JOINS_PER_INVITE),
+        f"Join requests for one invite that may wait for your approval at once (1 to "
+        f"{MAX_PENDING_JOINS_PER_INVITE}). The rest are dropped silently, and you get an "
+        "`invite_flooded` event.",
+    ),
+    ConfigKey(
+        "policy.join_ledger_per_invite",
+        "policy_join_ledger_per_invite",
+        shown_default(MAX_JOIN_LEDGER_PER_INVITE),
+        f"The most join requests the replay ledger remembers for one invite "
+        f"({MIN_JOIN_LEDGER_PER_INVITE} to {MAX_JOIN_LEDGER_PER_INVITE}). An invite's "
+        f"share is 4 times its `max_uses`, at least {MIN_JOIN_LEDGER_PER_INVITE} and at "
+        "most this. Past it, new requests for that invite are dropped and you get an "
+        "`invite_flooded` event; other invites are unaffected.",
     ),
 )
 
@@ -775,6 +802,8 @@ def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
     for key, lo, hi in (
         ("audit_max_rows_per_group", 1000, DEFAULT_AUDIT_GROUP_ROWS),
         ("audit_max_rows_per_sender", 100, DEFAULT_AUDIT_SENDER_ROWS),
+        ("max_pending_joins_per_invite", 1, MAX_PENDING_JOINS_PER_INVITE),
+        ("join_ledger_per_invite", MIN_JOIN_LEDGER_PER_INVITE, MAX_JOIN_LEDGER_PER_INVITE),
     ):
         value = _typed(table, key, int, hi)
         if not lo <= value <= hi:

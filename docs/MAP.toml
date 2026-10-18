@@ -161,6 +161,7 @@ code = [
     "core/src/identity.rs",
     "core/src/invite.rs",
     "core/src/join.rs",
+    "core/src/ledger.rs",
     "core/src/padding.rs",
     "core/src/policy.rs",
     "core/src/sas.rs",

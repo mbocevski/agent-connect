@@ -467,6 +467,25 @@ audit row with `group_id` empty, `direction` `in` and `kind` `knock`:
 The human's decisions are rows of their own (`approved`, `rejected`,
 `expired`). Never a name, a note or the door.
 
+A join request for one of your invites that the daemon has seen before (SPEC
+§6.2, "Replays") is dropped the same way, silently, with one audit row: the
+invite's group, `direction` `in`, `kind` `join_request`, `sender` the
+joiner's identity, `msg_id` the envelope's, `size` the request's,
+`decision` `drop` and reason `join_replay`. Two limits drop new requests
+the same way, and each also raises `invite_flooded` (once per invite and
+reason, human token only, with the invite and a suggestion to revoke it):
+`join_invite_full` when `policy.max_pending_joins_per_invite` (32) requests
+of the invite already wait, and `join_invite_quota` when the invite has used
+its share of the ledger (max(4 × `max_uses`, 64), at most
+`policy.join_ledger_per_invite`, 1024, not counting requests being added
+or added). A fourth, `join_ledger_full`, drops a request when the whole
+ledger is full; it raises `join_ledger_full` instead, once a day, for the
+daemon as a whole rather than the invite (human token only, suggesting
+revoking unused invites). Creating an invite is refused (`409
+too_many_invites`) when the open invites would reserve more than the
+ledger holds, so the shares alone can't fill it. A revoked, expired or used
+up invite's entries are forgotten at once, which frees its share.
+
 ## Transcript
 
 A full transcript is off by default. With `transcript` on for a group, the
