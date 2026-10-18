@@ -1,0 +1,26 @@
+[package]
+name = "agentconnect-core-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+
+[dependencies.agentconnect-core]
+path = ".."
+
+# Detached from the main workspace: fuzzing needs a nightly toolchain and is
+# not part of `just test`. Run with `cargo +nightly fuzz run listing_parser`
+# from `core/` (needs `cargo install cargo-fuzz`).
+[workspace]
+
+[[bin]]
+name = "listing_parser"
+path = "fuzz_targets/listing_parser.rs"
+test = false
+doc = false
+bench = false

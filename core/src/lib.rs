@@ -18,6 +18,9 @@
 //!   [`SqliteStore`] and its [`DbKey`])
 //! - [`db`]: [`EncryptedDb`], the SQLCipher database for a daemon's own records
 //! - [`journal`]: the processing journal that makes processing crash-safe (ADR-004)
+//! - [`knock`]: doors, sealed knocks and the knock Welcome wrap (§6.6)
+//! - [`listing`]: signed listings, listing tokens, withdrawals and owner
+//!   verification (§13)
 #![warn(clippy::pedantic, missing_docs)]
 
 pub mod clock;
@@ -31,6 +34,8 @@ pub mod identity;
 pub mod invite;
 pub mod join;
 pub mod journal;
+pub mod knock;
+pub mod listing;
 mod mls;
 pub mod padding;
 pub mod policy;

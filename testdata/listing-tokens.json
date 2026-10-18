@@ -1,0 +1,98 @@
+{
+  "binding_invalid": [
+    {
+      "directory": "other.example",
+      "error": "invalid listing token: bound to another directory",
+      "identity": "ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM",
+      "listing_name": "release-planner",
+      "name": "another directory",
+      "owner_domain": "example.com"
+    },
+    {
+      "directory": "agents.example",
+      "error": "invalid listing token: bound to another name",
+      "identity": "ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM",
+      "listing_name": "other-name",
+      "name": "another name",
+      "owner_domain": "example.com"
+    },
+    {
+      "directory": "agents.example",
+      "error": "invalid listing token: bound to another identity",
+      "identity": "ac:v0:HWPURZ7MujlI4_43263lK--A5rDV39InrzZcX3mcD24",
+      "listing_name": "release-planner",
+      "name": "another identity",
+      "owner_domain": "example.com"
+    },
+    {
+      "directory": "agents.example",
+      "error": "invalid listing token: bound to another owner domain",
+      "identity": "ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM",
+      "listing_name": "release-planner",
+      "name": "another owner domain",
+      "owner_domain": "evil.example"
+    }
+  ],
+  "description": "SPEC 13.2.1 ListingToken and TokenRevocation: sig = Ed25519(DK, label || JCS(object without sig)), labels 'agentconnect/v0/listing-token' and 'agentconnect/v0/listing-token-revoke'; key_id = base64url(SHA-256(DK.pub)[0..16]). Tokens verify for `directory` at `now` under `directory_key`.",
+  "directory": "agents.example",
+  "directory_key": "bYpZUq_ZgU9rqvKVPePqeu9LJBoRKuO3atOorSJS83U",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "key_id": "ByQEM6EQtSNTBbiin0YDpg",
+  "revocation": {
+    "revocation": "{\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"reason\":\"spam\",\"revoked_at\":1792497660,\"sig\":\"K9-GLbCXE070vuYpzB6XvzSsDg_7rMrZct3G8XaZ0xQhyzYsmYOv8qIf4YKlCW4tN-tyDUswWK1HgWuGD7u2Ag\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}",
+    "signing_input": "agentconnect/v0/listing-token-revoke{\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"reason\":\"spam\",\"revoked_at\":1792497660,\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}",
+    "tampered": "{\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"reason\":\"spam\",\"revoked_at\":1792497661,\"sig\":\"K9-GLbCXE070vuYpzB6XvzSsDg_7rMrZct3G8XaZ0xQhyzYsmYOv8qIf4YKlCW4tN-tyDUswWK1HgWuGD7u2Ag\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}",
+    "tampered_error": "invalid listing token: revocation signature"
+  },
+  "seed": "a06501ce43f8bdb98350b30e041c5e0b35f1095f5602e6799d3081561125793f",
+  "valid": {
+    "identity": "ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM",
+    "now": 1792497600,
+    "signing_input": "agentconnect/v0/listing-token{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}",
+    "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"J9fJsfEdUqqdL8-Zz67iu9tujdhAnKEUaKIwloWd8BRqprU0E5Vig2xHLGSiiu44SoutLvk5Ly-aO7YoLwFFDQ\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}"
+  },
+  "verify_invalid": [
+    {
+      "directory_key": "UDbN0UuQsjBGA3tTF26klOV_sQk4iA-ZdYElbvd37SY",
+      "error": "invalid listing token: unknown key_id",
+      "name": "unpinned key",
+      "now": 1792497600,
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"J9fJsfEdUqqdL8-Zz67iu9tujdhAnKEUaKIwloWd8BRqprU0E5Vig2xHLGSiiu44SoutLvk5Ly-aO7YoLwFFDQ\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}"
+    },
+    {
+      "directory_key": "bYpZUq_ZgU9rqvKVPePqeu9LJBoRKuO3atOorSJS83U",
+      "error": "invalid listing token: signature",
+      "name": "forged under the pinned key_id",
+      "now": 1792497600,
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"hqDNd1Giom7IsH3uPvgKSRfV3v7EktITHHe55MPG6cVgoGMD7xhhg-yz_3CIgcS1kb5z3sduscAaUNWQpXReAw\",\"token_id\":\"9feV3zCLe7qxB8F_7YPsjQ\",\"v\":0}"
+    },
+    {
+      "directory_key": "bYpZUq_ZgU9rqvKVPePqeu9LJBoRKuO3atOorSJS83U",
+      "error": "invalid listing token: signature",
+      "name": "tampered name",
+      "now": 1792497600,
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-plannex\",\"owner_domain\":\"example.com\",\"sig\":\"J9fJsfEdUqqdL8-Zz67iu9tujdhAnKEUaKIwloWd8BRqprU0E5Vig2xHLGSiiu44SoutLvk5Ly-aO7YoLwFFDQ\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}"
+    },
+    {
+      "directory_key": "bYpZUq_ZgU9rqvKVPePqeu9LJBoRKuO3atOorSJS83U",
+      "error": "invalid listing token: expired",
+      "name": "expired",
+      "now": 1795089600,
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"J9fJsfEdUqqdL8-Zz67iu9tujdhAnKEUaKIwloWd8BRqprU0E5Vig2xHLGSiiu44SoutLvk5Ly-aO7YoLwFFDQ\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}"
+    },
+    {
+      "directory_key": "bYpZUq_ZgU9rqvKVPePqeu9LJBoRKuO3atOorSJS83U",
+      "error": "invalid listing token: lifetime",
+      "name": "overlong",
+      "now": 1792497600,
+      "token": "{\"directory\":\"agents.example\",\"expires_at\":1800273601,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"ZT45DBrK_7-LMZrqI71LfdMPBdzvQUbuqzU_0Ggm3jn0hWJmRWUEjrBMhdPx6knrHXhG9m7VtD4pCbJiJJIKAA\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}"
+    },
+    {
+      "directory_key": "bYpZUq_ZgU9rqvKVPePqeu9LJBoRKuO3atOorSJS83U",
+      "error": "invalid listing token: encoding",
+      "name": "not canonical",
+      "now": 1792497600,
+      "token": "{ \"directory\":\"agents.example\",\"expires_at\":1795089600,\"identity\":\"ac:v0:WuqNzETVw-AY2YE2SolM0Xvsf-nolfR5xob1uwVdDZM\",\"issued_at\":1792497600,\"key_id\":\"ByQEM6EQtSNTBbiin0YDpg\",\"name\":\"release-planner\",\"owner_domain\":\"example.com\",\"sig\":\"J9fJsfEdUqqdL8-Zz67iu9tujdhAnKEUaKIwloWd8BRqprU0E5Vig2xHLGSiiu44SoutLvk5Ly-aO7YoLwFFDQ\",\"token_id\":\"nQY6RhmzgQ753j5w2TH0yQ\",\"v\":0}"
+    }
+  ]
+}

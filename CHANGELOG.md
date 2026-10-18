@@ -34,6 +34,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`rate_limited`). Past 10 per door per minute, or when the owner's queue
   is full, a knock is dropped but still answered `accepted`. There are no
   delivery receipts and no reject frame.
+- Core: discovery (`agentconnect_core::listing` and `::knock`, with Python
+  bindings), the one implementation the directory and the daemon verify
+  through. Signed listings: the closed AgentCard schema and text limits,
+  the canonical JCS profile (non-canonical bytes are rejected), and the
+  single `EdDSA` JWS by the identity key, which a2a-sdk's own verifier
+  accepts. Operator listing tokens checked against pinned directory keys
+  (binding, 90-day lifetime, expiry, revocation), token revocations,
+  withdrawals, and the owner well-known file with its owner states. Doors
+  (HPKE key pairs in the v0 suite), sealed and signed knocks, the owner's
+  checks 1 to 5, and the knock Welcome wrap. Vectors in `testdata/`
+  (`listings.json`, `listing-tokens.json`, `withdrawals.json`,
+  `owner-files.json`, `knocks.json`), property tests and a `core/fuzz`
+  target for the parsers.
 - Protocol: discovery (ADR-006). SPEC gains signed listings, a closed A2A
   AgentCard profile carrying the `e2e` extension
   (`https://yggdrasill.network/ext/agentconnect/e2e/v0`) and one `EdDSA`

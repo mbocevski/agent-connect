@@ -31,6 +31,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use zeroize::Zeroizing;
 
+mod discovery;
+
 create_exception!(
     _native,
     AgentConnectError,
@@ -791,6 +793,42 @@ impl Client {
         })
     }
 
+    /// Builds a sealed, signed knock on a door (SPEC §6.6.2): returns the
+    /// sealed bytes (the `knock` envelope's `ct`) and the pending knock to
+    /// keep until it joins or lapses.
+    #[pyo3(signature = (door_id, door_key, display_name, note=None))]
+    fn create_knock<'py>(
+        &self,
+        py: Python<'py>,
+        door_id: &[u8],
+        door_key: &[u8],
+        display_name: &str,
+        note: Option<&str>,
+    ) -> PyResult<(Bound<'py, PyBytes>, discovery::PendingKnock)> {
+        let id: [u8; 16] = array(door_id, "door id")?;
+        let (sealed, knock) = py.detach(|| {
+            with_client!(self, |c, _g| c.create_knock(
+                &id,
+                door_key,
+                display_name,
+                note
+            ))
+        })?;
+        Ok((PyBytes::new(py, &sealed), discovery::PendingKnock(knock)))
+    }
+
+    /// The owner's checks 4–5 (SPEC §6.6.3) on an opened knock: the
+    /// KeyPackage (including that it is unused) and the signature.
+    fn verify_knock(
+        &self,
+        py: Python<'_>,
+        opened: &discovery::OpenedKnock,
+    ) -> PyResult<discovery::VerifiedKnock> {
+        let o = opened.0.clone();
+        py.detach(|| with_client!(self, |c, _g| c.verify_knock(o.clone())))
+            .map(discovery::VerifiedKnock)
+    }
+
     /// Commits the Add (pending until confirmed) and wraps the Welcome.
     #[pyo3(signature = (group_id, request, invite, switch_floor=true))]
     fn add_member<'py>(
@@ -1370,6 +1408,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VerifiedJoinRequest>()?;
     m.add_class::<Client>()?;
     m.add_class::<Database>()?;
+    discovery::register(m)?;
     for f in [
         wrap_pyfunction!(supports_protocol, m)?,
         wrap_pyfunction!(parse_invite_url, m)?,

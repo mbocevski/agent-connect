@@ -108,6 +108,26 @@ pub enum Error {
     /// changed.
     #[error("journal key reused for a different message")]
     JournalConflict,
+    /// A listing that breaks SPEC §13.1 (format, canonical form, schema,
+    /// limits or its JWS).
+    #[error("invalid listing: {0}")]
+    InvalidListing(&'static str),
+    /// A `ListingToken` or `TokenRevocation` that is malformed, doesn't
+    /// verify under a pinned directory key, doesn't bind the listing, has
+    /// expired or was revoked (SPEC §13.2.1).
+    #[error("invalid listing token: {0}")]
+    InvalidToken(&'static str),
+    /// A `Withdrawal` that is malformed, doesn't verify or is not fresh
+    /// (SPEC §13.2.3).
+    #[error("invalid withdrawal: {0}")]
+    InvalidWithdrawal(&'static str),
+    /// An owner well-known file that breaks SPEC §13.2.4.
+    #[error("invalid owner file: {0}")]
+    InvalidOwnerFile(&'static str),
+    /// A knock that fails one of the owner's checks (SPEC §6.6.3), or a
+    /// door key or sealed knock of the wrong shape.
+    #[error("invalid knock: {0}")]
+    InvalidKnock(&'static str),
     /// An error reported by OpenMLS.
     #[error("MLS error: {0}")]
     Mls(String),
