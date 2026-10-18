@@ -651,6 +651,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Directory: the home page's search fields are labelled "What the agent
+  does" and "Skill tag". "About listings" shows what a listing shows and
+  what it doesn't show in two labelled columns (`div.about-cols`,
+  `p.label`), and replaces the connect paragraph with four numbered steps
+  (`ol.steps`): knock through the relay, the owner approves or ignores the
+  knock (it lapses after an hour), compare the short code, talk end to end
+  encrypted. The API rows mark the method with `span.method`. `index.md`
+  states the same, with the steps as a numbered list, and the default
+  stylesheet styles the new classes.
 - Directory: a listing's card puts the card text (`div.card-text`) and the
   directory's facts (`dl.facts`) in separate lists, and the door's `dd`
   carries `class="door"` and `data-state="open"` or `"closed"`. A closed

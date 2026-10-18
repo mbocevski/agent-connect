@@ -320,8 +320,8 @@ async fn the_home_page_is_plain_and_functional() {
         "AgentConnect directory",
         &format!("Agents listed on {HOST}, reachable end to end encrypted through {RELAY}."),
         "Search",
-        "Text",
-        "Skill",
+        "What the agent does",
+        "Skill tag",
         "Listings",
         "Nothing is listed yet.",
         "About listings",
@@ -335,8 +335,8 @@ async fn the_home_page_is_plain_and_functional() {
     ] {
         assert!(text.contains(needle), "home lacks {needle:?}");
     }
-    assert!(html.contains("<label for=\"q\">Text</label>"));
-    assert!(html.contains("<label for=\"skill\">Skill</label>"));
+    assert!(html.contains("<label for=\"q\">What the agent does</label>"));
+    assert!(html.contains("<label for=\"skill\">Skill tag</label>"));
     let css = h.get("/static/directory.css").await;
     assert_eq!(
         css.header("content-type").as_deref(),
@@ -832,4 +832,87 @@ async fn the_home_page_says_how_to_get_listed() {
     }
     assert!(html.contains("<code>agentconnect listing withdraw</code>"));
     assert!(md.contains("`agentconnect listing withdraw`"));
+}
+
+#[tokio::test]
+async fn about_listings_has_two_columns_and_four_steps() {
+    let h = Harness::new();
+    let html = h.get("/").await.text();
+    let shows = "<div>\n<p class=\"label\">What a listing shows</p>\n<p>A listing is signed by";
+    let not_shows =
+        "<div>\n<p class=\"label\">What it doesn&#39;t show</p>\n<p>A listing doesn&#39;t show";
+    let cols = html
+        .find("<div class=\"about-cols\">\n")
+        .expect("about-cols");
+    let (a, b) = (html.find(shows).unwrap(), html.find(not_shows).unwrap());
+    let steps_at = html.find("<ol class=\"steps\">\n").expect("steps");
+    assert!(cols < a && a < b && b < steps_at, "{html}");
+    assert!(!html[cols..steps_at].contains("<ol"));
+    let steps = [
+        "Knock through the relay, using the listed knock command.",
+        "The agent's owner approves or ignores it. Nothing is sent until they approve, and a \
+knock lapses after an hour.",
+        "Compare the short code with the agent's owner.",
+        "Talk end to end encrypted.",
+    ];
+    let items: String = steps
+        .iter()
+        .map(|s| format!("<li>{}</li>\n", s.replace('\'', "&#39;")))
+        .collect();
+    assert!(
+        html.contains(&format!(
+            "<p class=\"label\">How to connect</p>\n<ol class=\"steps\">\n{items}</ol>\n</section>"
+        )),
+        "{html}"
+    );
+    assert!(!html.contains("To connect, run"));
+
+    let md = h.get("/index.md").await.text();
+    let numbered: String = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{}. {s}\n", i + 1))
+        .collect();
+    assert!(
+        md.contains("## About listings\n\nWhat a listing shows:\n\nA listing is signed by"),
+        "{md}"
+    );
+    assert!(
+        md.contains("\n\nWhat it doesn't show:\n\nA listing doesn't show"),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!("\n\nHow to connect:\n\n{numbered}\n## Get listed")),
+        "{md}"
+    );
+}
+
+#[tokio::test]
+async fn api_rows_mark_the_method() {
+    let h = Harness::new();
+    let html = h.get("/").await.text();
+    for (method, path) in [
+        ("GET", "/search?q=&amp;skill="),
+        ("GET", "/a/&lt;name&gt;.json"),
+        ("GET", "/llms.txt"),
+        ("POST", "/mcp"),
+        ("GET", "/.well-known/agentconnect-directory.json"),
+    ] {
+        let row = format!(
+            "<dt><code><span class=\"method\">{method}</span> https://{HOST}{path}</code></dt>"
+        );
+        assert!(html.contains(&row), "home lacks {row:?}");
+    }
+    assert_eq!(html.matches("<span class=\"method\">").count(), 7);
+    let md = h.get("/index.md").await.text();
+    for line in [
+        format!("- `GET https://{HOST}/search?q=&skill=`: search results as JSON\n"),
+        format!(
+            "- `POST https://{HOST}/mcp`: MCP server (streamable HTTP): search_agents, get_card\n"
+        ),
+        format!("- `GET https://{HOST}/a/<name>.json`: the signed card, byte for byte\n"),
+    ] {
+        assert!(md.contains(&line), "Markdown lacks {line:?}");
+    }
+    assert!(!md.contains("class=\"method\""));
 }
