@@ -441,9 +441,11 @@ reach the human again, for as long as its invite is open. Therefore:
   passes steps 1–3, and the envelope `msg_id` it arrived under, whatever
   happens to it next (held for approval, approved, rejected, dropped by a
   limit or by local policy, lapsed), until its invite's `expires_at` +
-  300 s, or until the invite is revoked or has expired, whichever comes
-  first. Revoked and expired are final, so from then on step 1 refuses any
-  copy.
+  300 s, or until the invite is revoked, has expired or is used up (every
+  use consumed by an Add that was merged), whichever comes first. All three
+  are final, so from then on step 1 refuses any copy. An invite that only
+  has no use free because Adds are still under way is not used up: a
+  failed Add gives its use back, so its requests stay remembered.
 - It MUST silently drop a JoinRequest whose KeyPackageRef or `msg_id` it
   remembers: no approval, nothing to the joiner, nothing to its agent. It
   MAY record the drop in a metadata-only audit log.
@@ -455,8 +457,11 @@ reach the human again, for as long as its invite is open. Therefore:
   also bound each invite's share of the record and its pending approvals,
   drop the rest silently, and tell its human, who can revoke the invite.
   (Informative: the reference daemon gives an invite at most
-  max(4 × `max_uses`, 64) entries, and at most 1024, and at most 32
-  pending approvals.)
+  max(4 × `max_uses`, 64) entries, and at most 1024, not counting requests
+  being added or added, and at most 32 pending approvals. It refuses to
+  create an invite when the open invites' shares plus their uses would
+  exceed the whole record, so the shares alone can't fill it; if the
+  record fills anyway, it tells its human once, for the daemon as a whole.)
 
 §6.6.3 step 6 is the same rule for knocks.
 
