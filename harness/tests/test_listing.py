@@ -8,6 +8,7 @@ less than the 300 s the signed requests may be off.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import random
 from pathlib import Path
@@ -146,9 +147,21 @@ async def test_renewal_registers_a_second_door_and_the_old_one_stays(
     await publish(node, body(node, directory, name))
     first = ac.verify_listing((await fetch(directory, name)).content)
     old_door, old_expiry = listed_door(first)
-    await cluster.advance(120)
     events = node.daemon.store.events
-    await node.wait(lambda: any(e["type"] == "listing_renewed" for e in events(limit=1000)))
+
+    def renewed() -> bool:
+        return any(e["type"] == "listing_renewed" for e in events(limit=1000))
+
+    # Half the door's life; then a second at a time, in case the clock moved
+    # before the worker set its timer.
+    await cluster.advance(120)
+    for _ in range(5):
+        with contextlib.suppress(TimeoutError):
+            await node.wait(renewed, within=2.0)
+        if renewed():
+            break
+        await cluster.advance(1)
+    assert renewed()
     second = ac.verify_listing((await fetch(directory, name)).content)
     new_door, new_expiry = listed_door(second)
     assert second.seq > first.seq
@@ -175,18 +188,25 @@ async def test_a_crash_while_publishing_converges_after_a_restart(
     await node.restart()
     # A request signed again in the same second is byte-identical, and the
     # relay refuses a replayed signature (auth_failed): the worker retries
-    # it after its first backoff, with a fresh timestamp.
-    await cluster.advance(61)
+    # it after its first backoff, with a fresh timestamp. The clock may move
+    # before the worker has set its timer, so time moves until it is done
+    # (staying well inside the 300 s the relay allows).
     store = node.daemon.store
-    await node.wait(
-        lambda: (
-            (row := store.listing(directory.host, name)) is not None
-            and (row["state"] == "published")
-        )
-    )
+
+    def published() -> bool:
+        row = store.listing(directory.host, name)
+        return row is not None and str(row["state"]) == "published"
+
+    for _ in range(4):
+        await cluster.advance(61)
+        with contextlib.suppress(TimeoutError):
+            await node.wait(published, within=2.0)
+        if published():
+            break
+    assert published()
     listing = ac.verify_listing((await fetch(directory, name)).content)
     door_id, _ = listed_door(listing)
     assert [d["door_id"] for d in store.doors()] == [door_id]
-    published = [e for e in store.events(limit=1000) if e["type"] == "listing_published"]
-    assert len(published) == 1
+    events = [e for e in store.events(limit=1000) if e["type"] == "listing_published"]
+    assert len(events) == 1
     await node.runtime.agent.withdraw_listing()
