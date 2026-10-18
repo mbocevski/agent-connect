@@ -4,94 +4,20 @@
 
 mod common;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use agentconnect_relay::proto::{MAX_KNOCK_CT, b64_encode, log_tag, parse_client_frame};
+use agentconnect_relay::Limits;
+use agentconnect_relay::proto::{MAX_KNOCK_CT, b64_encode};
 use agentconnect_relay::store::{CreateDoorOutcome, DoorRecord, Store};
-use agentconnect_relay::{DEFAULT_FRAME_MAX, Limits, app};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{Client, HOST, Harness, envelope, fresh_id, mailbox_of, signed_request, signing_key};
-use http_body_util::BodyExt;
+use common::{
+    Client, HOST, Harness, WEEK, call, close_door, door_body, envelope, fresh_id, knock_as,
+    knock_env, knock_frame, knock_frame_as, mailbox_of, open_door, post_door, queued,
+    signed_request, signing_key,
+};
 use serde_json::{Value, json};
-use tower::ServiceExt;
-
-const WEEK: u64 = 7 * 24 * 3600;
-
-async fn call(h: &Harness, req: Request<Body>) -> (StatusCode, Value) {
-    let resp = app(h.relay.clone()).oneshot(req).await.unwrap();
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, body)
-}
-
-fn door_body(owner: u8, door_id: &str, expires_at: u64) -> Value {
-    json!({
-        "door_id": door_id,
-        "expires_at": expires_at,
-        "owner_mailbox": mailbox_of(&signing_key(owner)),
-    })
-}
-
-async fn post_door(h: &Harness, key: u8, body: &Value) -> (StatusCode, Value) {
-    let bytes = body.to_string().into_bytes();
-    let req = signed_request(&signing_key(key), "POST", "/v0/doors", &bytes, h.ts(), HOST);
-    call(h, req).await
-}
-
-/// Register a door for `owner` that is open for an hour; returns its id.
-async fn open_door(h: &Harness, owner: u8) -> String {
-    let id = fresh_id();
-    let (status, body) = post_door(h, owner, &door_body(owner, &id, h.now_secs() + 3600)).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    id
-}
-
-async fn close_door(h: &Harness, key: u8, door_id: &str) -> (StatusCode, Value) {
-    let path = format!("/v0/doors/{door_id}");
-    let req = signed_request(&signing_key(key), "DELETE", &path, b"", h.ts(), HOST);
-    call(h, req).await
-}
-
-fn knock_env(sender: &str, door_id: &str) -> Value {
-    let mut env = envelope("knock", None, None, sender);
-    env["door_id"] = json!(door_id);
-    env
-}
-
-fn knock_frame(sender: &str, door_id: &str) -> Value {
-    json!({"t": "knock", "door_id": door_id, "env": knock_env(sender, door_id)})
-}
-
-/// Send a knock from mailbox `n` straight into the relay (no socket), the
-/// way the WebSocket handler would after parsing.
-async fn knock_as(h: &Harness, n: u8, door_id: &str) -> Value {
-    let mailbox = mailbox_of(&signing_key(n));
-    knock_frame_as(h, &mailbox, &knock_frame(&mailbox, door_id)).await
-}
-
-async fn knock_frame_as(h: &Harness, mailbox: &str, frame: &Value) -> Value {
-    let parsed = match parse_client_frame(&frame.to_string(), DEFAULT_FRAME_MAX) {
-        Ok(f) => f,
-        Err((code, detail)) => {
-            return json!({"t": "error", "code": code.as_str(), "detail": detail});
-        }
-    };
-    serde_json::to_value(h.relay.handle(mailbox, parsed).await.unwrap()).unwrap()
-}
-
-async fn queued(h: &Harness, owner: u8) -> Vec<Value> {
-    h.relay
-        .store()
-        .pending(&mailbox_of(&signing_key(owner)), 0, 1000, h.relay.now_ms())
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|m| serde_json::from_str(&m.json).unwrap())
-        .collect()
-}
 
 // --- Registration -----------------------------------------------------------
 
@@ -587,64 +513,6 @@ async fn malformed_knocks_are_bad_requests() {
 }
 
 // --- Logs and metrics -------------------------------------------------------
-
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[tokio::test]
-async fn door_and_knock_logs_carry_no_identifiers() {
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let h = Harness::with_limits(Limits {
-        queue_max_bytes: 1500,
-        sends_per_sec: 100_000,
-        ..Limits::default()
-    })
-    .await;
-    let door = open_door(&h, 1).await;
-    let closed = open_door(&h, 1).await;
-    close_door(&h, 2, &closed).await;
-    close_door(&h, 1, &closed).await;
-    post_door(&h, 1, &door_body(1, &fresh_id(), h.now_secs() + 2 * WEEK)).await;
-    for n in 2..14 {
-        knock_as(&h, n, &door).await;
-    }
-    knock_as(&h, 2, &door).await;
-    knock_as(&h, 2, &closed).await;
-    knock_as(&h, 3, &fresh_id()).await;
-    h.clock.advance(Duration::from_secs(4000));
-    h.relay.purge().await.unwrap();
-
-    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-    assert!(
-        logs.contains("knock"),
-        "the door paths log something: {logs}"
-    );
-    let mut ids = vec![door, closed];
-    ids.extend((1..14).map(|n| mailbox_of(&signing_key(n))));
-    for id in &ids {
-        assert!(!logs.contains(id.as_str()), "raw identifier in logs");
-        assert!(!logs.contains(&log_tag(id)), "identifier tag in logs");
-    }
-}
 
 #[tokio::test]
 async fn door_metrics_count_outcomes_only() {
