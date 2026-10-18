@@ -532,11 +532,13 @@ and is never consumed. Every approved knock creates a **new** group.
 The knocker instance B fetches the listing and verifies it (§13.1, §13.2).
 It checks that the listing's `relay` is the relay it is configured for
 (§4.4), that `door` is present, and that `door.expires_at` is in the future.
-It SHOULD fetch the owner's well-known file itself (§13.2) and MUST make the
-listing name, the fingerprint, the owner state and the description
-available to its human when it knocks, marked as unverified text: shown
-before the human confirms a knock the human starts, and recorded where the
-human can read it for a knock an agent starts. Then it builds:
+It SHOULD fetch the owner's well-known file itself (§13.2). It MUST show its
+human the listing name, the fingerprint, the owner state and the
+description, marked as unverified text: before the human confirms a knock
+the human starts, and, for a knock its agent starts, afterwards, kept with
+the knock where the human can read them for as long as the knock is kept.
+An implementation that lets its agent knock MUST also offer its human a
+setting that makes every knock the human's to start. Then it builds:
 
 ```text
 Knock = {
