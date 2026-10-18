@@ -159,6 +159,10 @@ def test_listing_tokens() -> None:
             )
         assert str(e.value) == case["error"], case["name"]
         assert e.value.kind == case.get("kind", "malformed"), case["name"]
+        if "listing" in case:
+            with pytest.raises(ac.AgentConnectError) as e:
+                ac.verify_listing(case["listing"].encode())
+            assert (str(e.value), e.value.kind) == (case["listing_error"], case["listing_kind"])
     for case in v["binding_invalid"]:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.check_token_binding(
@@ -170,6 +174,10 @@ def test_listing_tokens() -> None:
             )
         assert str(e.value) == case["error"], case["name"]
         assert e.value.kind == case.get("kind", "malformed"), case["name"]
+        # The same mismatch, posted as a listing, fails the same way.
+        with pytest.raises(ac.AgentConnectError) as e:
+            ac.verify_listing(case["listing"].encode())
+        assert (str(e.value), e.value.kind) == (case["error"], case["kind"]), case["name"]
     rev = v["revocation"]
     fields = ac.verify_token_revocation(rev["revocation"].encode(), v["directory"], [key])
     assert fields["token_id"] == b64d(token["token_id"])

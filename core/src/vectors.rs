@@ -469,8 +469,16 @@ fn discovery(rng: &Rng) -> Discovery {
     }
 }
 
-/// A listing check vector: name, check, now, pinned keys, revoked token.
-type ListingCheck<'a> = (&'a str, &'a str, u64, &'a [[u8; 32]], Option<[u8; 16]>);
+/// A listing check vector: name, check, listing, now, pinned keys,
+/// revoked token.
+type ListingCheck<'a> = (
+    &'a str,
+    &'a str,
+    &'a SignedListing,
+    u64,
+    &'a [[u8; 32]],
+    Option<[u8; 16]>,
+);
 
 fn trusted(dk: &DirectoryKey) -> TrustedDirectory {
     TrustedDirectory::new(DIRECTORY, &[dk.public_key()]).unwrap()
@@ -641,60 +649,98 @@ fn listing_vectors() {
             json!({"name": name, "listing": listing, "error": e.to_string(), "kind": e.kind().as_str()})
         })
         .collect();
-    // Valid listings that fail a later check, each under the pinned
-    // `directory_keys` it runs with.
+    // Valid listings that fail exactly one later check, each under the
+    // pinned `directory_keys` it runs with: every other check passes for
+    // that listing at that `now`.
     let door_expiry = l.params().door.as_ref().unwrap().expires_at;
-    let token_end = l.token().grant.expires_at;
     let pinned = [d.dk.public_key()];
     let unpinned = [d.other_dk.public_key()];
     let rotated = [d.other_dk.public_key(), d.dk.public_key()];
+    let variant = |issued_at: u64, token_issued_at: u64, door_expires: Option<u64>| {
+        let token =
+            d.dk.issue_token(
+                &rng,
+                &TokenGrant {
+                    issued_at: token_issued_at,
+                    expires_at: token_issued_at + 30 * 24 * 3600,
+                    ..grant(&id)
+                },
+            )
+            .unwrap();
+        let door = door_expires.map(|expires_at| crate::listing::ListedDoor {
+            expires_at,
+            ..l.params().door.clone().unwrap()
+        });
+        let mut c = card_for(&d.ik, token, door);
+        c.params.issued_at = issued_at;
+        c.sign(&d.ik).unwrap()
+    };
+    let in_future = variant(T0, T0 - 24 * 3600, Some(T0 + 3 * 24 * 3600));
+    let doorless = variant(T0, T0, None);
+    let early = variant(T0 - 1000, T0, None);
+    let token_end = doorless.token().grant.expires_at;
+    let revoked_id = l.token().token_id;
     let checks: Vec<ListingCheck<'_>> = vec![
-        ("expired door", "publish", door_expiry, &pinned, None),
-        ("issued in the future", "publish", T0 - 301, &pinned, None),
+        ("expired door", "publish", l, door_expiry, &pinned, None),
+        (
+            "issued in the future",
+            "publish",
+            &in_future,
+            T0 - 301,
+            &pinned,
+            None,
+        ),
         (
             "token signed by an unpinned key",
             "token",
+            l,
             T0,
             &unpinned,
             None,
         ),
-        ("expired token", "token", token_end, &pinned, None),
         (
-            "token not yet valid",
+            "expired token",
             "token",
-            l.token().grant.issued_at - 301,
+            &doorless,
+            token_end,
             &pinned,
             None,
         ),
         (
-            "revoked token",
+            "token not yet valid",
             "token",
-            T0,
+            &early,
+            T0 - 301,
             &pinned,
-            Some(l.token().token_id),
+            None,
         ),
+        ("revoked token", "token", l, T0, &pinned, Some(revoked_id)),
         (
             "revoked token, keys mid-rotation",
             "token",
+            l,
             T0,
             &rotated,
-            Some(l.token().token_id),
+            Some(revoked_id),
         ),
     ];
     let checks: Vec<Value> = checks
         .into_iter()
-        .map(|(name, check, now, keys, revoked)| {
-            let result = if check == "publish" {
-                l.check_publish(now)
+        .map(|(name, check, listing, now, keys, revoked)| {
+            let t = TrustedDirectory::new(DIRECTORY, keys).unwrap();
+            let publish = listing.check_publish(now);
+            let token = listing.check_token(&t, now, |id| revoked == Some(*id));
+            let (result, other) = if check == "publish" {
+                (publish, token)
             } else {
-                let t = TrustedDirectory::new(DIRECTORY, keys).unwrap();
-                l.check_token(&t, now, |id| revoked == Some(*id))
+                (token, publish)
             };
+            other.unwrap_or_else(|e| panic!("{name}: the other check fails too: {e}"));
             let e = result.expect_err(name);
             json!({
                 "name": name,
                 "check": check,
-                "listing": s(l.bytes()),
+                "listing": s(listing.bytes()),
                 "now": now,
                 "directory_keys": keys.iter().map(|k| b64(k)).collect::<Vec<_>>(),
                 "revoked": revoked.map(|r| b64(&r)),
@@ -864,6 +910,7 @@ fn listing_vectors() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::many_single_char_names)]
 fn listing_token_vectors() {
     let (seed, rng) = vector_rng("listing-tokens.json");
     let d = discovery(&rng);
@@ -895,7 +942,25 @@ fn listing_token_vectors() {
         let e = ListingToken::from_json(json.as_bytes())
             .and_then(|t2| t2.verify(&t, now))
             .expect_err(name);
-        json!({"name": name, "token": json, "now": now, "directory_key": key, "error": e.to_string(), "kind": e.kind().as_str()})
+        let mut case = json!({"name": name, "token": json, "now": now, "directory_key": key, "error": e.to_string(), "kind": e.kind().as_str()});
+        // Tokens that don't parse, embedded raw in a listing, so the
+        // refusal can be watched end to end.
+        let listing = match name {
+            "overlong" => {
+                let mut c = d.card.clone();
+                c.params.token = overlong.clone();
+                Some(s(&c.sign_unchecked(&d.ik)))
+            }
+            "not canonical" => Some(s(d.listing.bytes()).replacen(&tj, &json, 1)),
+            _ => None,
+        };
+        if let Some(listing) = listing {
+            let le = SignedListing::from_bytes(listing.as_bytes()).expect_err(name);
+            case["listing"] = listing.into();
+            case["listing_error"] = le.to_string().into();
+            case["listing_kind"] = le.kind().as_str().into();
+        }
+        case
     })
     .collect();
     let id = d.ik.id();
@@ -909,7 +974,22 @@ fn listing_token_vectors() {
     .into_iter()
     .map(|(name, dir, n, i, dom)| {
         let e = token.check_binding(dir, n, i, dom).expect_err(name);
-        json!({"name": name, "directory": dir, "listing_name": n, "identity": i, "owner_domain": dom, "error": e.to_string(), "kind": e.kind().as_str()})
+        // The listing with those params and this token, signed by the
+        // identity it names through the test-only path (`sign` refuses).
+        let mut c = d.card.clone();
+        c.params.directory = dir.into();
+        c.params.name = n.into();
+        c.params.identity = i.into();
+        c.params.owner_domain = dom.map(str::to_owned);
+        if let (Some(p), Some(dom)) = (c.provider.as_mut(), dom) {
+            p.url = format!("https://{dom}");
+        }
+        let signer = if i == other { &d.stranger } else { &d.ik };
+        let listing = s(&c.sign_unchecked(signer));
+        let le = SignedListing::from_bytes(listing.as_bytes()).expect_err(name);
+        assert_eq!(le, e, "{name}: the listing fails on the binding alone");
+        json!({"name": name, "directory": dir, "listing_name": n, "identity": i, "owner_domain": dom,
+               "listing": listing, "error": e.to_string(), "kind": e.kind().as_str()})
     })
     .collect();
     let rev = d.dk.revoke_token(&token.token_id, T0 + 60, "spam").unwrap();
@@ -1178,13 +1258,22 @@ fn owner_file_vectors() {
                 .iter()
                 .map(|(ago, r)| json!({"at": now - ago, "result": r}))
                 .collect();
+            // A directory never skips the fetch, and withdraws a listing
+            // once it is revoked (SPEC 13.2.4): a vouch after a revocation
+            // only matters at a daemon, or for a new publish.
+            let directory = !skipped && !name.starts_with("revoked, then vouched");
+            let applies: &[&str] = if directory {
+                &["daemon", "directory"]
+            } else {
+                &["daemon"]
+            };
             json!({"name": name, "owner_domain": domain, "skipped": skipped,
-                   "fetches": fetches, "now": now,
+                   "fetches": fetches, "now": now, "applies": applies,
                    "state": owner_state(domain, &checks, now).as_str()})
         })
         .collect();
     let mut out = header(
-        "SPEC 13.2.4 owner files (/.well-known/agentconnect.json) and owner states. `error` is null when the file parses. `vouch` is what a parsed file says (a file that doesn't parse vouches for nothing); `fetch_result` is what the fetch counts as for the owner state, where a file that doesn't parse is a failed fetch. Each state case is a history of fetches in order (result: vouches | does_not_vouch | revoked | failed); a negative result is sticky until a later fetch vouches. `identities` gives each identity's Ed25519 secret, from this file's seed, for signing test listings.",
+        "SPEC 13.2.4 owner files (/.well-known/agentconnect.json) and owner states. `error` is null when the file parses. `vouch` is what a parsed file says (a file that doesn't parse vouches for nothing); `fetch_result` is what the fetch counts as for the owner state, where a file that doesn't parse is a failed fetch. Each state case is a history of fetches in order (result: vouches | does_not_vouch | revoked | failed); a negative result is sticky until a later fetch vouches. `applies` says who runs the case: a directory never skips the fetch and withdraws a revoked listing, so it skips cases without \"directory\". `identities` gives each identity's Ed25519 secret, from this file's seed, for signing test listings.",
         &seed,
     );
     out["identities"] = json!([

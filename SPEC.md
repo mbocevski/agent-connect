@@ -1808,7 +1808,12 @@ name is registered with IANA before v0 is tagged):
   sticky**: failed fetches after it never bring back `verified` or
   `stale`, and only a later fetch that vouches clears it. In particular
   `revoked` lasts until a fetch finds the identity vouched for and no
-  longer revoked. "Later" means later in the order fetches complete: a
+  longer revoked. A directory MUST withdraw a listing whose owner state
+  becomes `revoked` (as it does for a withdrawal: 410 and a feed entry), so
+  for a directory a later vouch matters only for a new publish of the
+  name, which then starts with its own owner check. A knocker's daemon,
+  which checks at knock time, uses the whole rule. "Later" means later in
+  the order fetches complete: a
   checker MUST record results in that order and MUST NOT let the times it
   stores reorder them (a clock that steps back or forward doesn't), and a
   stored time after the current time counts as the current time.

@@ -657,6 +657,23 @@ impl ListingCard {
     }
 }
 
+#[cfg(test)]
+impl ListingCard {
+    /// Signs the card **without validating it**, for negative vectors only:
+    /// listings that `sign` refuses, so a consumer can post them and watch
+    /// the refusal.
+    pub(crate) fn sign_unchecked(&self, ik: &Identity) -> Vec<u8> {
+        let payload = jcs(&self.json(None)).unwrap();
+        let protected = protected_header(&ik.id()).unwrap();
+        let input = format!("{protected}.{}", b64(&payload));
+        let signature = SignatureJson {
+            protected,
+            signature: b64(&ik.sign(input.as_bytes())),
+        };
+        jcs(&self.json(Some(&signature))).unwrap()
+    }
+}
+
 /// A published listing that passed every check of SPEC §13.1, including
 /// its JWS. The token's signature, expiry and revocation are checked
 /// separately against pinned directory keys
