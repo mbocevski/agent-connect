@@ -1,0 +1,51 @@
+name: scan-image
+description: >-
+  Scan a locally built container image with Trivy (OS packages and bundled
+  binaries). Writes every finding to a SARIF file and uploads it to code
+  scanning, then fails on HIGH and CRITICAL vulnerabilities that have a fix.
+  Unfixed findings are reported, never fatal. Accepted CVEs live in
+  .trivyignore.yaml.
+inputs:
+  image:
+    description: Image reference in the local Docker daemon.
+    required: true
+  category:
+    description: Code scanning category for the SARIF upload (one per image).
+    required: true
+  upload:
+    description: Upload the SARIF file ("true" or "false"). Needs security-events write.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    # Report step: all severities, fixed or not, never fails the job.
+    - name: Scan (report)
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.76.0
+        image-ref: ${{ inputs.image }}
+        format: sarif
+        output: trivy-${{ inputs.category }}.sarif
+        exit-code: "0"
+        trivyignores: .trivyignore.yaml
+        hide-progress: "true"
+    - name: Upload SARIF
+      if: ${{ inputs.upload == 'true' }}
+      uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+      with:
+        sarif_file: trivy-${{ inputs.category }}.sarif
+        category: ${{ inputs.category }}
+    # Gate step: only fixable HIGH and CRITICAL. The vulnerability DB is
+    # already in the cache directory from the step above.
+    - name: Scan (gate on fixable HIGH and CRITICAL)
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        version: v0.76.0
+        image-ref: ${{ inputs.image }}
+        format: table
+        severity: HIGH,CRITICAL
+        ignore-unfixed: "true"
+        exit-code: "1"
+        trivyignores: .trivyignore.yaml
+        hide-progress: "true"
+        skip-setup-trivy: "true"

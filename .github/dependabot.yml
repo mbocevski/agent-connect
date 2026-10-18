@@ -69,3 +69,17 @@ updates:
       prefix: build
       include: scope
     labels: [dependencies, skip-changelog]
+
+  # Base images in the Dockerfiles (rust build image, distroless runtime).
+  - package-ecosystem: docker
+    directories: [/relay, /directory]
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: build
+      include: scope
+    labels: [dependencies, skip-changelog]
+    groups:
+      docker-images:
+        patterns: ["*"]

@@ -1,0 +1,11 @@
+# Accepted container-image CVEs (Trivy). The counterpart of the ignore list in
+# deny.toml. Every entry needs:
+#   id          the CVE or GHSA id
+#   statement   why it is accepted, and which image and package it affects
+#   expired_at  the review date; Trivy stops ignoring the entry on that day,
+#               so the scan fails again until someone re-decides
+# Example:
+#   - id: CVE-2099-0001
+#     statement: "relay image, libfoo 1.2: not reachable, no fix in Debian 12 yet"
+#     expired_at: 2099-01-01
+vulnerabilities: []

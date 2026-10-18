@@ -152,6 +152,9 @@ jobs:
     name: image (${{ matrix.component }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -164,7 +167,18 @@ jobs:
             os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: docker buildx build --platform linux/${{ matrix.arch }} -f ${{ matrix.component }}/Dockerfile .
+      - run: docker buildx build --load --platform linux/${{ matrix.arch }} -t ac-${{ matrix.component }}:ci -f ${{ matrix.component }}/Dockerfile .
+      # Trivy scan of the amd64 images (OS packages and bundled binaries). Fails
+      # on fixable HIGH and CRITICAL findings; SARIF goes to code scanning. Not
+      # part of ci-ok: the vulnerability DB download and new CVEs against an
+      # unchanged tree must not block merges. Nightly scans the same images.
+      - if: matrix.arch == 'amd64'
+        uses: ./.github/actions/scan-image
+        with:
+          image: ac-${{ matrix.component }}:ci
+          category: image-${{ matrix.component }}
+          # Fork and Dependabot PR tokens cannot write security events.
+          upload: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
 
   # Integration tier (`just test-int`): Postgres in docker compose. Not part
   # of ci-ok until it has a track record.
