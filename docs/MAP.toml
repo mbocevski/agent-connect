@@ -56,6 +56,17 @@ code = ["relay/src/proto.rs", "relay/src/rest.rs", "relay/src/ws.rs"]
 docs = ["SPEC.md", "relay/README.md"]
 
 [[rule]]
+name = "directory-protocol"
+code = [
+    "directory/src/http.rs",
+    "directory/src/api.rs",
+    "directory/src/mcp.rs",
+    "directory/src/directory.rs",
+    "directory/src/config.rs",
+]
+docs = ["SPEC.md", "directory/README.md"]
+
+[[rule]]
 name = "wire-formats"
 code = ["testdata/*.json"]
 # The manifest lists files; it isn't a wire format.

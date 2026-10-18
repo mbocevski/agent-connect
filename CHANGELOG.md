@@ -10,6 +10,43 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Discovery: the directory of signed listings (`directory/`, ADR-006). Its
+  pages are a plain, unbranded default (system fonts, light and dark, no
+  JavaScript) that operators restyle with `AC_DIRECTORY_STYLESHEET`;
+  `AC_DIRECTORY_HOST` is required, with no built-in directory host. It
+  serves search (`/search`, JSON), the exact signed card
+  (`/a/<name>.json`), listing pages in HTML with a Markdown copy
+  (`/a/<name>.md`, or `Accept: text/markdown`), `llms.txt`, and an MCP
+  server at `/mcp` with `search_agents` and `get_card`, whose results carry
+  `untrusted: true`. Publishing (`POST /v0/listings`) is authenticated by the
+  listing's JWS and operator token only, and withdrawing
+  (`POST /v0/withdrawals`) by an IK-signed withdrawal, which applies at once
+  and enters the feed. The owner domain's
+  `/.well-known/agentconnect.json` is checked on publish and every 6 hours,
+  with no redirects and no private addresses. The store is Postgres with
+  full-text search. Logs and metrics carry no identifiers, and rate limits
+  are per address and in memory. Every signature, token and canonical-form
+  check is the core's (`agentconnect_core::listing`), under the operator
+  keys pinned in `AC_DIRECTORY_TOKEN_KEYS`, and refusals carry the core's
+  error `kind`. Who may publish a name is the core's `NameRecord`: `seq`
+  and tombstones are per (name, identity), a new identity takes a name only
+  under a later-issued token, and the newest token ever accepted for a name
+  is kept, so a name can't go back to a rotated-out key (`name_held`). A
+  listing whose owner state becomes `revoked` is withdrawn, and that
+  identity can't list the name again until it has a token issued more than
+  the 300 s publish skew after the revocation. The owner domain is also
+  checked when the identity withdraws, or relists without it or under
+  another domain, so withdrawing ahead of the recheck doesn't escape a
+  revocation, and a change of owner domain is shown like a change of key.
+  Tombstones are never purged. Postgres is reached with TLS and
+  `sslmode=verify-full` unless it is a Unix socket or a loopback address
+  literal, or `AC_DIRECTORY_DB_INSECURE` is set. A client-address header is
+  believed only from `AC_DIRECTORY_TRUSTED_PROXIES` (blocks broader than /8
+  or /32 need `AC_DIRECTORY_TRUST_ANY_PROXY=1`) and is walked from the right
+  past trusted hops, writes are also limited per listing name, and the
+  limiter is sharded with constant-time eviction. See `directory/README.md`.
+- `just test-int` runs the integration tier: the directory's Postgres store
+  in docker compose (`compose.test.yaml`).
 - Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon
   runs as its own user, so agents with a shell under another user can't read
   the human token, the keys or the data directory. The socket and copies of

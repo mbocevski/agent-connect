@@ -141,15 +141,18 @@ jobs:
   platforms:
     uses: ./.github/workflows/platform-tests.yml
 
-  # The relay image must build for both architectures. Each architecture
-  # builds on a native runner (no QEMU emulation); nothing is pushed.
+  # The relay and directory images must build for both architectures. Each
+  # architecture builds on a native runner (no QEMU emulation); nothing is
+  # pushed.
   image:
-    name: image (${{ matrix.arch }})
+    name: image (${{ matrix.component }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        component: [relay, directory]
+        arch: [amd64, arm64]
         include:
           - arch: amd64
             os: ubuntu-24.04
@@ -157,7 +160,21 @@ jobs:
             os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: docker buildx build --platform linux/${{ matrix.arch }} -f relay/Dockerfile .
+      - run: docker buildx build --platform linux/${{ matrix.arch }} -f ${{ matrix.component }}/Dockerfile .
+
+  # Integration tier (`just test-int`): Postgres in docker compose. Not part
+  # of ci-ok until it has a track record.
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: just,cargo-nextest
+      - run: just test-int
 
   # Single required check for merge gating (.github/required-checks.txt).
   ci-ok:
