@@ -116,6 +116,8 @@ async fn flush<S: Store>(
 
 async fn session<S: Store>(relay: Arc<Relay<S>>, mut socket: WebSocket) {
     relay.metrics().connection();
+    // Held until the session future ends or is dropped, on any path.
+    let _open = relay.metrics().ws_open();
     let Some(mailbox) = authenticate(&relay, &mut socket).await else {
         return;
     };
