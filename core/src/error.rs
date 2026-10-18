@@ -128,6 +128,12 @@ pub enum Error {
     /// door key or sealed knock of the wrong shape.
     #[error("invalid knock: {0}")]
     InvalidKnock(&'static str),
+    /// A Welcome that unwrapped under a knock's `welcome_key` but is not
+    /// the group the knock asked for (SPEC §6.6.5): the wrong owner, name
+    /// or members. Only the knock's two ends know the key, so raise
+    /// `relay_misbehaviour`. The KeyPackage is spent.
+    #[error("knock Welcome mismatch: {0}")]
+    KnockWelcome(&'static str),
     /// An error reported by OpenMLS.
     #[error("MLS error: {0}")]
     Mls(String),
@@ -197,6 +203,9 @@ pub enum ErrorKind {
     KeyLength,
     /// An AEAD or HPKE open that failed: wrong key, wrong secret or tampering.
     Authentication,
+    /// A knock Welcome that isn't the group the knock asked for (SPEC
+    /// §6.6.5).
+    WelcomeMismatch,
     /// Anything else (storage, MLS, randomness, internal).
     Other,
 }
@@ -225,6 +234,7 @@ impl ErrorKind {
             Self::CredentialMismatch => "credential_mismatch",
             Self::KeyLength => "key_length",
             Self::Authentication => "authentication",
+            Self::WelcomeMismatch => "welcome_mismatch",
             Self::Other => "other",
         }
     }
@@ -237,7 +247,7 @@ fn reason_kind(reason: &str) -> ErrorKind {
     match reason {
         "signature" | "revocation signature" => K::Signature,
         "unknown key_id" => K::UnknownKey,
-        "expired" => K::Expired,
+        "expired" | "lapsed" => K::Expired,
         "not yet valid" => K::NotYetValid,
         "revoked" => K::Revoked,
         r if r.starts_with("bound to another") => K::TokenMismatch,
@@ -280,6 +290,7 @@ impl Error {
             Self::HpkeKeyLength | Self::KemOutputLength => K::KeyLength,
             Self::WelcomeAuth | Self::BadMac => K::Authentication,
             Self::InviteExpired => K::Expired,
+            Self::KnockWelcome(_) => K::WelcomeMismatch,
             _ => K::Other,
         }
     }
@@ -332,6 +343,8 @@ mod tests {
             (Error::InvalidKnock("replayed"), K::Replay),
             (Error::InvalidListing("tombstoned"), K::Superseded),
             (Error::InvalidKnock("ledger full"), K::Busy),
+            (Error::InvalidKnock("lapsed"), K::Expired),
+            (Error::KnockWelcome("name"), K::WelcomeMismatch),
             (Error::InvalidKnock("seal does not open"), K::Authentication),
             (Error::InvalidListing("not canonical JCS"), K::Malformed),
             (Error::InvalidOwnerFile("not I-JSON"), K::Malformed),
@@ -366,11 +379,12 @@ mod tests {
             K::CredentialMismatch,
             K::KeyLength,
             K::Authentication,
+            K::WelcomeMismatch,
             K::Other,
         ]
         .into_iter()
         .map(ErrorKind::as_str)
         .collect();
-        assert_eq!(names.len(), 20, "kind names are distinct");
+        assert_eq!(names.len(), 21, "kind names are distinct");
     }
 }
