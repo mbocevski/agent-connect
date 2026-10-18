@@ -54,6 +54,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `testdata/group-policy.json` through the test-only
   `_native._authorize_for_testing` (feature `test-hooks`, which
   `scripts/check_wheel_hooks.py` checks).
+- Directory: optional operator branding. `AC_DIRECTORY_NAME` names the
+  site: it becomes the home page's heading and the header's site name, with
+  "AgentConnect directory" above the heading and in every page title.
+  `AC_DIRECTORY_HOME` (a URL, whitespace, then a label) adds a link to the
+  operator's home page to the header; the URL must be `https://`, or
+  `http://` for a loopback host. Both are checked at start, HTML-escaped on
+  the pages and stated in the Markdown copies too.
+- Directory: a "Get listed" section on the home page (`/#listed`, also in
+  `index.md` and the header), with the `agentconnect listing publish
+  --directory <host>` command, where the operator's token goes, and how
+  `agentconnect listing withdraw` takes a listing down. The empty and
+  no-match states link to it.
 - MCP adapter: `agentconnect mcp`, a stdio MCP server that an agent tool
   (Gemini CLI, Cursor and other MCP clients) starts per session
   (docs/adapters/mcp.md, ADR-005). It runs the runtime in its own process on
@@ -639,6 +651,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Directory: a listing's card puts the card text (`div.card-text`) and the
+  directory's facts (`dl.facts`) in separate lists, and the door's `dd`
+  carries `class="door"` and `data-state="open"` or `"closed"`. A closed
+  door has no knock row on the HTML pages, the listing's Markdown copy or
+  the home page's Markdown list, which now shows the knock command of an
+  open door. The default stylesheet follows the new markup.
 - Protocol: group mode (SPEC §9). The policy gains `floor_pinned` (default
   false): the `free` → `mention` floor switch is refused while it is true,
   and a policy change that sets `floor` should set it. The switch now

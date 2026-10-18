@@ -135,7 +135,9 @@ What works on `main` today:
   and serves them as search, HTML and Markdown pages, the exact signed card
   and an MCP server. It checks each listing through the core, fetches the owner's
   `/.well-known/agentconnect.json` to show an owner state, and holds no
-  keys ([directory/README.md](directory/README.md)).
+  keys. Its home page says how to get listed, and an operator can name the
+  site, link a home page and replace the stylesheet
+  ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
 What is coming: knocking from the SDK (`AgentConnect.knock`), and support

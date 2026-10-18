@@ -77,6 +77,90 @@ impl Cidr {
     }
 }
 
+/// Longest operator name or home link label, in characters.
+pub const MAX_SITE_TEXT: usize = 80;
+
+/// Operator text shown on every page: trimmed, not empty, no control
+/// characters, at most [`MAX_SITE_TEXT`] characters.
+fn site_text(var: &str, what: &str, value: &str) -> Result<String, String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err(format!("{var} has an empty {what}"));
+    }
+    if v.chars().any(char::is_control) {
+        return Err(format!("{var}: the {what} has a control character"));
+    }
+    if v.chars().count() > MAX_SITE_TEXT {
+        return Err(format!(
+            "{var}: the {what} is longer than {MAX_SITE_TEXT} characters"
+        ));
+    }
+    Ok(v.to_owned())
+}
+
+/// The operator's home link in the header (`AC_DIRECTORY_HOME`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeLink {
+    /// An absolute `https://` URL (`http://` for a loopback host only).
+    pub url: String,
+    /// The link text.
+    pub label: String,
+}
+
+/// Characters a home link URL may hold after its scheme: RFC 3986
+/// unreserved and reserved characters and `%`, except the parentheses
+/// (they would end a Markdown link).
+fn url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'*+,;=%".contains(c)
+}
+
+fn is_loopback(host: &str) -> bool {
+    let name = host
+        .strip_prefix('[')
+        .and_then(|h| h.split_once(']'))
+        .map_or_else(|| host.split(':').next().unwrap_or_default(), |(h, _)| h);
+    name.eq_ignore_ascii_case("localhost")
+        || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+impl HomeLink {
+    /// Parse `AC_DIRECTORY_HOME`: a URL, whitespace, then the label.
+    ///
+    /// # Errors
+    ///
+    /// A message for a missing label or an invalid URL.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        const VAR: &str = "AC_DIRECTORY_HOME";
+        let (url, label) = value
+            .trim()
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| format!("{VAR} needs a URL, whitespace, then a label"))?;
+        let label = site_text(VAR, "label", label)?;
+        let bad = || format!("{VAR} is not an absolute https:// URL: {url}");
+        let (rest, https) = if let Some(r) = url.strip_prefix("https://") {
+            (r, true)
+        } else if let Some(r) = url.strip_prefix("http://") {
+            (r, false)
+        } else {
+            return Err(bad());
+        };
+        if !rest.chars().all(url_char) {
+            return Err(bad());
+        }
+        let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        canonical_relay_host(host).map_err(|_| bad())?;
+        if !https && !is_loopback(host) {
+            return Err(format!(
+                "{VAR}: http:// is allowed for a loopback host only: {url}"
+            ));
+        }
+        Ok(Self {
+            url: url.to_owned(),
+            label,
+        })
+    }
+}
+
 /// Directory configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -113,6 +197,12 @@ pub struct Config {
     /// `AC_DIRECTORY_METRICS_ADDR`: serve `/metrics` on this address only
     /// (for example a private interface) instead of the public listener.
     pub metrics_addr: Option<SocketAddr>,
+    /// `AC_DIRECTORY_NAME`: the operator's name for the site, shown as the
+    /// home page's heading and the header's site name.
+    pub name: Option<String>,
+    /// `AC_DIRECTORY_HOME`: a link to the operator's home page in the
+    /// header.
+    pub home: Option<HomeLink>,
 }
 
 fn list(v: Option<String>) -> Vec<String> {
@@ -197,6 +287,12 @@ impl Config {
                 })?),
                 None => None,
             };
+        let name = get("AC_DIRECTORY_NAME")
+            .map(|n| site_text("AC_DIRECTORY_NAME", "name", &n))
+            .transpose()?;
+        let home = get("AC_DIRECTORY_HOME")
+            .map(|h| HomeLink::parse(&h))
+            .transpose()?;
         Ok(Self {
             addr,
             db,
@@ -213,6 +309,8 @@ impl Config {
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from),
             metrics_addr,
+            name,
+            home,
         })
     }
 
@@ -384,6 +482,178 @@ mod tests {
             assert!(Config::from_lookup(lookup(&bad)).is_err(), "{bad:?}");
         }
         let _ = Config::from_env();
+    }
+
+    fn with(extra: &[(&'static str, &'static str)]) -> Result<Config, String> {
+        let mut vars = vec![DB, KEYS, HOST, RELAYS];
+        vars.extend_from_slice(extra);
+        Config::from_lookup(lookup(&vars))
+    }
+
+    #[test]
+    fn the_site_name_and_home_link_are_optional() {
+        let c = with(&[]).unwrap();
+        assert!(c.name.is_none() && c.home.is_none());
+        let c = with(&[
+            ("AC_DIRECTORY_NAME", "  Example directory "),
+            (
+                "AC_DIRECTORY_HOME",
+                " https://example.org/about?x=1  Example  home ",
+            ),
+        ])
+        .unwrap();
+        assert_eq!(c.name.as_deref(), Some("Example directory"));
+        assert_eq!(
+            c.home,
+            Some(HomeLink {
+                url: "https://example.org/about?x=1".into(),
+                label: "Example  home".into(),
+            })
+        );
+        let name = "n".repeat(MAX_SITE_TEXT);
+        assert_eq!(
+            Config::from_lookup(lookup(&[
+                DB,
+                KEYS,
+                HOST,
+                RELAYS,
+                ("AC_DIRECTORY_NAME", &name)
+            ]))
+            .unwrap()
+            .name,
+            Some(name.clone())
+        );
+        for ok in [
+            "http://127.0.0.1:8080/ Local",
+            "http://[::1]/ Local",
+            "http://localhost:3000 Local",
+            "https://example.org:8443/#top Example",
+            "https://EXAMPLE.org Example",
+        ] {
+            assert!(HomeLink::parse(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn bad_site_names_are_startup_errors() {
+        let long = "n".repeat(MAX_SITE_TEXT + 1);
+        for (value, err) in [
+            ("", "AC_DIRECTORY_NAME has an empty name"),
+            ("   ", "AC_DIRECTORY_NAME has an empty name"),
+            (
+                "Example\u{7}directory",
+                "AC_DIRECTORY_NAME: the name has a control character",
+            ),
+            (
+                "Example\ndirectory",
+                "AC_DIRECTORY_NAME: the name has a control character",
+            ),
+            (
+                long.as_str(),
+                "AC_DIRECTORY_NAME: the name is longer than 80 characters",
+            ),
+        ] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[
+                    DB,
+                    KEYS,
+                    HOST,
+                    RELAYS,
+                    ("AC_DIRECTORY_NAME", value)
+                ]))
+                .unwrap_err(),
+                err,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_home_links_are_startup_errors() {
+        let long_label = format!("https://example.org {}", "n".repeat(MAX_SITE_TEXT + 1));
+        for (value, err) in [
+            (
+                "",
+                "AC_DIRECTORY_HOME needs a URL, whitespace, then a label",
+            ),
+            (
+                "https://example.org",
+                "AC_DIRECTORY_HOME needs a URL, whitespace, then a label",
+            ),
+            (
+                "https://example.org   ",
+                "AC_DIRECTORY_HOME needs a URL, whitespace, then a label",
+            ),
+            (
+                "https://example.org Home\u{0}",
+                "AC_DIRECTORY_HOME: the label has a control character",
+            ),
+            (
+                long_label.as_str(),
+                "AC_DIRECTORY_HOME: the label is longer than 80 characters",
+            ),
+            (
+                "http://example.org Example",
+                "AC_DIRECTORY_HOME: http:// is allowed for a loopback host only: http://example.org",
+            ),
+            (
+                "http://10.0.0.1 Example",
+                "AC_DIRECTORY_HOME: http:// is allowed for a loopback host only: http://10.0.0.1",
+            ),
+            (
+                "example.org Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: example.org",
+            ),
+            (
+                "/about Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: /about",
+            ),
+            (
+                "javascript:alert(1) Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: javascript:alert(1)",
+            ),
+            (
+                "https:// Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: https://",
+            ),
+            (
+                "https://user@example.org Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: https://user@example.org",
+            ),
+            (
+                "https://example.org/a\"b Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: https://example.org/a\"b",
+            ),
+            (
+                "https://example.org/<x> Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: https://example.org/<x>",
+            ),
+            (
+                "https://example.org/(x) Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: https://example.org/(x)",
+            ),
+            (
+                "https://exämple.org Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: https://exämple.org",
+            ),
+            (
+                "https://example.org:0 Example",
+                "AC_DIRECTORY_HOME is not an absolute https:// URL: https://example.org:0",
+            ),
+        ] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[
+                    DB,
+                    KEYS,
+                    HOST,
+                    RELAYS,
+                    ("AC_DIRECTORY_HOME", value)
+                ]))
+                .unwrap_err(),
+                err,
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
