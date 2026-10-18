@@ -147,9 +147,9 @@ wheels target manylinux 2.28. On macOS the daemon keeps its data under
 `~/Library/Application Support`; set `AC_DATA_DIR` to move it. Intel Macs and
 Windows are not supported ([ADR-001](docs/adr/001-stack.md)).
 
-Releases are blocked on three advisories in the OpenMLS crypto provider,
-RUSTSEC-2026-0329, RUSTSEC-2026-0330 and RUSTSEC-2026-0331. There will be no
-release and no public relay until a fixed provider ships
+The OpenMLS crypto provider comes from a pinned upstream commit, which fixes
+RUSTSEC-2026-0329, RUSTSEC-2026-0330 and RUSTSEC-2026-0331, until a
+crates.io release ships the fixed libcrux crates
 ([ADR-001](docs/adr/001-stack.md)).
 
 ## Quickstart

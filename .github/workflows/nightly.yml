@@ -29,6 +29,11 @@ jobs:
       - run: just licences
       - run: uv export --all-packages --no-emit-workspace --no-hashes --format requirements-txt > requirements.txt
       - run: uvx pip-audit==2.10.1 --strict -r requirements.txt
+      # Removal trigger for the OpenMLS provider patch (ADR-001 §2): fails
+      # once crates.io has a fixed provider release that works with our
+      # openmls, so the nightly issue says the patch can go.
+      - name: Fixed OpenMLS provider on crates.io
+        run: uv run --no-project python scripts/check_cargo_patch.py upstream
 
   # New CVEs against unchanged images: build the amd64 images from main and
   # scan them with Trivy (the same check as the PR `image` job).

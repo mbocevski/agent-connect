@@ -497,6 +497,42 @@ mod tests {
         }
     }
 
+    /// Known answer for the suite's `DeriveKeyPair` (SPEC §3.1): the
+    /// `MLKEM768-X25519` entries of the draft-ietf-hpke-pq test vectors
+    /// (`testdata/hpke-pq-test-vectors.json`, vendored byte-for-byte; source
+    /// in `testdata/MANIFEST.json`). Fails if the provider's derivation
+    /// changes, for instance back to the unlabeled `SHAKE256(ikm, 32)`.
+    #[test]
+    fn derive_hpke_keypair_matches_the_hpke_pq_known_answer() {
+        use crate::encoding::hex_decode;
+        use openmls_traits::OpenMlsProvider as _;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../testdata/hpke-pq-test-vectors.json"
+        );
+        let vectors: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let provider = crate::provider::Provider::new(
+            crate::provider::MemoryStore::new(),
+            crate::rng::Rng::for_test("hpke-pq-kat"),
+        )
+        .unwrap();
+        let field =
+            |v: &serde_json::Value, k: &str| hex_decode(v[k].as_str().unwrap(), "kat").unwrap();
+        let mut checked = 0;
+        for v in vectors.iter().filter(|v| v["kem_id"] == 25722) {
+            let keys = provider
+                .crypto()
+                .derive_hpke_keypair(CS.hpke_config(), &field(v, "ikmR"))
+                .unwrap();
+            assert_eq!(&keys.private[..], field(v, "skRm").as_slice());
+            assert_eq!(keys.public, field(v, "pkRm"));
+            assert_eq!(keys.public.len(), HPKE_PUBLIC_KEY_LEN);
+            checked += 1;
+        }
+        assert_eq!(checked, 2);
+    }
+
     #[test]
     fn guard_turns_panics_into_errors() {
         let r: Result<()> = guard(|| panic!("boom"));

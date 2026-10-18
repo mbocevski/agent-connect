@@ -558,6 +558,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Core: HPKE `DeriveKeyPair` for the v0 suite's KEM (`MLKEM768-X25519`) now
+  follows `draft-ietf-hpke-pq`, `SHAKE256.LabeledDerive(ikm,
+  "DeriveKeyPair", "", 32)`, as implemented by hpke-rs 0.8 (SPEC §3.1). It
+  was the unlabeled `SHAKE256(ikm, 32)`. Every HPKE key pair of the suite
+  changes for the same input (KeyPackage, TreeKEM path and door keys,
+  `external_pub`), so daemons built before this don't interoperate on
+  commits that carry an update path; v0 is unreleased, so there is no
+  migration, and the derivation is fixed for v0 from here on. The
+  door-key vectors in `knocks.json`, `listings.json`, `listing-tokens.json`
+  and `withdrawals.json` are regenerated from their stored seeds, and the
+  draft's own test vectors (`testdata/hpke-pq-test-vectors.json`, vendored
+  byte-for-byte) are a known-answer test in Rust and Python.
 - There is no built-in relay any more: `relay.url` (daemon, CLI, embedded SDK) and
   `AC_DIRECTORY_RELAYS` (directory) are required.
 - The daemon's protocol engine and local API moved into the
@@ -762,6 +774,28 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Dependencies: RUSTSEC-2026-0329 (`libcrux-hmac-drbg` 0.0.1),
+  RUSTSEC-2026-0330 and RUSTSEC-2026-0331 (`libcrux-kem` 0.0.9) are cleared
+  and no longer ignored by `cargo deny`. `openmls_traits`,
+  `openmls_libcrux_crypto`, `openmls_memory_storage` and the unbuilt
+  `openmls_rust_crypto` are patched, here and in the three fuzz workspaces,
+  to upstream OpenMLS commit `be2368a21ec5e0380abd568821addc57b79013ea`,
+  which uses `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2 and `hpke-rs`
+  0.8; the rest of OpenMLS stays on crates.io (ADR-001 §2). The HPKE key
+  length check stays.
+  - `scripts/check_cargo_patch.py check` (in `just lint`) fails when a
+    workspace lacks the root's exact patch table, when a patched git rev
+    isn't a full commit SHA, or when any `Cargo.lock` holds `libcrux-kem`
+    < 0.0.10 or `libcrux-hmac-drbg` < 0.0.2.
+  - The nightly `audit` job runs `check_cargo_patch.py upstream`, which
+    fails once crates.io has an `openmls_libcrux_crypto` release on the
+    fixed libcrux crates that works with the pinned `openmls`: the
+    condition for removing the patch.
+- Relay and directory images: the runtime base is now
+  `gcr.io/distroless/base-nossl-debian12:nonroot`, pinned by digest, instead
+  of the floating `cc-debian12:nonroot`. The images no longer carry `libssl3`
+  (CVE-2026-84782, no Debian fix yet), which neither binary links or loads.
+  Dependabot keeps the digest current.
 - Daemon: agent messages carry the `msg_id`s they reply to in a new inner
   `reply_to` field (SPEC §7.2, at most 16). A receiver that knows any of
   them treats the message's `hop` as at least one more than theirs, so a

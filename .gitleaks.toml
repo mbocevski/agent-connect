@@ -7,6 +7,12 @@ useDefault = true
 description = "dependency lockfiles"
 paths = ['''(^|/)Cargo\.lock$''', '''(^|/)uv\.lock$''']
 
+# Upstream known-answer vectors, vendored byte-for-byte (testdata/MANIFEST.json
+# names the source commit): published test values, not credentials.
+[[allowlists]]
+description = "vendored upstream test vectors"
+paths = ['''^testdata/hpke-pq-test-vectors\.json$''']
+
 # Published test vectors: every value is derived from the seed stored in the
 # file (core/src/vectors.rs), so these are test inputs, not credentials.
 [[allowlists]]

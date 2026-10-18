@@ -168,6 +168,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker buildx build --load --platform linux/${{ matrix.arch }} -t ac-${{ matrix.component }}:ci -f ${{ matrix.component }}/Dockerfile .
+      # Run the image: print the binary's NEEDED libraries and wait for /healthz,
+      # which proves the loader finds libgcc_s on this architecture.
+      - run: scripts/smoke-image.sh ${{ matrix.component }} ac-${{ matrix.component }}:ci linux/${{ matrix.arch }}
+        timeout-minutes: 5
       # Trivy scan of the amd64 images (OS packages and bundled binaries). Fails
       # on fixable HIGH and CRITICAL findings; SARIF goes to code scanning. Not
       # part of ci-ok: the vulnerability DB download and new CVEs against an
