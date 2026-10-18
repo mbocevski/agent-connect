@@ -746,12 +746,14 @@ class SafetyPolicy:
         most its byte share, ``max_held_bytes_per_sender`` or
         ``max_held_bytes`` divided by the senders waiting, whichever is
         smaller: past either the message is dropped as ``hold_overflow``, a
-        violation. When the group's
+        violation. A sender holding nothing is always within its share, so
+        its first message is never a violation, however small the share has
+        become. When the group's
         queue (``max_held_per_group``, ``max_held_bytes``) is full, the
-        message is dropped too, but only a sender holding at least its fair
-        share (the group cap divided by the senders waiting, at most the
-        per-sender cap) is charged (``hold_overflow``); anyone else gets
-        ``hold_queue_full``, which isn't a violation."""
+        message is dropped too, but only a sender holding something, and at
+        least its fair share (the group cap divided by the senders waiting,
+        at most the per-sender cap), is charged (``hold_overflow``); anyone
+        else gets ``hold_queue_full``, which isn't a violation."""
         task = task_of(inner) if direction == "in" else None
         now = self._now()
         if task is not None:
@@ -772,11 +774,13 @@ class SafetyPolicy:
         cap = settings.max_held_per_sender
         waiting = max(senders + (0 if ours else 1), 1)
         byte_share = min(settings.max_held_bytes_per_sender, settings.max_held_bytes // waiting)
-        if mine >= cap or ours >= cap or our_bytes + size > byte_share:
+        # A sender holding nothing is within its share, whatever the share
+        # has shrunk to: the group caps below still bound the queue.
+        if mine >= cap or ours >= cap or (ours and our_bytes + size > byte_share):
             return drop("hold_overflow")
         if total >= settings.max_held_per_group or held_bytes + size > settings.max_held_bytes:
             share = min(settings.max_held_per_group // waiting, cap)
-            return drop("hold_overflow" if ours >= share else "hold_queue_full")
+            return drop("hold_overflow" if ours and ours >= share else "hold_queue_full")
         if task is not None:
             self.store.set_task_state(group_id, sender, task, "pending", now)
         return hold("require_approval")

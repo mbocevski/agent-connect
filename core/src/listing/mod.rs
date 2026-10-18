@@ -153,18 +153,27 @@ pub const TEXT_NORMALIZATION_UNICODE_VERSION: (u8, u8, u8) = unicode_normalizati
 pub const MAX_COMBINING_MARKS: usize = 4;
 
 /// Whether `s` is text in the one-line rule (SPEC §13.1.2), of any length:
-/// every character passes [`is_text_char`], no more than 4 combining
+/// every character passes [`is_text_char`] (but for one VS15 or VS16 right
+/// after a character with the `Emoji` property), no more than 4 combining
 /// marks follow a base character (and none starts the text), and it is
 /// already in NFC.
 #[must_use]
 pub fn is_text(s: &str) -> bool {
+    use unicode_properties::emoji::UnicodeEmoji;
     use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory as _};
     let mut run = 0usize;
     let mut first = true;
+    let mut prev: Option<char> = None;
     for c in s.chars() {
-        if !is_text_char(c) {
+        // A selector passes only right after a character with the `Emoji`
+        // property. The previous character of a second selector is a
+        // selector, which has none, so exactly one can follow.
+        let selector =
+            matches!(c, '\u{FE0E}' | '\u{FE0F}') && prev.is_some_and(UnicodeEmoji::is_emoji_char);
+        if !selector && !is_text_char(c) {
             return false;
         }
+        prev = Some(c);
         if c.general_category_group() == GeneralCategoryGroup::Mark {
             run += 1;
             if first || run > MAX_COMBINING_MARKS {
@@ -409,7 +418,7 @@ mod tests {
             "x\u{FFA0}",                // HALFWIDTH HANGUL FILLER
             "\u{2800}",                 // BRAILLE PATTERN BLANK (So)
             "a\u{034F}b",               // COMBINING GRAPHEME JOINER
-            "\u{2764}\u{FE0F}",         // a variation selector (Default_Ignorable)
+            "a\u{FE0F}",                // a variation selector after a non-emoji
             "e\u{0301}",                // NFD spelling of U+00E9
             "\u{212B}",                 // ANGSTROM SIGN, NFC is U+00C5
         ] {
@@ -433,6 +442,47 @@ mod tests {
             assert!(is_text(ok), "{ok:?}");
         }
         assert_eq!(TEXT_NORMALIZATION_UNICODE_VERSION, (17, 0, 0));
+    }
+
+    /// SPEC §13.1.2: exactly one VS15 or VS16 may follow a character with
+    /// the `Emoji` property; every other default-ignorable stays refused.
+    #[test]
+    fn one_presentation_selector_may_follow_an_emoji() {
+        for ok in [
+            "\u{2764}\u{FE0F}", // red heart, emoji presentation
+            "\u{2764}\u{FE0E}", // red heart, text presentation
+            "I \u{2764}\u{FE0F} it",
+            "\u{2764}\u{FE0F}\u{2764}\u{FE0F}",
+            "1\u{FE0F}", // digits have the Emoji property
+            "\u{1F600}\u{FE0F}",
+        ] {
+            assert!(is_text(ok), "{ok:?}");
+            assert!(is_one_line_text(ok, 80), "{ok:?}");
+        }
+        assert!(
+            is_one_line_text("\u{2764}\u{FE0F}", 2),
+            "counted as scalar values"
+        );
+        assert!(!is_one_line_text("\u{2764}\u{FE0F}", 1));
+        for bad in [
+            "a\u{FE0F}", // after a non-emoji
+            "a\u{FE0E}",
+            "\u{FE0F}",                   // alone
+            "\u{FE0F}\u{2764}",           // at the start
+            "\u{2764}\u{FE0F}\u{FE0F}",   // doubled
+            "\u{2764}\u{FE0F}\u{FE0E}",   // one of each
+            "\u{2764}\u{FE00}",           // another variation selector
+            "\u{2764} \u{FE0F}",          // not immediately after
+            "\u{2764}\u{0301}\u{FE0F}",   // after a combining mark
+            "\u{1F468}\u{200D}\u{1F469}", // a ZWJ sequence
+            "\u{2764}\u{FE0F}\u{200D}\u{1F525}",
+            "\u{2764}\u{034F}", // another default-ignorable
+        ] {
+            assert!(!is_text(bad), "{bad:?}");
+            assert!(!is_one_line_text(bad, 80), "{bad:?}");
+        }
+        assert!(!is_text_char('\u{FE0F}'), "alone it is still refused");
+        assert!(!is_text_char('\u{FE0E}'));
     }
 
     #[test]

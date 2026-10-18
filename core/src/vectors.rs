@@ -609,8 +609,8 @@ fn listing_vectors() {
             mutate(&|m| m["name"] = json!("Release\u{34F}planner")),
         ),
         (
-            "variation selector",
-            mutate(&|m| m["description"] = json!("Loves \u{2764}\u{FE0F} releases")),
+            "variation selector after a non-emoji",
+            mutate(&|m| m["description"] = json!("Loves a\u{FE0F} releases")),
         ),
         (
             "five combining marks",
@@ -813,7 +813,7 @@ fn listing_vectors() {
     l.check_token(&trusted(&d.dk), T0, |_| false).unwrap();
     l.check_publish(T0).unwrap();
     let mut out = header(
-        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Each check runs at `now` against its own `directory_keys` (base64url Ed25519 public keys) for `directory`, with the `revoked` token id; `error` is the core's message and `kind` its stable kind. `replacements` say whether `listing` may replace `stored_listing` (SPEC 13.2.2: seq per identity; another identity needs a later token), `tombstones` whether a tombstone (identity, seq) blocks `stored_listing`. `identities` and `directory_key_secret` are seed-derived secrets for signing more test listings and tokens. `renewal`: `previous` renewed by the identity `ik_secret` at `seq` and `issued_at` with the door whose key pair is DeriveKeyPair(`ikm`) gives exactly `renewed` (SPEC 6.6.1, 13.2.2: only door, seq and issued_at change), and each of `refused` (a `seq` that does not increase, an `issued_at` before the previous one) is refused. `content`: the card text a human approves (ListingContent), `input` in any formatting canonicalises to `canonical`; each `invalid` input is refused.",
+        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Each check runs at `now` against its own `directory_keys` (base64url Ed25519 public keys) for `directory`, with the `revoked` token id; `error` is the core's message and `kind` its stable kind. `replacements` say whether `listing` may replace `stored_listing` (SPEC 13.2.2: seq per identity; another identity needs a later token), `tombstones` whether a tombstone (identity, seq) blocks `stored_listing`. `identities` and `directory_key_secret` are seed-derived secrets for signing more test listings and tokens. `renewal`: `previous` renewed by the identity `ik_secret` at `seq` and `issued_at` with the door whose key pair is DeriveKeyPair(`ikm`) gives exactly `renewed` (SPEC 6.6.1, 13.2.2: only door, seq and issued_at change), and each of `refused` (a `seq` that does not increase, an `issued_at` before the previous one) is refused. `content`: the card text a human approves (ListingContent), `input` in any formatting canonicalises to `canonical`; each `invalid` input is refused, and each of `valid_texts` (SPEC 13.1.2: a variation selector right after an Emoji character) canonicalises to its `canonical`.",
         &seed,
     );
     out["directory"] = DIRECTORY.into();
@@ -997,6 +997,30 @@ fn content_vectors(card: &ListingCard) -> Value {
             "a duplicate key",
             format!("{{\"name\":\"a\",{}", &s(&canonical)[1..]),
         ),
+        (
+            "a variation selector alone",
+            with("description", json!("\u{FE0F}")),
+        ),
+        (
+            "a variation selector after a non-emoji",
+            with("description", json!("a\u{FE0F}")),
+        ),
+        (
+            "a doubled variation selector",
+            with("description", json!("\u{2764}\u{FE0F}\u{FE0F}")),
+        ),
+        (
+            "a variation selector at the start",
+            with("description", json!("\u{FE0F}\u{2764}")),
+        ),
+        (
+            "a zero width joiner sequence",
+            with("description", json!("\u{1F468}\u{200D}\u{1F469}")),
+        ),
+        (
+            "an emoji with a variation selector and a joiner",
+            with("description", json!("\u{2764}\u{FE0F}\u{200D}\u{1F525}")),
+        ),
     ]
     .into_iter()
     .map(|(name, input)| {
@@ -1004,7 +1028,39 @@ fn content_vectors(card: &ListingCard) -> Value {
         json!({"name": name, "input": input, "error": e.to_string(), "kind": e.kind().as_str()})
     })
     .collect();
-    json!({"input": input, "canonical": s(&canonical), "invalid": invalid})
+    let valid_texts = valid_text_vectors(&v);
+    json!({
+        "input": input,
+        "canonical": s(&canonical),
+        "valid_texts": valid_texts,
+        "invalid": invalid,
+    })
+}
+
+/// SPEC 13.1.2: one VS15 or VS16 may follow a character with the Emoji
+/// property, so these descriptions are text.
+fn valid_text_vectors(v: &Value) -> Vec<Value> {
+    [
+        ("emoji presentation", "I \u{2764}\u{FE0F} releases"),
+        ("text presentation", "\u{2764}\u{FE0E}"),
+        ("a digit has the Emoji property", "1\u{FE0F}"),
+        (
+            "two emoji, each with a selector",
+            "\u{2764}\u{FE0F}\u{2764}\u{FE0F}",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, description)| {
+        let mut m = v.clone();
+        m["description"] = json!(description);
+        let input = serde_json::to_string(&m).unwrap();
+        let canonical = ListingContent::from_json(input.as_bytes())
+            .expect(name)
+            .to_json()
+            .unwrap();
+        json!({"name": name, "input": input, "canonical": s(&canonical)})
+    })
+    .collect()
 }
 
 #[test]

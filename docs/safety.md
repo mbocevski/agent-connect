@@ -346,12 +346,15 @@ it. Each identity may also have at most its byte share waiting:
 `max_held_bytes_per_sender` (1 MiB), or `max_held_bytes` divided by the
 senders waiting, whichever is smaller. A message over either is dropped
 (`hold_overflow`) and counts as a violation, so a few senders can't fill
-the queue with large messages while staying under the count. At most `max_held_per_group` (100) and `max_held_bytes`
+the queue with large messages while staying under the count. A sender that
+holds nothing is always within its share, however small the share has
+become with many senders waiting, so its first message is never a violation.
+At most `max_held_per_group` (100) and `max_held_bytes`
 (8 MiB) wait in one group's queue. When it is full, a new message is
-dropped, not held, but only a sender that already holds its fair share
-(the group cap divided by the senders waiting, at most the per-sender cap)
-is charged with `hold_overflow`; anyone else gets `hold_queue_full`, which
-is no violation. So one peer can't bury the messages you want to approve,
+dropped, not held, but only a sender that already holds something, and at
+least its fair share (the group cap divided by the senders waiting, at most
+the per-sender cap), is charged with `hold_overflow`; anyone else gets
+`hold_queue_full`, which is no violation. So one peer can't bury the messages you want to approve,
 fill the disk, or get an honest member reported. Like the limits, the caps
 can only be lowered.
 

@@ -347,8 +347,8 @@ The label is not length-prefixed. `testdata/invite-kdf.json` gives
 `mac_input` and `mac` for sample inputs.
 
 `display_name` is at most 80 characters of one-line text (§13.1.2: no
-control, format, separator, private-use, unassigned or ignorable character,
-no space but U+0020, NFC); the inviter MUST reject a request that
+control, format, separator, private-use, unassigned or ignorable character
+but for one emoji presentation selector, no space but U+0020, NFC); the inviter MUST reject a request that
 breaks either rule. The MAC stops the relay from renaming the joiner, but
 the name is still chosen by the joiner, so the inviter's UI MUST present
 it as unverified text.
@@ -532,7 +532,8 @@ SealedKnock = enc(1120) ‖ HPKE.Seal(door.key, info = "agentconnect/v0/knock" �
 - The `Knock` is a JCS object (§3.2) with exactly these fields; `note` is
   absent rather than empty. `display_name` and `note` MUST be one-line text
   as defined in §13.1.2 (no Cc, Cf, Zl, Zp, Co, Cs or Cn character of
-  Unicode 17.0.0, and no space but U+0020): the owner's human approves by
+  Unicode 17.0.0, no ignorable character but one emoji presentation
+  selector, and no space but U+0020): the owner's human approves by
   them, so they must not split lines or reorder what is shown next to
   them. A knock that breaks this fails check 2 (§6.6.3).
   `SealedKnock` is HPKE base mode (RFC 9180
@@ -1580,8 +1581,16 @@ wrapped for reading (the published form is one canonical line):
   tags), Zl, Zp, Co (private use), Cs or Cn (unassigned, noncharacters
   included), and the only space separator (Zs) it may contain is U+0020.
   It also MUST NOT contain a `Default_Ignorable_Code_Point` (blank fillers
-  such as U+3164 and U+115F, U+034F, variation selectors) or U+2800
-  BRAILLE PATTERN BLANK; it MUST NOT start with a combining mark (category
+  such as U+3164 and U+115F, U+034F, the zero-width joiner, variation
+  selectors) or U+2800 BRAILLE PATTERN BLANK, with one exception: exactly
+  one U+FE0E (VS15) or U+FE0F (VS16) MAY follow, immediately, a character
+  that has the Unicode `Emoji` property (`emoji-data.txt`, Unicode 17.0.0;
+  it includes `#`, `*` and the digits), so that a red heart (U+2764
+  U+FE0F) is text. A selector anywhere else (at the start, after any other
+  character, or after another selector) is refused, and so is every other
+  default-ignorable character; there are no joined emoji sequences. A
+  selector is a combining mark (Mn) and counts in the limit below. The text
+  MUST NOT start with a combining mark (category
   M) or have more than 4 combining marks in a row; and it MUST already be
   in NFC (Unicode Normalization Form C), so one text has one spelling.
   Receivers MUST reject a listing that breaks this rule. The categories,

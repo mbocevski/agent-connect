@@ -12,14 +12,19 @@ use std::time::Duration;
 
 use agentconnect_core::clock::FakeClock;
 use agentconnect_relay::auth::{rest_auth_message, ws_auth_message};
-use agentconnect_relay::proto::{b64_decode, b64_encode, mailbox_id_from_key};
-use agentconnect_relay::{Limits, Relay, SqliteStore, app};
+use agentconnect_relay::proto::{b64_decode, b64_encode, mailbox_id_from_key, parse_client_frame};
+use agentconnect_relay::store::Store;
+use agentconnect_relay::{DEFAULT_FRAME_MAX, Limits, Relay, SqliteStore, app};
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use axum::serve::ListenerExt;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sha2::Digest;
 use tokio_tungstenite::tungstenite::Message;
+use tower::ServiceExt;
 
 pub const HOST: &str = "relay.test";
 const GUARD: Duration = Duration::from_secs(20);
@@ -362,4 +367,82 @@ pub fn signed_request(
         .header("content-type", "application/json")
         .body(axum::body::Body::from(body.to_vec()))
         .unwrap()
+}
+
+// --- Doors and knocks (shared by tests/doors.rs and tests/door_log_privacy.rs) ---
+
+pub const WEEK: u64 = 7 * 24 * 3600;
+
+pub async fn call(h: &Harness, req: Request<Body>) -> (StatusCode, Value) {
+    let resp = app(h.relay.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, body)
+}
+
+pub fn door_body(owner: u8, door_id: &str, expires_at: u64) -> Value {
+    json!({
+        "door_id": door_id,
+        "expires_at": expires_at,
+        "owner_mailbox": mailbox_of(&signing_key(owner)),
+    })
+}
+
+pub async fn post_door(h: &Harness, key: u8, body: &Value) -> (StatusCode, Value) {
+    let bytes = body.to_string().into_bytes();
+    let req = signed_request(&signing_key(key), "POST", "/v0/doors", &bytes, h.ts(), HOST);
+    call(h, req).await
+}
+
+/// Register a door for `owner` that is open for an hour; returns its id.
+pub async fn open_door(h: &Harness, owner: u8) -> String {
+    let id = fresh_id();
+    let (status, body) = post_door(h, owner, &door_body(owner, &id, h.now_secs() + 3600)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    id
+}
+
+pub async fn close_door(h: &Harness, key: u8, door_id: &str) -> (StatusCode, Value) {
+    let path = format!("/v0/doors/{door_id}");
+    let req = signed_request(&signing_key(key), "DELETE", &path, b"", h.ts(), HOST);
+    call(h, req).await
+}
+
+pub fn knock_env(sender: &str, door_id: &str) -> Value {
+    let mut env = envelope("knock", None, None, sender);
+    env["door_id"] = json!(door_id);
+    env
+}
+
+pub fn knock_frame(sender: &str, door_id: &str) -> Value {
+    json!({"t": "knock", "door_id": door_id, "env": knock_env(sender, door_id)})
+}
+
+/// Send a knock from mailbox `n` straight into the relay (no socket), the
+/// way the WebSocket handler would after parsing.
+pub async fn knock_as(h: &Harness, n: u8, door_id: &str) -> Value {
+    let mailbox = mailbox_of(&signing_key(n));
+    knock_frame_as(h, &mailbox, &knock_frame(&mailbox, door_id)).await
+}
+
+pub async fn knock_frame_as(h: &Harness, mailbox: &str, frame: &Value) -> Value {
+    let parsed = match parse_client_frame(&frame.to_string(), DEFAULT_FRAME_MAX) {
+        Ok(f) => f,
+        Err((code, detail)) => {
+            return json!({"t": "error", "code": code.as_str(), "detail": detail});
+        }
+    };
+    serde_json::to_value(h.relay.handle(mailbox, parsed).await.unwrap()).unwrap()
+}
+
+pub async fn queued(h: &Harness, owner: u8) -> Vec<Value> {
+    h.relay
+        .store()
+        .pending(&mailbox_of(&signing_key(owner)), 0, 1000, h.relay.now_ms())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| serde_json::from_str(&m.json).unwrap())
+        .collect()
 }

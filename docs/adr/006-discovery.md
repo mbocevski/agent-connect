@@ -1055,3 +1055,43 @@ The recommendations below stand unless review says otherwise.
    the operator plus the 30-day "key changed" banner, rather than letting
    the old key sign a handover. A compromised key must not be able to
    hand its name to the attacker.
+
+## Changes after acceptance
+
+The decisions above stand. Later SPEC edits settled details this ADR left
+open or states differently. `SPEC.md` is the source of truth for each:
+
+- **Names, `seq` and tombstones.** `seq` and tombstones belong to
+  (directory, name, identity), not to the name alone. A listing replaces
+  the stored one from the same identity only with a greater `seq`, and
+  replaces another identity's only under a later-issued token; a directory
+  keeps a per-name token high-water mark and the tombstones after
+  withdrawal, expiry or revocation (SPEC §13.2.2, `NameRecord` in the
+  core). This supersedes any per-name reading of `seq` in Decision 6.
+- **Owner states.** A negative owner state is sticky: failed fetches after
+  it never bring back `verified`, and only a later fetch that vouches
+  clears it. Fetches are recorded in the order they complete, whatever the
+  clock does. `checking` (no fetch has completed) and `unchecked` (the
+  human skipped the fetch) are separate states, and neither says anything
+  about the owner (SPEC §13.2.4).
+- **Revocation by the owner.** When a directory withdraws a listing
+  because the owner revoked the key, it records the revocation against the
+  (directory, name, identity). Only a token issued after that record lifts
+  it. The directory also checks the claimed domain when the identity
+  withdraws and when a new listing drops or changes the domain, so
+  withdrawing first doesn't avoid the record (SPEC §13.2.4).
+- **Rollback.** A listing without a door can be served stale until its
+  token expires, so its rollback is bounded by the token lifetime (at most
+  90 days), as a listing with a door is by the door's expiry (SPEC §12,
+  §13.2.5).
+- **Relay logs.** Door and knock paths log no identifier, hashed or not: a
+  listing links a door id to an identity, so a hash of a public id is no
+  protection (SPEC §8.3).
+- **No defaults to trust.** There is no built-in relay: the relay URL is
+  configuration that must be set (#34). Daemons pin the token key per
+  directory in their configuration and have no default directory, so the
+  default named in Decision 6's "Issuer" bullet no longer applies (SPEC
+  §13.2.1).
+- **Fresh group for a knock.** The knocker accepts the Welcome only for a
+  fresh two-member group: epoch 1, created by the listed identity, with no
+  commit before the one that added the knocker (SPEC §6.6.5).

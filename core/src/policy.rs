@@ -461,6 +461,9 @@ mod tests {
             created_by: id[0].clone(),
         };
         meta("Trip planning", "").validate().unwrap();
+        meta("Trip \u{2764}\u{FE0F}", "Plan \u{2764}\u{FE0E}")
+            .validate()
+            .unwrap();
         for bad in [
             "a\u{2028}b",
             "\u{202E}x",

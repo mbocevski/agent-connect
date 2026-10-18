@@ -630,6 +630,20 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Core and protocol: the one-line text rule (SPEC §13.1.2) allows exactly
+  one emoji presentation selector (U+FE0E or U+FE0F) right after a
+  character with the Unicode `Emoji` property (Unicode 17.0.0), so a red
+  heart (U+2764 U+FE0F) works in display names, group names, knock text
+  and listings. It was refused as a `Default_Ignorable_Code_Point`. A
+  selector anywhere else, a doubled one and every other ignorable
+  character, the zero-width joiner included, are still refused.
+- Policy: a sender that holds nothing in the approval queue is never
+  charged a `hold_overflow` violation. With many senders waiting, or the
+  caps at their minimums, the per-sender byte share fell below one message
+  and a sender's first message counted against it; now a sender holding
+  nothing is within its share, and a full queue drops its message as
+  `hold_queue_full`, which is no violation. The group caps still bound the
+  queue.
 - CLI: a group, invite or request id that starts with `-` (base64url ids
   can) is read as the id, not as an unknown option, by every command that
   takes one positionally (`groups show`, `verify`, `leave`, `send`,

@@ -74,9 +74,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # NFC for the one-line text rule (SPEC §13.1.2), pinned exactly to the
 # release whose tables are Unicode 17.0.0, like unicode-properties below.
 unicode-normalization = { version = "=0.1.25", default-features = false }
-# Unicode general categories for the one-line text rule (SPEC §13.1.2),
-# pinned exactly: its tables are Unicode 17.0.0, which the SPEC names.
+# Unicode general categories and the `Emoji` property for the one-line text
+# rule (SPEC §13.1.2), pinned exactly: its tables are Unicode 17.0.0, which
+# the SPEC names.
 unicode-properties = { version = "=0.1.4", default-features = false, features = [
+    "emoji",
     "general-category",
 ] }
 zeroize = { version = "1.9.1", features = ["derive"] }
