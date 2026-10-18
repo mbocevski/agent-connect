@@ -113,6 +113,8 @@ pub(crate) struct GroupContextInfo {
     pub meta: GroupMeta,
     pub meta_bytes: Vec<u8>,
     pub policy: GroupPolicy,
+    /// The policy exactly as carried, which may be an older encoding.
+    pub policy_bytes: Vec<u8>,
 }
 
 /// Checks a full GroupContext extension set: exactly `ac_group_meta`,
@@ -140,6 +142,7 @@ pub(crate) fn check_group_context(exts: &Extensions<GroupContext>) -> Result<Gro
         meta: GroupMeta::from_json(meta)?,
         meta_bytes: meta.clone(),
         policy: GroupPolicy::from_json(policy)?,
+        policy_bytes: policy.clone(),
     })
 }
 

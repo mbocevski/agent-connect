@@ -35,6 +35,9 @@ pub struct Journaled<T> {
 /// What a journal entry holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
+// Built only to be encoded at once (or matched once after decoding), never
+// stored in bulk: the size of `Event` doesn't matter here.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Stored {
     /// The event of a processed group message or a confirmed own commit.
     Event {

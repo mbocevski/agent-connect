@@ -1703,14 +1703,11 @@ fn knock_vectors() {
 use std::collections::BTreeMap;
 
 use crate::policy::{
-    CommitFacts, Floor, GroupPolicy, InvitePermission, LoopGuard, MAX_AGENT_TURNS, MAX_GROUP_SIZE,
-    OWNER_MUST_TRANSFER, Removal, RemovePermission, authorize,
+    Floor, GroupPolicy, InvitePermission, LoopGuard, MAX_AGENT_TURNS, MAX_GROUP_SIZE,
+    OWNER_MUST_TRANSFER, RemovePermission, authorize_facts_for_testing,
 };
 
-/// `group-policy.json`: the `pending` marks (SPEC rules the core doesn't
-/// implement yet) and the expected errors.
-const PINNED: &str = "core: floor_pinned (SPEC 9.1)";
-const IDENTITIES: &str = "core: the floor switch counts identities (SPEC 9.1)";
+/// `group-policy.json`: the expected errors.
 const NOT_INVITE: &str = "unauthorized commit: committer may not invite";
 const NOT_REMOVE: &str = "unauthorized commit: committer may not remove members";
 const NOT_POLICY: &str = "unauthorized commit: committer may not change this policy";
@@ -1718,6 +1715,9 @@ const NOT_POLICY: &str = "unauthorized commit: committer may not change this pol
 /// What a commit does, as stored in `group-policy.json`: committer, Adds,
 /// Removes (identity, proposed by the removed leaf), the policy the commit
 /// introduces, and leaves and identities before and after it.
+/// `identities_kept` (those with an instance from before the commit that
+/// it doesn't remove) is every identity after the commit that its Adds
+/// don't bring alone; [`with_kept`] overrides it.
 fn facts(
     committer: &str,
     adds: &[&str],
@@ -1726,6 +1726,11 @@ fn facts(
     leaves: [usize; 2],
     identities: [&[&str]; 2],
 ) -> Value {
+    let kept: Vec<&str> = identities[1]
+        .iter()
+        .copied()
+        .filter(|i| identities[0].contains(i) || !adds.contains(i))
+        .collect();
     json!({
         "committer": committer,
         "adds": adds,
@@ -1737,14 +1742,14 @@ fn facts(
         "leaves_after": leaves[1],
         "identities_before": identities[0],
         "identities_after": identities[1],
+        "identities_kept": kept,
     })
 }
 
-fn strings(v: &Value) -> impl Iterator<Item = String> + '_ {
-    v.as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s.as_str().unwrap().to_owned())
+/// `facts` with these `identities_kept`.
+fn with_kept(mut facts: Value, kept: &[&str]) -> Value {
+    facts["identities_kept"] = json!(kept);
+    facts
 }
 
 /// Checks a `group-policy.json` value against the core. A case marked
@@ -1777,34 +1782,19 @@ fn check_group_policy(v: &Value) {
     for c in v["authorization"].as_array().unwrap() {
         let name = c["name"].as_str().unwrap();
         let f = &c["facts"];
-        let usize_of = |key: &str| usize::try_from(f[key].as_u64().unwrap()).unwrap();
         let got = (|| {
             let in_force = policy(&c["policy"])?;
             let new_policy = match &f["new_policy"] {
                 Value::Null => None,
                 n => Some(policy(n)?),
             };
-            let facts = CommitFacts {
-                committer: f["committer"].as_str().unwrap().to_owned(),
-                adds: strings(&f["adds"]).collect(),
-                removes: f["removes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|r| Removal {
-                        identity: r["identity"].as_str().unwrap().to_owned(),
-                        self_proposed: r["self_proposed"].as_bool().unwrap(),
-                    })
-                    .collect(),
-                new_policy,
-                members_before: usize_of("leaves_before"),
-                members_after: usize_of("leaves_after"),
-                identities_after: strings(&f["identities_after"]).collect(),
-            };
-            Some(match authorize(&in_force, &facts) {
-                Ok(()) => "ok".to_owned(),
-                Err(e) => e.to_string(),
-            })
+            let facts = serde_json::to_vec(f).unwrap();
+            Some(
+                match authorize_facts_for_testing(&in_force, new_policy, &facts) {
+                    Ok(()) => "ok".to_owned(),
+                    Err(e) => e.to_string(),
+                },
+            )
         })();
         let want = c["result"].as_str().unwrap();
         if c.get("pending").is_some() {
@@ -1893,11 +1883,13 @@ fn group_policy_vectors() {
             },
         ),
     ];
-    // `floor_pinned` (SPEC 9.1) isn't a policy field in the core yet.
     let pinned = |p: &GroupPolicy| {
-        let mut v = serde_json::to_value(p).unwrap();
-        v["floor_pinned"] = true.into();
-        s(&crate::encoding::jcs(&v).unwrap())
+        s(&GroupPolicy {
+            floor_pinned: true,
+            ..p.clone()
+        }
+        .to_json()
+        .unwrap())
     };
     let mut valid: Vec<Value> = valid
         .iter()
@@ -1912,8 +1904,17 @@ fn group_policy_vectors() {
             ),
             ("admin, pinned", pinned(&with_admin)),
         ]
-        .map(|(n, p)| json!({"name": n, "policy": p, "pending": PINNED})),
+        .map(|(n, p)| json!({"name": n, "policy": p})),
     );
+    // Written before `floor_pinned` existed: the key is absent, and the
+    // policy reads as unpinned (D4).
+    let legacy = s(&with_admin.to_json().unwrap()).replace("\"floor_pinned\":false,", "");
+    assert!(!legacy.contains("floor_pinned"));
+    assert_eq!(
+        GroupPolicy::from_json(legacy.as_bytes()).unwrap(),
+        with_admin
+    );
+    valid.push(json!({"name": "admin, written before floor_pinned", "policy": legacy}));
 
     let canonical = s(&base.to_json().unwrap());
     let edit = |from: &str, to: &str| {
@@ -2320,7 +2321,7 @@ fn group_policy_vectors() {
                 [two, two],
             ),
             NOT_POLICY,
-            Some(IDENTITIES),
+            None,
         ),
         (
             "the floor switch counts identities, not instances",
@@ -2334,7 +2335,7 @@ fn group_policy_vectors() {
                 [two, &[o, m, j]],
             ),
             "ok",
-            Some(IDENTITIES),
+            None,
         ),
         (
             "no floor switch while the floor is pinned",
@@ -2348,7 +2349,7 @@ fn group_policy_vectors() {
                 [two, &[o, m, j]],
             ),
             NOT_POLICY,
-            Some(PINNED),
+            None,
         ),
         (
             "the owner changes a pinned floor",
@@ -2362,7 +2363,7 @@ fn group_policy_vectors() {
                 [two, two],
             ),
             "ok",
-            Some(PINNED),
+            None,
         ),
         (
             "an admin pins the floor",
@@ -2376,7 +2377,7 @@ fn group_policy_vectors() {
                 [three, three],
             ),
             "ok",
-            Some(PINNED),
+            None,
         ),
         (
             "a member may not pin the floor",
@@ -2390,7 +2391,80 @@ fn group_policy_vectors() {
                 [three, three],
             ),
             NOT_POLICY,
-            Some(PINNED),
+            None,
+        ),
+        (
+            "an admin unpins the floor",
+            "admin, pinned",
+            facts(a, none, none_removed, Some("admin"), [3, 3], [three, three]),
+            "ok",
+            None,
+        ),
+        (
+            "a member may not unpin the floor",
+            "admin, pinned",
+            facts(m, none, none_removed, Some("admin"), [3, 3], [three, three]),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "the floor switch may not also unpin the floor",
+            "members invite, pinned",
+            facts(
+                m,
+                &[j],
+                none_removed,
+                Some("members invite, mention"),
+                [2, 3],
+                [two, &[o, m, j]],
+            ),
+            NOT_POLICY,
+            None,
+        ),
+        (
+            "a policy written before floor_pinned is the same policy",
+            "admin",
+            facts(
+                m,
+                none,
+                none_removed,
+                Some("admin, written before floor_pinned"),
+                [3, 3],
+                [three, three],
+            ),
+            "ok",
+            None,
+        ),
+        (
+            "an Add of a new owner instance doesn't keep the owner",
+            "members invite",
+            with_kept(
+                facts(m, &[o], &[(o, true), (o, true)], None, [3, 2], [two, two]),
+                &[m],
+            ),
+            owner_must_transfer.as_str(),
+            None,
+        ),
+        (
+            "ownership may not go to an identity the commit adds",
+            "admin",
+            facts(
+                o,
+                &[m],
+                none_removed,
+                Some("transferred to the member"),
+                [2, 3],
+                [&[o, a], three],
+            ),
+            "unauthorized commit: new owner is not a member",
+            None,
+        ),
+        (
+            "an admin may not remove one of the owner's instances",
+            "admins invite and remove",
+            facts(a, none, &[(o, false)], None, [4, 3], [three, three]),
+            "unauthorized commit: only the owner may remove the owner",
+            None,
         ),
     ];
     let authorization: Vec<Value> = cases
@@ -2405,7 +2479,7 @@ fn group_policy_vectors() {
         .collect();
 
     let mut fresh = header(
-        "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, and leaves and identities before and after) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies through the bindings.",
+        "SPEC 9.1 group policies and 9.2 commit authorisation. `default` is the policy of a new group owned by `identities.owner`; `valid` policies parse (canonical JCS); `invalid` ones fail with `error` and `kind`. Each `authorization` case evaluates `facts` (a commit by `committer` with these Adds, Removes, the named `new_policy`, leaves and identities before and after, and `identities_kept`: those with an instance from before the commit that it doesn't remove) against the named policy in force: `result` is `ok` or the error. A case marked `pending` names a SPEC rule the core doesn't implement yet, and must not pass until it does. Rust checks every part; the Python suite checks the policies, and the policy-change cases through check_policy_change, through the bindings.",
         &seed,
     );
     fresh["identities"] = json!({"owner": o, "admin": a, "member": m, "joiner": j});

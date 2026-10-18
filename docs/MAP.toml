@@ -26,6 +26,7 @@ internal = [
     "core/src/error.rs",
     "core/src/failpoint.rs",
     "core/src/group/tests.rs",
+    "core/src/group/group_mode_tests.rs",
     "core/src/group/knock_tests.rs",
     "core/src/journal.rs",
     "core/src/mls.rs",
