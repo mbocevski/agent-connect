@@ -563,41 +563,25 @@ fn remove_instances_of_others_needs_the_remove_permission() {
         m.set_policy(0, &p);
         m
     };
-    // C is an admin: it may remove one of B's instances...
+    // Members: A1 (owner), A2, B1, B2, C (admin, remove: admins).
     let mut m = setup();
-    let b2 = m.gs[3].own_leaf_index();
-    let out = m.gs[4].remove_instances(&m.cs[4], &[b2]).unwrap();
-    let s = m.apply(4, &out);
-    assert_eq!(s.removed.len(), 1);
-    assert_eq!(s.removed[0].identity, m.id(3));
-    // ...but not one of the owner's, locally or at the receivers.
-    let mut m = setup();
-    let a2 = m.gs[1].own_leaf_index();
+    let (a2, b2, c) = (
+        m.gs[1].own_leaf_index(),
+        m.gs[3].own_leaf_index(),
+        m.gs[4].own_leaf_index(),
+    );
+    // The admin may not remove one of the owner's instances locally...
     assert_eq!(
         m.gs[4].remove_instances(&m.cs[4], &[a2]),
         Err(Error::NotPermitted("only the owner may remove the owner"))
     );
-    m.rejected(
-        4,
-        &[],
-        &[a2],
-        None,
-        None,
-        &Error::Unauthorized("only the owner may remove the owner"),
-    );
-    // A plain member (B1) removing one of another identity's instances
-    // (the owner's A2, or C).
-    let mut m = setup();
-    m.rejected(
-        2,
-        &[],
-        &[a2],
-        None,
-        None,
-        &Error::Unauthorized("committer may not remove members"),
-    );
-    let mut m = setup();
-    let c = m.gs[4].own_leaf_index();
+    // ...but may remove one of B's, and B1 stays.
+    let out = m.gs[4].remove_instances(&m.cs[4], &[b2]).unwrap();
+    let s = m.apply(4, &out);
+    assert_eq!(s.removed.len(), 1);
+    assert_eq!(s.removed[0].identity, m.id(3));
+    assert!(m.gs[2].is_active());
+    // A plain member (B1) removing another identity's instance is rejected.
     m.rejected(
         2,
         &[],
@@ -606,22 +590,42 @@ fn remove_instances_of_others_needs_the_remove_permission() {
         None,
         &Error::Unauthorized("committer may not remove members"),
     );
-    // An instance of the owner's identity (A2) removing a B instance is the
-    // owner removing it: allowed.
+    // So is the admin removing one of the owner's instances, at the
+    // receivers.
+    m.rejected(
+        4,
+        &[],
+        &[a2],
+        None,
+        None,
+        &Error::Unauthorized("only the owner may remove the owner"),
+    );
+
     let mut m = setup();
-    let b2 = m.gs[3].own_leaf_index();
-    let out = m.gs[1].remove_instances(&m.cs[1], &[b2]).unwrap();
-    m.apply(1, &out);
-    // A plain member removing one of its own other instances is accepted.
-    let mut m = setup();
+    // A plain member removes one of its own other instances (B1 removes B2).
     let out = m.gs[2].remove_instances(&m.cs[2], &[b2]).unwrap();
     m.apply(2, &out);
-    assert_eq!(m.gs[0].members().unwrap().len(), 4);
-    // The owner removes one of B's instances.
-    let mut m = setup();
-    let out = m.gs[0].remove_instances(&m.cs[0], &[b2]).unwrap();
-    m.apply(0, &out);
-    assert_eq!(m.gs[0].members().unwrap().len(), 4);
+    // B1 removing one of the owner's instances is rejected.
+    m.rejected(
+        2,
+        &[],
+        &[a2],
+        None,
+        None,
+        &Error::Unauthorized("committer may not remove members"),
+    );
+    // A2, an instance of the owner's identity, removes as the owner.
+    let out = m.gs[1].remove_instances(&m.cs[1], &[c]).unwrap();
+    m.apply(1, &out);
+    assert_eq!(
+        m.gs[0]
+            .members()
+            .unwrap()
+            .into_iter()
+            .map(|x| x.identity)
+            .collect::<Vec<_>>(),
+        vec![m.id(0), m.id(1), m.id(2)]
+    );
 }
 
 /// G1: `pending_leaves` lists the stored leave proposals (each leaf once),
