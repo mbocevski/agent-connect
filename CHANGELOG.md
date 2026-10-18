@@ -626,6 +626,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Policy: a sender that holds nothing in the approval queue is never
+  charged a `hold_overflow` violation. With many senders waiting, or the
+  caps at their minimums, the per-sender byte share fell below one message
+  and a sender's first message counted against it; now a sender holding
+  nothing is within its share, and a full queue drops its message as
+  `hold_queue_full`, which is no violation. The group caps still bound the
+  queue.
 - CLI: a group, invite or request id that starts with `-` (base64url ids
   can) is read as the id, not as an unknown option, by every command that
   takes one positionally (`groups show`, `verify`, `leave`, `send`,
