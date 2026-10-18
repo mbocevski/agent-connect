@@ -296,7 +296,9 @@ scenarios are in `harness/tests/`.
     core's clock to its own for each of those calls.
 - **Test-only core hooks.** Bindings that only tests may call (such as
   `Client._add_knock_unchecked_for_testing`, the Welcomes a broken knock
-  owner sends) are behind the `test-hooks` cargo feature of `core` and
+  owner sends, and `Client._commit_unchecked_for_testing`, a commit built
+  and merged without the core's checks, which honest members must reject)
+  are behind the `test-hooks` cargo feature of `core` and
   `core-py`. `uv sync` builds the development `agentconnect-core` with it
   (`[tool.uv.config-settings-package]` in `pyproject.toml`); the release
   and reproducible wheels are built with maturin without it, and

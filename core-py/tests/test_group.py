@@ -232,3 +232,146 @@ def test_peek_header_rejects_what_process_rejects(rng: random.Random, bad: bytes
 
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def canonical(obj: Any) -> bytes:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def replicas(rng: random.Random, n: int) -> list[ac.Client]:
+    """``n`` instances of one identity."""
+    identity = ac.Identity._generate_for_testing(rng.getrandbits(64))
+    return [
+        ac.Client._for_testing(
+            None,
+            identity._create_instance_for_testing(seed=rng.getrandbits(64)).to_secret_bytes(),
+            rng.getrandbits(64),
+        )
+        for _ in range(n)
+    ]
+
+
+def grow(owner: ac.Client, gid: bytes, members: list[ac.Client], joiner: ac.Client) -> None:
+    """``joiner`` joins through the owner; every member processes the commit."""
+    out = join(owner, gid, joiner)
+    for m in members:
+        if m is not owner:
+            assert m.process(gid, out["commit"])["type"] == "commit"
+    members.append(joiner)
+
+
+def test_a_group_starts_with_its_policy_and_a_replica_keeps_it_free(rng: random.Random) -> None:
+    a = make_client(rng)
+    defaults = json.loads(a.policy(a.create_group(NAME, PURPOSE)))
+    assert defaults["floor_pinned"] is False
+    b1, b2 = replicas(rng, 2)
+    gid = a.create_group(NAME, PURPOSE)
+    members = [a]
+    grow(a, gid, members, b1)
+    grow(a, gid, members, b2)
+    # Three instances, two identities: still free.
+    assert json.loads(a.policy(gid))["floor"] == "free"
+
+    pinned = {**defaults, "floor_pinned": True}
+    with pytest.raises(ac.AgentConnectError, match="creator must be the owner"):
+        b1.create_group(NAME, PURPOSE, policy=canonical(pinned))
+    with pytest.raises(ac.AgentConnectError, match="max_members"):
+        a.create_group(NAME, PURPOSE, policy=canonical({**pinned, "max_members": 0}))
+    gid = a.create_group(NAME, PURPOSE, policy=canonical(pinned))
+    assert json.loads(a.policy(gid)) == pinned
+    members = [a]
+    for joiner in (make_client(rng), make_client(rng)):
+        grow(a, gid, members, joiner)
+    assert json.loads(members[2].policy(gid)) == pinned
+
+
+def test_check_policy_change_is_a_dry_run(rng: random.Random) -> None:
+    a, b = make_client(rng), make_client(rng)
+    gid = a.create_group(NAME, PURPOSE)
+    join(a, gid, b)
+    policy = json.loads(a.policy(gid))
+    verified = canonical({**policy, "require_verified": True})
+    assert a.check_policy_change(gid, verified) is None
+    assert not a.has_pending_commit(gid)
+    with pytest.raises(ac.AgentConnectError, match="may not change this policy"):
+        b.check_policy_change(gid, verified)
+    with pytest.raises(ac.AgentConnectError, match="new owner is not a member"):
+        a.check_policy_change(gid, canonical({**policy, "owner": make_client(rng).identity}))
+    with pytest.raises(ac.AgentConnectError, match="malformed"):
+        a.check_policy_change(gid, b"{}")
+    epoch = a.epoch(gid)
+    out = a.set_policy(gid, verified)
+    summary = a.confirm_pending_commit(gid, out["msg_id"])
+    assert a.epoch(gid) == epoch + 1
+    assert summary["policy_changed"] is True
+    assert summary["previous_policy"] == canonical(policy)
+    assert summary["policy"] == verified
+    event = b.process(gid, out["commit"])
+    assert (event["previous_policy"], event["policy"]) == (canonical(policy), verified)
+    up = b.update(gid)
+    s = b.confirm_pending_commit(gid, up["msg_id"])
+    assert (s["policy_changed"], s["previous_policy"], s["policy"]) == (False, None, None)
+
+
+def test_pending_leaves_left_and_removing_one_instance(rng: random.Random) -> None:
+    a = make_client(rng)
+    b1, b2 = replicas(rng, 2)
+    c = make_client(rng)
+    gid = a.create_group(NAME, PURPOSE)
+    members = [a]
+    for joiner in (b1, b2, c):
+        grow(a, gid, members, joiner)
+    assert a.pending_leaves(gid) == []
+    proposal = c.propose_leave(gid)
+    for m in (a, b1, b2):
+        assert m.process(gid, proposal)["type"] == "leave_proposed"
+    for m in members:
+        assert [x["identity"] for x in m.pending_leaves(gid)] == [c.identity]
+    out = b1.commit_pending_proposals(gid)
+    s = b1.confirm_pending_commit(gid, out["msg_id"])
+    assert [x["identity"] for x in s["left"]] == [c.identity]
+    assert s["left"] == s["removed"]
+    for m in (a, b2):
+        assert m.process(gid, out["commit"])["left"] == s["left"]
+    assert c.process(gid, out["commit"])["type"] == "removed"
+
+    # B1 removes its own replica B2 by instance id; B1 stays.
+    with pytest.raises(ac.AgentConnectError, match="unknown member"):
+        b1.remove_instances(gid, ["00" * 8])
+    with pytest.raises(ac.AgentConnectError, match="may not remove members"):
+        b2.remove_instances(gid, [a.instance_id_hex])
+    out = b1.remove_instances(gid, [b2.instance_id_hex])
+    s = b1.confirm_pending_commit(gid, out["msg_id"])
+    assert [x["instance_id_hex"] for x in s["removed"]] == [b2.instance_id_hex]
+    assert s["left"] == []
+    assert a.process(gid, out["commit"])["type"] == "commit"
+    assert b2.process(gid, out["commit"])["type"] == "removed"
+    assert [m["identity"] for m in a.members(gid)] == [a.identity, b1.identity]
+
+
+def test_an_unchecked_commit_is_rejected_by_honest_members(rng: random.Random) -> None:
+    a, b, c = (make_client(rng) for _ in range(3))
+    gid = a.create_group(NAME, PURPOSE)
+    members = [a]
+    grow(a, gid, members, b)
+    grow(a, gid, members, c)
+    epoch, sas = a.epoch(gid), a.sas(gid)
+    leaf_c = next(m["leaf_index"] for m in a.members(gid) if m["identity"] == c.identity)
+    bad = b._commit_unchecked_for_testing(gid, remove_leaves=[leaf_c])
+    assert bad["epoch"] == epoch
+    assert b.epoch(gid) == epoch + 1
+    for honest in (a, c):
+        with pytest.raises(ac.AgentConnectError, match="may not remove members"):
+            honest.process(gid, bad["commit"])
+        assert (honest.epoch(gid), honest.sas(gid)) == (epoch, sas)
+    # The committer alone moved on: its SAS shows the fork.
+    assert b.sas(gid) != sas
+    assert b.process(gid, bad["commit"])["type"] == "own_echo"
+
+    policy = json.loads(a.policy(gid))
+    grab = a._commit_unchecked_for_testing(
+        gid, policy=canonical({**policy, "owner": b.identity}), meta=a.meta(gid)
+    )
+    # The owner may hand over ownership; C (still at A's epoch) accepts.
+    assert c.process(gid, grab["commit"])["type"] == "commit"
+    assert json.loads(c.policy(gid))["owner"] == b.identity

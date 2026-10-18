@@ -575,7 +575,15 @@ fn summary<'py>(py: Python<'py>, s: &CommitSummary) -> PyResult<Bound<'py, PyDic
     d.set_item("committer", member(py, &s.committer)?)?;
     d.set_item("added", members(py, &s.added)?)?;
     d.set_item("removed", members(py, &s.removed)?)?;
+    d.set_item("left", members(py, &s.left)?)?;
     d.set_item("policy_changed", s.policy_changed)?;
+    let policy_json = |p: &Option<core::GroupPolicy>| -> PyResult<Option<Bound<'py, PyBytes>>> {
+        p.as_ref()
+            .map(|p| p.to_json().map(|j| PyBytes::new(py, &j)).map_err(err))
+            .transpose()
+    };
+    d.set_item("previous_policy", policy_json(&s.previous_policy)?)?;
+    d.set_item("policy", policy_json(&s.policy)?)?;
     d.set_item("discarded_own_pending", s.discarded_own_pending)?;
     d.set_item("routing", routing(py, &s.routing())?)?;
     Ok(d)
@@ -745,15 +753,26 @@ impl Client {
     }
 
     /// Creates a group with this instance as owner; returns the group id.
+    /// With `policy` (canonical JSON bytes, naming this identity as owner),
+    /// the group starts with it instead of the defaults.
+    #[pyo3(signature = (name, purpose, policy=None))]
     fn create_group<'py>(
         &self,
         py: Python<'py>,
         name: &str,
         purpose: &str,
+        policy: Option<&[u8]>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let id = py.detach(|| {
             with_client!(self, |c, groups| {
-                let g = c.create_group(name, purpose)?;
+                let g = match policy {
+                    Some(p) => c.create_group_with_policy(
+                        name,
+                        purpose,
+                        &core::GroupPolicy::from_json(p)?,
+                    )?,
+                    None => c.create_group(name, purpose)?,
+                };
                 let id = g.group_id().to_vec();
                 groups.insert(id.clone(), g);
                 Ok(id)
@@ -1187,6 +1206,78 @@ impl Client {
             with_client!(self, |c, groups| group(c, groups, group_id)?
                 .remove(c, identity))
         })?;
+        commit_out(py, &out)
+    }
+
+    /// Commits the removal of the instances with these ids (16 lowercase
+    /// hex characters each), e.g. a dead replica (SPEC §9.2).
+    fn remove_instances<'py>(
+        &self,
+        py: Python<'py>,
+        group_id: &[u8],
+        instance_ids: Vec<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let out = py.detach(|| {
+            with_client!(self, |c, groups| {
+                let g = group(c, groups, group_id)?;
+                let members = g.members()?;
+                let mut leaves = Vec::new();
+                for want in &instance_ids {
+                    let found: Vec<u32> = members
+                        .iter()
+                        .filter(|m| m.instance_id_hex() == *want)
+                        .map(|m| m.leaf_index)
+                        .collect();
+                    if found.is_empty() {
+                        return Err(core::Error::UnknownMember);
+                    }
+                    leaves.extend(found);
+                }
+                g.remove_instances(c, &leaves)
+            })
+        })?;
+        commit_out(py, &out)
+    }
+
+    /// The members whose leave proposal is pending in this epoch (this
+    /// instance's own included), in leaf order.
+    fn pending_leaves<'py>(
+        &self,
+        py: Python<'py>,
+        group_id: &[u8],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let ms = with_client!(self, |c, groups| group(c, groups, group_id)?
+            .pending_leaves())?;
+        members(py, &ms)
+    }
+
+    /// Raises the error `set_policy(group_id, policy)` would raise for this
+    /// instance now, without building a commit; returns `None` if it would
+    /// pass.
+    fn check_policy_change(&self, group_id: &[u8], policy: &[u8]) -> PyResult<()> {
+        with_client!(self, |c, groups| {
+            let p = core::GroupPolicy::from_json(policy)?;
+            group(c, groups, group_id)?.check_policy_change(c, &p)
+        })
+    }
+
+    /// **Tests only**: a commit built and merged without any local check
+    /// (KeyPackage TLS bytes to add, leaf indices to remove, raw policy and
+    /// meta bytes for a GroupContextExtensions proposal): what a malicious
+    /// member could send, which honest members must reject.
+    #[cfg(feature = "test-hooks")]
+    #[pyo3(signature = (group_id, adds=Vec::new(), remove_leaves=Vec::new(), policy=None, meta=None))]
+    fn _commit_unchecked_for_testing<'py>(
+        &self,
+        py: Python<'py>,
+        group_id: &[u8],
+        adds: Vec<Vec<u8>>,
+        remove_leaves: Vec<u32>,
+        policy: Option<&[u8]>,
+        meta: Option<&[u8]>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let out = with_client!(self, |c, groups| group(c, groups, group_id)?
+            .commit_unchecked(c, &adds, &remove_leaves, meta, policy))?;
         commit_out(py, &out)
     }
 

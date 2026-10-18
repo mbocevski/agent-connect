@@ -43,6 +43,12 @@ def test_a_wheel_with_a_hook_fails(tmp_path: Path) -> None:
     assert check.main([]) == 2
 
 
+def test_the_unchecked_commit_hook_fails_a_wheel(tmp_path: Path) -> None:
+    hooked = _wheel(tmp_path, "commit.whl", b"\x7fELF _commit_unchecked_for_testing")
+    assert check.hooks_in(hooked) == ["_commit_unchecked_for_testing"]
+    assert check.main([str(hooked)]) == 1
+
+
 def test_the_development_build_has_the_hooks() -> None:
     """The test environment (uv sync) builds the core with ``test-hooks``;
     the names the check looks for are the ones that build exports."""
