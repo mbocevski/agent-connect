@@ -109,3 +109,25 @@ async fn a_trusted_proxy_header_names_the_client() {
     );
     assert_eq!(h.send(from("192.0.2.51")).await.status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn an_unparsable_proxy_hop_falls_back_to_the_peer() {
+    let mut h = Harness::with(|d| d.with_limits(tight()));
+    h.http.client_ip_header = Some(HeaderName::from_static("x-forwarded-for"));
+    h.http.trusted_proxies =
+        vec![agentconnect_directory::config::Cidr::parse(common::CLIENT).unwrap()];
+    let from = |xff: &str| {
+        Request::get("/healthz")
+            .header("x-forwarded-for", xff)
+            .body(Body::empty())
+            .unwrap()
+    };
+    // The client can't pick its own bucket with a hop that isn't an address.
+    for xff in ["10.1.1.1, not-an-ip", "10.2.2.2, nope", "10.3.3.3, ???"] {
+        assert_eq!(h.send(from(xff)).await.status, StatusCode::OK);
+    }
+    assert_eq!(
+        h.send(from("10.4.4.4, still-not-an-ip")).await.status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
