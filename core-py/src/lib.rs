@@ -916,6 +916,24 @@ impl Client {
         .map(discovery::Door)
     }
 
+    /// **Tests only**: `add_knock` without its checks, adding the
+    /// KeyPackages of the `extra` knocks too: the Welcomes a broken owner
+    /// could send (a group that isn't fresh, three leaves), for testing that
+    /// knockers refuse them.
+    #[pyo3(signature = (group_id, knock, extra=Vec::new()))]
+    fn _add_knock_unchecked_for_testing<'py>(
+        &self,
+        py: Python<'py>,
+        group_id: &[u8],
+        knock: &discovery::VerifiedKnock,
+        extra: Vec<PyRef<'py, discovery::VerifiedKnock>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let extra: Vec<&core::knock::VerifiedKnock> = extra.iter().map(|k| &k.0).collect();
+        let out = with_client!(self, |c, groups| group(c, groups, group_id)?
+            .add_knocker_unchecked(c, &knock.0, &extra))?;
+        commit_out(py, &out)
+    }
+
     /// **Tests only**: records a KeyPackageRef as used, as merging an Add
     /// of it would.
     fn _mark_key_package_used_for_testing(&self, kp_ref: &[u8]) -> PyResult<()> {

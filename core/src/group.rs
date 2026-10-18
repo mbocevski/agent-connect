@@ -1953,17 +1953,25 @@ impl Group {
         })
     }
 
-    /// [`Group::add_knocker`] without its checks, adding `extra`
-    /// KeyPackages too: Welcomes a broken owner could send.
-    #[cfg(test)]
-    pub(crate) fn add_knocker_unchecked<S: Store>(
+    /// [`Group::add_knocker`] without its checks, adding the KeyPackages of
+    /// `extra` knocks too: the Welcomes a broken (or malicious) owner could
+    /// send, which a knocker must refuse (SPEC §6.6.5). **Tests only**: it
+    /// changes nothing a knocker accepts, since a knocker checks every
+    /// Welcome whoever built it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::CommitPending`], or an MLS error.
+    #[doc(hidden)]
+    pub fn add_knocker_unchecked<S: Store>(
         &mut self,
         client: &Client<S>,
         knock: &VerifiedKnock,
-        extra: &[KeyPackage],
+        extra: &[&VerifiedKnock],
     ) -> Result<CommitOut> {
-        let adds: Vec<KeyPackage> = std::iter::once(knock.key_package().clone())
-            .chain(extra.iter().cloned())
+        let adds: Vec<KeyPackage> = std::iter::once(knock)
+            .chain(extra.iter().copied())
+            .map(|k| k.key_package().clone())
             .collect();
         commit!(
             self,

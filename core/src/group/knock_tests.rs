@@ -498,9 +498,7 @@ fn a_welcome_with_three_leaves_is_refused() {
     let third = client("three-third", &s.clock);
     let (_, v3) = s.knock_from(&third);
     let mut g = s.fresh_group();
-    let out = g
-        .add_knocker_unchecked(&s.owner, &v, &[v3.key_package().clone()])
-        .unwrap();
+    let out = g.add_knocker_unchecked(&s.owner, &v, &[&v3]).unwrap();
     assert_eq!(out.routing.add.len(), 2);
     refused(
         &s,
