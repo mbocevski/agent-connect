@@ -382,11 +382,15 @@ approval decision:
 
 The log never holds a message body. It lives in the daemon's encrypted
 database ([ADR-003](adr/003-daemon-storage-encryption.md)). Rows older than
-`policy.audit_retention_days` (30 days) are deleted. Every new row keeps one
-sender's rows in a group to its newest `policy.audit_max_rows_per_sender`
-(2000), a group's to its newest `policy.audit_max_rows_per_group` (20000),
-and the log to its newest 100000, so a sender flooding the log with drops
-pushes out only its own record, never another sender's or group's. Read it with the human token:
+`policy.audit_retention_days` (30 days) are deleted. Rows come in two
+classes that never push each other out: drops, and decisions (deliver,
+hold, approve, reject, expire). A new drop keeps one sender's drops in a
+group to their newest `policy.audit_max_rows_per_sender` (2000); drops and
+decisions are each kept to their newest `policy.audit_max_rows_per_group`
+(20000) in a group and 100000 in all, oldest first, across senders. A
+sender flooding the log with drops pushes out only its own older drops,
+never a delivered or held message, its own included: the record of what an
+injection got through survives the flood that follows it. Read it with the human token:
 
 ```sh
 agentconnect audit --group <group>

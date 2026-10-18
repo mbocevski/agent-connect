@@ -66,6 +66,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   CLI prints every peer-controlled string with control characters
   replaced, the audit log records unknown kinds as `unknown`, and the
   SPEC 10.1 notice quotes and cleans the sender's name and the scope.
+- Audit rows come in two classes, drops and decisions, with their own caps:
+  a sender's flood of drops can no longer push out the deliver row of the
+  injection it sent before.
 - Held messages: each identity may have at most its byte share waiting
   (`policy.max_held_bytes_per_sender`, 1 MiB, or `max_held_bytes` divided
   by the senders waiting), and a task approval covers a peer task's later

@@ -224,7 +224,8 @@ CREATE TABLE IF NOT EXISTS audit (
     kind TEXT NOT NULL,
     size INTEGER NOT NULL,
     decision TEXT NOT NULL,
-    reason TEXT NOT NULL
+    reason TEXT NOT NULL,
+    class TEXT NOT NULL DEFAULT 'decision'
 );
 CREATE TABLE IF NOT EXISTS transcript_bytes (
     group_id TEXT PRIMARY KEY,
@@ -330,8 +331,9 @@ class Store:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
-            "CREATE INDEX IF NOT EXISTS audit_group ON audit (group_id, seq);"
-            "CREATE INDEX IF NOT EXISTS audit_sender ON audit (group_id, sender, seq);"
+            "CREATE INDEX IF NOT EXISTS audit_class ON audit (class, seq);"
+            "CREATE INDEX IF NOT EXISTS audit_group ON audit (group_id, class, seq);"
+            "CREATE INDEX IF NOT EXISTS audit_sender ON audit (group_id, sender, class, seq);"
             "CREATE INDEX IF NOT EXISTS transcript_group ON transcript (group_id, seq);"
             "CREATE INDEX IF NOT EXISTS transcript_sender ON transcript (group_id, sender, seq);"
         )
@@ -684,20 +686,30 @@ class Store:
         keep_group: int | None = None,
         keep_sender: int | None = None,
     ) -> None:
-        """One audit row. Then only the newest ``keep_sender`` rows of this
-        sender in the group, ``keep_group`` of the group and ``keep`` in all
-        stay: a sender flooding the log only pushes out its own rows."""
-        cur = self._db.execute(
+        """One audit row, in one of two classes that never evict each other:
+        ``drop`` rows (what the policy refused) and ``decision`` rows (what
+        it delivered, held, approved, rejected or expired). A drop row keeps
+        only the newest ``keep_sender`` drops of its sender in the group, and
+        ``keep_group`` and ``keep`` drops in the group and in all; a decision
+        row is trimmed only by the group and daemon caps, across senders. So a
+        sender flooding the log with drops can't erase what it got through,
+        its own record included."""
+        row_class = "drop" if decision == "drop" else "decision"
+        self._db.execute(
             "INSERT INTO audit (group_id, at, direction, sender, msg_id, kind, size, decision, "
-            "reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (group_id, at, direction, sender, msg_id, kind, size, decision, reason),
+            "reason, class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (group_id, at, direction, sender, msg_id, kind, size, decision, reason, row_class),
         )
-        if keep_sender is not None:
-            self._trim_audit("group_id = ? AND sender = ?", (group_id, sender), keep_sender)
+        if keep_sender is not None and row_class == "drop":
+            self._trim_audit(
+                "group_id = ? AND sender = ? AND class = ?",
+                (group_id, sender, row_class),
+                keep_sender,
+            )
         if keep_group is not None:
-            self._trim_audit("group_id = ?", (group_id,), keep_group)
+            self._trim_audit("group_id = ? AND class = ?", (group_id, row_class), keep_group)
         if keep is not None:
-            self._db.execute("DELETE FROM audit WHERE seq <= ?", (int(cur.lastrowid) - keep,))
+            self._trim_audit("class = ?", (row_class,), keep)
 
     def _trim_audit(self, where: str, args: tuple[str, ...], keep: int) -> None:
         """Delete the audit rows matching ``where`` beyond the newest ``keep``

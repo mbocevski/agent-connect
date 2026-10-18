@@ -836,3 +836,20 @@ def test_the_task_cover_ends_with_its_own_window(
     )
     with pytest.raises(PolicyError, match=r"1\.\.3600"):
         policy.update(G, {"task_approval_window_secs": 3601})
+
+
+# -- N6: drops can not erase a sender's own record ----------------------------------
+
+
+def test_a_flood_of_drops_keeps_the_injections_deliver_row(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    meta: dict[str, Any] = {"sender": MALLORY, "kind": "a2a.message", "size": 10}
+    policy.audit(G, "in", msg_id="inject", decision="deliver", **meta)
+    policy.audit(G, "in", msg_id="held", decision="hold_for_approval", **meta)
+    for i in range(2100):
+        policy.audit(G, "in", msg_id=f"junk{i}", decision="drop", reason="malformed", **meta)
+    kept = {r["msg_id"] for r in store.audit(G, limit=10_000)}
+    assert {"inject", "held"} <= kept, "the decisions stay"
+    drops = [r for r in store.audit(G, limit=10_000) if r["decision"] == "drop"]
+    assert len(drops) == 2000, "the drops have their own cap"
