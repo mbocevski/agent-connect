@@ -1290,8 +1290,15 @@ class Store:
         )
 
     def join_ledger_count(self, invite_id: str) -> int:
-        """How many join requests of this invite the ledger remembers."""
-        row = self._one("SELECT count(*) FROM join_ledger WHERE invite_id = ?", invite_id)
+        """How many join requests of this invite the ledger remembers that
+        are not being added or added: those are in the approvals table, and
+        their KeyPackages are tracked once merged, so they don't count
+        against the invite's share."""
+        row = self._one(
+            "SELECT count(*) FROM join_ledger WHERE invite_id = ? AND request_id NOT IN "
+            "(SELECT request_id FROM approvals WHERE status IN ('approving', 'approved'))",
+            invite_id,
+        )
         return 0 if row is None else int(row[0])
 
     def join_ledger_forget(self, invite_id: str) -> int:

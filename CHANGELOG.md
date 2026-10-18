@@ -816,17 +816,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   Add are recorded in the same transaction as the request, so a failure
   after it can't leave the approval waiting until it lapses.
   - A leaked invite link can't fill the ledger for every invite. Each entry
-    records its invite; a revoked or expired invite's entries are forgotten
+    records its invite; a revoked, expired or used-up (`exhausted`)
+    invite's entries are forgotten
     at once (both are final, and step 1 refuses any copy); each invite holds
     at most max(4 × `max_uses`, 64) entries, at most the new
     `policy.join_ledger_per_invite` (default 1024, 64 to 1024), and at most
     the new `policy.max_pending_joins_per_invite` (default 32, 1 to 32)
-    pending requests. Past either, requests for that invite are dropped
+    pending requests; requests being added or added don't count against the
+    share. Past either, requests for that invite are dropped
     (`join_invite_quota`, `join_invite_full`), and the human gets a new
     `invite_flooded` event, once per invite and reason, which the agent token
-    and the adapters never see, suggesting revoking the invite. SPEC §6.2
-    allows forgetting at revocation and expiry, and recommends the per-invite
-    bounds.
+    and the adapters never see, suggesting revoking the invite. Creating an
+    invite fails with `409 too_many_invites` when the open invites' shares
+    plus their uses would exceed the ledger's 65536 entries; if it fills
+    anyway, requests are dropped as `join_ledger_full` and the human gets a
+    daemon-wide `join_ledger_full` event (once a day, no invite named).
+    Forgetting the expired invites of one pass rebuilds the ledger once.
+    SPEC §6.2 allows forgetting at revocation, expiry and use-up, and
+    recommends the per-invite bounds.
   - The ledgers load in full and purge only in the runtime's passes. The
     knock ledger's load used to purge on the start-time clock (since the
     knock ledger landed), so a clock that was ahead at start and put right

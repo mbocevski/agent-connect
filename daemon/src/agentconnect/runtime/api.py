@@ -648,7 +648,8 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "policy did. Nor does it see "
         "the knocks your listing received (`knock_received`, `knock_approved`, "
         "`knock_rejected`, `knock_expired`, `knock_approval_failed`), or "
-        "`invite_flooded` (one of your invites gets more join requests than it can hold). "
+        "`invite_flooded` (one of your invites gets more join requests than it can hold) "
+        "and `join_ledger_full` (the join ledger itself is full). "
         "With "
         "`Accept: text/event-stream` it is instead a Server-Sent Events stream "
         "of messages and events from a durable feed (needs "
@@ -755,6 +756,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "The invite or request has expired (a knock lapses an hour after it was sent).",
     ),
     (409, "invite_not_open", "The invite was used up, revoked or never open."),
+    (
+        409,
+        "too_many_invites",
+        "Create invite: the open invites already reserve the whole join ledger (each "
+        "its share plus its uses, SPEC 6.2); revoke the ones you no longer need.",
+    ),
     (
         409,
         "listing_exists",

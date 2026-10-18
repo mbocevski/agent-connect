@@ -26,7 +26,7 @@ from agentconnect.keystore import FileKeystore
 from agentconnect.relay import b64, unb64
 from agentconnect.runtime import Options, Runtime
 from agentconnect.runtime import ledger as replay
-from agentconnect.runtime.engine import HUMAN_EVENTS, Engine
+from agentconnect.runtime.engine import HUMAN_EVENTS, DaemonError, Engine
 
 RELAY = "127.0.0.1:1"
 
@@ -278,11 +278,11 @@ async def test_revoking_or_expiring_an_invite_frees_its_entries(
 ) -> None:
     """Revoked and expired are final: step 1 refuses any copy, so their
     entries go at once and make room in a full ledger for other invites."""
-    owner.engine._join_capacity = 2
-    owner.engine._join_ledger = owner.engine._load_join_ledger()
     leaked = await owner.invite()
     short = await owner.invite(ttl_secs=600)
     other = await owner.invite()
+    owner.engine._join_capacity = 2  # lowered after the invites: create_invite would refuse
+    owner.engine._join_ledger = owner.engine._load_join_ledger()
     thief = Joiner(rng, owner.now)
     leaked_request = thief.request(leaked)
     await owner.deliver(leaked_request, thief.mailbox)
@@ -290,7 +290,8 @@ async def test_revoking_or_expiring_an_invite_frees_its_entries(
     bob = Joiner(rng, owner.now)
     await owner.deliver(bob.request(other), bob.mailbox)
     assert owner.audit() == ["join_ledger_full"]
-    assert [e["data"]["reason"] for e in owner.flooded()] == ["join_ledger_full"]
+    assert owner.flooded() == []
+    assert [e["type"] for e in owner.engine.store.events(limit=100)].count("join_ledger_full") == 1
     await owner.revoke(leaked)
     assert owner.ledger() == 1
     # The revoked invite refuses its copy before the ledger is asked.
@@ -430,3 +431,92 @@ async def test_the_same_key_package_under_a_new_name_and_mac_is_a_replay(
     await owner.deliver(renamed, bob.mailbox)
     assert owner.audit() == ["join_replay"]
     assert owner.engine.join_approvals() == []
+
+
+# -- N1-N3: the quota, the global cap, and the cost of forgetting --------------------
+
+
+async def test_approved_requests_dont_use_up_the_invites_quota(
+    owner: Owner, rng: random.Random
+) -> None:
+    """A large multi-use invite fills its uses with no false drops: requests
+    that are being added or were added are in the approvals table (and
+    their KeyPackages are tracked once merged), so they don't count
+    against the invite's share; only rejected, lapsed and dropped ones do."""
+    await owner.restart(policy_join_ledger_per_invite=64)
+    url = await owner.invite(max_uses=40)
+    assert replay.join_quota(40, 64) == 64
+    joiner = Joiner(rng, owner.now)
+    for decide in [owner.engine.approve] * 30 + [owner.engine.reject] * 34:
+        await owner.deliver(joiner.request(url), joiner.mailbox)
+        (waiting,) = owner.engine.join_approvals()
+        decide(waiting["request_id"])
+    assert owner.ledger() == 64
+    await owner.deliver(joiner.request(url), joiner.mailbox)
+    assert owner.audit() == []
+    assert len(owner.engine.join_approvals()) == 1
+    assert owner.flooded() == []
+
+
+async def test_open_invites_cant_reserve_more_than_the_join_ledger(
+    owner: Owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each open invite reserves its share plus its uses; an invite that
+    would take the total past the ledger's capacity is refused, so the
+    shares alone can't fill the ledger."""
+    owner.engine._join_capacity = 2 * (1024 + 1000) + 100
+    first = await owner.invite(max_uses=1000)
+    await owner.invite(max_uses=1000)
+    with pytest.raises(DaemonError) as e:
+        await owner.invite(max_uses=1000)
+    assert e.value.code == "too_many_invites"
+    await owner.invite(max_uses=1)  # 64 + 1 still fit
+    await owner.revoke(first)
+    await owner.invite(max_uses=1000)  # the revoked invite's reserve is free again
+
+
+async def test_a_full_join_ledger_tells_the_human_daemon_wide(
+    owner: Owner, rng: random.Random
+) -> None:
+    """If the whole ledger is full (a lowered capacity, say), the request
+    that finds it full is dropped and the human gets one daemon-wide
+    event: it doesn't say the bystander invite leaked."""
+    a, b = await owner.invite(), await owner.invite()
+    owner.engine._join_capacity = 1
+    owner.engine._join_ledger = owner.engine._load_join_ledger()
+    thief, bob = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    await owner.deliver(thief.request(a), thief.mailbox)
+    await owner.deliver(bob.request(b), bob.mailbox)
+    await owner.deliver(bob.request(b), bob.mailbox)
+    assert owner.audit() == ["join_ledger_full", "join_ledger_full"]
+    assert owner.flooded() == []
+    (full,) = [e for e in owner.engine.store.events(limit=100) if e["type"] == "join_ledger_full"]
+    assert full["group_id"] is None
+    assert "invite_id" not in full["data"]
+    assert "revoke" in full["data"]["warning"].lower()
+    assert "leaked" not in full["data"]["warning"]
+    assert "join_ledger_full" in HUMAN_EVENTS
+
+
+async def test_expiring_many_invites_reloads_the_ledger_once(
+    owner: Owner, rng: random.Random, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    urls = [await owner.invite(ttl_secs=600) for _ in range(3)]
+    bob = Joiner(rng, owner.now)
+    for url in urls:
+        await owner.deliver(bob.request(url), bob.mailbox)
+    assert owner.ledger() == 3
+    reloads: list[int] = []
+    load = owner.engine._load_join_ledger
+
+    def counted() -> ac.ReplayLedger:
+        reloads.append(1)
+        return load()
+
+    monkeypatch.setattr(owner.engine, "_load_join_ledger", counted)
+    owner.clock.advance(600)
+    await owner.engine.expire()
+    assert owner.ledger() == 0
+    assert len(reloads) == 1
+    await owner.engine.expire()
+    assert len(reloads) == 1

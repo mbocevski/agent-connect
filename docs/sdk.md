@@ -140,7 +140,8 @@ requests wait at the relay until it starts.
 
 A join request is shown to the human once. Every request that passes the
 invite's checks is remembered, in the encrypted database and across
-restarts, until its invite expires or is revoked, whatever became of it:
+restarts, until its invite expires, is revoked or is used up, whatever
+became of it:
 rejected, lapsed after an hour, or refused at approval because the invite
 had no uses left. A copy the relay delivers again is dropped without an
 approval, an event or a reply, and only the audit log records it
@@ -151,11 +152,14 @@ copy delivered later is shown for the first time.
 
 An invite holds at most 32 pending requests
 (`policy.max_pending_joins_per_invite`) and remembers at most
-max(4 × `max_uses`, 64) requests, never more than 1024
-(`policy.join_ledger_per_invite`). Past either, new requests for that invite
-are dropped, the other invites carry on, and the human gets an
-`invite_flooded` event (human token only) that suggests revoking the
-invite: whoever holds the link can send any number of requests.
+max(4 × `max_uses`, 64) requests that weren't added, never more than 1024
+(`policy.join_ledger_per_invite`); requests being added or added don't
+count. Past either, new requests for that invite are dropped, the other
+invites carry on, and the human gets an `invite_flooded` event (human token
+only) that suggests revoking the invite: whoever holds the link can send
+any number of requests. Creating an invite fails with `409
+too_many_invites` when the open invites' shares and uses would exceed the
+whole ledger (65536 entries); revoke the invites you no longer need.
 
 ## Attach mode
 

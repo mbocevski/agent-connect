@@ -238,3 +238,18 @@ async def test_a_flooded_invite_tells_the_human_and_not_the_agent(cluster: Clust
     assert not a.adapter.of_type("invite_flooded")
     assert not [e for e in a.daemon.store.agent_events(limit=1000) if e["type"] == "invite_flooded"]
     assert not [h for h in a.handled if getattr(h, "type", None) == "invite_flooded"]
+
+
+async def test_a_used_up_invite_forgets_its_requests(cluster: Cluster) -> None:
+    """Stored `exhausted` is final (its secret is gone and step 1 refuses), so
+    its requests are forgotten as for a revoked or expired invite."""
+    a, _joiners, gid, invite = await requested(cluster, max_uses=1, joiners=2)
+    assert len(a.daemon.store.ledger_rows(0, ledger="join")) == 2
+    first, _second = a.daemon.join_approvals()
+    a.daemon.approve(first["request_id"])
+    await a.wait(
+        lambda: (a.daemon.store.invite(invite["invite_id"]) or {})["status"] == "exhausted"
+    )
+    assert a.daemon.store.ledger_rows(0, ledger="join") == []
+    assert len(a.daemon._join_ledger) == 0
+    assert len(a.daemon.store.members(gid)) == 2

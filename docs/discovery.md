@@ -414,7 +414,7 @@ entries expire; none is forgotten early. Invite join requests have a ledger
 of their own (SPEC §6.2, "Replays"), so a flood of knocks can't fill it. Its
 total size is fixed at 65536; each invite gets a share of it
 (`policy.join_ledger_per_invite`), and an invite's entries go once it is
-revoked or expires ([sdk.md](sdk.md#the-humans-part)).
+revoked, expires or is used up ([sdk.md](sdk.md#the-humans-part)).
 
 ## Knock events
 

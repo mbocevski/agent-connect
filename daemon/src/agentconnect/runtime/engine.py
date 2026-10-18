@@ -126,13 +126,25 @@ KNOCK_OWNER_EVENTS = frozenset(
 # A flood of join requests on one of the human's invites (SPEC 6.2
 # "Replays"): the human's to act on, by revoking the invite.
 HUMAN_EVENTS = (
-    frozenset({"message_held", "held_expired", "repeated_violations", "invite_flooded"})
+    frozenset(
+        {
+            "message_held",
+            "held_expired",
+            "repeated_violations",
+            "invite_flooded",
+            "join_ledger_full",
+        }
+    )
     | KNOCK_OWNER_EVENTS
 )
 INVITE_FLOOD_WARNING = (
     "This invite gets more join requests than it can hold, and new ones are "
     "dropped. If you didn't expect that many, the link may have leaked: revoke "
     "it with `agentconnect invite revoke <invite_id>`."
+)
+JOIN_LEDGER_FULL_WARNING = (
+    "The join ledger is full, so new join requests for every invite are "
+    "dropped. Revoke the invites you no longer need: that frees their entries."
 )
 INVITE_WARNING = (
     "This invite was already used or revoked. If you didn't expect this, "
@@ -1057,11 +1069,13 @@ class Engine:
         are dropped, and the audit log and transcripts keep their retention.
         Runs before each inbound frame and on (re)connect."""
         now = self.now()
+        ended = []
         for invite in self.store.invites("open"):
             if now >= int(invite["expires_at"]):
                 self.store.set_invite_status(invite["invite_id"], "expired")
                 self.keystore.delete(f"invite/{invite['invite_id']}")
-                self._forget_invite_requests(str(invite["invite_id"]))
+                ended.append(str(invite["invite_id"]))
+        self._forget_invite_requests(*ended)
         for pending in self.store.pending_joins():
             expires = pending["meta"].get("expires_at")
             if isinstance(expires, int) and now >= expires + JOIN_CLOSED_GRACE_SECS:
@@ -1730,26 +1744,12 @@ class Engine:
             return "dropped"
 
         async def flooded(reason: str) -> str:
-            # The human hears that this invite takes more requests than it
-            # can hold, once per invite and reason; the agent never does.
-            await self.emit(
-                group_id,
-                "invite_flooded",
-                cause=f"invite_flooded/{invite_id}/{reason}",
-                invite_id=invite_id,
-                reason=reason,
-                warning=INVITE_FLOOD_WARNING,
-            )
+            await self._tell_join_flood(group_id, invite_id, reason)
             return drop_it(reason)
 
         async def body() -> str:
             key = replay.entry_key("join", request_id)
-            quota = replay.join_quota(
-                int(invite["max_uses"]), self.config.policy_join_ledger_per_invite
-            )
-            if self.store.join_ledger_count(invite_id) >= quota and not self._join_ledger.seen(
-                key, verified.key_package_ref
-            ):
+            if self._over_join_quota(invite, key, verified.key_package_ref):
                 return await flooded("join_invite_quota")
             refused = replay.remember(
                 self.store,
@@ -1762,7 +1762,8 @@ class Engine:
                 invite_id=invite_id,
             )
             if refused == "join_ledger_full":
-                return await flooded(refused)
+                await self._tell_join_flood(None, None, refused)
+                return drop_it(refused)
             if refused is not None:
                 return drop_it(refused)
             if (
@@ -1813,14 +1814,60 @@ class Engine:
             self._join_ledger = self._load_join_ledger()
             raise
 
+    def _over_join_quota(self, invite: dict[str, Any], key: bytes, kp_ref: bytes) -> bool:
+        """Whether a request that isn't a replay would take the invite past
+        its share of the join ledger (a replay is dropped as one)."""
+        quota = replay.join_quota(
+            int(invite["max_uses"]), self.config.policy_join_ledger_per_invite
+        )
+        return self.store.join_ledger_count(str(invite["invite_id"])) >= quota and not (
+            self._join_ledger.seen(key, kp_ref)
+        )
+
+    async def _tell_join_flood(
+        self, group_id: str | None, invite_id: str | None, reason: str
+    ) -> None:
+        """Tell the human (never the agent) that join requests are dropped
+        by a limit: an invite's (``invite_flooded``, once per invite and
+        reason), or the whole ledger's (``join_ledger_full``, daemon-wide and
+        once a day: the invite whose request found it full is a bystander,
+        so it isn't named)."""
+        if invite_id is None:
+            await self.emit(
+                None,
+                "join_ledger_full",
+                cause=f"join_ledger_full/{self.now() // 86_400}",
+                warning=JOIN_LEDGER_FULL_WARNING,
+            )
+            return
+        await self.emit(
+            group_id,
+            "invite_flooded",
+            cause=f"invite_flooded/{invite_id}/{reason}",
+            invite_id=invite_id,
+            reason=reason,
+            warning=INVITE_FLOOD_WARNING,
+        )
+
     def _load_join_ledger(self) -> ac.ReplayLedger:
         return replay.load(self.store, "join", self._join_capacity)
 
-    def _forget_invite_requests(self, invite_id: str) -> None:
-        """Revoked or expired: both final, so step 1 refuses any copy of the
-        invite's requests and the join ledger forgets them (SPEC 6.2)."""
-        if self.store.join_ledger_forget(invite_id):
+    def _forget_invite_requests(self, *invite_ids: str) -> None:
+        """Revoked, expired or used up (stored ``exhausted``): all final, so
+        step 1 refuses any copy of these invites' requests and the join
+        ledger forgets them (SPEC 6.2). The in-memory ledger is rebuilt once
+        for all of them, from at most its capacity of rows."""
+        forgotten = 0
+        for invite_id in invite_ids:
+            forgotten += self.store.join_ledger_forget(invite_id)
+        if forgotten:
             self._join_ledger = self._load_join_ledger()
+
+    def _join_reserve(self, max_uses: int) -> int:
+        """What one open invite can hold in the join ledger at most: its
+        share for requests that weren't added, plus one entry per use for
+        those being added or added (outside the share)."""
+        return replay.join_quota(max_uses, self.config.policy_join_ledger_per_invite) + max_uses
 
     async def check_joins(self) -> None:
         """SPEC 4.3: a pending join whose invite was used up or revoked
@@ -2472,6 +2519,7 @@ class Engine:
                 if used >= invite["max_uses"]:
                     self.store.set_invite_status(invite["invite_id"], "exhausted")
                     self.keystore.delete(f"invite/{invite['invite_id']}")
+                    self._forget_invite_requests(str(invite["invite_id"]))
         return "done"
 
     def _update_due(self, group: GroupRow) -> bool:
@@ -2862,6 +2910,18 @@ class Engine:
         }.get(str(policy.get("invite")))
         if allowed is not None and self.me not in allowed:
             raise DaemonError("forbidden", "the group policy does not let this identity invite")
+        reserved = sum(
+            self._join_reserve(int(i["max_uses"]))
+            for status in ("open", "registering")
+            for i in self.store.invites(status)
+        )
+        if reserved + self._join_reserve(max_uses) > self._join_capacity:
+            # SPEC 6.2 "Replays": the open invites' shares can't fill the join
+            # ledger, which every invite shares.
+            raise DaemonError(
+                "too_many_invites",
+                "too many open invites: revoke the ones you no longer need",
+            )
         invite = self.client.create_invite(self.config.relay_host, ttl_secs)
         members = len(self.client.members(unb64(group_id)))
         meta = {
