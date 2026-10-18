@@ -1,3 +1,4 @@
+import os
 import random
 import stat
 from pathlib import Path
@@ -155,9 +156,28 @@ def test_write_private_is_atomic_and_leaves_no_temp_files(
 
 def test_the_data_dir_lock_is_exclusive(tmp_path: Path) -> None:
     first = DataDirLock(tmp_path / "data")
-    with pytest.raises(DataDirLockedError, match="another agentconnect daemon"):
+    with pytest.raises(DataDirLockedError, match="another agentconnect runtime"):
         DataDirLock(tmp_path / "data")
     assert stat.S_IMODE((tmp_path / "data" / "daemon.lock").stat().st_mode) == 0o600
     first.release()
     first.release()  # idempotent
     DataDirLock(tmp_path / "data").release()
+
+
+def test_the_data_dir_lock_names_its_holder(tmp_path: Path) -> None:
+    first = DataDirLock(tmp_path / "data", "embedded")
+    with pytest.raises(DataDirLockedError, match=rf"an embedded agent, pid {os.getpid()}"):
+        DataDirLock(tmp_path / "data")
+    first.release()
+    daemon = DataDirLock(tmp_path / "data")  # the next holder rewrites the note
+    with pytest.raises(DataDirLockedError, match=r"\(a daemon, pid \d+\)"):
+        DataDirLock(tmp_path / "data", "embedded")
+    daemon.release()
+
+
+def test_the_data_dir_lock_note_is_informational(tmp_path: Path) -> None:
+    held = DataDirLock(tmp_path / "data")
+    (tmp_path / "data" / "daemon.lock").write_text("something else entirely")
+    with pytest.raises(DataDirLockedError, match=r"\(unknown\)"):
+        DataDirLock(tmp_path / "data")
+    held.release()

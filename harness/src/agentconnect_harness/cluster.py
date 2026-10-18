@@ -1,8 +1,12 @@
-"""N in-process daemons against one real relay, each behind its own proxy.
+"""N in-process runtimes against one real relay, each behind its own proxy.
 
-All daemons share one :class:`FakeClock` (starting at the real current time,
+Every node is a :class:`~agentconnect.runtime.Runtime` with the node's
+adapters, as ``agentconnectd`` hosts it (ADR-005); scenarios drive its
+engine (``node.daemon``).
+
+All nodes share one :class:`FakeClock` (starting at the real current time,
 so signed REST timestamps and invite expiries agree with the relay's system
-clock). ``advance`` is the only way daemon time moves.
+clock). ``advance`` is the only way runtime time moves.
 """
 
 from __future__ import annotations
@@ -20,8 +24,10 @@ from agentconnect.clock import Clock, FakeClock
 from agentconnect.config import Config
 from agentconnect.identity import Seeded
 from agentconnect.keystore import FileKeystore
+from agentconnect.runtime import Runtime
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import Engine, Options
+from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import RelayProcess
 
@@ -38,19 +44,25 @@ class Node:
     seed: int
     starts: int = 0
     make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None
+    runtime: Runtime = field(init=False)
+    # The node's protocol engine (the runtime's), which scenarios drive.
     daemon: Engine = field(init=False)
 
-    def _make(self) -> Engine:
-        # A fresh seed per start: a restarted daemon must not replay the
+    def _make(self) -> Runtime:
+        """A runtime on this node's state, constructed but not started (it
+        holds the lock and the databases until stopped). Scenarios build
+        their own API servers, so it serves none."""
+        # A fresh seed per start: a restarted runtime must not replay the
         # randomness (keys, msg_ids) of its previous run.
         self.starts += 1
         seed = self.seed + self.starts
-        return Engine(
+        return Runtime(
             self.config,
-            [self.adapter, *self._extra_adapters()],
+            adapters=[self.adapter, *self._extra_adapters()],
             clock=self.clock,
             keystore=FileKeystore(self.config.data_dir / "keys"),
             options=Options(testing=Seeded(seed), backoff_rng=random.Random(seed)),  # noqa: S311
+            serve_api=False,
         )
 
     def _extra_adapters(self) -> list[Adapter]:
@@ -60,16 +72,23 @@ class Node:
         return self.make_adapters(self.config, self.clock)
 
     async def start(self) -> None:
-        self.daemon = self._make()
-        await self.daemon.start()
+        self.runtime = self._make()
+        await self.runtime.start()
+        self.daemon = self.runtime._engine
         await self.connected()
+
+    async def stop(self) -> None:
+        """Stop without any flush (a crash, for the journal)."""
+        await self.runtime.stop(flush=0)
+        if self.daemon.running:  # a scenario swapped in an engine of its own
+            await self.daemon.stop()
 
     async def connected(self) -> None:
         await asyncio.wait_for(self.daemon.link.wait_connected(), WAIT)
 
     async def restart(self) -> None:
         """Kill (stop without any flush) and start again on the same state."""
-        await self.daemon.stop()
+        await self.stop()
         await asyncio.wait_for(self.proxy.wait_no_sessions(), WAIT)
         await self.start()
 
@@ -103,6 +122,17 @@ async def serve_api(node: Node, sockdir: Path) -> ApiServer:
     server = ApiServer(node.daemon)
     await server.start()
     return server
+
+
+def api_token(server: ApiServer, scope: str) -> str:
+    """The token a caller with ``scope`` presents, read from its file as the
+    CLI and agents do (the server keeps only hashes). Any other ``scope`` is
+    returned as is, a wrong token."""
+    files = {"agent": API_TOKEN_FILE, "human": HUMAN_TOKEN_FILE}
+    if scope not in files:
+        return scope
+    path = server.daemon.config.data_dir / files[scope]
+    return path.read_text(encoding="ascii").strip()
 
 
 def status(node: Node, group_id: str) -> str | None:
@@ -216,6 +246,5 @@ class Cluster:
 
     async def close(self) -> None:
         for n in self.nodes:
-            if n.daemon.running:
-                await n.daemon.stop()
+            await n.stop()
             await n.proxy.stop()

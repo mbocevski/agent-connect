@@ -34,6 +34,12 @@ only `api-token`. Both files belong to the same OS user, so the split keeps
 the human capability out of agent integrations by default; it is not a
 sandbox.
 
+The runtime reads each token file once when it starts and keeps only the
+token's SHA-256, which it compares in constant time; the CLI reads the file
+per command. The agent-token routes call the runtime's agent-scope
+operations (`AgentApi`), the same object any host of the runtime gives its
+agents, which has no human-scope operation.
+
 In the separate-OS-user mode ([isolation.md](isolation.md)) the socket is
 opened to an agent group, a connection from a UID that isn't listed is
 refused with `403 peer_refused` before its request is read, and the human

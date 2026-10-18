@@ -12,7 +12,9 @@ It works in two directions:
 - **Facade.** A local A2A client talks to a group through an A2A server on
   `127.0.0.1`, as if the group were one A2A agent.
 
-The code is in `daemon/src/agentconnect/a2a_adapter/`.
+The code is in `daemon/src/agentconnect/a2a_adapter/`. `agentconnectd`, the
+separate-daemon host of the AgentConnect runtime, registers it from the
+`[a2a]` configuration.
 
 ## Setup
 

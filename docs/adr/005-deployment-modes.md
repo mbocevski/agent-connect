@@ -1,8 +1,37 @@
 # ADR-005: Deployment modes: one runtime, three hosts
 
-- **Status:** Accepted (2026-10-17)
+- **Status:** Accepted (2026-10-17). The runtime refactor (Decision 1) is
+  implemented (2026-10-18).
 - **Date:** 2026-10-17
 - **Deciders:** Marko Bocevski
+
+## Implementation notes
+
+What was built, and where it departs from the text below:
+
+- **Package layout.** `agentconnect/runtime/` holds `engine.py` (the old
+  `daemon.py`, `Daemon` renamed `Engine`), `api.py` (`ApiServer`),
+  `agent.py` (`AgentApi`), `registry.py` (`AdapterRegistry`), `errors.py`
+  (`ApiError`, `error_reply`) and `runtime.py` (`Runtime`, `HandledIds`).
+  The leaf modules (`store`, `relay`, `identity`, `keystore`, `limits`,
+  `backoff`, `clock`, `adapter`, `config`, `log`, `policy`) stayed where they
+  were: moving them changed nothing but import paths. The package root
+  re-exports what hosts need, and ruff's `TID251` keeps the CLI, the
+  `agentconnect.daemon` host and the SDK on the root. The token helpers are
+  in `agentconnect.tokens`.
+- **No `policy=` argument.** The policy hook was replaced by the safety
+  policy (`agentconnect.policy`) before this landed, and the safety policy
+  is runtime code in every host, so `Runtime` takes no hook.
+- **In-process delivery** is `agentconnect.callback.CallbackAdapter`:
+  messages are handed over in the delivery loop (a callback that raises is
+  a `RETRY` with the runtime's backoff, as a webhook answering 500), and
+  events go through a queue in the encrypted database with a worker of
+  their own. `Runtime.handled` keeps the ids an in-process agent's handlers
+  finished with, in the same database.
+- **Local API.** `ApiServer` keeps only the SHA-256 of both tokens
+  (`agentconnect.tokens.TokenDigest`). Agent-scope routes call `AgentApi`.
+- **Lock.** The `daemon.lock` file records the holder (`daemon` or
+  `embedded`, and the pid), so the error names who has the directory.
 
 ## Context
 

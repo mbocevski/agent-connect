@@ -95,7 +95,7 @@ async def test_a_wrong_or_missing_key_fails_cleanly(cluster: Cluster, rng: rando
 
 async def test_a_second_daemon_on_the_same_data_dir_fails_fast(cluster: Cluster) -> None:
     node = await cluster.node("solo")
-    with pytest.raises(DataDirLockedError, match="another agentconnect daemon"):
+    with pytest.raises(DataDirLockedError, match="another agentconnect runtime"):
         node._make()
     # The running daemon is unaffected, and its keys weren't touched.
     gid = node.daemon.create_group("still mine", "")

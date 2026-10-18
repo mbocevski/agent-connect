@@ -6,6 +6,10 @@ callback URL, and the agent answers with a 2xx status once it has the
 payload. Use it for agents built on the Claude Agent SDK, LangGraph or your
 own loop. The [Python SDK](../sdk.md) receives these requests for you.
 
+The runtime's in-process adapter (`agentconnect.callback`), which hands
+messages and events to Python callbacks without HTTP, follows the same rules
+as below for acks, retries with backoff and order.
+
 ## Set it up
 
 ```toml

@@ -242,6 +242,17 @@ CREATE TABLE IF NOT EXISTS transcript (
     inner TEXT NOT NULL,
     size INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS adapter_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    adapter TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE (adapter, event_id)
+);
+CREATE TABLE IF NOT EXISTS handled (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE
+);
 """
 
 GROUP_COLUMNS = (
@@ -1218,6 +1229,50 @@ class Store:
     def feed_last(self) -> int:
         row = self._one("SELECT seq FROM sqlite_sequence WHERE name = 'feed'")
         return 0 if row is None else int(row[0])
+
+    # -- in-process adapters (agentconnect.callback) --------------------------
+
+    def adapter_event_add(
+        self, adapter: str, event_id: str, payload: dict[str, Any], keep: int = 10_000
+    ) -> bool:
+        """Queue an event for an in-process adapter; ``False`` if it is
+        queued already. Only the newest ``keep`` per adapter are retained."""
+        with self.tx() as db:
+            cur = db.execute(
+                "INSERT OR IGNORE INTO adapter_events (adapter, event_id, payload) "
+                "VALUES (?, ?, ?)",
+                (adapter, event_id, json.dumps(payload, sort_keys=True)),
+            )
+            db.execute(
+                "DELETE FROM adapter_events WHERE adapter = ? AND seq NOT IN "
+                "(SELECT seq FROM adapter_events WHERE adapter = ? ORDER BY seq DESC LIMIT ?)",
+                (adapter, adapter, keep),
+            )
+        return cur.rowcount == 1
+
+    def adapter_events(self, adapter: str, limit: int = 100) -> list[tuple[int, dict[str, Any]]]:
+        """Queued events of ``adapter``, oldest first."""
+        rows = self._all(
+            "SELECT seq, payload FROM adapter_events WHERE adapter = ? ORDER BY seq LIMIT ?",
+            adapter,
+            limit,
+        )
+        return [(int(r[0]), json.loads(r[1])) for r in rows]
+
+    def adapter_event_done(self, seq: int) -> None:
+        self._db.execute("DELETE FROM adapter_events WHERE seq = ?", (seq,))
+
+    # -- ids an in-process agent's handlers finished with ---------------------
+
+    def handled_has(self, key: str) -> bool:
+        return self._one("SELECT 1 FROM handled WHERE key = ?", key) is not None
+
+    def handled_add(self, key: str, keep: int) -> None:
+        """Remember ``key``; only the newest ``keep`` keys are retained."""
+        with self.tx() as db:
+            cur = db.execute("INSERT OR IGNORE INTO handled (key) VALUES (?)", (key,))
+            if cur.rowcount == 1:
+                db.execute("DELETE FROM handled WHERE seq <= ?", (int(cur.lastrowid or 0) - keep,))
 
     def unnotified_events(self) -> list[dict[str, Any]]:
         """Recorded events the adapter has not accepted yet, oldest first."""

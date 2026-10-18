@@ -36,6 +36,10 @@ The decision is recorded with the message, in one place in the daemon, and
 adapters only receive what was recorded as delivered. Adapters can only send
 through the daemon. Neither direction has a path around the policy.
 
+The policy is part of the AgentConnect runtime (`agentconnect.runtime`), so
+every host of the runtime runs the same code, and no host can change or skip
+it.
+
 What the policy checks, in order:
 
 1. **Content.** The kind must be one the protocol defines. The message must

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hmac
 import json
 import os
 import re
@@ -43,17 +42,12 @@ from typing import Any
 from agentconnect import log
 from agentconnect.cli_json import HELD
 from agentconnect.isolation import PeerGate
-from agentconnect.relay import RelayError
-from agentconnect.runtime.engine import (
-    HUMAN_EVENTS,
-    HUMAN_ONLY_KINDS,
-    DaemonError,
-    Engine,
-    new_msg_id,
-)
+from agentconnect.runtime.agent import AgentApi, a2a_text
+from agentconnect.runtime.engine import Engine
+from agentconnect.runtime.errors import ApiError, error_reply
 from agentconnect.shapes import Opt
 from agentconnect.sse import SseAdapter, Subscription
-from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE, load_token
+from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE, TokenDigest
 
 LOG = log.get("agentconnect.api")
 
@@ -79,18 +73,6 @@ STATUS_TEXT = {
     500: "Internal Server Error",
     502: "Bad Gateway",
     503: "Service Unavailable",
-}
-ERROR_STATUS = {
-    "bad_request": 400,
-    "wrong_relay": 400,
-    "forbidden": 403,
-    "not_found": 404,
-    "expired": 409,
-    "stale_epoch": 409,
-    "invite_not_open": 409,
-    "too_large": 413,
-    "rate_limited": 429,
-    "relay": 502,
 }
 
 
@@ -139,12 +121,6 @@ class SseStream:
             gone.cancel()
             stopped.cancel()
             await _close(writer)
-
-
-class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str) -> None:
-        super().__init__(message)
-        self.status, self.code = status, code
 
 
 Handler = Callable[[dict[str, str], dict[str, Any]], Awaitable[Any]]
@@ -585,16 +561,6 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
 )
 
 
-def a2a_text(group_id: str, text: str, human: bool) -> dict[str, Any]:
-    """The ``text`` shorthand as an A2A v1.0 ``Message`` (SPEC 7.2)."""
-    return {
-        "messageId": new_msg_id(),
-        "contextId": group_id,
-        "role": "ROLE_USER" if human else "ROLE_AGENT",
-        "parts": [{"text": text}],
-    }
-
-
 def _str(body: dict[str, Any], key: str, default: str | None = None) -> str:
     value = body.get(key, default)
     if not isinstance(value, str):
@@ -619,14 +585,18 @@ def _query_int(p: dict[str, str], key: str) -> int:
 class ApiServer:
     """Serves the control API for one :class:`Engine`."""
 
-    def __init__(self, daemon: Engine, gate: PeerGate | None = None) -> None:
+    def __init__(
+        self, daemon: Engine, gate: PeerGate | None = None, agent: AgentApi | None = None
+    ) -> None:
         self.daemon = daemon
+        self.agent = agent or AgentApi(daemon)
         # Peer-credential checks; a no-op unless isolation.enabled.
         self.gate = gate if gate is not None else PeerGate.from_config(daemon.config)
         data_dir = daemon.config.data_dir
-        self.tokens = {
-            "agent": load_token(data_dir / API_TOKEN_FILE),
-            "human": load_token(data_dir / HUMAN_TOKEN_FILE),
+        # Created (0600) on first start; only their hashes stay in memory.
+        self._tokens = {
+            "agent": TokenDigest.of_file(data_dir / API_TOKEN_FILE),
+            "human": TokenDigest.of_file(data_dir / HUMAN_TOKEN_FILE),
         }
         self._server: asyncio.Server | None = None
         self._connections = 0
@@ -642,27 +612,25 @@ class ApiServer:
 
     # -- handlers ----------------------------------------------------------
 
+    # Routes either token may call go to AgentApi for the agent token, so
+    # the socket and the embedded SDK share one implementation. The human
+    # token gets the fuller view where there is one.
+
     async def _status(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        info = self.daemon.status()
         if p.get(SCOPE) != "human":
-            # SPEC 10.2: the agent can't learn (and tell a peer) what is held
-            # of the peers' messages; it sees its own held sends only.
-            info["held_messages"] = len(self.daemon.held_messages(direction="out"))
-        return info
+            return await self.agent.status()
+        return self.daemon.status()
 
     async def _list_groups(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return {"groups": self.daemon.list_groups()}
+        return await self.agent.list_groups()
 
     async def _group_info(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return self.daemon.group_info(p["gid"])
+        return await self.agent.group_info(p["gid"])
 
     async def _list_approvals(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        await self.daemon.expire_held()
         if p.get(SCOPE) != "human":
-            # The agent token sees no join requests and no held peer messages
-            # (their sender, msg_id and task would tell it what the policy
-            # did); only its own held sends.
-            return {"approvals": [], "messages": self.daemon.held_messages(direction="out")}
+            return await self.agent.approvals()
+        await self.daemon.expire_held()
         return {"approvals": self.daemon.approvals(), "messages": self.daemon.held_messages()}
 
     async def _held_message(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
@@ -685,7 +653,7 @@ class ApiServer:
         return {"status": "removing"}
 
     async def _safety(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return self.daemon.safety_settings(p["gid"])
+        return await self.agent.safety(p["gid"])
 
     async def _set_safety(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         changes = b.get("set")
@@ -705,14 +673,17 @@ class ApiServer:
         return {"transcript": rows, "untrusted": True}
 
     async def _create_group(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
-        return {"group_id": self.daemon.create_group(_str(b, "name"), _str(b, "purpose", ""))}
+        return await self.agent.create_group(_str(b, "name"), _str(b, "purpose", ""))
 
     async def _create_invite(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         name = b.get("inviter_name")
         if name is not None and not isinstance(name, str):
             raise ApiError(400, "bad_request", "inviter_name must be a string")
-        return await self.daemon.create_invite(
-            p["gid"], _int(b, "ttl_secs", 86_400), _int(b, "max_uses", 1), name
+        return await self.agent.create_invite(
+            p["gid"],
+            ttl_secs=_int(b, "ttl_secs", 86_400),
+            max_uses=_int(b, "max_uses", 1),
+            inviter_name=name,
         )
 
     async def _policy(self, p: dict[str, str], b: dict[str, Any]) -> Any:
@@ -721,23 +692,22 @@ class ApiServer:
         value = b.get("require_verified")
         if not isinstance(value, bool):
             raise ApiError(400, "bad_request", "require_verified must be a boolean")
-        if not value and p.get(SCOPE) != "human":
-            raise ApiError(403, "human_only", "relaxing verification needs the human token")
+        if p.get(SCOPE) != "human":
+            return await self.agent.set_policy(p["gid"], require_verified=value)
         self.daemon.set_policy(p["gid"], require_verified=value)
         return {"require_verified": value}
 
     async def _revoke(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        await self.daemon.revoke_invite(p["invite_id"])
-        return {"revoked": p["invite_id"]}
+        return await self.agent.revoke_invite(p["invite_id"])
 
     async def _inspect(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
-        return await self.daemon.inspect_invite(_str(b, "url"))
+        return await self.agent.inspect_invite(_str(b, "url"))
 
     async def _accept(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
         name = b.get("display_name")
         if name is not None and not isinstance(name, str):
             raise ApiError(400, "bad_request", "display_name must be a string")
-        return await self.daemon.accept_invite(_str(b, "url"), name)
+        return await self.agent.accept_invite(_str(b, "url"), name)
 
     async def _send(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         body = b.get("body")
@@ -760,24 +730,25 @@ class ApiServer:
             not isinstance(addressee, list) or not all(isinstance(x, str) for x in addressee)
         ):
             raise ApiError(400, "bad_request", "addressee must be a list of identities")
-        # SPEC 7.2/10.3: only the human's own requests are human-originated.
-        # The agent token always sends as the agent, and can't send the
-        # controls SPEC 7.3 reserves to humans.
-        if kind in HUMAN_ONLY_KINDS and not human:
-            raise ApiError(403, "human_only", f"{kind} needs the human token")
+        if not human:
+            # SPEC 7.2/10.3: the agent token always sends as the agent, and
+            # can't send the controls SPEC 7.3 reserves to humans.
+            return await self.agent.send(
+                p["gid"], body, to=to, kind=kind, reply_to=reply_to, addressee=addressee
+            )
         msg_id, status = self.daemon.queue_message(
             p["gid"],
             body,
             to=to,
             kind=kind,
-            origin="human" if human else "agent",
+            origin="human",
             reply_to=reply_to,
             addressee=addressee,
         )
         return {"msg_id": msg_id, "status": status}
 
     async def _leave(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return {"status": await self.daemon.leave(p["gid"])}
+        return await self.agent.leave(p["gid"])
 
     async def _approve(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         self.daemon.approve(p["rid"])
@@ -806,10 +777,9 @@ class ApiServer:
         group = p.get("group") or None
         if "text/event-stream" not in p.get(ACCEPT, ""):
             after = int(p.get("after", "0") or 0)
-            # The safety policy's events are the human's (SPEC 10.2): an agent
-            # that heard of a hold could tell the sender.
-            hidden = () if p.get(SCOPE) == "human" else tuple(HUMAN_EVENTS)
-            return {"events": self.daemon.store.events(after, group_id=group, exclude=hidden)}
+            if p.get(SCOPE) != "human":
+                return await self.agent.events(after, group)
+            return {"events": self.daemon.store.events(after, group_id=group)}
         hub = self.daemon.adapters.get("sse")
         if not isinstance(hub, SseAdapter):
             raise ApiError(409, "no_sse_adapter", 'set daemon.default_adapter = "sse"')
@@ -825,8 +795,8 @@ class ApiServer:
         scheme, _, token = auth.partition(" ")
         if scheme.lower() != "bearer" or not token:
             raise ApiError(401, "auth_failed", "missing bearer token")
-        is_human = hmac.compare_digest(token.encode(), self.tokens["human"].encode())
-        is_agent = hmac.compare_digest(token.encode(), self.tokens["agent"].encode())
+        is_human = self._tokens["human"].matches(token)
+        is_agent = self._tokens["agent"].matches(token)
         if not (is_human or is_agent):
             raise ApiError(401, "auth_failed", "invalid token")
         if is_human and not self.gate.human_allowed():
@@ -916,18 +886,17 @@ class ApiServer:
                 method, target, headers, body = await self._read(reader)
             self._check_origin(headers)
             status, payload = await self.handle(method, target, headers, body)
-        except ApiError as e:
-            status, payload = e.status, {"code": e.code, "message": str(e)}
-        except DaemonError as e:
-            status, payload = ERROR_STATUS.get(e.code, 409), {"code": e.code, "message": str(e)}
-        except RelayError as e:
-            status, payload = 502, {"code": e.code, "message": str(e)}
         except TimeoutError:
             status, payload = 408, {"code": "timeout", "message": "request not received in time"}
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError):
             status, payload = 400, {"code": "bad_request", "message": "malformed request"}
-        except Exception:
-            LOG.exception("api_failed")
+        except Exception as e:
+            reply = error_reply(e)
+            if reply is None:
+                LOG.exception("api_failed")
+            else:
+                status, code, message = reply
+                payload = {"code": code, "message": message}
         return status, payload
 
     @staticmethod

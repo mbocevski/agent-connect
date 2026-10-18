@@ -17,11 +17,12 @@ import pytest
 import pytest_asyncio
 from typer.testing import CliRunner
 
+from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient, ApiClientError
-from agentconnect.cli import _run, app
+from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
-from agentconnect_harness.cluster import Cluster, Node
+from agentconnect_harness.cluster import Cluster, Node, api_token
 
 
 class Api:
@@ -39,7 +40,7 @@ class Api:
     ) -> tuple[int, Any]:
         headers = {}
         if scope is not None:
-            headers["authorization"] = f"Bearer {self.server.tokens.get(scope, scope)}"
+            headers["authorization"] = f"Bearer {api_token(self.server, scope)}"
         async with httpx.AsyncClient(transport=self.transport, base_url="http://ac") as c:
             resp = await c.request(method, path, json=body, content=raw, headers=headers)
         return resp.status_code, resp.json()
@@ -283,7 +284,7 @@ async def test_daemon_run_serves_until_signalled(cluster: Cluster, sockdir: Path
         data_dir=cluster.tmp / "run", api_socket=sockdir / "run.sock", keystore="file"
     )
     ready = asyncio.Event()
-    task = asyncio.ensure_future(_run(cfg, ready))
+    task = asyncio.ensure_future(daemon_host.serve(cfg, ready))
     sock = sockdir / "run.sock"
     await asyncio.wait_for(ready.wait(), 10)
     info = await asyncio.to_thread(ApiClient(cfg).request, "GET", "/v0/status")
@@ -305,7 +306,7 @@ async def test_daemon_run_starts_the_a2a_adapter(cluster: Cluster, sockdir: Path
         a2a_facade_port=port,
     )
     ready = asyncio.Event()
-    task = asyncio.ensure_future(_run(cfg, ready))
+    task = asyncio.ensure_future(daemon_host.serve(cfg, ready))
     try:
         await asyncio.wait_for(ready.wait(), 10)
         token_file = cfg.data_dir / "a2a-facade-token"
@@ -358,7 +359,7 @@ async def test_tcp_api_refuses_browser_requests(cluster: Cluster) -> None:
     node.daemon.config = node.config.with_overrides(api_tcp_port=_free())
     server = ApiServer(node.daemon)
     await server.start()
-    auth = {"authorization": f"Bearer {server.tokens['agent']}"}
+    auth = {"authorization": f"Bearer {api_token(server, 'agent')}"}
     async with httpx.AsyncClient(base_url=str(server.address)) as c:
         assert (await c.get("/v0/status", headers=auth)).status_code == 200
         bad_origin = {**auth, "origin": "https://evil.example"}

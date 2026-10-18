@@ -69,30 +69,47 @@ def write_private(path: Path, data: bytes) -> None:
 
 
 class DataDirLockedError(RuntimeError):
-    """Another daemon holds the data directory."""
+    """Another runtime (a daemon or an embedded agent) holds the data directory."""
 
 
 class DataDirLock:
     """An exclusive ``flock`` on ``<data_dir>/daemon.lock``, held for the
-    daemon's lifetime, so two daemons (or a daemon and a tool that opens
-    the same state) never share keys, databases or a mailbox."""
+    runtime's lifetime, so two runtimes (a daemon, an embedded agent, or a
+    tool that opens the same state) never share keys, databases or a mailbox.
+
+    The holder writes ``<owner> <pid>`` into the file, so a second runtime
+    can say who has the directory. That note is informational only: the
+    ``flock`` is the lock."""
 
     FILE = "daemon.lock"
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, owner: str = "daemon") -> None:
         private_dir(data_dir)
         path = data_dir / self.FILE
         self._fd: int | None = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            holder = self._holder(self._fd)
             os.close(self._fd)
             self._fd = None
             msg = (
-                f"another agentconnect daemon is using {data_dir} "
-                "(stop it, or use another data directory)"
+                f"another agentconnect runtime ({holder}) is using {data_dir}: "
+                "stop it, or use another data directory"
             )
             raise DataDirLockedError(msg) from None
+        os.ftruncate(self._fd, 0)
+        os.pwrite(self._fd, f"{owner} {os.getpid()}\n".encode("ascii"), 0)
+
+    @staticmethod
+    def _holder(fd: int) -> str:
+        """``an embedded agent, pid 123`` from the holder's note, or
+        ``unknown`` when it's missing or not ours."""
+        words = os.pread(fd, 64, 0).decode("ascii", "replace").split()
+        names = {"daemon": "a daemon", "embedded": "an embedded agent"}
+        if len(words) != 2 or words[0] not in names or not words[1].isdigit():  # noqa: PLR2004
+            return "unknown"
+        return f"{names[words[0]]}, pid {words[1]}"
 
     def release(self) -> None:
         if self._fd is not None:

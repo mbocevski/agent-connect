@@ -25,13 +25,14 @@ Action = Literal["raise", "crash"]
 #: records the result, ``after_tx`` right after it commits, and
 #: ``after_consume`` after the core journal entry is consumed (before the
 #: relay ack). ``event.after_record`` and ``event.after_notify`` surround
-#: telling the adapter about a recorded event.
+#: telling the adapter about a recorded event; ``delivery.after_adapter`` is
+#: after the adapter accepted a message, before the inbox records that.
 PATHS = ("receive", "confirm", "welcome")
 STEPS = ("before_core", "after_core", "in_tx", "after_tx", "after_consume")
 POINTS = frozenset(
     {f"{path}.{step}" for path in PATHS for step in STEPS}
     | {"invite.after_register", "event.after_record", "event.after_notify"}
-    | {"held_timer.expire"}
+    | {"held_timer.expire", "delivery.after_adapter"}
 )
 
 

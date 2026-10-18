@@ -20,7 +20,7 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "ASYNC", "PT", "N", "PL"]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "ASYNC", "PT", "N", "PL", "TID251"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
@@ -30,8 +30,22 @@ known-first-party = [
     "agentconnect_sdk",
 ]
 
+# ADR-005: hosts (the CLI, agentconnectd, the SDK) use the runtime through
+# its package root only. The runtime itself, tests, the harness and the
+# reference generator may reach into it.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"agentconnect.runtime.agent".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.api".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.engine".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.errors".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.registry".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+"agentconnect.runtime.runtime".msg = "import from agentconnect.runtime, not its submodules (ADR-005)"
+
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["S101", "S603", "S607", "PLR2004"]
+"**/tests/**" = ["S101", "S603", "S607", "PLR2004", "TID251"]
+"daemon/src/agentconnect/runtime/**" = ["TID251"]
+"harness/**" = ["TID251"]
+"scripts/**" = ["TID251"]
 
 [tool.ty.environment]
 python-version = "3.12"

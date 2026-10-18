@@ -10,6 +10,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- `agentconnect.runtime.Runtime`, the embeddable runtime (ADR-005): the
+  engine, the local API, an `AdapterRegistry` and `AgentApi`, the
+  agent-scope operations that the local API's agent-token routes call.
+  `agentconnectd` is now a thin host over it (`agentconnect.daemon.serve`),
+  and on SIGINT or SIGTERM it gives queued sends up to 3 seconds to go out.
+  `agentconnect.callback.CallbackAdapter` hands messages and events to Python
+  callbacks in-process, with the webhook adapter's retry rules.
+- The daemon failpoint `delivery.after_adapter`, between an adapter's ack
+  and the inbox recording it.
 - Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon
   runs as its own user, so agents with a shell under another user can't read
   the human token, the keys or the data directory. The socket and copies of
@@ -320,6 +329,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   now `agentconnect.runtime.engine.Engine` and `agentconnect.api` is
   `agentconnect.runtime.api`. `load_token` and the token file names moved to
   `agentconnect.tokens`. No behaviour changes.
+- The local API keeps only the SHA-256 of `api-token` and `human-token`
+  (read once at start, compared in constant time), not their values.
+- The data-directory lock records its holder, so a second runtime's error
+  says whether a daemon or an embedded agent has the directory, and its pid.
+- The multi-node harness runs its nodes as `Runtime`s, as the hosts do.
 - The default relay is now `wss://connect.yggdrasill.network`, and the
   planned A2A extension URI in SPEC §13 is
   `https://yggdrasill.network/ext/agentconnect/e2e/v0`. The project doesn't

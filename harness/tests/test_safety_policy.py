@@ -27,7 +27,7 @@ from agentconnect.adapter import Event
 from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import DaemonError, new_msg_id
-from agentconnect_harness.cluster import WAIT, Cluster, Node, serve_api
+from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token, serve_api
 from agentconnect_harness.headless import headless
 from agentconnect_sdk import Group, Message, parse_payload
 
@@ -86,7 +86,7 @@ class Human:
 
     async def _call(self, scope: str, method: str, path: str, body: Any) -> tuple[int, Any]:
         transport = httpx.AsyncHTTPTransport(uds=str(self.server.address))
-        headers = {"authorization": f"Bearer {self.server.tokens[scope]}"}
+        headers = {"authorization": f"Bearer {api_token(self.server, scope)}"}
         async with httpx.AsyncClient(transport=transport, base_url="http://ac") as c:
             resp = await c.request(method, path, json=body, headers=headers)
         return resp.status_code, resp.json()

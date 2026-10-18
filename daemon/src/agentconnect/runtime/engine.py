@@ -86,6 +86,7 @@ from agentconnect.relay import (
     b64,
     unb64,
 )
+from agentconnect.runtime.registry import AdapterRegistry
 from agentconnect.schemas import normalize
 from agentconnect.store import GroupRow, OutboxRow, Store
 from agentconnect.tasks import cancel_and_wait
@@ -315,15 +316,18 @@ class Options:
     testing: Seeded | None = None
     backoff_rng: random.Random | None = None
     keyring_backend: Any = None
+    # Who holds the data-directory lock, as told to a second runtime.
+    lock_owner: str = "daemon"
 
 
 class Engine:
-    """One daemon: one identity, one instance, one relay connection."""
+    """The protocol engine of one runtime: one identity, one instance, one
+    relay connection. Hosts use it through :class:`agentconnect.runtime.Runtime`."""
 
     def __init__(
         self,
         config: Config,
-        adapters: Iterable[Adapter] = (),
+        adapters: Iterable[Adapter] | AdapterRegistry = (),
         *,
         clock: Clock | None = None,
         keystore: Keystore | None = None,
@@ -331,7 +335,9 @@ class Engine:
     ) -> None:
         self.config = config
         self.clock: Clock = clock or SystemClock()
-        self.adapters: dict[str, Adapter] = {a.name: a for a in adapters}
+        self.adapters = (
+            adapters if isinstance(adapters, AdapterRegistry) else AdapterRegistry(adapters)
+        )
         self.options = options or Options()
         self.failpoints = Failpoints()  # inert unless a test arms one
         # Set while one journal entry's effects are being recorded (_apply).
@@ -341,7 +347,7 @@ class Engine:
         self._cause: tuple[str, int] | None = None
         self._registering: set[str] = set()
         # Before touching keys or databases: one daemon per data directory.
-        self._lock = DataDirLock(config.data_dir)
+        self._lock = DataDirLock(config.data_dir, self.options.lock_owner)
         try:
             self._open(keystore)
         except BaseException:
@@ -400,6 +406,7 @@ class Engine:
         self._drain_frame = False
         self._drain = DrainBudget()
         self.running = False
+        self._closed = False
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -415,6 +422,7 @@ class Engine:
         return unix_seconds(self.clock)
 
     async def start(self) -> None:
+        self.adapters.close()
         self._recover()
         # First thing the inbound worker does: finish what a crash left in
         # the core's journal.
@@ -455,24 +463,43 @@ class Engine:
 
     async def stop(self) -> None:
         """Stop the workers and close the databases (also used to simulate a
-        crash in tests: nothing is flushed that isn't already durable)."""
+        crash in tests: nothing is flushed that isn't already durable).
+
+        Every step runs even if the caller is cancelled meanwhile; that
+        cancellation propagates once the lock is released."""
+        if self._closed:
+            return
         self.running = False
-        await self.link.stop()
         try:
-            # If whoever stops us is cancelled meanwhile, that cancellation
-            # propagates, after the cleanup below.
-            await cancel_and_wait(*self._tasks, ignore=(Exception, SimulatedCrash))
+            await self.link.stop()
         finally:
-            self._tasks.clear()
-            for adapter in self.adapters.values():
-                # Optional hook: adapters with workers or connections release them.
-                close = getattr(adapter, "close", None)
-                if close is not None:
-                    with contextlib.suppress(Exception):
-                        await close()
+            try:
+                await cancel_and_wait(*self._tasks, ignore=(Exception, SimulatedCrash))
+            finally:
+                self._tasks.clear()
+                try:
+                    for adapter in self.adapters.values():
+                        # Optional hook: adapters with workers or connections release them.
+                        close = getattr(adapter, "close", None)
+                        if close is not None:
+                            with contextlib.suppress(Exception):
+                                await close()
+                finally:
+                    self.close()
+
+    def close(self) -> None:
+        """Close the databases and release the data directory, without
+        stopping anything (for an engine that never started, or after
+        :meth:`stop`)."""
+        if self._closed:
+            return
+        self._closed = True
+        self.running = False
+        try:
             self.store.close()
             # Drop the core client so its SQLite connections close.
             del self.client
+        finally:
             self._lock.release()
             LOG.info("daemon_stopped")
 
@@ -578,7 +605,7 @@ class Engine:
             g = self.store.group(group_id)
             if g is not None:
                 name = g.adapter
-        return self.adapters.get(name) or next(iter(self.adapters.values()), None)
+        return self.adapters.bound(name)
 
     async def emit(
         self, group_id: str | None, kind: str, *, cause: str | None = None, **data: Any
@@ -2048,6 +2075,7 @@ class Engine:
                     LOG.warning("adapter_deliver_failed")
                     result = DeliveryResult.RETRY
                 if result is DeliveryResult.ACK:
+                    self.failpoints.hit("delivery.after_adapter")
                     self.store.set_inbox_state(row.seq, "done")
                     self._delivery_backoff.reset()
                     await self._ack(row.msg_id)

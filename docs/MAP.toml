@@ -41,6 +41,16 @@ code = [
 docs = ["docs/safety.md"]
 
 [[rule]]
+name = "runtime-hosts"
+code = [
+    "daemon/src/agentconnect/runtime/runtime.py",
+    "daemon/src/agentconnect/runtime/agent.py",
+    "daemon/src/agentconnect/callback.py",
+    "daemon/src/agentconnect/daemon/*.py",
+]
+docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
+
+[[rule]]
 name = "python-sdk"
 code = ["sdk/python/src/agentconnect_sdk/*.py"]
 docs = ["docs/sdk.md"]

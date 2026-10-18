@@ -289,7 +289,7 @@ Uses the **human token**: a person makes this decision.
 
 Run agentconnectd in the foreground (JSON logs on stderr).
 
-Starts the adapter named by daemon.default_adapter (webhook or sse), and the A2A adapter when a2a.local_agent_url or a2a.facade_port is set.
+Starts the adapter named by daemon.default_adapter (webhook or sse), and the A2A adapter when a2a.local_agent_url or a2a.facade_port is set. On SIGINT or SIGTERM, queued sends get up to 3 seconds to go out while the relay is connected; the rest stay in the encrypted outbox for the next start.
 
 ```text
 agentconnect daemon run [OPTIONS]

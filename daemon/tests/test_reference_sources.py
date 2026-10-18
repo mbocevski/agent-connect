@@ -7,7 +7,7 @@ import inspect
 import re
 
 from agentconnect import cli_json, cli_support, config
-from agentconnect.runtime import api
+from agentconnect.runtime import api, errors
 from agentconnect.shapes import Opt, conforms
 
 
@@ -64,7 +64,7 @@ def test_every_route_spec_has_a_handler_and_is_unique() -> None:
 
 def test_error_table_lists_every_status_the_server_maps() -> None:
     documented = {(status, code) for status, code, _ in api.API_ERRORS}
-    for code, status in api.ERROR_STATUS.items():
+    for code, status in errors.ERROR_STATUS.items():
         assert (status, code) in documented
     for status, code, meaning in api.API_ERRORS:
         assert meaning
