@@ -37,6 +37,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Core: discovery (`agentconnect_core::listing` and `::knock`, with Python
   bindings), the one implementation the directory and the daemon verify
   through. Signed listings: the closed AgentCard schema and text limits,
+  one-line text everywhere (no control, format, separator, private-use or
+  unassigned characters of Unicode 17.0.0, and no space but U+0020; the
+  same for knock display names and notes),
   the canonical JCS profile (non-canonical bytes are rejected), and the
   single `EdDSA` JWS by the identity key, which a2a-sdk's own verifier
   accepts. Operator listing tokens checked against pinned directory keys

@@ -705,6 +705,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn revocation_reasons_are_one_line_text() {
+        let (dk, _, _, token) = setup();
+        for c in ['\u{2028}', '\u{202E}', '\u{E000}'] {
+            assert_eq!(
+                dk.revoke_token(&token.token_id, T0, &format!("spam{c}")),
+                Err(bad("revocation reason"))
+            );
+        }
+    }
+
+    #[test]
     fn revocations_verify_under_the_pinned_key_only() {
         let (dk, trusted, _, token) = setup();
         let rev = dk.revoke_token(&token.token_id, T0 + 5, "spam").unwrap();

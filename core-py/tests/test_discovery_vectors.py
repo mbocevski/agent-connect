@@ -199,20 +199,10 @@ def test_knocks() -> None:
     assert json.loads(good["signing_input"].removeprefix("agentconnect/v0/knock")) == without_sig
     assert ed25519_ok(b64d(good["sig_key"]), opened.signing_input, opened.sig)
     assert ac.mailbox_id(b64d(good["sig_key"])) == opened.mailbox_id
-    for case, expected in zip(
-        v["invalid"],
-        [
-            "not this door",
-            "door_id mismatch",
-            "ts out of range",
-            "ts out of range",
-            "sealed knock too short",
-        ],
-        strict=True,
-    ):
+    for case in v["invalid"]:
         with pytest.raises(ac.AgentConnectError) as e:
             door.open_knock(b64d(case["envelope_door_id"]), b64d(case["sealed"]), case["now"])
-        assert str(e.value) == f"invalid knock: {expected}", case["name"]
+        assert str(e.value) == case["error"], case["name"]
     bad = v["bad_signature"]
     forged = door.open_knock(b64d(d["id"]), b64d(bad["sealed"]), bad["now"])
     assert not ed25519_ok(b64d(bad["sig_key"]), forged.signing_input, forged.sig)

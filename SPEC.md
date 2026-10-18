@@ -512,8 +512,8 @@ Knock = {
   "door_id": "<22 b64url>",
   "knock_id": "<16 random bytes, b64url>",
   "ts": <unix seconds>,
-  "display_name": "<≤ 80 chars, no Cc>",
-  "note": "<1 to 500 chars, no Cc; optional>",
+  "display_name": "<≤ 80 chars of one-line text>",
+  "note": "<1 to 500 chars of one-line text; optional>",
   "key_package": "<b64url MLS KeyPackage, v0 suite, with ac_instance_cert, fresh, used for this knock only>",
   "mailbox_id": "<B's mailbox>",
   "welcome_secret": "<32 random bytes, b64url>",
@@ -523,7 +523,12 @@ SealedKnock = enc(1120) ‖ HPKE.Seal(door.key, info = "agentconnect/v0/knock" �
 ```
 
 - The `Knock` is a JCS object (§3.2) with exactly these fields; `note` is
-  absent rather than empty. `SealedKnock` is HPKE base mode (RFC 9180
+  absent rather than empty. `display_name` and `note` MUST be one-line text
+  as defined in §13.1.2 (no Cc, Cf, Zl, Zp, Co, Cs or Cn character of
+  Unicode 17.0.0, and no space but U+0020): the owner's human approves by
+  them, so they must not split lines or reorder what is shown next to
+  them. A knock that breaks this fails check 2 (§6.6.3).
+  `SealedKnock` is HPKE base mode (RFC 9180
   §5.1.1), single-shot: `enc` is the 1120-byte KEM ciphertext and the rest
   is the AEAD ciphertext. In `info`, `door_id` is the raw 16 bytes.
 - `sig` is made with the KeyPackage's leaf signature key `SK_B`, and the
@@ -1466,9 +1471,18 @@ wrapped for reading (the published form is one canonical line):
   MUST be `https://<owner_domain>` or a path under it (`https://<owner_domain>/…`),
   with no query or fragment. A directory shows `provider.organization` only
   next to a verified owner domain (§13.2.4).
-- **Text.** All text is attacker-controlled (§10.5). No string anywhere in a
-  listing may contain a control character (Unicode Cc), so every field is
-  one line. Lengths are counted in Unicode scalar values:
+- **Text.** All text is attacker-controlled (§10.5). Every string anywhere
+  in a listing is **one-line text**: it MUST NOT contain a character whose
+  Unicode 17.0.0 general category is Cc (controls, tabs and newlines
+  included), Cf (format: bidi controls, zero-width characters, the BOM,
+  tags), Zl, Zp, Co (private use), Cs or Cn (unassigned, noncharacters
+  included), and the only space separator (Zs) it may contain is U+0020.
+  Receivers MUST reject a listing that breaks this rule. The categories
+  are those of Unicode 17.0.0 for every implementation, so that verifiers
+  agree on which listings exist; a new protocol version may move to a
+  later Unicode version. The same rule applies to the knock's text
+  (§6.6.2) and a `TokenRevocation.reason` (§13.2.1). Lengths are counted
+  in Unicode scalar values:
 
   | Field | Limit |
   |---|---|
@@ -1597,7 +1611,7 @@ TokenRevocation = {
   "v": 0,
   "token_id": "<b64url>",
   "revoked_at": <unix seconds>,
-  "reason": "<1 to 200 chars, no Cc>",
+  "reason": "<1 to 200 chars of one-line text>",
   "key_id": "<b64url>",
   "sig": "<b64url Ed25519(DK, "agentconnect/v0/listing-token-revoke" || JCS(revocation without "sig"))>"
 }

@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::group::Client;
 use crate::identity::{fingerprint, parse_identity};
 use crate::invite::{NONCE_LEN, hkdf32, open_wrapped_welcome, seal_wrapped_welcome};
-use crate::join::check_display_name;
+use crate::listing::{is_one_line_text, is_text_char};
 use crate::mls::{CS, HPKE_PUBLIC_KEY_LEN, KEM_CIPHERTEXT_LEN, LeafInfo};
 use crate::provider::Store;
 use crate::rng::Rng;
@@ -312,15 +312,23 @@ struct KnockIn<'a> {
     sig: &'a str,
 }
 
+/// Longest `display_name`, in characters.
+pub const MAX_DISPLAY_NAME_CHARS: usize = 80;
+
+/// At most 80 characters of single-line text (SPEC §6.6.2, §13.1.2); may
+/// be empty.
+fn check_display_name(name: &str) -> Result<()> {
+    if name.chars().count() <= MAX_DISPLAY_NAME_CHARS && name.chars().all(is_text_char) {
+        Ok(())
+    } else {
+        Err(bad("display_name"))
+    }
+}
+
+/// 1 to 500 characters of single-line text, when present.
 fn check_note(note: Option<&str>) -> Result<()> {
     match note {
-        Some(n)
-            if n.is_empty()
-                || n.chars().count() > MAX_NOTE_CHARS
-                || n.chars().any(char::is_control) =>
-        {
-            Err(bad("note"))
-        }
+        Some(n) if !is_one_line_text(n, MAX_NOTE_CHARS) => Err(bad("note")),
         _ => Ok(()),
     }
 }
@@ -400,7 +408,7 @@ impl Knock {
         if raw.v != 0 {
             return Err(Error::UnsupportedVersion);
         }
-        check_display_name(&raw.display_name).map_err(|_| bad("display_name"))?;
+        check_display_name(&raw.display_name)?;
         check_note(raw.note.as_deref())?;
         check_mailbox(raw.mailbox_id)?;
         if raw.ts > MAX_SAFE_INTEGER {
@@ -967,6 +975,41 @@ pub(crate) mod tests {
             s.owner.verify_knock(opened).err(),
             Some(Error::KeyPackageReused)
         );
+    }
+
+    /// Review M2: a display name or note that reorders or splits the
+    /// approval prompt is refused on both ends.
+    #[test]
+    fn knock_text_rejects_line_format_and_private_characters() {
+        let s = setup("knock-unicode");
+        let key = s.door.public_key();
+        let (_, k) = knock(&s);
+        for c in [
+            '\u{2028}', '\u{2029}', '\u{202E}', '\u{200B}', '\u{FEFF}', '\u{E000}', '\u{A0}',
+        ] {
+            let text = format!("bob{c}s agent");
+            assert_eq!(
+                s.knocker.create_knock(s.door.id(), key, &text, None).err(),
+                Some(bad("display_name")),
+                "U+{:04X}",
+                u32::from(c)
+            );
+            assert_eq!(
+                s.knocker
+                    .create_knock(s.door.id(), key, "b", Some(&text))
+                    .err(),
+                Some(bad("note"))
+            );
+            let mut forged = k.clone();
+            forged.display_name.clone_from(&text);
+            assert_eq!(
+                Knock::from_json(&forged.to_json()).err(),
+                Some(bad("display_name"))
+            );
+            let mut forged = k.clone();
+            forged.note = Some(text);
+            assert_eq!(Knock::from_json(&forged.to_json()).err(), Some(bad("note")));
+        }
     }
 
     #[test]

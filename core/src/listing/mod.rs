@@ -91,10 +91,39 @@ pub fn is_canonical_host(s: &str) -> bool {
     canonical_relay_host(s).is_ok_and(|c| c == s)
 }
 
-/// Non-empty, at most `max` Unicode scalar values, no control characters
-/// (Unicode Cc).
+/// The Unicode version whose general categories [`is_text_char`] uses
+/// (SPEC §13.1.2).
+pub const TEXT_UNICODE_VERSION: (u64, u64, u64) = unicode_properties::UNICODE_VERSION;
+
+/// Whether `c` may appear in single-line text (SPEC §13.1.2): not a
+/// control (Cc), format (Cf), line or paragraph separator (Zl, Zp),
+/// private-use (Co) or unassigned (Cn) character in Unicode 17.0.0, and no
+/// space separator (Zs) but U+0020. (Surrogates, Cs, can't be a `char`.)
+#[must_use]
+pub fn is_text_char(c: char) -> bool {
+    use unicode_properties::{GeneralCategory as G, UnicodeGeneralCategory as _};
+    match c.general_category() {
+        G::Control
+        | G::Format
+        | G::LineSeparator
+        | G::ParagraphSeparator
+        | G::PrivateUse
+        | G::Surrogate
+        | G::Unassigned => false,
+        G::SpaceSeparator => c == ' ',
+        _ => true,
+    }
+}
+
+/// Single-line text (SPEC §13.1.2): 1 to `max` Unicode scalar values, each
+/// allowed by [`is_text_char`].
+#[must_use]
+pub fn is_one_line_text(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.chars().count() <= max && s.chars().all(is_text_char)
+}
+
 fn text_ok(s: &str, max: usize) -> bool {
-    !s.is_empty() && s.chars().count() <= max && !s.chars().any(char::is_control)
+    is_one_line_text(s, max)
 }
 
 /// Strict Ed25519 verification (as for SPEC §3.3).
@@ -262,6 +291,49 @@ mod tests {
             "",
         ] {
             assert!(!is_owner_domain(bad), "{bad}");
+        }
+    }
+
+    /// Review M2: Cc is not the only way to break a line or disguise text.
+    #[test]
+    fn text_rejects_line_format_private_and_unassigned_characters() {
+        for bad in [
+            '\u{9}',      // tab (Cc)
+            '\u{85}',     // NEL (Cc)
+            '\u{2028}',   // LINE SEPARATOR (Zl)
+            '\u{2029}',   // PARAGRAPH SEPARATOR (Zp)
+            '\u{202E}',   // RIGHT-TO-LEFT OVERRIDE (Cf)
+            '\u{2066}',   // LEFT-TO-RIGHT ISOLATE (Cf)
+            '\u{200B}',   // ZERO WIDTH SPACE (Cf)
+            '\u{200D}',   // ZERO WIDTH JOINER (Cf)
+            '\u{FEFF}',   // BOM (Cf)
+            '\u{AD}',     // SOFT HYPHEN (Cf)
+            '\u{E0041}',  // TAG LATIN CAPITAL LETTER A (Cf)
+            '\u{E000}',   // private use (Co)
+            '\u{10FFFD}', // supplementary private use (Co)
+            '\u{A0}',     // NO-BREAK SPACE (Zs other than U+0020)
+            '\u{3000}',   // IDEOGRAPHIC SPACE (Zs)
+            '\u{0378}',   // unassigned (Cn)
+            '\u{FFFF}',   // noncharacter (Cn)
+        ] {
+            assert!(!is_text_char(bad), "U+{:04X}", u32::from(bad));
+            assert!(
+                !is_one_line_text(&format!("a{bad}b"), 80),
+                "U+{:04X}",
+                u32::from(bad)
+            );
+        }
+        for ok in [
+            ' ',
+            'a',
+            '\u{e9}',
+            '\u{1F600}',
+            '\u{4E2D}',
+            '\u{0627}',
+            '-',
+            '\u{2014}',
+        ] {
+            assert!(is_text_char(ok), "U+{:04X}", u32::from(ok));
         }
     }
 

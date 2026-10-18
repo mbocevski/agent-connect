@@ -9,6 +9,7 @@
 use agentconnect_core::encoding::{MAX_SAFE_INTEGER, from_jcs, jcs};
 use agentconnect_core::listing::{
     DirectoryKey, E2eParams, ListingCard, ListingProvider, ListingSkill, SignedListing, TokenGrant,
+    is_text_char,
 };
 use agentconnect_core::{Identity, Rng};
 use proptest::prelude::*;
@@ -52,11 +53,11 @@ fn json_value() -> impl Strategy<Value = Value> {
     })
 }
 
-/// One-line text of 1 to `max` characters: any Unicode but control
-/// characters.
+/// One-line text of 1 to `max` characters: anything `is_text_char` allows
+/// (SPEC 13.1.2).
 fn text(max: usize) -> impl Strategy<Value = String> {
     prop::collection::vec(
-        any::<char>().prop_filter("no Cc", |c| !c.is_control()),
+        any::<char>().prop_filter("one-line text", |c| is_text_char(*c)),
         1..=max,
     )
     .prop_map(|cs| cs.into_iter().collect())
