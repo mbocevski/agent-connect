@@ -24,7 +24,7 @@ use crate::identity::Instance;
 use crate::invite::{Invite, InviteMeta, InviteSecret};
 use crate::join::{JoinRequest, check_display_name, join_request_mac};
 use crate::journal::{self, JournalEntry, Journaled, Stored, Tx, WELCOME_SCOPE, keeps_state};
-use crate::knock::{Knock, KnockExpectation, KnockSecret, VerifiedKnock};
+use crate::knock::{KNOCK_FUTURE_SECS, Knock, KnockExpectation, KnockSecret, VerifiedKnock};
 use crate::mls::{
     CS, GroupContextInfo, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities,
     check_group_context, check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
@@ -620,16 +620,20 @@ impl<S: Store> Client<S> {
     /// - the group has exactly two leaves: this instance's own, and one of
     ///   `expected.identity` whose instance certificate verifies.
     ///
-    /// A failure after the unwrap spends the KeyPackage and keeps no group
-    /// (SPEC §6.3), so the knock is over; [`Error::KnockWelcome`] (kind
+    /// The knocker stops waiting at [`Knock::gives_up_at`] (SPEC §6.6.6),
+    /// on this client's clock: after it, a Welcome is refused before the
+    /// unwrap. A failure after the unwrap spends the KeyPackage and keeps no
+    /// group (SPEC §6.3), so the knock is over; [`Error::KnockWelcome`] (kind
     /// `welcome_mismatch`) should raise `relay_misbehaviour`. The caller
     /// deletes its stored knock after success (dropping the [`Knock`]
     /// zeroizes the `welcome_secret`).
     ///
     /// # Errors
     ///
-    /// [`Error::WelcomeAuth`] if it doesn't unwrap under this knock (try the
-    /// next pending one), [`Error::NotPermitted`] if `expected` names this
+    /// [`Error::InvalidKnock`] `"lapsed"` (kind `expired`) after
+    /// `gives_up_at`, [`Error::WelcomeAuth`] if it doesn't unwrap under this
+    /// knock (try the next pending one), [`Error::NotPermitted`] if
+    /// `expected` names this
     /// identity, [`Error::KnockWelcome`], or any error of
     /// [`Client::join_from_wrapped_welcome`] but [`Error::MetaMismatch`].
     pub fn join_from_knock_welcome(
@@ -642,6 +646,7 @@ impl<S: Store> Client<S> {
             &Joining::Knock {
                 secret: knock.secret(),
                 expected,
+                gives_up_at: knock.gives_up_at(),
             },
             wrapped,
             None,
@@ -669,6 +674,7 @@ impl<S: Store> Client<S> {
             &Joining::Knock {
                 secret: knock.secret(),
                 expected,
+                gives_up_at: knock.gives_up_at(),
             },
             wrapped,
             Some((key, context)),
@@ -737,7 +743,14 @@ impl<S: Store> Client<S> {
                 }
                 invite.unwrap_welcome(wrapped)?
             }
-            Joining::Knock { secret, expected } => {
+            Joining::Knock {
+                secret,
+                expected,
+                gives_up_at,
+            } => {
+                if self.now() > *gives_up_at {
+                    return Err(Error::InvalidKnock("lapsed"));
+                }
                 if expected.identity == self.instance.identity() {
                     return Err(Error::NotPermitted(
                         "a knock on this identity's own listing",
@@ -817,10 +830,12 @@ enum Joining<'a> {
         invite: &'a InviteSecret,
         expected: &'a InviteMeta,
     },
-    /// An approved knock (SPEC §6.6.5): the listing knocked on.
+    /// An approved knock (SPEC §6.6.5): the listing knocked on, and when
+    /// the knocker stops waiting.
     Knock {
         secret: KnockSecret,
         expected: &'a KnockExpectation,
+        gives_up_at: u64,
     },
 }
 
@@ -832,7 +847,9 @@ impl Joining<'_> {
     fn journal_hash(&self, wrapped: &[u8]) -> String {
         match self {
             Self::Invite { .. } => wire_hash(wrapped),
-            Self::Knock { secret, expected } => {
+            Self::Knock {
+                secret, expected, ..
+            } => {
                 let mut input = b"agentconnect/v0/journal/knock-welcome".to_vec();
                 for part in [
                     secret.knock_id().as_slice(),
@@ -1112,13 +1129,15 @@ impl Group {
     /// with [`Client::create_group`] under the listing's name).
     ///
     /// Only a human approves a knock (SPEC §6.6.4); this is the step after.
-    /// `now` is the caller's clock: the approval lapses at
-    /// [`Knock::lapses_at`], and no Add is committed after it. Atomic, and
-    /// the knock is only borrowed, as for [`Group::add_member`].
+    /// The deadline is checked on this client's clock: the approval lapses
+    /// at [`Knock::lapses_at`], and no Add is committed after it, nor for a
+    /// knock whose `ts` is further ahead of the clock than check 3 allows.
+    /// Atomic, and the knock is only borrowed, as for [`Group::add_member`].
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidKnock`] `"lapsed"` (kind `expired`),
+    /// [`Error::InvalidKnock`] `"lapsed"` (kind `expired`) or `"ts out of
+    /// range"` (kind `stale_timestamp`),
     /// [`Error::KeyPackageReused`], [`Error::NotPermitted`] for a knock
     /// from this instance's own identity or a group that isn't fresh,
     /// [`Error::CommitPending`], or an MLS error.
@@ -1126,9 +1145,8 @@ impl Group {
         &mut self,
         client: &Client<S>,
         knock: &VerifiedKnock,
-        now: u64,
     ) -> Result<CommitOut> {
-        self.atomically(client, |g| g.add_knocker_inner(client, knock, now))
+        self.atomically(client, |g| g.add_knocker_inner(client, knock))
     }
 
     /// Commits the removal of every instance of `identity` (SPEC §9.2:
@@ -1894,10 +1912,13 @@ impl Group {
         &mut self,
         client: &Client<S>,
         knock: &VerifiedKnock,
-        now: u64,
     ) -> Result<CommitOut> {
+        let now = client.now();
         if now > knock.knock().lapses_at() {
             return Err(Error::InvalidKnock("lapsed"));
+        }
+        if knock.knock().ts > now.saturating_add(KNOCK_FUTURE_SECS) {
+            return Err(Error::InvalidKnock("ts out of range"));
         }
         let me = client.instance.identity();
         if knock.identity() == me {

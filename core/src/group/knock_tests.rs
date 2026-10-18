@@ -95,7 +95,7 @@ impl Setup {
     /// The owner approves `v`: a fresh group, the Add confirmed.
     fn approve(&self, v: &VerifiedKnock) -> (Group, CommitOut) {
         let mut g = self.fresh_group();
-        let out = g.add_knocker(&self.owner, v, self.now).unwrap();
+        let out = g.add_knocker(&self.owner, v).unwrap();
         g.confirm_pending_commit(&self.owner, &out.msg_id).unwrap();
         (g, out)
     }
@@ -191,20 +191,79 @@ fn a_welcome_under_another_knock_does_not_open() {
         .unwrap();
 }
 
+/// Review L7: the deadlines are the client's clock, not the caller's.
 #[test]
 fn add_knocker_refuses_a_lapsed_knock_and_changes_nothing() {
     let s = setup("lapsed");
     let (_, v) = s.knock();
     let mut g = s.fresh_group();
     let lapses = v.knock().lapses_at();
-    let e = g.add_knocker(&s.owner, &v, lapses + 1).unwrap_err();
+    s.clock
+        .advance(std::time::Duration::from_secs(lapses - s.now + 1));
+    let e = g.add_knocker(&s.owner, &v).unwrap_err();
     assert_eq!(e, Error::InvalidKnock("lapsed"));
     assert_eq!(e.kind(), crate::ErrorKind::Expired);
     assert!(!g.has_pending_commit());
     assert_eq!(g.epoch(), 0);
     // At the deadline itself it is still in time, in the same group.
-    let out = g.add_knocker(&s.owner, &v, lapses).unwrap();
+    s.clock
+        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(lapses));
+    let out = g.add_knocker(&s.owner, &v).unwrap();
     assert!(out.welcome.is_some());
+}
+
+/// Review L7: a knock stamped further ahead of the owner's clock than check
+/// 3 allows (opened against a caller's clock that ran ahead) isn't Added.
+#[test]
+fn add_knocker_refuses_a_knock_from_the_future() {
+    let s = setup("future");
+    let ahead = s.now + 1000;
+    let (sealed, _) = s
+        .knocker
+        .create_knock_at(s.door.id(), s.door.public_key(), "bob", None, ahead)
+        .unwrap();
+    let v = s
+        .owner
+        .verify_knock(s.door.open_knock(s.door.id(), &sealed, ahead).unwrap())
+        .unwrap();
+    let mut g = s.fresh_group();
+    let e = g.add_knocker(&s.owner, &v).unwrap_err();
+    assert_eq!(e, Error::InvalidKnock("ts out of range"));
+    assert_eq!(e.kind(), crate::ErrorKind::StaleTimestamp);
+    assert!(!g.has_pending_commit());
+    s.clock.advance(std::time::Duration::from_secs(700));
+    g.add_knocker(&s.owner, &v).unwrap();
+}
+
+/// Review L7: the knocker joins only until `gives_up_at` on its own clock;
+/// a later Welcome is refused before the unwrap, so nothing is spent. A
+/// journalled join recorded in time still replays after it.
+#[test]
+fn a_knock_welcome_after_gives_up_at_is_refused() {
+    let s = setup("late");
+    let (k, v) = s.knock();
+    let (g, out) = s.approve(&v);
+    let w = out.welcome.unwrap();
+    let late = std::time::UNIX_EPOCH + std::time::Duration::from_secs(k.gives_up_at() + 1);
+    let in_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(k.gives_up_at());
+    s.clock.set(late);
+    let e = s
+        .knocker
+        .join_from_knock_welcome(&k, &s.expect(), &w)
+        .unwrap_err();
+    assert_eq!(e, Error::InvalidKnock("lapsed"));
+    assert_eq!(e.kind(), crate::ErrorKind::Expired);
+    s.clock.set(in_time);
+    s.knocker
+        .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+        .unwrap();
+    s.clock.set(late);
+    let j = s
+        .knocker
+        .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+        .unwrap();
+    assert!(j.replayed);
+    assert_eq!(j.value.group_id(), g.group_id());
 }
 
 #[test]
@@ -215,7 +274,7 @@ fn add_knocker_refuses_a_used_key_package() {
     // The same verified knock approved again (a replay past the ledger).
     let mut g = s.fresh_group();
     assert_eq!(
-        g.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        g.add_knocker(&s.owner, &v).unwrap_err(),
         Error::KeyPackageReused
     );
     assert!(!g.has_pending_commit());
@@ -224,7 +283,7 @@ fn add_knocker_refuses_a_used_key_package() {
         .mark_key_package_used_for_testing(v2.key_package_ref())
         .unwrap();
     assert_eq!(
-        g.add_knocker(&s.owner, &v2, s.now).unwrap_err(),
+        g.add_knocker(&s.owner, &v2).unwrap_err(),
         Error::KeyPackageReused
     );
 }
@@ -237,7 +296,7 @@ fn add_knocker_needs_a_fresh_group_of_this_identity() {
     let (_, v0) = s.knock();
     let (mut two, _) = s.approve(&v0);
     assert_eq!(
-        two.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        two.add_knocker(&s.owner, &v).unwrap_err(),
         Error::NotPermitted("not a fresh group")
     );
     // One member, but past epoch 0.
@@ -245,14 +304,14 @@ fn add_knocker_needs_a_fresh_group_of_this_identity() {
     let up = later.update(&s.owner).unwrap();
     later.confirm_pending_commit(&s.owner, &up.msg_id).unwrap();
     assert_eq!(
-        later.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        later.add_knocker(&s.owner, &v).unwrap_err(),
         Error::NotPermitted("not a fresh group")
     );
     // Not owned by this identity.
     let other = Identity::generate(&Rng::for_test("knock-group-fresh-other")).unwrap();
     let mut given = forged_group(&s.owner, &other.id());
     assert_eq!(
-        given.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        given.add_knocker(&s.owner, &v).unwrap_err(),
         Error::NotPermitted("not a group this identity created and owns")
     );
     // A floor other than free.
@@ -266,7 +325,7 @@ fn add_knocker_needs_a_fresh_group_of_this_identity() {
         .confirm_pending_commit(&s.owner, &out.msg_id)
         .unwrap();
     assert_eq!(
-        moderated.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        moderated.add_knocker(&s.owner, &v).unwrap_err(),
         Error::NotPermitted("the floor is not free")
     );
     // The knock is still good for a fresh group.
@@ -287,7 +346,7 @@ fn add_knocker_refuses_a_knock_from_its_own_identity() {
         .unwrap();
     let mut g = owner.create_group(NAME, PURPOSE).unwrap();
     assert_eq!(
-        g.add_knocker(&owner, &v, s.now).unwrap_err(),
+        g.add_knocker(&owner, &v).unwrap_err(),
         Error::NotPermitted("a knock from this identity")
     );
 }
@@ -741,25 +800,25 @@ fn one_knock_is_not_added_into_two_pending_groups() {
     let s = setup("double");
     let (k, v) = s.knock();
     let mut g1 = s.fresh_group();
-    let o1 = g1.add_knocker(&s.owner, &v, s.now).unwrap();
+    let o1 = g1.add_knocker(&s.owner, &v).unwrap();
     let mut g2 = s.fresh_group();
     assert_eq!(
-        g2.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        g2.add_knocker(&s.owner, &v).unwrap_err(),
         Error::KeyPackageReused
     );
     assert!(!g2.has_pending_commit());
     // Discarding the first Add releases the KeyPackage.
     g1.discard_pending_commit(&s.owner).unwrap();
-    let o2 = g2.add_knocker(&s.owner, &v, s.now).unwrap();
+    let o2 = g2.add_knocker(&s.owner, &v).unwrap();
     assert_eq!(
-        g1.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        g1.add_knocker(&s.owner, &v).unwrap_err(),
         Error::KeyPackageReused
     );
     g2.confirm_pending_commit(&s.owner, &o2.msg_id).unwrap();
     // Merged, it is used for good.
     let mut g3 = s.fresh_group();
     assert_eq!(
-        g3.add_knocker(&s.owner, &v, s.now).unwrap_err(),
+        g3.add_knocker(&s.owner, &v).unwrap_err(),
         Error::KeyPackageReused
     );
     s.knocker
@@ -850,7 +909,7 @@ fn a_knock_welcome_into_a_group_with_history_is_refused() {
     let third = client("history-third", &s.clock);
     let (k3, v3) = s.knock_from(&third);
     let mut g = s.fresh_group();
-    let o3 = g.add_knocker(&s.owner, &v3, s.now).unwrap();
+    let o3 = g.add_knocker(&s.owner, &v3).unwrap();
     g.confirm_pending_commit(&s.owner, &o3.msg_id).unwrap();
     third
         .join_from_knock_welcome(&k3, &s.expect(), o3.welcome.as_ref().unwrap())
@@ -922,7 +981,7 @@ fn a_knock_welcome_with_a_floor_or_roles_add_knocker_never_builds_is_refused() {
         } else {
             Error::NotPermitted("the floor is not free")
         };
-        assert_eq!(forged.add_knocker(&s.owner, &v, s.now).unwrap_err(), want);
+        assert_eq!(forged.add_knocker(&s.owner, &v).unwrap_err(), want);
     }
     // The owner as its own admin or moderator is the same group.
     let (k, v) = s.knock();
@@ -932,7 +991,7 @@ fn a_knock_welcome_with_a_floor_or_roles_add_knocker_never_builds_is_refused() {
         ..base
     };
     let mut g = forged_group_with(&s.owner, &owner, &policy);
-    let out = g.add_knocker(&s.owner, &v, s.now).unwrap();
+    let out = g.add_knocker(&s.owner, &v).unwrap();
     g.confirm_pending_commit(&s.owner, &out.msg_id).unwrap();
     s.knocker
         .join_from_knock_welcome(&k, &s.expect(), out.welcome.as_ref().unwrap())

@@ -846,24 +846,24 @@ impl Client {
 
     /// The approved knock's Add (SPEC §6.6.4), committed in the fresh group
     /// `group_id` (pending until confirmed); `welcome` is wrapped under the
-    /// knock key. `now` is the caller's clock: refused after the knock's
+    /// knock key. Refused, on the client's clock, after the knock's
     /// `lapses_at` (kind `expired`).
     fn add_knock<'py>(
         &self,
         py: Python<'py>,
         group_id: &[u8],
         knock: &discovery::VerifiedKnock,
-        now: u64,
     ) -> PyResult<Bound<'py, PyDict>> {
         let out = py.detach(|| {
             with_client!(self, |c, groups| group(c, groups, group_id)?
-                .add_knocker(c, &knock.0, now))
+                .add_knocker(c, &knock.0))
         })?;
         commit_out(py, &out)
     }
 
     /// Joins from the Welcome of a knock on the listing of `identity` named
-    /// `name` (SPEC §6.6.5). Returns the group id. Kind `welcome_mismatch`:
+    /// `name` (SPEC §6.6.5). Returns the group id. Kind `expired`: past the
+    /// knock's `gives_up_at` on the client's clock. Kind `welcome_mismatch`:
     /// the Welcome opened but is not that group; the KeyPackage is spent.
     /// With `key`, journalled with `context` as `join` is.
     #[allow(clippy::too_many_arguments)]

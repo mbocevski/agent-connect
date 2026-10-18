@@ -41,7 +41,7 @@ class Pair:
 
     def approve(self, knock: ac.VerifiedKnock | None = None) -> tuple[bytes, dict[str, Any]]:
         gid = self.owner.create_group(NAME, PURPOSE)
-        out = self.owner.add_knock(gid, knock or self.verified, T0 + 120)
+        out = self.owner.add_knock(gid, knock or self.verified)
         self.owner.confirm_pending_commit(gid, out["msg_id"])
         return gid, out
 
@@ -73,17 +73,44 @@ def test_an_approved_knock_joins_after_a_restart(rng: random.Random) -> None:
 def test_add_knock_refuses_a_lapsed_or_used_knock(rng: random.Random) -> None:
     p = Pair(rng)
     gid = p.owner.create_group(NAME, PURPOSE)
+    # The deadline is the client's clock.
+    p.owner._set_time_for_testing(p.verified.lapses_at + 1)
     with pytest.raises(ac.AgentConnectError) as e:
-        p.owner.add_knock(gid, p.verified, p.verified.lapses_at + 1)
+        p.owner.add_knock(gid, p.verified)
     assert e.value.kind == "expired"
     assert not p.owner.has_pending_commit(gid)
+    p.owner._set_time_for_testing(T0)
     p.owner._mark_key_package_used_for_testing(p.verified.key_package_ref)
     with pytest.raises(ac.AgentConnectError) as e:
-        p.owner.add_knock(gid, p.verified, T0)
+        p.owner.add_knock(gid, p.verified)
     assert e.value.kind == "key_package_reused"
     with pytest.raises(ac.AgentConnectError) as e:
         p.owner.restore_knock(p.verified.to_secret_bytes())
     assert e.value.kind == "key_package_reused"
+
+
+def test_a_welcome_after_gives_up_at_is_refused(rng: random.Random) -> None:
+    p = Pair(rng)
+    _, out = p.approve()
+    p.knocker._set_time_for_testing(p.pending.gives_up_at + 1)
+    with pytest.raises(ac.AgentConnectError) as e:
+        p.join(out["welcome"])
+    assert e.value.kind == "expired"
+    # Refused before the unwrap: in time, the same Welcome still joins.
+    p.knocker._set_time_for_testing(p.pending.gives_up_at)
+    p.join(out["welcome"])
+
+
+def test_a_knock_is_not_added_into_two_pending_groups(rng: random.Random) -> None:
+    p = Pair(rng)
+    g1 = p.owner.create_group(NAME, PURPOSE)
+    p.owner.add_knock(g1, p.verified)
+    g2 = p.owner.create_group(NAME, PURPOSE)
+    with pytest.raises(ac.AgentConnectError) as e:
+        p.owner.add_knock(g2, p.verified)
+    assert e.value.kind == "key_package_reused"
+    p.owner.discard_pending_commit(g1)
+    p.owner.add_knock(g2, p.verified)
 
 
 def test_a_tampered_stored_knock_does_not_restore(rng: random.Random) -> None:
@@ -162,7 +189,7 @@ def test_bad_arguments_raise_instead_of_panicking(rng: random.Random) -> None:
     with pytest.raises(ac.AgentConnectError):
         p.knocker.create_knock(p.door.id, p.door.public_key, "b", ts=2**53)
     with pytest.raises(ac.AgentConnectError):
-        p.owner.add_knock(b"no such group", p.verified, T0)
+        p.owner.add_knock(b"no such group", p.verified)
     with pytest.raises(ac.AgentConnectError):
         p.join(b"")
     with pytest.raises(ac.AgentConnectError) as e:

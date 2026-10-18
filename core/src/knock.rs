@@ -908,10 +908,12 @@ impl<S: Store> Client<S> {
     /// [`VerifiedKnock::to_secret_bytes`], kept in its own encrypted store
     /// while the approval waits. The bytes must be a canonical `Knock`, and
     /// checks 4–5 run again (the KeyPackage, including that it is still
-    /// unused, and the signature). The door and `ts` checks don't: the
-    /// knock passed them when it arrived, and the approval's own deadline
-    /// is [`Knock::lapses_at`], which [`crate::Group::add_knocker`]
-    /// enforces.
+    /// unused, and the signature). The door and `ts` checks don't, so that
+    /// an approval can wait across a restart: the knock passed them when it
+    /// arrived. The deadlines are checked at the Add, on this client's
+    /// clock: [`crate::Group::add_knocker`] refuses a knock past
+    /// [`Knock::lapses_at`], and the knocker's join refuses a Welcome past
+    /// [`Knock::gives_up_at`].
     ///
     /// # Errors
     ///
