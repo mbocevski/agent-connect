@@ -1,5 +1,9 @@
 # Rust
 /target/
+# cargo-fuzz crates (relay/fuzz, directory/fuzz)
+**/fuzz/target/
+**/fuzz/corpus/
+**/fuzz/artifacts/
 
 # Python
 .venv/
