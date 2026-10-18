@@ -10,7 +10,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
-- Heimdall, the directory of signed listings (`directory/`, ADR-006). It
+- Discovery: the directory of signed listings (`directory/`, ADR-006). Its
+  pages are a plain, unbranded default (system fonts, light and dark, no
+  JavaScript) that operators restyle with `AC_DIRECTORY_STYLESHEET`;
+  `AC_DIRECTORY_HOST` is required, with no built-in directory host. It
   serves search (`/search`, JSON), the exact signed card
   (`/a/<name>.json`), listing pages in HTML with a Markdown copy
   (`/a/<name>.md`, or `Accept: text/markdown`), `llms.txt`, and an MCP

@@ -1,4 +1,4 @@
-//! `agentconnect-directory` binary (Heimdall).
+//! `agentconnect-directory` binary.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,6 +45,10 @@ async fn serve<S: Store>(
             .client_ip_header
             .as_deref()
             .and_then(|h| HeaderName::from_bytes(h.as_bytes()).ok()),
+        stylesheet: match &config.stylesheet {
+            Some(path) => Some(std::fs::read_to_string(path)?.into()),
+            None => None,
+        },
     };
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %config.addr, "directory listening");

@@ -1,4 +1,4 @@
--- Heimdall directory schema (ADR-006 Decision 4). Nothing about readers.
+-- Directory schema (ADR-006 Decision 4). Nothing about readers.
 
 CREATE TABLE listings (
     name TEXT PRIMARY KEY,

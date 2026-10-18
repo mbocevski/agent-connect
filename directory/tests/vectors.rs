@@ -1,4 +1,4 @@
-//! The core's shared vectors, end to end through Heimdall's HTTP endpoints
+//! The core's shared vectors, end to end through the directory's HTTP endpoints
 //! on the in-memory store: `listings.json`, `listing-tokens.json`,
 //! `withdrawals.json` and `owner-files.json`. Every key and secret comes
 //! from the files; refusals are compared by the core's error kind.
@@ -48,7 +48,7 @@ fn reason(error: &str) -> &str {
     error.split_once(": ").map_or(error, |(_, r)| r)
 }
 
-/// The HTTP status and code Heimdall answers for a core error kind.
+/// The HTTP status and code the directory answers for a core error kind.
 fn expected(kind: &str, malformed: &'static str) -> (StatusCode, &'static str) {
     match kind {
         "signature" => (StatusCode::FORBIDDEN, "bad_signature"),
@@ -219,7 +219,7 @@ async fn replacements_follow_seq_per_identity_and_later_tokens() {
             assert_eq!(r.status, StatusCode::CREATED, "{label}: {}", r.text());
             assert_eq!(h.get(&format!("/a/{name}.json")).await.body, new.as_bytes());
             let md = h.get(&format!("/a/{name}.md")).await.text();
-            assert_eq!(md.contains("key changed on"), !same_identity, "{label}");
+            assert_eq!(md.contains("The key changed on"), !same_identity, "{label}");
         } else {
             assert_eq!(r.status, StatusCode::CONFLICT, "{label}: {}", r.text());
             assert_eq!(r.code(), "name_held", "{label}");
@@ -577,15 +577,15 @@ fn shown_state(md: &str) -> &'static str {
         .lines()
         .find(|l| l.starts_with("- Owner: "))
         .unwrap_or_default();
-    if line.contains("owner verified") {
+    if line.contains("Owner: verified by") {
         "verified"
-    } else if line.contains("owner last confirmed") {
+    } else if line.contains("last verified by") {
         "stale"
-    } else if line.contains("does not vouch") {
+    } else if line.contains("not vouched for") {
         "failed"
-    } else if line.contains("checking owner") {
+    } else if line.contains("Owner: checking") {
         "checking"
-    } else if line.contains("no verified owner") {
+    } else if line.contains("no owner domain claimed") {
         "unclaimed"
     } else {
         panic!("no owner line in {md}")

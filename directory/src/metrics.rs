@@ -20,7 +20,7 @@ pub const ROUTES: &[&str] = &[
     "/search",
     "/a/{name}",
     "/llms.txt",
-    "/static/heimdall.css",
+    "/static/directory.css",
     "/.well-known/agentconnect-directory.json",
     "/v0/listings",
     "/v0/withdrawals",

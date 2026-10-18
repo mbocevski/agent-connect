@@ -1,18 +1,25 @@
-# agentconnect-directory (Heimdall)
+# agentconnect-directory
 
-Heimdall is the AgentConnect directory served at `agents.yggdrasill.network`
-for the relay Ratatoskr at `connect.yggdrasill.network`. It indexes signed
-listings (A2A Agent Cards with the `e2e` extension) and serves them as HTML,
-Markdown, JSON and MCP. The design and the trust model are in
-[ADR-006](../docs/adr/006-discovery.md).
+The directory is the server side of AgentConnect discovery. It indexes signed
+listings (A2A Agent Cards with the `e2e` extension) of agents reachable
+through an AgentConnect relay, and serves them as HTML, Markdown, JSON and
+MCP. The design and the trust model are in
+[ADR-006](../docs/adr/006-discovery.md). The examples use
+`directory.example.org` as the directory's host.
 
-Heimdall holds no keys and no secrets, never talks to the relay and never
-learns mailbox ids. A listing proves who signed it, not what the agent does.
+The directory holds no keys and no secrets, never talks to the relay and
+never learns mailbox ids. A listing proves who signed it, not what the agent
+does.
+
+The pages are a plain, unbranded default: system fonts, a light and a dark
+scheme, no JavaScript. To restyle them, point `AC_DIRECTORY_STYLESHEET` at a
+CSS file; it is served instead of `static/directory.css` at
+`/static/directory.css`.
 
 ## Run
 
 ```sh
-AC_DIRECTORY_TOKEN_KEYS=<DK.pub> just directory   # in-memory store, 127.0.0.1:8090
+AC_DIRECTORY_HOST=directory.example.org AC_DIRECTORY_TOKEN_KEYS=<DK.pub> just directory   # in-memory store, 127.0.0.1:8090
 docker build -f directory/Dockerfile -t agentconnect-directory .   # from the repo root
 ```
 
@@ -22,10 +29,11 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 |---|---|---|
 | `AC_DIRECTORY_ADDR` | `127.0.0.1:8090` | Listen address. |
 | `AC_DIRECTORY_DB` | required | A `postgres://` URL, or `memory:` for a throwaway store. Migrations run at start. |
-| `AC_DIRECTORY_HOST` | `agents.yggdrasill.network` | This directory's host. Listings, tokens and withdrawals must name it, and MCP requests must carry it as `Host`. |
+| `AC_DIRECTORY_HOST` | required | This directory's public host, e.g. `directory.example.org`. Listings, tokens and withdrawals must name it, and MCP requests must carry it as `Host`. |
 | `AC_DIRECTORY_RELAYS` | `connect.yggdrasill.network` | Comma-separated relays a listing may point at. The first is shown on the site. |
 | `AC_DIRECTORY_TOKEN_KEYS` | required | Comma-separated operator token public keys (`DK.pub`, base64url): one, or two while rotating. Tokens, revocations and the well-known file use them. |
 | `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header a trusted reverse proxy sets to the client address (its last value is used) for rate limiting. Unset: the TCP peer. |
+| `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `RUST_LOG` | `info` | `tracing` filter. |
 
 Logs and metrics carry route templates and status codes only: no query
@@ -55,7 +63,7 @@ A listing in JSON (search and MCP):
 
 ```json
 {"name": "release-planner", "card_url": "...", "page_url": "...", "markdown_url": "...",
- "knock": "agentconnect knock agents.yggdrasill.network/a/release-planner",
+ "knock": "agentconnect knock directory.example.org/a/release-planner",
  "identity": "ac:v0:...", "fingerprint": "3f9a 0c21 ...",
  "owner": {"state": "verified", "domain": "example.com"},
  "door": {"state": "open", "expires_at": 1792800000},
@@ -109,8 +117,8 @@ the core's stable error kind (`malformed`, `signature`, `unknown_key`,
 | `too_large` | 413 | Over 32 KiB. |
 | `rate_limited` | 429 | Over the per-address limit; see `Retry-After`. |
 
-Who may publish a name is the core's `NameRecord`: per name Heimdall
-stores the high-water mark (the newest accepted token's `issued_at` and its
+Who may publish a name is the core's `NameRecord`: per name the
+directory stores the high-water mark (the newest accepted token's `issued_at` and its
 identity, kept through withdrawal, expiry and revocation, so a name can't go
 back to a key it was rotated away from) and per-identity tombstones. A
 publish is admitted with `NameRecord::admits` against the stored listing and
@@ -120,7 +128,7 @@ changed since the decision.
 
 ## Owner verification
 
-On publish and every 6 hours Heimdall fetches
+On publish and every 6 hours the directory fetches
 `https://<owner_domain>/.well-known/agentconnect.json`: HTTPS on port 443, the
 system roots, no redirects, no proxies, `application/json`, at most 64 KiB,
 5 s in all. Names that resolve only to loopback, private, link-local, ULA or
@@ -138,7 +146,7 @@ Every signature, token and canonical-form check goes through the `Verifier`
 trait in `src/verify.rs`, implemented by `CoreVerifier` on
 `agentconnect_core::listing` with the pinned operator keys. The `detail` of a
 `bad_listing`, `bad_token` or `bad_request` refusal is the core's reason.
-Heimdall itself keeps only what needs its own state: its host and relays,
+The directory itself keeps only what needs its own state: its host and relays,
 the stored listing, tombstones and name marks, and revoked token ids. The
 token is checked before the publish-time rules, so an unauthorised listing
 is refused as such.

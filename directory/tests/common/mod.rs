@@ -33,8 +33,8 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-pub const HOST: &str = "agents.test";
-pub const RELAY: &str = "relay.test";
+pub const HOST: &str = "directory.example.org";
+pub const RELAY: &str = "relay.example.org";
 pub const DAY: u64 = 86_400;
 pub const CLIENT: &str = "198.51.100.7";
 

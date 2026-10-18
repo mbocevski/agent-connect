@@ -53,6 +53,8 @@ const MAX_SMALL_BODY: usize = 4 * 1024;
 pub struct HttpConfig {
     /// A trusted proxy's client-address header (last value used).
     pub client_ip_header: Option<HeaderName>,
+    /// The stylesheet served at [`render::CSS_PATH`] instead of the default.
+    pub stylesheet: Option<Arc<str>>,
 }
 
 struct App<S: Store> {
@@ -349,12 +351,18 @@ async fn llms<S: Store>(State(app): State<Shared<S>>) -> Response {
     }
 }
 
-async fn stylesheet() -> Response {
+async fn stylesheet<S: Store>(State(app): State<Shared<S>>) -> Response {
+    let css = app
+        .config
+        .stylesheet
+        .as_deref()
+        .unwrap_or(render::CSS)
+        .to_owned();
     respond(
         StatusCode::OK,
         "text/css; charset=utf-8",
         "public, max-age=3600",
-        render::CSS,
+        css,
     )
 }
 
@@ -566,7 +574,7 @@ pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
         .route("/search", get(search::<S>))
         .route("/a/{name}", get(listing::<S>))
         .route("/llms.txt", get(llms::<S>))
-        .route(render::CSS_PATH, get(stylesheet))
+        .route(render::CSS_PATH, get(stylesheet::<S>))
         .route(
             "/.well-known/agentconnect-directory.json",
             get(well_known::<S>),

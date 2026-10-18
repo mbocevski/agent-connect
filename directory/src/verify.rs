@@ -1,11 +1,11 @@
 //! The seam to `agentconnect_core::listing` for every signature, token and
 //! canonical-form check (ADR-006, Decisions 1, 2 and 6).
 //!
-//! Heimdall never checks a signature, parses a JWS or canonicalises JSON on
+//! The directory never checks a signature, parses a JWS or canonicalises JSON on
 //! its own. Everything that decides whether a signed object is genuine goes
 //! through a [`Verifier`], implemented by [`CoreVerifier`]. Refusals carry
 //! the core's stable [`ErrorKind`], which picks the HTTP code, and the
-//! core's reason, which becomes the detail. What Heimdall does itself is
+//! core's reason, which becomes the detail. What the directory does itself is
 //! state the core can't see: its host and relays, the stored listing and
 //! tombstones (compared with the core's `replaces` and `tombstoned_by`) and
 //! the revoked token ids.
@@ -74,7 +74,7 @@ impl From<&Error> for Rejection {
     }
 }
 
-/// Every cryptographic and canonical-form check Heimdall needs.
+/// Every cryptographic and canonical-form check the directory needs.
 pub trait Verifier: Send + Sync + 'static {
     /// Verify published listing bytes: canonical JCS, the closed schema and
     /// field rules, the one JWS and its signature, and the token's binding.

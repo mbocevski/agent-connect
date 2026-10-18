@@ -415,7 +415,7 @@ fn from_vouch(v: core::Vouch) -> OwnerCheck {
     }
 }
 
-/// The stored history as the core's `OwnerChecks`. Heimdall never skips a
+/// The stored history as the core's `OwnerChecks`. The directory never skips a
 /// fetch.
 fn checks(s: &OwnerStatus) -> core::OwnerChecks {
     core::OwnerChecks {
@@ -449,7 +449,7 @@ pub fn record_fetch(s: OwnerStatus, at: u64, check: OwnerCheck) -> OwnerStatus {
 
 /// The state to show for a listing at `now`: the core's `owner_state` on
 /// the stored history. A revoked key is withdrawn at once, so `revoked`
-/// never reaches a live page; Heimdall never skips a fetch, so `unchecked`
+/// never reaches a live page; the directory never skips a fetch, so `unchecked`
 /// can't occur. Both show as the nearest live state.
 #[must_use]
 pub fn owner_state(domain: Option<&str>, s: &OwnerStatus, now: u64) -> OwnerState {

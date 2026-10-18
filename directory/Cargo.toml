@@ -1,6 +1,6 @@
 [package]
 name = "agentconnect-directory"
-description = "Heimdall: the AgentConnect directory of signed listings"
+description = "AgentConnect discovery: the directory of signed listings"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

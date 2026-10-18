@@ -56,7 +56,10 @@ async fn initialize_and_list_tools() {
     .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     let init = r.json();
-    assert_eq!(init["result"]["serverInfo"]["name"], "heimdall");
+    assert_eq!(
+        init["result"]["serverInfo"]["name"],
+        "agentconnect-directory"
+    );
     assert!(init["result"]["capabilities"]["tools"].is_object());
     let r = rpc(
         &h,

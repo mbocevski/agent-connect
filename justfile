@@ -75,10 +75,10 @@ contract:
     uv run --no-project python scripts/check_manifest.py
 
 # Integration tier (docker compose); populated as components land
-# Postgres for Heimdall's store comes from compose.test.yaml (loopback only).
+# Postgres for the directory's store comes from compose.test.yaml (loopback only).
 test-int:
     docker compose -f compose.test.yaml up -d --wait
-    status=0; AC_DIRECTORY_TEST_DB=postgres://heimdall@127.0.0.1:55432/heimdall cargo nextest run -p agentconnect-directory --locked --run-ignored only || status=$?; docker compose -f compose.test.yaml down; exit "$status"
+    status=0; AC_DIRECTORY_TEST_DB=postgres://directory@127.0.0.1:55432/directory?sslmode=disable cargo nextest run -p agentconnect-directory --locked --run-ignored only || status=$?; docker compose -f compose.test.yaml down; exit "$status"
 
 # Nightly tier: mutation testing, quarantined tests, long property runs
 # (fuzzing and benchmarks are added with the core)
@@ -142,7 +142,7 @@ ci: lint test cov changelog-check docs-check
 relay:
     cargo run -p agentconnect-relay
 
-# Run Heimdall locally on the in-memory store (needs AC_DIRECTORY_TOKEN_KEYS; AC_DIRECTORY_ADDR, default 127.0.0.1:8090)
+# Run the directory locally on the in-memory store (needs AC_DIRECTORY_TOKEN_KEYS; AC_DIRECTORY_ADDR, default 127.0.0.1:8090)
 directory:
     AC_DIRECTORY_DB="${AC_DIRECTORY_DB:-memory:}" cargo run -p agentconnect-directory
 

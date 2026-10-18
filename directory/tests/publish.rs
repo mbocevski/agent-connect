@@ -133,7 +133,7 @@ async fn listing_params_are_checked_against_this_directory() {
     )
     .await;
     let mut s = h.spec("params", &id);
-    s.relay = "other-relay.test".into();
+    s.relay = "other-relay.example.org".into();
     refused(
         &h,
         h.build(&s).bytes,

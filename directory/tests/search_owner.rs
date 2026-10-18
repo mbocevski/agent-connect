@@ -63,7 +63,7 @@ async fn search_ranks_names_above_descriptions_and_filters_by_skill() {
         first["knock"]
             .as_str()
             .unwrap()
-            .starts_with("agentconnect knock agents.test/a/")
+            .starts_with("agentconnect knock directory.example.org/a/")
     );
     assert_eq!(
         names(&h.get("/search?skill=code+review").await.json()),
@@ -93,11 +93,11 @@ async fn search_ranks_names_above_descriptions_and_filters_by_skill() {
         h.get("/?q=nothingmatches")
             .await
             .text()
-            .contains("No listed agent matches.")
+            .contains("No listing matches.")
     );
     let md = h.get("/index.md?q=release").await.text();
     assert!(
-        md.contains("- release-planner: https://agents.test/a/release-planner.md"),
+        md.contains("- release-planner: https://directory.example.org/a/release-planner.md"),
         "{md}"
     );
 }
@@ -130,17 +130,17 @@ async fn owner_states_move_from_verified_to_stale_to_failed() {
     h.fetcher.vouch("example.com", &id.id());
     h.publish(&s).await;
     let page = || async { h.get("/a/aging.md").await.text() };
-    assert!(page().await.contains("owner verified · example.com"));
+    assert!(page().await.contains("verified by example.com"));
     // The domain stops answering: verified for 24 h, then stale.
     h.fetcher.fail("example.com", FetchError::Timeout);
     h.advance(6 * 3600);
     assert_eq!(h.dir.recheck_due().await.unwrap(), 1);
-    assert!(page().await.contains("owner verified · example.com"));
+    assert!(page().await.contains("verified by example.com"));
     h.advance(19 * 3600);
     h.dir.recheck_due().await.unwrap();
     let md = page().await;
     assert!(
-        md.contains("owner last confirmed 2025-01-01 · example.com"),
+        md.contains("last verified by example.com on 2025-01-01"),
         "{md}"
     );
     assert!(
@@ -151,11 +151,7 @@ async fn owner_states_move_from_verified_to_stale_to_failed() {
     // No success for 7 days: failed, out of search, still served.
     h.advance(6 * DAY);
     h.dir.recheck_due().await.unwrap();
-    assert!(
-        page()
-            .await
-            .contains("example.com does not vouch for this key")
-    );
+    assert!(page().await.contains("not vouched for by example.com"));
     assert_eq!(
         names(&h.get("/search?q=aging").await.json()),
         Vec::<String>::new()
@@ -165,7 +161,7 @@ async fn owner_states_move_from_verified_to_stale_to_failed() {
     h.fetcher.vouch("example.com", &id.id());
     h.advance(6 * 3600);
     h.dir.recheck_due().await.unwrap();
-    assert!(page().await.contains("owner verified · example.com"));
+    assert!(page().await.contains("verified by example.com"));
 }
 
 #[tokio::test]
@@ -181,13 +177,13 @@ async fn a_file_that_does_not_list_the_key_fails_at_once() {
         h.get("/a/unvouched")
             .await
             .text()
-            .contains("example.com does not vouch for this key")
+            .contains("not vouched for by example.com")
     );
     assert_eq!(names(&h.get("/search").await.json()), Vec::<String>::new());
     // Scoped to other listings only.
     h.fetcher.serve(
         "example.com",
-        &json!({"v": 0, "identities": [{"identity": id.id(), "listings": ["agents.test/a/other"]}]}),
+        &json!({"v": 0, "identities": [{"identity": id.id(), "listings": ["directory.example.org/a/other"]}]}),
     );
     h.advance(6 * 3600);
     h.dir.recheck_due().await.unwrap();
@@ -195,11 +191,11 @@ async fn a_file_that_does_not_list_the_key_fails_at_once() {
         h.get("/a/unvouched.md")
             .await
             .text()
-            .contains("does not vouch")
+            .contains("not vouched for")
     );
     h.fetcher.serve(
         "example.com",
-        &json!({"v": 0, "identities": [{"identity": id.id(), "listings": ["agents.test/a/unvouched"]}]}),
+        &json!({"v": 0, "identities": [{"identity": id.id(), "listings": ["directory.example.org/a/unvouched"]}]}),
     );
     h.advance(6 * 3600);
     h.dir.recheck_due().await.unwrap();
@@ -207,7 +203,7 @@ async fn a_file_that_does_not_list_the_key_fails_at_once() {
         h.get("/a/unvouched.md")
             .await
             .text()
-            .contains("owner verified · example.com")
+            .contains("verified by example.com")
     );
 }
 
