@@ -32,9 +32,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   encrypted database for MCP sessions attached to the daemon, and the
   agent-scope routes `GET /v0/deliveries` (a long poll that leases messages
   for 120 seconds under a lease token, at most 4 waiting per token) and
-  `POST /v0/deliveries/ack` (only the lease's ids). Agent-token requests may
-  use 48 of the local API's 64 connections, so the human's CLI always gets
-  through. The data directory's lock
+  `POST /v0/deliveries/ack` (only the lease's ids), and
+  `POST /v0/deliveries/release` (give a lease's ids back at once).
+  Authenticated agent-token requests may use 48 of the local API's 64
+  connections, so they can't take every one. The data directory's lock
   note names an MCP server as its holder.
 - Daemon and CLI: knocking on a listing, and approving knocks
   (docs/discovery.md, SPEC 6.6). `agentconnect knock <host>/a/<name>`

@@ -85,9 +85,9 @@ command is `agentconnect mcp` with the options above.
 Every tool wraps one agent-scope operation of the runtime (the same calls the
 agent token may make on the [local API](../api.md)). Arguments are checked
 against the tool's schema: an unknown or missing argument (`null` counts as
-missing), a wrong type, a value out of range or an id that isn't one (ids have
-a letter or digit, and only `A-Z a-z 0-9 _ : . -`) is refused with
-`bad_request`. A refused call is an error result whose
+missing), a wrong type, a value out of range or an id that isn't one (group
+and message ids are base64url: `A-Z a-z 0-9 _ -`, with a letter or digit) is
+refused with `bad_request`. A refused call is an error result whose
 JSON is `{"error": {"code", "message"}}`, with the local API's `code`.
 
 | Tool | Arguments | Result |
@@ -128,9 +128,11 @@ when nothing came.
 A session runs at most two waits at once; another answers `busy` at once. A
 wait the client cancels (MCP `notifications/cancelled`) while it waits ends at
 once and takes nothing. A batch is acknowledged only once its result is
-written to the client: a wait cancelled after it took its batch, or whose
-result never reached the client, acknowledges nothing, and the batch is
-returned again after 120 seconds.
+written to the client and is the result that returned it. A wait cancelled
+after it took its batch acknowledges nothing and gives the batch back at
+once; one whose result never reached the client acknowledges nothing either,
+and its batch is returned again after 120 seconds (or at once, when the
+client reuses that request id).
 
 ### Untrusted content
 
@@ -193,8 +195,10 @@ messages wait at the relay until the next session starts.
   as handled, in the same store the embedded SDK uses, and a repeat after a
   crash is dropped. An ack the runtime refuses or doesn't answer is tried
   again on the next `agentconnect_wait` or `agentconnect_events` and when
-  the session ends; until it went through, the message may be returned
-  again. What remains: a result written to the client's pipe that the client
+  the session ends, oldest first and up to the first that fails again. A
+  session keeps at most 8 such batches, and none older than its 120-second
+  lease, whose messages are offered again anyway. Until an ack went
+  through, its messages may be returned again. What remains: a result written to the client's pipe that the client
   then drops (its own timeout, say) is acknowledged, and the model doesn't
   see it; and a message can be returned twice after a cancelled or unread
   result, a failed ack or a takeover.

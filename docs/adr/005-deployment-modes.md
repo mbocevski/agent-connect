@@ -94,15 +94,19 @@ below ([adapters/mcp.md](../adapters/mcp.md)):
   session uses the same leases, so two sessions never get one message at the
   same time. With `addressed_only` the queue finds the oldest addressed
   message by an indexed column, so no number of other messages before it can
-  hide it. At most 4 polls per token wait at once (`429 busy`), and agent
-  requests may use 48 of the API's 64 connections, so the human's CLI always
-  gets through.
+  hide it. At most 4 polls per token wait at once (`429 busy`), and
+  authenticated agent requests may use 48 of the API's 64 connections.
+  Connections that never send a whole request count before authentication,
+  until the read timeout; that is a separate limit.
 - **When to acknowledge.** Decision 3 says a delivery is acknowledged once a
   tool call returned it to the model. The server acknowledges a wait's batch
-  once it wrote the result to the client's pipe: a call cancelled after it
-  took its batch, or whose result was never written, acknowledges nothing.
-  A failed ack is retried and, until it went through, the batch's messages
-  are not dropped as repeats. A client that drops a written result loses it;
+  once it wrote the result that returned it to the client's pipe (matched by
+  request id and the messages it returned, so a reused id acks nothing); a
+  call cancelled after it took its batch gives it back at once
+  (`POST /v0/deliveries/release`), and one whose result was never written
+  acknowledges nothing. A failed ack is retried (at most 8 batches, none
+  older than its lease, stopping at the first failure) and, until it went
+  through, the batch's messages are not dropped as repeats. A client that drops a written result loses it;
   MCP has no receipt.
 - **Takeover.** Every reconnect looks at the lock as it is then: held, the
   session attaches to the holder; free, it takes the directory over, unless
