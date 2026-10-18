@@ -1049,10 +1049,13 @@ daemon offers:
   `a2a.task_status`, `a2a.task_artifact`, `a2a.task_cancel`) in either
   direction until the member's human approves it, with an expiry. A peer's
   task is decided on its first update, and an approval covers that task's
-  later inbound updates only, until the expiry or the task's end; the
+  later inbound updates only, for a short window of its own (the
+  reference daemon's `task_approval_window_secs`, 600 seconds by default
+  and at most 3600) or until the task's end, whichever comes first; the
   member's own sends are each held. The held messages are capped per
-  sender identity and per group in each direction, and only a sender over
-  its share is charged when the queue is full. Controls
+  sender identity, in count and in bytes (each sender at most its share of
+  the queue), and per group in each direction, and only a sender over its
+  share is charged. Controls
   and Agent Cards are never held, so membership, the loop guard and SAS
   verification keep working. They carry no content: the daemon keeps only
   the fields each control, card and cancellation defines (§7.2), drops one

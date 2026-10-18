@@ -604,22 +604,24 @@ class Store:
 
     def held_load(
         self, group_id: str, direction: str, instance: str, identity: str
-    ) -> tuple[int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int]:
         """Pending holds of a group in one direction: how many, how many from
         ``instance``, how many from ``identity`` (all its instances), their
-        bytes, and how many identities have one."""
+        bytes, how many identities have one, and ``identity``'s bytes."""
         row = self._one(
             "SELECT COUNT(*), COALESCE(SUM(instance = ?), 0), COALESCE(SUM(sender = ?), 0), "
-            "COALESCE(SUM(size), 0), COUNT(DISTINCT sender) FROM held "
+            "COALESCE(SUM(size), 0), COUNT(DISTINCT sender), "
+            "COALESCE(SUM(CASE WHEN sender = ? THEN size ELSE 0 END), 0) FROM held "
             "WHERE group_id = ? AND direction = ? AND status = 'pending'",
             instance,
+            identity,
             identity,
             group_id,
             direction,
         )
         if row is None:
-            return 0, 0, 0, 0, 0
-        return int(row[0]), int(row[1]), int(row[2]), int(row[3]), int(row[4])
+            return 0, 0, 0, 0, 0, 0
+        return int(row[0]), int(row[1]), int(row[2]), int(row[3]), int(row[4]), int(row[5])
 
     def task_decision(self, group_id: str, sender: str, task_id: str) -> tuple[str, int] | None:
         """A task's state (``pending``, ``approved``, ``rejected``) and when it

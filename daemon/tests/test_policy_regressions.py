@@ -23,6 +23,7 @@ from agentconnect.policy import (
     VIOLATIONS,
     Inbound,
     Outbound,
+    PolicyError,
     SafetyPolicy,
     Settings,
     Verdict,
@@ -744,3 +745,94 @@ def test_the_transcript_byte_caps_spare_the_other_groups(
     assert store.transcript_bytes() <= 10 * size
     assert store.transcript_bytes(G) == size * len(store.transcript(G))
     policy.update(G, {"transcript_max_group_bytes": 65536})
+
+
+# -- R2-1: the fair share counts bytes too ----------------------------------------------
+
+
+def big(n: int = 250_000) -> dict[str, Any]:
+    return {"kind": "a2a.message", "origin": "agent", "body": {"parts": [{"text": "x" * n}]}}
+
+
+def test_two_identities_can_not_fill_the_held_bytes_uncharged(
+    policy: SafetyPolicy, store: Store, fake_clock: FakeClock
+) -> None:
+    policy.update(G, {"require_approval": "inbound"})
+    held = {"ac:v0:m1": 0, "ac:v0:m2": 0}
+    charged = 0
+    for minute in range(3):
+        for ident in list(held):
+            for _ in range(17 if minute == 0 else 5):
+                d = policy.inbound(
+                    Inbound(G, ident, ident + "/i1", big(), 250_100, OWNER, 1, 20, True)
+                )
+                if d.verdict is Verdict.HOLD_FOR_APPROVAL:
+                    store.add_held(
+                        {
+                            "hold_id": f"{ident}-{held[ident]}",
+                            "group_id": G,
+                            "direction": "in",
+                            "sender": ident,
+                            "instance": ident + "/i1",
+                            "msg_id": f"{ident}-{held[ident]}",
+                            "kind": "a2a.message",
+                            "size": 250_100,
+                            "created_at": 0,
+                            "expires_at": 10**12,
+                        }
+                    )
+                    held[ident] += 1
+                elif d.reason == "hold_overflow":
+                    charged += 1
+        fake_clock.advance(61)
+    # 1 MiB each (the per-sender byte cap): four 250 KB holds.
+    assert held == {"ac:v0:m1": 4, "ac:v0:m2": 4}
+    assert charged > 0, "a sender over its byte share is charged"
+    honest = Inbound(G, "ac:v0:alice", "a/i1", msg(), 100, OWNER, 1, 20, True)
+    assert policy.inbound(honest) == hold("require_approval"), "room is left for others"
+
+
+def test_the_byte_share_shrinks_with_more_senders(policy: SafetyPolicy, store: Store) -> None:
+    policy.update(
+        G,
+        {"require_approval": "inbound", "max_held_bytes": 2048, "max_held_bytes_per_sender": 2048},
+    )
+    store.add_held(
+        {
+            "hold_id": "o1",
+            "group_id": G,
+            "direction": "in",
+            "sender": "ac:v0:other",
+            "instance": "o/i1",
+            "msg_id": "o1",
+            "kind": "a2a.message",
+            "size": 100,
+            "created_at": 0,
+            "expires_at": 10**12,
+        }
+    )
+    # Two senders waiting: each may hold 1024 bytes.
+    over = Inbound(G, MALLORY, "m/i1", big(1200), 1200, OWNER, 1, 20, True)
+    assert policy.inbound(over) == drop("hold_overflow")
+    fits = Inbound(G, MALLORY, "m/i1", big(900), 900, OWNER, 1, 20, True)
+    assert policy.inbound(fits) == hold("require_approval")
+
+
+# -- N2: the task cover has its own, short window -----------------------------------------
+
+
+def test_the_task_cover_ends_with_its_own_window(
+    policy: SafetyPolicy, fake_clock: FakeClock
+) -> None:
+    policy.update(G, {"require_approval": "inbound", "approval_ttl_secs": 86_400})
+    assert policy.settings(G).task_approval_window_secs == 600
+    assert policy.inbound(inb(task("t9"))) == hold("require_approval")
+    policy.decide_task(G, MALLORY, "t9", approved=True)
+    fake_clock.advance(599)
+    assert policy.inbound(inb(task("t9"))).delivered
+    fake_clock.advance(2)
+    assert policy.inbound(inb(task("t9"))) == hold("require_approval"), (
+        "the cover doesn't last as long as a hold may"
+    )
+    with pytest.raises(PolicyError, match=r"1\.\.3600"):
+        policy.update(G, {"task_approval_window_secs": 3601})

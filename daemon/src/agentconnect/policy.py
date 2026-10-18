@@ -96,6 +96,9 @@ DEFAULT_AUDIT_SENDER_ROWS = 2000
 DEFAULT_MAX_HELD_PER_GROUP = 100
 DEFAULT_MAX_HELD_PER_SENDER = 20
 DEFAULT_MAX_HELD_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_HELD_SENDER_BYTES = 1024 * 1024
+DEFAULT_TASK_WINDOW_SECS = 600
+MAX_TASK_WINDOW_SECS = 3600
 TASK_DECISION_DAYS = 7  # decided tasks are forgotten after a week untouched
 MAX_TRACKED = 10_000  # (group, sender) violation counters kept at most
 DEFAULT_VIOLATION_THRESHOLD = 10
@@ -297,6 +300,25 @@ KNOBS: tuple[Knob, ...] = (
         DEFAULT_MAX_HELD_BYTES,
     ),
     Knob(
+        "max_held_bytes_per_sender",
+        int,
+        DEFAULT_MAX_HELD_SENDER_BYTES,
+        "Bytes one sender identity may have waiting for approval in a group (1024 to "
+        "1048576, 1 MiB), and never more than its share of `max_held_bytes` among the "
+        "senders waiting.",
+        1024,
+        DEFAULT_MAX_HELD_SENDER_BYTES,
+    ),
+    Knob(
+        "task_approval_window_secs",
+        int,
+        DEFAULT_TASK_WINDOW_SECS,
+        "How long approving a peer task's first update lets its later inbound updates "
+        "through (1 to 3600); the task's end closes it sooner.",
+        1,
+        MAX_TASK_WINDOW_SECS,
+    ),
+    Knob(
         "violation_threshold",
         int,
         DEFAULT_VIOLATION_THRESHOLD,
@@ -377,6 +399,8 @@ class Settings:
     max_held_per_group: int = DEFAULT_MAX_HELD_PER_GROUP
     max_held_per_sender: int = DEFAULT_MAX_HELD_PER_SENDER
     max_held_bytes: int = DEFAULT_MAX_HELD_BYTES
+    max_held_bytes_per_sender: int = DEFAULT_MAX_HELD_SENDER_BYTES
+    task_approval_window_secs: int = DEFAULT_TASK_WINDOW_SECS
     violation_threshold: int = DEFAULT_VIOLATION_THRESHOLD
     violation_window_secs: int = DEFAULT_VIOLATION_WINDOW_SECS
     transcript: bool = False
@@ -708,14 +732,17 @@ class SafetyPolicy:
         **Tasks, inbound only.** A peer's task is decided on its first update.
         While that waits, later updates are dropped (``task_pending``).
         Approving it lets the task's inbound updates through until
-        ``approval_ttl_secs`` have passed or the task ends; rejecting it (or
+        ``task_approval_window_secs`` have passed or the task ends; rejecting it (or
         letting it expire) drops them (``task_rejected``) for as long. After
         that window the next update is a new first update. Nothing covers the
         agent's own sends: each is held.
 
         **Caps, per direction.** At most ``max_held_per_sender`` per sender
-        instance and per identity (all its instances): past it the message
-        is dropped as ``hold_overflow``, a violation. When the group's
+        instance and per identity (all its instances), and per identity at
+        most its byte share, ``max_held_bytes_per_sender`` or
+        ``max_held_bytes`` divided by the senders waiting, whichever is
+        smaller: past either the message is dropped as ``hold_overflow``, a
+        violation. When the group's
         queue (``max_held_per_group``, ``max_held_bytes``) is full, the
         message is dropped too, but only a sender holding at least its fair
         share (the group cap divided by the senders waiting, at most the
@@ -726,7 +753,7 @@ class SafetyPolicy:
         if task is not None:
             decided = self.store.task_decision(group_id, sender, task)
             state, at = decided if decided is not None else ("", -math.inf)
-            if now - at < settings.approval_ttl_secs:
+            if now - at < settings.task_approval_window_secs:
                 if state == "approved":
                     if task_ended(inner):
                         self.store.forget_task(group_id, sender, task)
@@ -735,15 +762,16 @@ class SafetyPolicy:
                     return drop("task_pending")
                 if state == "rejected":
                     return drop("task_rejected")
-        total, mine, ours, held_bytes, senders = self.store.held_load(
+        total, mine, ours, held_bytes, senders, our_bytes = self.store.held_load(
             group_id, direction, instance, sender
         )
         cap = settings.max_held_per_sender
-        if mine >= cap or ours >= cap:
+        waiting = max(senders + (0 if ours else 1), 1)
+        byte_share = min(settings.max_held_bytes_per_sender, settings.max_held_bytes // waiting)
+        if mine >= cap or ours >= cap or our_bytes + size > byte_share:
             return drop("hold_overflow")
         if total >= settings.max_held_per_group or held_bytes + size > settings.max_held_bytes:
-            waiting = senders + (0 if ours else 1)
-            share = min(settings.max_held_per_group // max(waiting, 1), cap)
+            share = min(settings.max_held_per_group // waiting, cap)
             return drop("hold_overflow" if ours >= share else "hold_queue_full")
         if task is not None:
             self.store.set_task_state(group_id, sender, task, "pending", now)

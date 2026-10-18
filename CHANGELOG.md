@@ -66,6 +66,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   CLI prints every peer-controlled string with control characters
   replaced, the audit log records unknown kinds as `unknown`, and the
   SPEC 10.1 notice quotes and cleans the sender's name and the scope.
+- Held messages: each identity may have at most its byte share waiting
+  (`policy.max_held_bytes_per_sender`, 1 MiB, or `max_held_bytes` divided
+  by the senders waiting), and a task approval covers a peer task's later
+  updates for `policy.task_approval_window_secs` (600 seconds, at most
+  3600) instead of `approval_ttl_secs`.
 - The A2A facade follows a held send through: its task waits in
   `input-required`, moves to `working` when the human approves (the agent's
   adapter gets a new `send_approved` event), receives the peer's reply, and
