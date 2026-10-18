@@ -54,12 +54,21 @@ What the policy checks, in order:
    (a newer peer's extra field is no violation), and a body that carries
    content (`parts` anywhere, or a top-level `text`, `data`, `file` or
    `raw`) or a known field of the wrong type is `malformed`, dropped, and
-   counts as a violation. An Agent Card's text is capped at the listing
-   limits of ADR-006: name 80 characters, description 500, version 32, at
-   most 16 skills (name 80, description 500, 8 tags of 32, 4 examples of
-   200), 8 media types per list, 8 extensions with `params` of at most
-   4 KiB, 32 KiB in all; control characters become spaces. A card cut to
-   fit no longer matches a signature on it.
+   counts as a violation. An Agent Card is checked, never rewritten:
+   its signature is verified first, on the card as received, against the
+   keys pinned in `a2a.card_keys_file`, and a card that fails is dropped
+   (`bad_signature`, a violation). Every known A2A v1.0 field is then kept
+   exactly as sent, newlines in descriptions included, so a signature
+   still verifies wherever the card goes, while unknown fields (which no
+   signature covers) are left out at every level. A card over a listing
+   limit of ADR-006 is refused (`malformed`), not cut: name 80 characters,
+   description 500, version 32, at most 16 skills (name 80, description
+   500, 8 tags of 32, 4 examples of 200), 8 media types per list, 8
+   extensions with `params` of at most 4 KiB, 8 interfaces, 4 signatures,
+   4 KiB for the security objects, 32 KiB in all. Control characters are
+   cleaned only where text is shown (the CLI, the notice). Your own card
+   goes out exactly as your agent built it; if it doesn't fit, the daemon
+   doesn't send it and logs `own_card_refused`.
 2. **Rates.** Each sender instance may send `sender_per_minute` messages
    (30), all instances of one identity together `identity_rate_multiple`
    times that (3, so 90), and the whole group `group_per_minute` (120).

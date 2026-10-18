@@ -42,6 +42,7 @@ from typing import Any
 
 import agentconnect_core as ac
 from agentconnect import log
+from agentconnect.a2a_adapter import cards, convert
 from agentconnect.adapter import (
     Adapter,
     Delivery,
@@ -392,6 +393,8 @@ class Daemon:
             audit_sender_rows=config.policy_audit_max_rows_per_sender,
         )
         self._background: set[asyncio.Task[None]] = set()
+        # Pinned card-signing keys (SPEC 10.5), checked on every received card.
+        self._card_keys = cards.load_jwks(config.a2a_card_keys_file)
         self._held_wake = asyncio.Event()
         self._fail_codes: dict[int, str] = {}
         self._drain_frame = False
@@ -1308,6 +1311,16 @@ class Daemon:
                 hop = max(hop, max(known) + 1)
         return hop
 
+    def _card_invalid(self, inner: dict[str, Any]) -> bool:
+        """SPEC 10.5: a card whose signature fails against a pinned key
+        (``a2a.card_keys_file``) is not used. Checked on the card as received,
+        before anything else touches it."""
+        if inner.get("kind") != "a2a.agent_card" or not self._card_keys:
+            return False
+        body = inner.get("body")
+        parsed = convert.parse_card(body) if isinstance(body, dict) else None
+        return parsed is not None and cards.signature_status(parsed, self._card_keys) == "invalid"
+
     def _card_changed(self, group_id: str, identity: str, inner: dict[str, Any]) -> bool:
         """Whether an Agent Card says something new: with inbound approval, a
         changed card is held like any content (its text reaches the agent)."""
@@ -1366,6 +1379,7 @@ class Daemon:
                 replayed=replayed,
                 drain_exempt=lambda: self._drain_exempt(group.group_id, identity),
                 card_changed=self._card_changed(group.group_id, identity, inner),
+                card_invalid=self._card_invalid(inner),
             )
         )
         if decision.verdict is Verdict.DROP:
@@ -2444,7 +2458,11 @@ class Daemon:
         adapter = self._adapter_for(group_id)
         card = adapter.capabilities().agent_card if adapter is not None else None
         if card is not None:
-            self.send_message(group_id, card, to=to, kind="a2a.agent_card", internal=True)
+            try:
+                self.send_message(group_id, card, to=to, kind="a2a.agent_card", internal=True)
+            except DaemonError as e:
+                # Over a card cap (agentconnect.schemas): fix the agent's card.
+                LOG.warning("own_card_refused", code=e.code)
 
     # -- operations (local API and adapters) --------------------------------
 
@@ -2757,9 +2775,11 @@ class Daemon:
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
             hop, refs = self._reply_hop(group.group_id, reply_to)
-        # A control, card or cancel goes out in its schema's shape only.
+        # A control or cancel goes out in its schema's shape only. A card goes
+        # out exactly as built (a signature covers it): it must already fit.
         shaped = normalize(kind, body)
-        body = body if shaped is None else shaped
+        if shaped is not None and kind != "a2a.agent_card":
+            body = shaped
         inner = self.inner(
             kind, body, to or ["*"], origin=origin, hop=hop, reply_to=refs, addressee=addressee
         )

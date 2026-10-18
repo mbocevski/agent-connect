@@ -14,10 +14,11 @@ only that shape:
   smuggle text, data or files to an agent (or past ``require_approval``)
   under a kind that is never held as content and never shown as text. So
   does a known field of the wrong type.
-* **Agent Card text is capped** (the listing limits of ADR-006, Decision 1):
-  strings are cut and cleaned of control characters, lists are cut, and an
-  extension's ``params`` larger than :data:`MAX_PARAMS_BYTES` is refused. A
-  card that changed this way no longer verifies against a signature.
+* **Agent Cards are checked, never rewritten** (the listing limits of
+  ADR-006, Decision 1): every known A2A v1.0 field is kept exactly as sent,
+  so a signature over it still verifies; a string, list or object over its
+  cap makes the card ``malformed`` instead of being cut. Unknown fields,
+  which no A2A signature covers, are left out at every level.
 """
 
 from __future__ import annotations
@@ -50,6 +51,9 @@ MAX_EXTENSIONS = 8
 MAX_URI = 512
 MAX_PARAMS_BYTES = 4096
 MAX_CARD_BYTES = 32 * 1024
+MAX_OBJECT_BYTES = 4096  # securitySchemes, securityRequirements, one signature
+MAX_INTERFACES = 8
+MAX_SIGNATURES = 4
 MAX_METADATA_BYTES = 4096
 # The A2A v1.0 AgentCard, AgentSkill and CancelTaskRequest fields (JSON names).
 CARD_FIELDS = frozenset(
@@ -71,8 +75,22 @@ CARD_FIELDS = frozenset(
     }
 )
 SKILL_FIELDS = frozenset(
-    {"id", "name", "description", "tags", "examples", "inputModes", "outputModes"}
+    {
+        "id",
+        "name",
+        "description",
+        "tags",
+        "examples",
+        "inputModes",
+        "outputModes",
+        "securityRequirements",
+    }
 )
+CAPABILITY_FIELDS = frozenset({"streaming", "pushNotifications", "extensions", "extendedAgentCard"})
+EXTENSION_FIELDS = frozenset({"uri", "description", "required", "params"})
+PROVIDER_FIELDS = frozenset({"organization", "url"})
+INTERFACE_FIELDS = frozenset({"url", "protocolBinding", "protocolVersion", "tenant"})
+SIGNATURE_FIELDS = frozenset({"protected", "signature", "header"})
 CANCEL_FIELDS = frozenset({"id", "metadata", "tenant"})
 
 
@@ -150,64 +168,122 @@ def _capabilities(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _skill(skill: Any) -> dict[str, Any]:
-    if not isinstance(skill, dict):
+def _capped(value: Any, longest: int) -> str:
+    """A card string, kept exactly as sent (a signature covers it): over the
+    cap it is refused, never cut. Control characters are cleaned only where
+    it is shown (the CLI, the SPEC 10.1 notice)."""
+    if not isinstance(value, str) or len(value) > longest:
         raise MalformedError
-    out: dict[str, Any] = {"id": _text(skill.get("id"), MAX_SKILL_NAME)}
+    return value
+
+
+def _capped_list(value: Any, most: int, longest: int) -> list[str]:
+    if not isinstance(value, list) or len(value) > most:
+        raise MalformedError
+    return [_capped(v, longest) for v in value]
+
+
+def _known(value: Any, fields: frozenset[str]) -> dict[str, Any]:
+    """An object with its known fields only: an unknown field is no field of
+    the A2A object, so no signature covers it, and no free-text channel."""
+    if not isinstance(value, dict):
+        raise MalformedError
+    return {k: v for k, v in value.items() if k in fields}
+
+
+def _skill(skill: Any) -> dict[str, Any]:
+    out = _known(skill, SKILL_FIELDS)
+    out["id"] = _capped(out.get("id"), MAX_SKILL_NAME)
     for key, longest in (("name", MAX_SKILL_NAME), ("description", MAX_CARD_DESCRIPTION)):
-        if key in skill:
-            out[key] = _text(skill[key], longest)
-    if "tags" in skill:
-        out["tags"] = _words(skill["tags"], MAX_TAGS, MAX_TAG)
-    if "examples" in skill:
-        out["examples"] = _words(skill["examples"], MAX_EXAMPLES, MAX_EXAMPLE)
+        if key in out:
+            out[key] = _capped(out[key], longest)
+    if "tags" in out:
+        out["tags"] = _capped_list(out["tags"], MAX_TAGS, MAX_TAG)
+    if "examples" in out:
+        out["examples"] = _capped_list(out["examples"], MAX_EXAMPLES, MAX_EXAMPLE)
     for key in ("inputModes", "outputModes"):
-        if key in skill:
-            out[key] = _words(skill[key], MAX_MODES, MAX_MODE)
+        if key in out:
+            out[key] = _capped_list(out[key], MAX_MODES, MAX_MODE)
+    if "securityRequirements" in out:
+        out["securityRequirements"] = _small(out["securityRequirements"], MAX_OBJECT_BYTES)
     return out
 
 
 def _extension(ext: Any) -> dict[str, Any]:
-    if not isinstance(ext, dict):
+    out = _known(ext, EXTENSION_FIELDS)
+    out["uri"] = _capped(out.get("uri"), MAX_URI)
+    if "description" in out:
+        out["description"] = _capped(out["description"], MAX_CARD_DESCRIPTION)
+    if "required" in out and not isinstance(out["required"], bool):
         raise MalformedError
-    out: dict[str, Any] = {"uri": _text(ext.get("uri"), MAX_URI)}
-    if "description" in ext:
-        out["description"] = _text(ext["description"], MAX_CARD_DESCRIPTION)
-    if "required" in ext:
-        out["required"] = bool(ext["required"])
-    if "params" in ext:
-        if not isinstance(ext["params"], dict):
+    if "params" in out:
+        if not isinstance(out["params"], dict):
             raise MalformedError
-        out["params"] = _small(ext["params"], MAX_PARAMS_BYTES)
+        out["params"] = _small(out["params"], MAX_PARAMS_BYTES)
     return out
 
 
-def _card(body: dict[str, Any]) -> dict[str, Any]:
-    out: dict[str, Any] = {k: v for k, v in body.items() if k in CARD_FIELDS}
-    out["name"] = _text(body.get("name"), MAX_CARD_NAME)
+def _card_capabilities(caps: Any) -> dict[str, Any]:
+    out = _known(caps, CAPABILITY_FIELDS)
+    for key in ("streaming", "pushNotifications", "extendedAgentCard"):
+        if key in out and not isinstance(out[key], bool):
+            raise MalformedError
+    if "extensions" in out:
+        if not isinstance(out["extensions"], list) or len(out["extensions"]) > MAX_EXTENSIONS:
+            raise MalformedError
+        out["extensions"] = [_extension(e) for e in out["extensions"]]
+    return out
+
+
+def _interface(interface: Any) -> dict[str, Any]:
+    out = _known(interface, INTERFACE_FIELDS)
+    for key in INTERFACE_FIELDS & out.keys():
+        out[key] = _capped(out[key], MAX_URI)
+    return out
+
+
+def _card(body: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912
+    """A card in its A2A v1.0 shape, every known field as sent, or refused.
+    Unknown fields are left out, at the top level and in the nested objects."""
+    out = _known(body, CARD_FIELDS)
+    out["name"] = _capped(out.get("name"), MAX_CARD_NAME)
     if not out["name"].strip():
         raise MalformedError
-    if "description" in out:
-        out["description"] = _text(out["description"], MAX_CARD_DESCRIPTION)
-    if "version" in out:
-        out["version"] = _text(out["version"], MAX_CARD_VERSION)
+    for key, longest in (
+        ("description", MAX_CARD_DESCRIPTION),
+        ("version", MAX_CARD_VERSION),
+        ("documentationUrl", MAX_URI),
+        ("iconUrl", MAX_URI),
+    ):
+        if key in out:
+            out[key] = _capped(out[key], longest)
     if "skills" in out:
-        if not isinstance(out["skills"], list):
+        if not isinstance(out["skills"], list) or len(out["skills"]) > MAX_SKILLS:
             raise MalformedError
-        out["skills"] = [_skill(s) for s in out["skills"][:MAX_SKILLS]]
+        out["skills"] = [_skill(s) for s in out["skills"]]
     for key in ("defaultInputModes", "defaultOutputModes"):
         if key in out:
-            out[key] = _words(out[key], MAX_MODES, MAX_MODE)
-    caps = out.get("capabilities")
-    if caps is not None:
-        if not isinstance(caps, dict):
+            out[key] = _capped_list(out[key], MAX_MODES, MAX_MODE)
+    if "capabilities" in out:
+        out["capabilities"] = _card_capabilities(out["capabilities"])
+    if "provider" in out:
+        provider = _known(out["provider"], PROVIDER_FIELDS)
+        out["provider"] = {k: _capped(v, MAX_URI) for k, v in provider.items()}
+    if "supportedInterfaces" in out:
+        interfaces = out["supportedInterfaces"]
+        if not isinstance(interfaces, list) or len(interfaces) > MAX_INTERFACES:
             raise MalformedError
-        caps = dict(caps)
-        if "extensions" in caps:
-            if not isinstance(caps["extensions"], list):
-                raise MalformedError
-            caps["extensions"] = [_extension(e) for e in caps["extensions"][:MAX_EXTENSIONS]]
-        out["capabilities"] = caps
+        out["supportedInterfaces"] = [_interface(i) for i in interfaces]
+    if "signatures" in out:
+        signatures = out["signatures"]
+        if not isinstance(signatures, list) or len(signatures) > MAX_SIGNATURES:
+            raise MalformedError
+        out["signatures"] = [
+            _small(_known(s, SIGNATURE_FIELDS), MAX_OBJECT_BYTES) for s in signatures
+        ]
+    for key in ("securitySchemes", "securityRequirements"):
+        if key in out:
+            out[key] = _small(out[key], MAX_OBJECT_BYTES)
     return _small(out, MAX_CARD_BYTES)
 
 

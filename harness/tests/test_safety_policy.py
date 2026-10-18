@@ -15,8 +15,14 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
+from a2a.types import AgentCard
+from a2a.utils.signing import create_agent_card_signer
+from cryptography.hazmat.primitives.asymmetric import ec
+from jwt import PyJWK
+from jwt.utils import base64url_encode
 from typer.testing import CliRunner
 
+from agentconnect.a2a_adapter import cards, convert
 from agentconnect.adapter import Event
 from agentconnect.api import ApiServer
 from agentconnect.cli import app
@@ -722,3 +728,66 @@ async def test_the_agent_token_sees_only_its_own_held_sends(
     assert {m["msg_id"] for m in both["messages"]} == {inbound, mine["msg_id"]}
     status, info = await h.human_call("GET", "/v0/status")
     assert info["held_messages"] == 2
+
+
+def es256_jwk(kid: str) -> tuple[Any, dict[str, str]]:
+    """A fresh P-256 key (never literal key bytes) and its public JWK."""
+    private = ec.generate_private_key(ec.SECP256R1())
+    numbers = private.public_key().public_numbers()
+
+    def b64(n: int) -> str:
+        return base64url_encode(n.to_bytes(32, "big")).decode("ascii")
+
+    jwk = {"kty": "EC", "crv": "P-256", "x": b64(numbers.x), "y": b64(numbers.y), "kid": kid}
+    return private, jwk
+
+
+def signed_card(private: Any, kid: str) -> dict[str, Any]:
+    card = convert._parse(
+        {
+            "name": "b",
+            "description": "Line one.\nLine two.",
+            "skills": [
+                {
+                    "id": "s",
+                    "name": "S",
+                    "securityRequirements": [{"schemes": {"oauth": {"list": ["r"]}}}],
+                }
+            ],
+        },
+        AgentCard(),
+    )
+    assert card is not None
+    signer = create_agent_card_signer(
+        private, {"kid": kid, "alg": "ES256", "jku": None, "typ": "JOSE"}
+    )
+    return convert.to_json(signer(card))
+
+
+async def test_a_signed_card_reaches_a_peer_unchanged_and_a_forged_one_is_dropped(
+    cluster: Cluster, tmp_path: Path
+) -> None:
+    private, jwk = es256_jwk("k1")
+    keys = tmp_path / "card-keys.json"
+    keys.write_text(json.dumps({"keys": [jwk]}), encoding="utf-8")
+    a = await cluster.node("a", a2a_card_keys_file=keys)
+    gid = a.daemon.create_group("Ops", "Cards")
+    await a.idle()
+    b = await cluster.node("b")
+    card = signed_card(private, "k1")
+    b.adapter._card = card  # our own card, signed: sent exactly as built
+    await cluster.invite(a, b, gid)
+    await a.wait(lambda: b.me in a.daemon.store.cards(gid))
+    kept = a.daemon.store.cards(gid)[b.me]
+    assert kept["description"] == "Line one.\nLine two."
+    assert kept["skills"][0]["securityRequirements"]
+    parsed = convert.parse_card(kept)
+    assert parsed is not None
+    assert cards.signature_status(parsed, {"k1": PyJWK(jwk)}) == "verified"
+    # A card signed by someone else under the pinned kid: dropped, a violation.
+    forger, _ = es256_jwk("k1")
+    forged = raw_send(b, gid, signed_card(forger, "k1"), "a2a.agent_card")
+    assert await settled(a, b, forged) == "dropped"
+    (row,) = [r for r in a.daemon.store.audit(gid) if r["msg_id"] == forged]
+    assert row["reason"] == "bad_signature"
+    assert a.daemon.safety.violations(gid, b.me) == 1

@@ -1059,8 +1059,10 @@ daemon offers:
   and Agent Cards are never held, so membership, the loop guard and SAS
   verification keep working. They carry no content: the daemon keeps only
   the fields each control, card and cancellation defines (§7.2), drops one
-  that carries content, caps a card's text at the listing limits of ADR-006
-  and delivers controls and cards as context only. With inbound approval
+  that carries content, verifies a card's signature against pinned keys
+  before anything else, refuses (never cuts) a card over the listing
+  limits of ADR-006, so a signed card is passed on as signed, and delivers
+  controls and cards as context only. With inbound approval
   on, a card that changed is held, since its text reaches the agent. Approval is a human action, like SAS
   verification (§11): it is not offered to the agent.
 - **Framing.** Besides the §10.1 fields, every delivery says whether the

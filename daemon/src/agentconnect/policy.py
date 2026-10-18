@@ -81,6 +81,7 @@ VIOLATIONS = frozenset(
         "not_human",
         "not_owner",
         "hold_overflow",
+        "bad_signature",
     }
 )
 APPROVAL_MODES = ("off", "inbound", "outbound", "both")
@@ -540,6 +541,7 @@ class Inbound:
     replayed: bool = False  # a journal replay: counted when first received
     drain_exempt: Callable[[], bool] = lambda: False  # SPEC 8.2/10.2
     card_changed: bool = False  # an Agent Card that differs from the one kept
+    card_invalid: bool = False  # a card whose signature fails against a pinned key
 
     @property
     def kind(self) -> str:
@@ -620,7 +622,7 @@ class SafetyPolicy:
 
     # -- decisions ----------------------------------------------------------
 
-    def inbound(self, m: Inbound) -> Decision:  # noqa: PLR0911
+    def inbound(self, m: Inbound) -> Decision:  # noqa: PLR0911, PLR0912
         """The decision for a received message. Counts it against the rates
         (except replays and the reconnect drain)."""
         settings = self.settings(m.group_id)
@@ -628,6 +630,8 @@ class SafetyPolicy:
         problem = content_problem(m.inner, m.size, limits)
         if problem is not None:
             return drop(problem)
+        if m.card_invalid:
+            return drop("bad_signature")  # SPEC 10.5: not used, and held against it
         if (
             not m.replayed
             and not m.drain_exempt()
