@@ -72,6 +72,12 @@ Commits whose types are all `docs`, `ci`, `chore`, `test`, `build` or `style`
 don't need a changelog entry. For anything else that genuinely isn't
 user-facing, add the `skip-changelog` label to the PR.
 
+Adding or removing a skip label (`skip-changelog`, `skip-docs`, `skip-readme`)
+starts a fresh CI run that reads the current labels and cancels any run still
+in progress for the PR. Re-running a job from the Actions tab does not pick up
+a label change, because a re-run reuses the original event payload. Any other
+label also starts a run, and that run executes the full pipeline.
+
 ### Docs that must change with code
 
 `docs/MAP.toml` has three parts. Each rule maps user-facing code to the docs

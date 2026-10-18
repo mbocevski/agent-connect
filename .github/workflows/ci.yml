@@ -2,6 +2,9 @@ name: ci
 
 on:
   pull_request:
+    # labeled and unlabeled start a fresh run, so the skip-* labels are read
+    # from the current label set (a re-run reuses the old event payload).
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches: [main]
   workflow_dispatch:
