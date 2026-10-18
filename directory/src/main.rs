@@ -81,6 +81,8 @@ async fn serve<S: Store>(
             Some(path) => Some(agentconnect_directory::http::resolve_font_dir(path)?),
             None => None,
         },
+        name: config.name.clone(),
+        home: config.home.clone(),
     };
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %config.addr, "directory listening");

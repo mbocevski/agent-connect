@@ -74,6 +74,10 @@ pub struct HttpConfig {
     /// A directory of fonts served at `/static/fonts/{file}`. Setting it also
     /// adds `font-src 'self'` to the CSP.
     pub font_dir: Option<std::path::PathBuf>,
+    /// The operator's name for the site (`AC_DIRECTORY_NAME`).
+    pub name: Option<String>,
+    /// The operator's home link in the header (`AC_DIRECTORY_HOME`).
+    pub home: Option<crate::config::HomeLink>,
 }
 
 struct App<S: Store> {
@@ -186,11 +190,13 @@ fn error_json(e: DirError) -> Response {
     r
 }
 
-fn site<S: Store>(dir: &Directory<S>) -> Site<'_> {
-    let s = dir.settings();
+fn site<S: Store>(app: &App<S>) -> Site<'_> {
+    let s = app.dir.settings();
     Site {
         host: &s.host,
         relay: s.relays.first().map_or("", String::as_str),
+        name: app.config.name.as_deref(),
+        home: app.config.home.as_ref(),
     }
 }
 
@@ -218,22 +224,22 @@ impl SearchParams {
 }
 
 async fn home_page<S: Store>(
-    dir: &Directory<S>,
+    app: &App<S>,
     params: &SearchParams,
     markdown: bool,
     negotiated: bool,
 ) -> Response {
     let query = params.home();
     let results = if query.is_search() {
-        dir.search(query.q, query.skill).await
+        app.dir.search(query.q, query.skill).await
     } else {
-        dir.listed(crate::directory::SEARCH_LIMIT).await
+        app.dir.listed(crate::directory::SEARCH_LIMIT).await
     };
     let results = match results {
         Ok(r) => r,
         Err(e) => return error_json(e),
     };
-    let site = site(dir);
+    let site = site(app);
     let alternate = query.alternate();
     let mut r = page(
         StatusCode::OK,
@@ -254,14 +260,14 @@ async fn home<S: Store>(
     Query(p): Query<SearchParams>,
     headers: HeaderMap,
 ) -> Response {
-    home_page(&app.dir, &p, wants_markdown(&headers), true).await
+    home_page(&app, &p, wants_markdown(&headers), true).await
 }
 
 async fn index_md<S: Store>(
     State(app): State<Shared<S>>,
     Query(p): Query<SearchParams>,
 ) -> Response {
-    home_page(&app.dir, &p, true, false).await
+    home_page(&app, &p, true, false).await
 }
 
 async fn search<S: Store>(State(app): State<Shared<S>>, Query(p): Query<SearchParams>) -> Response {
@@ -298,8 +304,7 @@ async fn listing<S: Store>(
         Ok(l) => l,
         Err(e) => return error_json(e),
     };
-    let dir = &app.dir;
-    let site = site(dir);
+    let site = site(&app);
     // Only a valid slug is ever echoed into a header.
     let alternate = if valid_name(name) {
         format!("/a/{name}.md")
@@ -398,7 +403,7 @@ async fn llms<S: Store>(State(app): State<Shared<S>>) -> Response {
                 StatusCode::OK,
                 "text/plain; charset=utf-8",
                 CACHE_PUBLIC,
-                render::llms_txt(&site(&app.dir), &names),
+                render::llms_txt(&site(&app), &names),
             )
         }
         Err(e) => error_json(e),
@@ -599,7 +604,7 @@ async fn metrics<S: Store>(State(app): State<Shared<S>>) -> Response {
 }
 
 async fn fallback<S: Store>(State(app): State<Shared<S>>, headers: HeaderMap) -> Response {
-    let site = site(&app.dir);
+    let site = site(&app);
     page(
         StatusCode::NOT_FOUND,
         wants_markdown(&headers),

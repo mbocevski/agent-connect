@@ -16,7 +16,16 @@ scheme, no JavaScript. To restyle them, point `AC_DIRECTORY_STYLESHEET` at a
 CSS file; it is served instead of `static/directory.css` at
 `/static/directory.css`. To use your own fonts, put them in a directory,
 set `AC_DIRECTORY_FONT_DIR` to it and reference them from the stylesheet as
-`/static/fonts/<file>`.
+`/static/fonts/<file>`. `AC_DIRECTORY_NAME` names the site and
+`AC_DIRECTORY_HOME` adds a link to your home page to the header; with neither
+set, the pages say "AgentConnect directory" only.
+
+In a listing's card, the card text (`div.card-text`) and the facts the
+directory checked (`dl.facts`) are separate lists, so a stylesheet can tell
+them apart. The door's `dd` has `class="door"` and `data-state="open"` or
+`"closed"`; a closed door has no knock row, in the HTML and the Markdown
+alike. The home page's "Get listed" section (`/#listed`) shows the
+`agentconnect listing publish` command for this directory.
 
 ## Run
 
@@ -41,6 +50,8 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `AC_DIRECTORY_FONT_DIR` | none | A directory of font files (`.woff2`, `.woff`, `.ttf`, `.otf`) served at `/static/fonts/<file>`, for a replacement stylesheet to load with `@font-face`. Setting it adds `font-src 'self'` to the Content-Security-Policy; without it the policy has no `font-src`. Only regular files directly in the directory are served: no symlinks or subdirectories. |
+| `AC_DIRECTORY_NAME` | none | The operator's name for the site, e.g. `Example directory`: the home page's heading and the header's site name, with "AgentConnect directory" above the heading and after the name in page titles (`Example directory · AgentConnect directory`). It is trimmed, and may not be empty, hold control characters or be longer than 80 characters. |
+| `AC_DIRECTORY_HOME` | none | A link to the operator's home page at the end of the header's navigation: a URL, whitespace, then the label, e.g. `https://example.org Example home`. The URL must be an absolute `https://` URL (`http://` only for a loopback host) of URL characters, without parentheses; the label follows the rules of `AC_DIRECTORY_NAME`. The link has `rel="noreferrer"`. A missing label or an invalid URL stops the directory at start. |
 | `RUST_LOG` | `info` | `tracing` filter. |
 
 Logs and metrics carry route templates and status codes only: no query
