@@ -55,8 +55,10 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# Git sources must be pinned by full rev, never a branch or tag. The only
-# allowed one is upstream OpenMLS, for the temporary provider patch in
-# Cargo.toml (RUSTSEC-2026-0329/-0330/-0331); remove it with that patch.
+# Git sources need a `rev`: cargo-deny refuses `branch` and `tag` sources,
+# but accepts short revs and refs such as `refs/heads/main`, so
+# `scripts/check_cargo_patch.py` additionally requires a full commit SHA. The
+# only allowed source is upstream OpenMLS, for the temporary provider patch
+# in Cargo.toml (RUSTSEC-2026-0329/-0330/-0331); remove it with that patch.
 required-git-spec = "rev"
 allow-git = ["https://github.com/openmls/openmls"]

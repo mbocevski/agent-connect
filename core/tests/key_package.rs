@@ -165,7 +165,9 @@ fn honest_key_package_is_accepted() {
 #[test]
 fn short_hpke_init_key_is_rejected_without_panic() {
     // Regression test for RUSTSEC-2026-0331 (spikes/mls-xwing t9): this
-    // KeyPackage passes OpenMLS validation and crashes the committer.
+    // KeyPackage passes OpenMLS validation. With libcrux-kem 0.0.9 it
+    // crashed the committer; the fixed provider returns an error. The core
+    // rejects it before OpenMLS either way (defence in depth, SPEC §3.1).
     let (_, m) = mallory(11);
     let kp = with_short_init_key(&build(&honest(&m)), &m);
     assert_eq!(submit(kp, &m), Err(Error::HpkeKeyLength));

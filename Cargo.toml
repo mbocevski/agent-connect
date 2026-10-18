@@ -90,18 +90,27 @@ zeroize = { version = "1.9.1", features = ["derive"] }
 #
 # The patch is mixed on purpose: only the provider side (openmls_traits,
 # openmls_libcrux_crypto, openmls_memory_storage, openmls_rust_crypto)
-# comes from main, while
-# openmls 0.9.1, openmls_basic_credential 0.6.0 and openmls_sqlite_storage
-# 0.3.0 stay on crates.io. Main's openmls has openmls_sqlite_storage as an
-# optional dependency on rusqlite 0.40, whose libsqlite3-sys 0.38 conflicts
-# (one `links = "sqlite3"` per build) with sqlx 0.9, which allows < 0.38.
-# Pinned by full rev, never a branch: `deny.toml` allows only this git
-# source and requires a rev.
+# comes from main, while openmls 0.9.1, openmls_basic_credential 0.6.0 and
+# openmls_sqlite_storage 0.3.0 stay on crates.io. Main's openmls has
+# openmls_sqlite_storage as an optional dependency on rusqlite 0.40, whose
+# libsqlite3-sys 0.38 conflicts (one `links = "sqlite3"` per build) with
+# sqlx 0.9, which allows < 0.38. The patched openmls_traits differs from
+# 0.6.0 only behind features we don't enable (`async`,
+# `targeted-messages-draft`, `virtual-clients-draft`); turning one on fails
+# to compile rather than changing behaviour.
 #
-# Remove this block once crates.io has (1) an openmls and
-# openmls_libcrux_crypto release that depends on libcrux-kem >= 0.0.10 and
-# libcrux-hmac-drbg >= 0.0.2, and (2) a sqlx release that allows the
-# libsqlite3-sys of that family, so the whole family moves together.
+# Every workspace in the tree (the fuzz ones too) carries this exact table.
+# `deny.toml` allows only this git source and requires a `rev`;
+# `scripts/check_cargo_patch.py` (in `just lint`) also requires the rev to be
+# a full commit SHA, the same table in every workspace and no affected
+# libcrux crate in any Cargo.lock.
+#
+# Remove this block once crates.io has an openmls_libcrux_crypto release
+# (with matching openmls_traits and openmls_memory_storage) that depends on
+# libcrux-kem >= 0.0.10 and libcrux-hmac-drbg >= 0.0.2 and works with the
+# openmls release pinned above. The nightly `check_cargo_patch.py upstream`
+# step fails when one appears. A sqlx release that allows libsqlite3-sys
+# 0.38 is only needed to patch the whole family to an upstream commit.
 [patch.crates-io]
 openmls_libcrux_crypto = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }
 openmls_memory_storage = { git = "https://github.com/openmls/openmls", rev = "be2368a21ec5e0380abd568821addc57b79013ea" }

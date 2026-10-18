@@ -5,10 +5,11 @@ default_stages: [pre-commit]
 repos:
   - repo: builtin
     hooks:
-      - id: trailing-whitespace
       # Vendored vectors stay byte-for-byte as published (testdata/MANIFEST.json).
+      - id: trailing-whitespace
+        exclude: ^testdata/(sas-emoji|hpke-pq-test-vectors)\.json$
       - id: end-of-file-fixer
-        exclude: ^testdata/sas-emoji\.json$
+        exclude: ^testdata/(sas-emoji|hpke-pq-test-vectors)\.json$
       - id: check-yaml
       - id: check-toml
       - id: check-json
@@ -126,6 +127,12 @@ repos:
         language: system
         entry: cargo shear
         files: (Cargo\.toml|\.rs)$
+        pass_filenames: false
+      - id: cargo-patch
+        name: provider patch in every workspace, full revs, no affected libcrux
+        language: system
+        entry: uv run --no-project python scripts/check_cargo_patch.py check
+        files: (Cargo\.(toml|lock)|check_cargo_patch\.py)$
         pass_filenames: false
       - id: ty
         name: ty check

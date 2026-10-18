@@ -53,21 +53,24 @@ The classical fallback (`0x0003`) is **not** needed.
 
 Before `core/` depends on it, though, four things have to be settled:
 
-1. **Wait for the next provider release (blocker).**
-   `openmls_libcrux_crypto` 0.4.0 pins `libcrux-kem` 0.0.9, which is affected
-   by RUSTSEC-2026-0330 and RUSTSEC-2026-0331, and `libcrux-hmac-drbg` 0.0.1,
-   which is affected by RUSTSEC-2026-0329.
-   - RUSTSEC-2026-0331 is **reachable**: a validly signed KeyPackage with a
-     32-byte `init_key` passes `KeyPackageIn::validate` and then panics the
-     inviter inside `add_members` (test
-     `t9_advisories::malicious_key_package_is_an_error_not_a_crash`, which
-     now asserts the fixed behaviour). Anyone holding an invite link can
-     therefore crash the inviter's daemon.
-   - Upstream `main` already depends on the fixed crates (`hpke-rs` 0.8,
-     `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2), but they haven't been
-     released as a provider yet.
-   - Until they are, `core/` MUST check the length of every HPKE public key
-     it accepts (1216 bytes for X-Wing) before calling OpenMLS.
+1. **Wait for the next provider release (blocker; lifted 2026-10-18 by the
+   provider patch, see the update above).**
+   `openmls_libcrux_crypto` 0.4.0 pinned `libcrux-kem` 0.0.9, which was
+   affected by RUSTSEC-2026-0330 and RUSTSEC-2026-0331, and
+   `libcrux-hmac-drbg` 0.0.1, which was affected by RUSTSEC-2026-0329.
+   - RUSTSEC-2026-0331 was **reachable** with libcrux-kem 0.0.9: a validly
+     signed KeyPackage with a 32-byte `init_key` passed
+     `KeyPackageIn::validate` and then panicked the inviter inside
+     `add_members`, so anyone holding an invite link could crash the
+     inviter's daemon. With the patched provider `add_members` returns an
+     error instead; `t9_advisories::short_init_key_is_an_error_not_a_crash_*`
+     asserts that on `0x004F` and `0x004D`.
+   - At the time, upstream `main` already depended on the fixed crates
+     (`hpke-rs` 0.8, `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2), but no
+     provider release shipped them.
+   - `core/` checks the length of every HPKE public key it accepts (1216
+     bytes) before calling OpenMLS. SPEC §3.1 makes that check permanent:
+     it stays as defence in depth after the fix.
 2. **Approve the hpke-rs licence (maintainer sign-off).** `hpke-rs`,
    `hpke-rs-crypto` and `hpke-rs-libcrux` are **MPL-2.0**.
    - Both OpenMLS providers depend on them, so there's no OpenMLS without
@@ -105,7 +108,9 @@ Before `core/` depends on it, though, four things have to be settled:
 
 These are the spike's versions. Since 2026-10-18 the provider side is
 patched to upstream main (see the update above): `hpke-rs*` 0.8.0,
-`libcrux-kem` 0.0.10 and `libcrux-hmac-drbg` 0.0.2.
+`libcrux-kem` 0.0.10 and `libcrux-hmac-drbg` 0.0.2. The patched provider
+also compiles in `libcrux-ecdsa` (P-256, P-384) and, with the PQ feature,
+`libcrux-ml-dsa`; the v0 suite uses neither.
 
 `openmls_sqlx_storage` 0.3.0 exists too, but wasn't tried. Its manifest
 lists no `draft-ietf-mls-pq-ciphersuites` feature.
