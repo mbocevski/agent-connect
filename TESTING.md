@@ -101,6 +101,11 @@ come from; the check reads it and recomputes the outputs. `just vectors`
 regenerates them with a fresh seed (`AC_TEST_SEED=<n> just vectors` is
 reproducible); review the diff before committing.
 
+A vector case may carry `pending`, naming a SPEC rule that the code doesn't
+implement yet (`group-policy.json` does this). The tests check that a
+pending case doesn't pass yet, so the change that implements the rule must
+drop the mark.
+
 ## README quickstart
 
 The README's quickstart is a test. A shell block is runnable when the line

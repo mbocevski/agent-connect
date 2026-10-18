@@ -259,5 +259,36 @@ def test_peek_header_rejects_what_process_rejects(rng: random.Random, bad: bytes
         a.process(gid, bad)
 
 
+def test_group_policy_vectors(rng: random.Random) -> None:
+    """The policies of testdata/group-policy.json (SPEC 9.1) through set_policy.
+
+    Its authorization cases (SPEC 9.2) are checked by core/src/vectors.rs;
+    the bindings have no call that evaluates a commit's facts on their own.
+    """
+    testdata = Path(__file__).resolve().parents[2] / "testdata"
+    vectors = json.loads((testdata / "group-policy.json").read_text(encoding="utf-8"))
+    a = make_client(rng)
+    gid = a.create_group(NAME, PURPOSE)
+
+    def own(policy: str) -> bytes:
+        # The vector's owner becomes this client, the group's only member.
+        return policy.replace(json.loads(policy)["owner"], a.identity).encode()
+
+    assert a.policy(gid) == own(vectors["default"])
+    for case in vectors["valid"]:
+        if "pending" in case:
+            # A SPEC rule the core doesn't implement yet: drop the mark when
+            # it does, and this policy is accepted.
+            with pytest.raises(ac.AgentConnectError, match="malformed group policy"):
+                a.set_policy(gid, own(case["policy"]))
+            continue
+        a.set_policy(gid, own(case["policy"]))
+        a.discard_pending_commit(gid)
+    for case in vectors["invalid"]:
+        with pytest.raises(ac.AgentConnectError) as err:
+            a.set_policy(gid, case["policy"].encode())
+        assert str(err.value) == case["error"], case["name"]
+
+
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()

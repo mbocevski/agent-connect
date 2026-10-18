@@ -20,9 +20,10 @@ Pre-alpha. The protocol is in `SPEC.md` and the stack decisions in
 `docs/adr/001-stack.md`; those two files are the source of truth. The core,
 relay, daemon, the A2A, webhook and SSE adapters, the safety policy, the
 separate-OS-user mode, the Python SDK (embedded mode by default, attach mode
-for a separate daemon) and the directory are implemented. The daemon and CLI
-side of discovery (publishing a listing, knocking, approving knocks) is not:
-the core and the relay already support signed listings, doors and knocks.
+for a separate daemon) and the directory are implemented, and so is
+discovery end to end: the core and the relay support signed listings, doors
+and knocks, and the daemon and CLI publish and withdraw a listing, register
+and renew its doors, knock on a listing and let the human approve knocks.
 The README's Status section lists what works; `docs/MAP.toml` keeps it in step.
 
 ## Layout

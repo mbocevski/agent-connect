@@ -568,6 +568,30 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Protocol: group mode (SPEC §9). The policy gains `floor_pinned` (default
+  false): the `free` → `mention` floor switch is refused while it is true,
+  and a policy change that sets `floor` should set it. The switch now
+  counts identities, not instances, so a new instance of a member no
+  longer switches a 1:1 group; `max_members` still counts instances.
+  Admins may change `floor_pinned` with the floor. `moderated` mode gets
+  floor control: the effective moderator (`floor_moderator` while it is a
+  member, otherwise the owner) or the owner grants the floor with
+  `control.floor`, ordered by `seq`, and each instance keeps the holder,
+  which resets when it has no instance left or a commit changes `floor` or
+  `floor_moderator`. A leaver sends `control.leave` before its self-Remove
+  proposal, and membership changes only with the commit. Task replies
+  should name the requesting instance in `body.metadata.instance`. An
+  owner instance should drop departed identities from `admins` and
+  `floor_moderator`. A new instance of a verified identity keeps the flag
+  and is shown as new. A knock Welcome must have `floor_pinned` false
+  (§6.6.5). The threat model gains a member stalling the group with a
+  rejected commit, instances added with a stolen `IK`, and floor holders
+  that differ when grants are dropped (§12); §14 gains the leave and the
+  owner transfer. New vectors in `testdata/group-policy.json`: the default
+  and valid and invalid policies, checked in Rust and through the Python
+  bindings, and commit authorisation cases checked in Rust, with the
+  `floor_pinned` and identity-counting cases marked pending until the core
+  implements them. The core doesn't implement the new rules yet.
 - Local API: with the agent token, `GET /v0/events` numbers events with a
   sequence of the agent's own (`seq`, and `after` takes it), with no gap
   where an event the agent doesn't see was recorded. Before, the global

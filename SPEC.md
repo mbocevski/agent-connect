@@ -677,7 +677,8 @@ counts toward local rate limiting.
   removes that leaf again.)
 - **On approve,** A:
   1. creates a new group (§5) with `owner` = A's identity,
-     `floor: "free"`, and no admin or floor moderator but A's identity.
+     `floor: "free"`, `floor_pinned: false`, and no admin or floor
+     moderator but A's identity.
      `ac_group_meta.name` is the listing's `name`; `purpose` is chosen
      by A's human and defaults to the listing's description;
   2. sends `group.create`;
@@ -706,8 +707,9 @@ with `InviteMeta` is replaced by these:
 - `ac_group_meta.name` equals the listing's `name`.
 - The group is the new one of §6.6.4: the Welcome is for epoch 1, so the
   commit that added B is the group's only commit and no member came or went
-  before it. `ac_group_policy.floor` is `free`, and every `admins` entry and
-  the `floor_moderator`, if set, is the listing's `identity`.
+  before it. `ac_group_policy.floor` is `free`, `floor_pinned` is false,
+  and every `admins` entry and the `floor_moderator`, if set, is the
+  listing's `identity`.
 - B is still waiting for it: by B's clock it arrives no later than
   `ts + 3600 + 300` (§6.6.6). A later Welcome is dropped before it is
   unwrapped.
@@ -823,7 +825,9 @@ Inner = {
   The task's **requester** is the identity that sent that message. The
   member running the task sends its `a2a.task_status`,
   `a2a.task_artifact` and `a2a.message` replies with `reply_to` naming that
-  message, `to: ["*"]` and `addressee: [<requester>]` (§9.3).
+  message, `to: ["*"]` and `addressee: [<requester>]` (§9.3), and SHOULD
+  set `body.metadata.instance` to the requesting instance's `instance_id`,
+  so that the requester's other instances are not triggered (§9.4).
 - `a2a.task_cancel` asks the member running the task `body.id` to cancel
   it (A2A `CancelTask`). Only the task's requester may send it: the member
   running the task MUST ignore an `a2a.task_cancel` from any other
@@ -845,17 +849,15 @@ Inner = {
 
 | kind | body | Who may send |
 |---|---|---|
-| `control.leave` | `{}` | Any member, about itself |
+| `control.leave` | `{}` | Any member, about itself. Sent immediately before its leave proposal (§9.2); receivers MUST NOT change membership because of it. |
 | `control.close` | `{"reason": "..."}` | Owner. All members SHOULD leave. |
-| `control.floor` | `{"holder": "ac:v0:…" \| null}` | Per policy (§9.3) |
+| `control.floor` | `{"holder": "ac:v0:…" \| null}` | The effective moderator or the owner (§9.3) |
 | `control.pause` | `{"reason": "loop_guard" \| "human"}` | Any member |
 | `control.resume` | `{}` | Any member, with a human-originated message (`origin: "human"`) |
 | `control.capabilities` | `{"adapters": [...], "accepts": [...part kinds]}` | Any member |
 
 - `control.close`: a receiver MUST NOT leave on its own. It prompts its human
   (the reference daemon raises a `close_requested` event), who decides.
-- `control.floor` is defined only with floor control (§9.3) and is
-  otherwise delivered as context.
 
 A receiver MUST ignore a control message from a sender the table doesn't
 allow; in particular a `control.resume` whose `origin` isn't `"human"`.
@@ -1149,6 +1151,7 @@ GroupPolicy = {
   "max_members": <int, default 50, ≤ relay limit>,
   "require_verified": <bool, default false>,
   "floor": "free" | "mention" | "moderated",
+  "floor_pinned": <bool, default false>,
   "floor_moderator": "ac:v0:…" | null,
   "loop_guard": {"max_agent_turns": <int, default 20>}
 }
@@ -1161,18 +1164,21 @@ Welcome (§6.3) or a commit (§9.2).
 
 Defaults for a new group: `owner` = the creator, `admins: []`,
 `invite: "owner"`, `remove: "owner"`, `max_members: 50`,
-`require_verified: false`, `floor: "free"`, `floor_moderator: null`,
-`loop_guard.max_agent_turns: 20`.
+`require_verified: false`, `floor: "free"`, `floor_pinned: false`,
+`floor_moderator: null`, `loop_guard.max_agent_turns: 20`.
 
 - 1:1 groups: `floor: "free"`.
-- Groups that grow beyond two members: the inviter's daemon SHOULD switch to
-  `floor: "mention"` in the same commit that adds the third member, unless
-  the owner set the floor mode explicitly. Member counts here and in
-  `max_members` count **instances** (leaves), not identities. The switch is
-  a GroupContextExtensions proposal that changes only `floor` from `free`
-  to `mention`, in a commit with at least one Add that takes the group from
-  at most two to more than two instances. Receivers MUST accept it from any
-  committer allowed to make that Add, whatever its role.
+- Groups that grow beyond two identities: the inviter's daemon SHOULD switch
+  to `floor: "mention"` in the same commit that adds the third identity,
+  unless `floor_pinned` is true. Member counts in `max_members` count
+  **instances** (leaves); the switch counts **identities**. The switch is a
+  GroupContextExtensions proposal that changes only `floor` from `free` to
+  `mention`, in a commit with at least one Add that takes the group from at
+  most two to more than two identities. Receivers MUST accept it from any
+  committer allowed to make that Add, whatever its role, and MUST reject it
+  when `floor_pinned` is true, unless the committer's role allows the
+  change anyway (§9.2: the owner, or an admin). A policy change that sets
+  `floor` SHOULD set `floor_pinned` to true.
 
 ### 9.2 Authorisation of commits
 
@@ -1186,7 +1192,7 @@ and SHOULD leave the group if the honest members can't converge.
 | Add (via invite) | A committer whose identity satisfies `invite` under the policy in force at the commit's epoch. |
 | Remove other member | A committer whose identity satisfies `remove`. Only the owner may remove the owner's instances. |
 | Remove self | The leaving member sends a Remove proposal for its own leaf (as a `PrivateMessage`); any other member commits it. The owner's last instance may not leave until it has transferred ownership. A sole remaining member only deletes its local state. |
-| Policy change (GroupContextExtensions) | Owner. Admins may change `floor` and `floor_moderator` only. Any committer allowed to make the Add may apply the §9.1 floor switch. |
+| Policy change (GroupContextExtensions) | Owner. Admins may change `floor`, `floor_pinned` and `floor_moderator` only. Any committer allowed to make the Add may apply the §9.1 floor switch. |
 | Owner transfer | Owner. The new owner must be a member after the commit. |
 | Update (own leaf) | The instance itself |
 | Add another instance of an existing identity | Any instance of that identity (multi-replica), whatever `invite` says |
@@ -1210,6 +1216,8 @@ Notes on the table:
   commits them is the one with the lowest leaf index among those not
   themselves leaving. A
   self-Remove is allowed for any member, except the owner's last instance.
+  The leaving member sends `control.leave` (§7.3) immediately before its
+  proposal; membership changes only with the commit.
 - **The owner transfers ownership before it leaves.** Otherwise the group
   would be left with no owner, and no policy change could ever pass again.
   An owner instance MUST NOT propose its own removal while it is the
@@ -1223,6 +1231,10 @@ Notes on the table:
   freely. An owner leaving after a SAS mismatch (§11) transfers ownership
   the same way before it deletes its state. A sole remaining member, owner
   or not, only deletes its local state.
+- **Departed roles.** Roles name identities. When a commit leaves an
+  identity listed in `admins` or as `floor_moderator` with no instance, the
+  owner's instance SHOULD commit a policy change that only removes it from
+  those roles; otherwise it regains them if it rejoins.
 - Each proposal of a commit is authorised against the policy in force at
   the commit's epoch, not the policy the commit introduces. The group after
   the commit MUST fit the `max_members` of the policy the commit ends with.
@@ -1251,10 +1263,22 @@ triggering.
 |---|---|
 | `free` | All members except the sender |
 | `mention` | Only members listed in `to`. With `to: ["*"]`, all members, but only for `origin: "human"` messages; agent-originated broadcasts are context only. |
-| `moderated` | Only the current `control.floor` holder, plus the moderator. The moderator (or owner) grants the floor. Until an implementation supports floor control, only the moderator is triggered and everyone else receives messages as context only. |
+| `moderated` | The instances of the floor holder and of the effective moderator. The **effective moderator** is `floor_moderator` if it is set and a current member, otherwise the owner. |
 
 In `mention` mode, an agent-originated message with `to: ["*"]` and no
 `addressee` triggers nobody: every member gets it as context.
+
+**Floor holder.** Each instance keeps a floor holder, initially null. It
+accepts a `control.floor{holder}` only when the floor is `moderated`, the
+sender is the effective moderator or the owner, `holder` is null or a
+current member, and the message's `seq` is greater than that of the last
+`control.floor` it accepted from the same sender instance; it ignores any
+other. The holder becomes null when it has no instance left and when a
+commit changes `floor` or `floor_moderator`. A new member starts with null;
+the effective moderator SHOULD resend the current grant to new members.
+Holders are local state: a relay that drops or delays a grant can make
+members disagree on who holds the floor, which changes only who is
+triggered (§12).
 
 **`addressee`.** An inner message MAY carry `addressee`, a list of 1 to 50
 identities. In `free` and `mention` mode, a message with `addressee`
@@ -1265,19 +1289,22 @@ applies and `addressee` is ignored. Task replies (§7.2) use it: every
 member sees the task's progress, and only the requester is triggered.
 
 Messages that don't trigger a member are still delivered to its adapter as
-context (`addressed_to_me: false`), or batched (§10).
+context (`addressed_to_me: false`), or batched by the adapter (§10.6).
 
 ### 9.4 Multi-instance members
 
 - An identity may have several instances in a group, for example agent
   replicas.
 - A new instance of an existing member joins through an invite like anyone
-  else.
+  else. An instance of that identity may create the invite whatever
+  `invite` says (§9.2), and then MUST NOT commit an Add of another
+  identity through it unless its identity satisfies `invite`.
 - Every instance receives every message. Naming an identity in `to` (§9.3)
   triggers all of its instances. For a message of any kind with
   `body.metadata.instance` set, only that instance is triggered. Otherwise
   all instances are triggered, and coordinating among them is the member's
-  own responsibility.
+  own responsibility. A task reply (§7.2) SHOULD name the requesting
+  instance this way.
 
 ## 10. Endpoint policy (normative minimums)
 
@@ -1431,6 +1458,11 @@ daemon offers:
 - **Framing.** Besides the §10.1 fields, every delivery says whether the
   group wants the §10.1 notice shown in front of the text (`frame_text`, on
   by default) and carries the notice itself.
+- **Context.** How a message that doesn't trigger the member (§9.3)
+  reaches its agent is the adapter's choice. The webhook and event-stream
+  adapters deliver each one with `addressed_to_me: false`; the A2A adapter
+  keeps the most recent ones and hands them over with the next call that
+  triggers the agent.
 - **Local limits.** Lower §10.2 limits for a group or one sender, whether
   `file` parts are accepted and how large they may be, an alert when one
   sender keeps breaking the limits (the daemon never removes a member on
@@ -1489,6 +1521,8 @@ daemon offers:
   - A new member starts `unverified`.
   - When the epoch changes, previously verified members stay verified. The
     UI shows the new SAS and "N of M verified".
+  - A new instance of a verified identity does not reset the flag;
+    implementations SHOULD show it as new.
 
 ## 12. Threat model
 
@@ -1506,13 +1540,13 @@ daemon offers:
 | Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; single-use KeyPackages and the inviter's replay record stop JoinRequest replays (§6.2); MLS signatures and epochs; replay protection via generation counters and `msg_id`; own commits confirmed only by `msg_id` or exact bytes (§8.3); routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
 | **Link leaked before use** (chat/email provider, inbox access, LLM logs, tampered landing page) | Joins as a member | Use limits and the "already used" warning; inviter approval; **SAS** | **Becomes a member if approved. Full MITM if the relay colludes and the SAS isn't compared.** |
 | Link leaked after exhaustion or expiry | — | The secret only authenticates joins | None |
-| Malicious member | Reads everything while a member; injects content | Roles and policy; removal (new epoch); endpoint policy (§10) | Everything it saw while it was a member |
+| Malicious member | Reads everything while a member; injects content | Roles and policy; removal (new epoch); endpoint policy (§10) | Everything it saw while it was a member. It can stop the group by sending a commit the honest members reject (the relay advances its epoch, the honest members don't); recovery is a new group (§9.2 "SHOULD leave") |
 | Removed member | Holds old keys | MLS forward secrecy across epochs | Past epochs it was part of |
 | Quantum adversary recording traffic | Future decryption | Hybrid ML-KEM-768 + X25519 KEM in every path secret; Update cadence | Rests on ML-KEM-768 (and X25519 until a quantum computer exists) |
 | **Model provider of any member's agent** | Sees what that agent processes | — (inherent) | **Sees plaintext. E2E runs daemon to daemon, not to the model.** |
-| Compromised host | Has keys and state | Encrypted-at-rest storage (see below); Updates heal after removal or re-key | That member fully, until removed |
+| Compromised host | Has keys and state | Encrypted-at-rest storage (see below); Updates heal after removal or re-key | That member fully, until removed. A stolen `IK` can add instances of that identity that every member accepts (§9.2); members see each new instance (§11) |
 | Malicious or prompt-injected peer agent | Social-engineers the local agent | Untrusted framing, scope, limits (§10.1, §10.2), approval hooks (§10.6) | Behavioural; can't be solved with cryptography |
-| Agent loops | Runaway costs or spam | Loop guard, rate limits, floor modes | Bounded by the limits |
+| Agent loops | Runaway costs or spam | Loop guard, rate limits, floor modes | Bounded by the limits. Floor holders can differ between members if the relay drops grants (§9.3) |
 | Malicious software distributor | Backdoored daemon | Open source, reproducible builds, signed releases with provenance | Users who don't verify |
 | Spam lister | Publishes junk or lookalike listings | Listing only by operator-issued token, bound to one name and identity (§13.2). Per-address publish limits. Instant operator revocation | Whatever the operator lets through. Curation is a judgement, not a cryptographic check |
 | Impersonator (claims another org's name or text) | Signs a card that copies a real agent's name, description or skills | The signature binds the card to its own `IK` only. The owner domain is shown only when `/.well-known/agentconnect.json` lists the key, and `provider.organization` only next to a verified domain. Names are ASCII slugs. "Key changed" banner for 30 days. The knocker's daemon fetches the domain file itself. Then the SAS | Humans who trust the name or text over the fingerprint and domain. An attacker who controls the owner's web server can vouch for its own key |
@@ -2117,6 +2151,7 @@ H_A      A (inviter daemon)          Relay                 B (joiner daemon)    
 ```text
 C ── join(JoinRequest) ──▶ Relay ──▶ A (holds the invite)
 A: verify, approve, commit [Add(C), GroupContextExtensions(floor=mention)]; Welcome wrapped with welcome_key
+   (C is the third identity and floor_pinned is false; a new instance of A or B wouldn't switch the floor)
 A ── commit (epoch n) ──▶ Relay ──▶ B, A          (B checks the commit against policy)
 A ── welcome ──────────▶ Relay ──▶ C
 A, B, C: new SAS for epoch n+1. A and B stay verified for each other; C starts unverified.
@@ -2137,6 +2172,27 @@ Attacker has the leaked link and the relay colludes:
   Attacker joins as "B" toward A    (group view 1)
   Attacker invites the real B into a second group posing as A    (group view 2)
 A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice → sas_mismatch → leave
+```
+
+### 14.5 Leave
+
+```text
+Members A (leaf 0), B (leaf 1), C (leaf 2); C leaves:
+C ── control.leave (epoch n) ──▶ Relay ──▶ A, B     (a notice; membership unchanged)
+C ── proposal Remove(leaf 2) (epoch n) ──▶ Relay ──▶ A, B     (both store it)
+A: lowest leaf not itself leaving → commit [Remove(leaf 2)]
+A ── commit (epoch n) ──▶ Relay ──▶ B, C            (B checks it against the policy; C is removed)
+A, B: new SAS for epoch n+1; C deletes its state
+```
+
+### 14.6 Owner transfer, then leave
+
+```text
+Owner A wants to leave; A has no other instance:
+A ── commit [GroupContextExtensions(owner=B)] (epoch n) ──▶ Relay ──▶ B, C   (each checks: A is the owner, B is a member)
+A ── control.leave, proposal Remove(own leaf) (epoch n+1) ──▶ Relay ──▶ B, C
+B (lowest leaf not leaving) ── commit [Remove(A's leaf)] ──▶ Relay ──▶ A, C
+Before the transfer, receivers reject A's leave proposal and store nothing (§9.2).
 ```
 
 ## 15. Open questions
@@ -2160,14 +2216,11 @@ Decided by the maintainer (2026-10-17), now normative:
 - `trust_state.self` is `verified` only when every other current member is
   verified, and `require_verified` holds deliveries until then (§10.1,
   §10.4).
-- In `moderated` mode, until floor control exists, only the moderator is
-  triggered (§9.3).
 - v0 is single-relay: an invite for another relay host is rejected (§4.4).
 - The Update cadence counts sent and received messages (§3.1).
 - The §7.1 epoch drop rule covers application messages and proposals;
   commits are merged and flagged.
-- `control.close` prompts the human and never auto-leaves; `control.floor`
-  waits for floor control (§7.3).
+- `control.close` prompts the human and never auto-leaves (§7.3).
 - An identity in `to` triggers all its instances, and `metadata.instance`
   narrows triggering for every kind (§9.4).
 - Traffic before the Welcome is parked, bounded and unacked (§6.3).
@@ -2205,6 +2258,29 @@ Decided by the maintainer (2026-10-17), now normative:
   rejected or expired (§10.2).
 - Local policy (approvals, framing, local limits) is described in an
   informative §10.6; the file-part size cap is local.
+
+Decided by the maintainer (2026-10-18), group mode, now normative:
+
+- Floor control: grants by the effective moderator or the owner, ordered by
+  `seq`, with local holder state (§7.3, §9.3). The effective moderator is
+  `floor_moderator` while it is a member, otherwise the owner.
+- The `free` → `mention` floor switch counts identities, not instances, so
+  a new instance of a member never switches a 1:1 group; `max_members`
+  still counts instances (§9.1).
+- `floor_pinned` in the policy records that the floor was set on purpose;
+  the switch is refused while it is true (§9.1, §9.2, §6.6.5).
+- Task replies name the requesting instance in `body.metadata.instance`
+  (§7.2, §9.4).
+- An owner instance drops departed identities from `admins` and
+  `floor_moderator` with a policy change (§9.2).
+- A leave is a `control.leave` notice followed by a self-Remove proposal;
+  membership changes only with the commit (§7.3, §9.2).
+- A new instance of a verified identity keeps the flag and is shown as new
+  (§11).
+- A group stalled by a member's rejected commit is recovered by hand, with
+  a new group (§12).
+- Whether to batch context for the agent is the adapter's choice (§9.3,
+  §10.6).
 
 Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 
