@@ -156,11 +156,11 @@ def test_listing_renewal() -> None:
         return card
 
     assert fixed(renewed) == fixed(previous)
-    refused = r["refused"]
-    with pytest.raises(ac.AgentConnectError) as e:
-        previous.renew(ik, refused["seq"], r["issued_at"], None)
-    assert str(e.value) == refused["error"]
-    assert e.value.kind == refused["kind"]
+    for case in r["refused"]:
+        with pytest.raises(ac.AgentConnectError) as e:
+            previous.renew(ik, case["seq"], case["issued_at"], None)
+        assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case["kind"], case["name"]
 
 
 def test_listing_content() -> None:

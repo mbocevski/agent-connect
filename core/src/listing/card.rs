@@ -1087,7 +1087,9 @@ impl SignedListing {
     /// # Errors
     ///
     /// [`Error::InvalidListing`]: `"seq does not increase"` (kind
-    /// `superseded`), `"signing key is not params.identity"`, or a rule the
+    /// `superseded`), `"issued_at goes back"` (kind `stale_timestamp`) for an
+    /// `issued_at` before this listing's, `"signing key is not
+    /// params.identity"`, or a rule the
     /// new values break (a door more than 7 days after `issued_at`, a `seq`
     /// past 2^53 − 1).
     pub fn renew(
@@ -1099,6 +1101,9 @@ impl SignedListing {
     ) -> Result<SignedListing> {
         if seq <= self.card.params.seq {
             return Err(bad("seq does not increase"));
+        }
+        if issued_at < self.card.params.issued_at {
+            return Err(bad("issued_at goes back"));
         }
         let mut card = self.card.clone();
         card.params.seq = seq;
@@ -2122,6 +2127,12 @@ mod tests {
                 Some(bad("seq does not increase"))
             );
         }
+        // Review L6: an issued_at before the previous listing's. The same
+        // issued_at is a renewal within the same second.
+        let e = r.renew(&f.ik, 9, T0 + 3599, None).unwrap_err();
+        assert_eq!(e, bad("issued_at goes back"));
+        assert_eq!(e.kind(), crate::ErrorKind::StaleTimestamp);
+        r.renew(&f.ik, 9, T0 + 3600, None).unwrap();
         let stranger = Identity::generate(&Rng::for_test("renew-stranger")).unwrap();
         assert_eq!(
             l.renew(&stranger, 8, T0 + 3600, None).err(),

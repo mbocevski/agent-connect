@@ -254,9 +254,10 @@ fn reason_kind(reason: &str) -> ErrorKind {
         "door has expired" | "door expired" => K::DoorExpired,
         "not this door" | "door_id mismatch" => K::WrongDoor,
         "for another directory" => K::WrongDirectory,
-        "ts not within 300 s" | "ts out of range" | "issued_at is in the future" => {
-            K::StaleTimestamp
-        }
+        "ts not within 300 s"
+        | "ts out of range"
+        | "issued_at is in the future"
+        | "issued_at goes back" => K::StaleTimestamp,
         "replayed" => K::Replay,
         "token older than the name's newest"
         | "does not replace the stored listing"
@@ -337,6 +338,10 @@ mod tests {
                 K::StaleTimestamp,
             ),
             (Error::InvalidKnock("ts out of range"), K::StaleTimestamp),
+            (
+                Error::InvalidListing("issued_at goes back"),
+                K::StaleTimestamp,
+            ),
             (
                 Error::InvalidListing("issued_at is in the future"),
                 K::StaleTimestamp,

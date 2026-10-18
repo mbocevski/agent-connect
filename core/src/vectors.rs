@@ -813,7 +813,7 @@ fn listing_vectors() {
     l.check_token(&trusted(&d.dk), T0, |_| false).unwrap();
     l.check_publish(T0).unwrap();
     let mut out = header(
-        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Each check runs at `now` against its own `directory_keys` (base64url Ed25519 public keys) for `directory`, with the `revoked` token id; `error` is the core's message and `kind` its stable kind. `replacements` say whether `listing` may replace `stored_listing` (SPEC 13.2.2: seq per identity; another identity needs a later token), `tombstones` whether a tombstone (identity, seq) blocks `stored_listing`. `identities` and `directory_key_secret` are seed-derived secrets for signing more test listings and tokens. `renewal`: `previous` renewed by the identity `ik_secret` at `seq` and `issued_at` with the door whose key pair is DeriveKeyPair(`ikm`) gives exactly `renewed` (SPEC 6.6.1, 13.2.2: only door, seq and issued_at change), and a `seq` that does not increase is `refused`. `content`: the card text a human approves (ListingContent), `input` in any formatting canonicalises to `canonical`; each `invalid` input is refused.",
+        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Each check runs at `now` against its own `directory_keys` (base64url Ed25519 public keys) for `directory`, with the `revoked` token id; `error` is the core's message and `kind` its stable kind. `replacements` say whether `listing` may replace `stored_listing` (SPEC 13.2.2: seq per identity; another identity needs a later token), `tombstones` whether a tombstone (identity, seq) blocks `stored_listing`. `identities` and `directory_key_secret` are seed-derived secrets for signing more test listings and tokens. `renewal`: `previous` renewed by the identity `ik_secret` at `seq` and `issued_at` with the door whose key pair is DeriveKeyPair(`ikm`) gives exactly `renewed` (SPEC 6.6.1, 13.2.2: only door, seq and issued_at change), and each of `refused` (a `seq` that does not increase, an `issued_at` before the previous one) is refused. `content`: the card text a human approves (ListingContent), `input` in any formatting canonicalises to `canonical`; each `invalid` input is refused.",
         &seed,
     );
     out["directory"] = DIRECTORY.into();
@@ -928,7 +928,16 @@ fn renewal_vector(rng: &Rng, d: &Discovery) -> Value {
         .renew(&d.ik, seq, issued_at, Some(door.listed()))
         .unwrap();
     assert_eq!(renewed.card().content(), previous.card().content());
-    let refused = previous.renew(&d.ik, seq - 1, issued_at, None).unwrap_err();
+    let refusals: Vec<Value> = [
+        ("seq does not increase", seq - 1, issued_at),
+        ("issued_at goes back", seq, previous.params().issued_at - 1),
+    ]
+    .into_iter()
+    .map(|(name, seq, issued_at)| {
+        let e = previous.renew(&d.ik, seq, issued_at, None).expect_err(name);
+        json!({"name": name, "seq": seq, "issued_at": issued_at, "error": e.to_string(), "kind": e.kind().as_str()})
+    })
+    .collect();
     json!({
         "previous": s(previous.bytes()),
         "ik_secret": hex(d.ik.secret_bytes().as_slice()),
@@ -936,7 +945,7 @@ fn renewal_vector(rng: &Rng, d: &Discovery) -> Value {
         "issued_at": issued_at,
         "door": {"id": b64(&door_id), "ikm": hex(&ikm), "expires_at": expires_at},
         "renewed": s(renewed.bytes()),
-        "refused": {"seq": seq - 1, "error": refused.to_string(), "kind": refused.kind().as_str()},
+        "refused": refusals,
     })
 }
 
