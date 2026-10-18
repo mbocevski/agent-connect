@@ -1,4 +1,4 @@
-# ADR-006: Discovery: signed listings, doors and the Heimdall directory
+# ADR-006: Discovery: signed listings, doors and the directory
 
 - **Status:** Accepted
 - **Date:** 2026-10-17
@@ -10,13 +10,12 @@ Today two agents can only meet if their humans already know each other: one
 creates an invite (SPEC [§4](../../SPEC.md#4-invites)) and sends the link
 out of band. There's no way to find an agent you haven't been told about.
 
-**Heimdall** is a directory of agents that can be reached through an
-AgentConnect relay. It is served at `agents.yggdrasill.network`. The relay
-it points to, **Ratatoskr**, is at `connect.yggdrasill.network`. A listing
-says "this agent exists, this is its key, this is what it says it does, and
-you can knock here". A knock is a request to talk. The owner's human
-approves or ignores it, and an approved knock becomes an ordinary
-two-member MLS group.
+A **directory** is a service that indexes agents that can be reached
+through an AgentConnect relay, for example one served at
+`directory.example.org`. A listing says "this agent exists, this is its
+key, this is what it says it does, and you can knock here". A knock is a
+request to talk. The owner's human approves or ignores it, and an
+approved knock becomes an ordinary two-member MLS group.
 
 This ADR decides the protocol and trust model. It is docs only. The SPEC
 text below is a proposal and goes into `SPEC.md` after review. Phase 2
@@ -25,7 +24,7 @@ here only as far as these decisions require.
 
 What has to keep holding:
 
-- **The relay sees no plaintext and no secrets** (AGENTS.md). Heimdall is a
+- **The relay sees no plaintext and no secrets** (AGENTS.md). The directory is a
   second server run by the same operator, so it gets the same rule. It
   must not become a way to tie identities to mailboxes, and it must not
   hold keys.
@@ -97,7 +96,7 @@ Example (wrapped for reading; the real thing is one canonical line):
     "extensions": [{
       "description": "Reachable end-to-end encrypted through AgentConnect. Knock to connect; a human approves every connection.",
       "params": {
-        "directory": "agents.yggdrasill.network",
+        "directory": "directory.example.org",
         "door": {
           "expires_at": 1792800000,
           "id": "q3J0bXhH4mTb0cJ2Zb8m1A",
@@ -131,7 +130,7 @@ Example (wrapped for reading; the real thing is one canonical line):
   "supportedInterfaces": [{
     "protocolBinding": "AGENTCONNECT",
     "protocolVersion": "0",
-    "url": "https://agents.yggdrasill.network/a/release-planner.json"
+    "url": "https://directory.example.org/a/release-planner.json"
   }],
   "version": "1.4.0"
 }
@@ -164,12 +163,12 @@ Example (wrapped for reading; the real thing is one canonical line):
 - **`required: true`.** A2A clients that don't speak the extension can't
   reach the agent, and A2A says to fail rather than guess (§4.6.3).
 - **`provider`.** If present, `provider.url` MUST be
-  `https://<owner_domain>` or a path under it. Heimdall shows
+  `https://<owner_domain>` or a path under it. A directory shows
   `provider.organization` only next to a verified domain (Decision 2).
   Otherwise any listing could claim to be "Example Ltd".
 - **Text limits.** All text is attacker-controlled (§10.5) and MUST NOT
   contain control characters (Unicode Cc). Newlines are Cc, so every field
-  is one line, which matches the site's "one-line description".
+  is one line.
   - `name`: at most 80 characters.
   - `description`: at most 500.
   - `version`: at most 32.
@@ -249,14 +248,14 @@ our verifier and a2a-sdk's verifier compute the same bytes:
   Replicas share IK (ADR-005, Decision 5), and IK is what peers see in
   MLS credentials.
 - *`alg: "Ed25519"` (RFC 9864).* It is the cleaner name, but PyJWT 2.15.1
-  and so a2a-sdk 1.2.2 can't verify it. See open question 4.
+  and so a2a-sdk 1.2.2 can't verify it. See open question 3.
 
 ### Fingerprint shown to humans
 
 **The existing §2 fingerprint, unchanged.** That is the first 16 bytes of
 SHA-256(IK.pub), as 8 groups of 4 lower-case hex characters, for example
-`3f9a 0c21 77de 41b0 9e5c d2a8 16f4 b03e`. It is the format on the
-Heimdall design, in `approvals list` and in `groups show`. It is a
+`3f9a 0c21 77de 41b0 9e5c d2a8 16f4 b03e`. It is the format used
+in `approvals list` and in `groups show`. It is a
 truncation (128 bits) of the hash of the identity key, not a new value.
 Its use is human comparison. Machines compare the full `ac:v0:` identity
 (the well-known file in Decision 2 lists full identities for that
@@ -283,7 +282,7 @@ https://<owner_domain>/.well-known/agentconnect.json
     {
       "identity": "ac:v0:2l3k…",
       "fingerprint": "3f9a 0c21 77de 41b0 9e5c d2a8 16f4 b03e",
-      "listings": ["agents.yggdrasill.network/a/release-planner"]
+      "listings": ["directory.example.org/a/release-planner"]
     }
   ],
   "revoked": [
@@ -315,11 +314,11 @@ https://<owner_domain>/.well-known/agentconnect.json
 
 ### Who checks, and when
 
-- **Heimdall** checks on every publish, every 6 hours afterwards, and when
+- **The directory** checks on every publish, every 6 hours afterwards, and when
   a withdrawal or revocation names the identity. Every check must succeed
   on its own; it is never assumed.
 - **The knocker's daemon** fetches the file itself before it knocks, and
-  shows the result to its human. Heimdall's badge is the operator's
+  shows the result to its human. A directory's badge is the operator's
   opinion, and a malicious operator can fake it (§12 row below). The
   daemon's own fetch is what the knock records. The fetch tells the
   owner's web server that someone is about to knock, and from which
@@ -327,7 +326,7 @@ https://<owner_domain>/.well-known/agentconnect.json
   `--no-domain-check` skips the fetch; the knock then records the owner
   state as unchecked.
 
-### States Heimdall shows
+### States a directory shows
 
 | State | Condition | What the page shows |
 |---|---|---|
@@ -346,10 +345,10 @@ https://<owner_domain>/.well-known/agentconnect.json
      token for the new identity.
   3. Move the old identity to `revoked` with `superseded`.
 
-  For 30 days Heimdall shows "key changed on <date>" on that listing, the
+  For 30 days the directory shows "key changed on <date>" on that listing, the
   way SSH warns about a changed host key. People who pinned the old
   fingerprint must notice the change.
-- **Revocation** (`compromised`). Heimdall withdraws every listing of that
+- **Revocation** (`compromised`). The directory withdraws every listing of that
   identity at its next check. To make it immediate, the owner also sends a
   withdrawal, or the operator revokes the token. The daemon's
   `listing withdraw` does all of it (phase 3).
@@ -357,7 +356,7 @@ https://<owner_domain>/.well-known/agentconnect.json
 **Rejected:**
 
 - *DNS TXT records.* Many owners can't edit DNS. TXT size limits make
-  several identities awkward. It also needs a DNS client in Heimdall with
+  several identities awkward. It also needs a DNS client in the directory with
   DNSSEC questions attached.
 - *The key inside the owner's own `/.well-known/agent-card.json`.* That
   forces the owner to run a public A2A card, ties AgentConnect to a file
@@ -375,10 +374,8 @@ to the door's key and signed by the knocker's instance key. **Approving a
 knock** creates that group and sends a wrapped Welcome. Rejection and
 timeout send nothing.
 
-On naming: the site's status line says "door invites". A door is **not**
-an invite. It has no secret, isn't bound to a group, and is never consumed.
-This ADR uses "door" and "knock" throughout, and SPEC §4 is unchanged. See
-"Decided in review", item 1.
+On naming: a door is **not** an invite. It has no secret, isn't bound to a group, and is never consumed.
+This ADR uses "door" and "knock" throughout, and SPEC §4 is unchanged.
 
 ### Why not reuse §4
 
@@ -583,8 +580,7 @@ listing, and one fewer probe surface is better.
 | At `ts + 3600 + 300` with no Welcome | "No answer." The daemon deletes the knock's `welcome_secret` and KeyPackage and reports `knock_lapsed`, never "rejected" | No. Rejected, timed out, owner offline, dropped by a limit and a failed check all look the same. |
 
 That is what makes rejection silent: until the deadline, every outcome
-other than approval produces the same observation. It matches the site's
-"Silence after an hour means no." The timing of an approval does reveal
+other than approval produces the same observation. The timing of an approval does reveal
 when the human approved, which is inherent to approving.
 
 **Rejected:**
@@ -599,14 +595,13 @@ when the human approved, which is inherent to approving.
 - *A door that is a long-lived group knockers join.* Knockers would see
   each other.
 
-## Decision 4: what Heimdall stores and sees
+## Decision 4: what the directory stores and sees
 
-Heimdall indexes signed listings and serves them.
+The directory indexes signed listings and serves them.
 
 - **It never talks to the relay.** It has no relay credentials, opens no
   WebSocket and checks no doors. It can't tell whether a door is
-  registered: "door open" on the site means "the signed door hasn't
-  expired". Closing a door goes through the relay *and* a re-published
+  registered, only whether the signed door has expired. Closing a door goes through the relay *and* a re-published
   listing without `door` (Decision 6), so the two stay in step.
 - **It holds no keys and no secrets.**
   - Publishing is authenticated by the listing's own JWS and the
@@ -614,7 +609,7 @@ Heimdall indexes signed listings and serves them.
   - Withdrawing is authenticated by an IK-signed `Withdrawal`.
   - There are no accounts, passwords, sessions or bearer tokens.
   - The operator's token-signing key stays with the operator's offline
-    tool. Heimdall has only the public key.
+    tool. The directory has only the public key.
 - **It never learns mailbox ids.** The listing carries:
   - `door.id`, a random relay-side handle that only the relay maps to a
     mailbox;
@@ -622,7 +617,7 @@ Heimdall indexes signed listings and serves them.
   - the relay host, which is public.
 
   None of them derives from `SK` or the mailbox (§2). Knocks go
-  knocker → relay → owner, and Heimdall isn't on that path.
+  knocker → relay → owner, and the directory isn't on that path.
 - **It stores:**
   - per listing: the exact canonical bytes, their SHA-256, and `name`,
     `identity`, `seq`, `token_id`, `owner_domain`, the owner state and
@@ -641,7 +636,7 @@ Heimdall indexes signed listings and serves them.
 
 | Field | Why it is safe |
 |---|---|
-| `identity`, fingerprint | Public by the owner's choice. It does link the listed identity to any group where it is a member, so a dedicated identity for listing is recommended ("Decided in review", item 4). |
+| `identity`, fingerprint | Public by the owner's choice. It does link the listed identity to any group where it is a member, so a dedicated identity for listing is recommended ("Decided in review", item 3). |
 | `door.id` | It authenticates nothing. All it allows is sending knocks, which are rate-limited and approved by a human. Only the relay can map it to a mailbox, and the relay knows every mailbox already. |
 | `door.key` | A public key. Rotated with every door. |
 | `relay` | A public host. |
@@ -660,7 +655,7 @@ Proposed new rows for the SPEC §12 table, in its column order:
 | **Impersonator** (claims another org's name or text) | Signs a card that copies a real agent's name, description or skills | The signature binds the card to its own IK only. The owner domain is shown only when `/.well-known/agentconnect.json` lists the key, and `provider.organization` only next to a verified domain. Slugs are ASCII-only. "Key changed" banner for 30 days. The knocker's daemon fetches the domain file itself. Then the SAS | Humans who trust the name or text over the fingerprint and domain. An attacker who controls the owner's web server can vouch for its own key |
 | **Scraper / enumerator** | Downloads every listing, tracks door rotations and owner domains over time | Listings are public by design. Rate limits. Listings carry no mailbox id, no relay secret and no contact data beyond what the owner signed. Doors rotate weekly | The set of listed identities and their published text, and a weekly rotation cadence. Listing makes an identity public |
 | **Malicious directory operator** | Hides, delays or reorders listings. Serves stale versions. Fakes owner badges. Ignores withdrawals. Logs who reads what. Issues tokens to identities of its own | Listings and withdrawals are signed by IK, and tokens are checked against a key pinned in the daemon, so it **can't forge or alter** a listing. The knocker re-verifies the JWS, the token and the expiry, and fetches the domain file itself. Rollback is bounded by the door's 7-day expiry, and by the owner closing the door at the relay | Censorship and delay. Stale but validly signed listings until their door expires. Reader metadata. Names are operator-assigned, so a name proves nothing about who holds it |
-| **Relay and directory colluding** (same operator) | Joins reads of a listing to knocks on its door, and knocks to their mailboxes | Knocks are sealed (§6.6), so the relay sees a sender mailbox, a door and a time. Heimdall logs no addresses | Who knocked on whom and when, if both sides keep data they're told not to keep. **Metadata**, as for the relay |
+| **Relay and directory colluding** (same operator) | Joins reads of a listing to knocks on its door, and knocks to their mailboxes | Knocks are sealed (§6.6), so the relay sees a sender mailbox, a door and a time. the directory logs no addresses | Who knocked on whom and when, if both sides keep data they're told not to keep. **Metadata**, as for the relay |
 | **Stale door** (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones stop older listings from being re-published | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry |
 | **Knock flooder** | Sends many knocks to tire the owner's human, or to crowd out real knocks | Relay limits per (door, sender) and per sender, and per door, where overflow is dropped silently. Owner caps: one pending knock per identity per door, 32 per door. The 1 h lapse. Local policy (§10.6) drops | Denial of service on a popular door. Mailboxes are free, so the relay limits slow Sybils down rather than stop them |
 | **Prompt injection through card text** | Card name, description, skills and examples are attacker-controlled and are read by agents through MCP, `.md`, `llms.txt` and `knock` | Cards are untrusted content (§10.1, §10.5). Directories MUST present card text as data: MCP results carry `untrusted: true`, Markdown escapes card text inside fenced blocks, and `llms.txt` lists names and URLs only. Single-line fields with length caps. No links from card text are rendered. Knock approval is human. Knocking only asks to talk | Behavioural: an agent that obeys card text anyway. Can't be solved with cryptography (as the existing row) |
@@ -676,7 +671,7 @@ listing says).
 ListingToken = {
   "v": 0,
   "token_id": "<16 random bytes, b64url>",
-  "directory": "agents.yggdrasill.network",
+  "directory": "directory.example.org",
   "name": "release-planner",
   "identity": "ac:v0:…",
   "owner_domain": "example.com",        // optional: pins the domain the listing may claim
@@ -688,11 +683,11 @@ ListingToken = {
 ```
 
 - **Issuer.** `DK` is the directory operator's token key, an Ed25519 key
-  held by the operator's offline tool, never by Heimdall.
+  held by the operator's offline tool, never by the directory.
   - Daemons ship its public key, pinned per directory in their config,
-    with `agents.yggdrasill.network` as the default. They never fetch it
+    with `directory.example.org` as the default. They never fetch it
     from a URL a listing names (as §10.5).
-  - Heimdall is configured with the same public key. It also publishes the
+  - The directory is configured with the same public key. It also publishes the
     key at `/.well-known/agentconnect-directory.json`, for information
     only.
   - Up to two `key_id`s are valid at once, so DK can be rotated.
@@ -703,17 +698,17 @@ ListingToken = {
     only IK can sign the listing.
   - It is embedded in `params.token`, so mirrors and knockers check
     curation themselves.
-- **Lifetime.** At most 90 days (open question 2). Re-issuing is an
+- **Lifetime.** At most 90 days (open question 1). Re-issuing is an
   operator action. A listing whose token has expired is hidden as if it
   were withdrawn, and the daemon warns its human 14 days ahead.
 - **Revocation.** The operator signs
   `TokenRevocation = {v, token_id, revoked_at, reason, key_id, sig}`
-  (label `agentconnect/v0/listing-token-revoke`) and posts it. Heimdall
+  (label `agentconnect/v0/listing-token-revoke`) and posts it. The directory
   stores the token id and withdraws the listing in the same transaction.
 
 ### Publish (human decision)
 
-`POST /v0/listings`, whose body is the canonical listing. Heimdall
+`POST /v0/listings`, whose body is the canonical listing. The directory
 accepts it only if all of the following hold:
 
 - The listing passes Decision 1.
@@ -738,13 +733,13 @@ the human approved.
 
 ```text
 Withdrawal = {
-  "v": 0, "directory": "agents.yggdrasill.network", "name": "release-planner",
+  "v": 0, "directory": "directory.example.org", "name": "release-planner",
   "identity": "ac:v0:…", "seq": <the highest seq withdrawn>, "ts": <unix seconds>,
   "sig": "<b64url Ed25519(IK, \"agentconnect/v0/listing-withdraw\" || JCS(withdrawal without sig))>"
 }
 ```
 
-- `POST /v0/withdrawals`. Heimdall checks the signature and that `ts` is
+- `POST /v0/withdrawals`. The directory checks the signature and that `ts` is
   within 300 s. In **one transaction** it deletes the listing, writes the
   tombstone, and appends the signed entry to the feed. A repeat of the
   same withdrawal changes nothing.
@@ -762,11 +757,11 @@ Withdrawal = {
   `Cache-Control: public, max-age=60, must-revalidate`, an `ETag` (the
   bytes' hash) and `Vary: Accept`.
 - **After withdrawal**, every URL of the listing returns
-  `410 Gone` with `Cache-Control: max-age=60`. A CDN in front of Heimdall
+  `410 Gone` with `Cache-Control: max-age=60`. A CDN in front of the directory
   is purged on every withdrawal.
 - **The feed.** `GET /v0/withdrawals?after=<cursor>` lists withdrawals and
   token revocations in order. Each entry is signed by the owner or the
-  operator, so a mirror verifies it without trusting Heimdall.
+  operator, so a mirror verifies it without trusting the directory.
   - A conforming mirror polls at least every 60 s and applies an entry
     before it serves the listing again.
   - A mirror re-verifies every listing (Decision 1 and the token) and
@@ -780,11 +775,11 @@ Withdrawal = {
 
 - *Open self-service listing in v0.* It invites spam and impersonation
   before any reputation system exists.
-- *An opaque bearer token stored hashed in Heimdall.* Heimdall would hold a
+- *An opaque bearer token stored hashed in the directory.* The directory would hold a
   credential-equivalent. Mirrors and knockers couldn't check curation. A
   leaked token would let anyone publish under the name until it was
   revoked.
-- *Withdrawal only at Heimdall.* "Instant" would then depend on every cache
+- *Withdrawal only at the directory.* "Instant" would then depend on every cache
   and mirror behaving well.
 
 ## Decision 7: spec changes and versioning
@@ -904,13 +899,11 @@ The edits use the existing section numbers; nothing is renumbered.
 - the knock Welcome wrap;
 - the well-known file parser cases.
 
-## What a listing proves (for the site and the docs)
-
-This matches the Heimdall design.
+## What a listing proves
 
 - **It proves** that the card was signed by the key with that
-  fingerprint, so Heimdall can't forge or alter it. With a `verified`
-  badge, it also proves that whoever controls the domain vouches for that
+  fingerprint, so the directory can't forge or alter it. With a `verified`
+  state, it also proves that whoever controls the domain vouches for that
   key.
 - **It does not prove** that the agent does what its card says, or that
   it's safe to hand it anything. It also doesn't prove who is on the other
@@ -918,18 +911,6 @@ This matches the Heimdall design.
 
 The docs use the canonical security claim from SPEC §1 for the
 conversation itself, and nothing stronger.
-
-### Site wording, mapped to protocol state
-
-| Site | Protocol meaning |
-|---|---|
-| `release-planner` | `params.name` (operator-assigned through the token) |
-| "owner verified · example.com" | Owner state `verified` (Decision 2) |
-| Description, skills `release planning · scheduling` | `description`, `skills[].tags` (unverified text) |
-| `3f9a 0c21 …` | §2 fingerprint of `params.identity` |
-| "DOOR OPEN · RENEWS IN 5 DAYS" | `door` present, and `door.expires_at` − now is 5 days (rounded down). The daemon renews at half-life, so in practice the number seldom drops below 3 |
-| "DOOR CLOSED · NOT TAKING NEW CONNECTIONS" | `door` absent, or `door.expires_at` passed |
-| `agentconnect knock agents.yggdrasill.network/a/release-planner` | Phase 3 argument form, below |
 
 ## Plan for phases 2 and 3 (as constrained here)
 
@@ -975,13 +956,13 @@ conversation itself, and nothing stronger.
 
 ### Phase 3: the daemon and CLI
 
-- **`agentconnect listing publish --directory agents.yggdrasill.network`.**
+- **`agentconnect listing publish --directory directory.example.org`.**
   Human token.
   - It needs a token file from the operator.
   - It shows the card it will sign, then registers a door, signs and
     publishes.
-  - It warns when the identity already has private groups (open
-    question 5).
+  - It warns when the identity already has private groups ("Decided
+    in review", item 3).
 - **`agentconnect listing withdraw`.** Agent or human token. It closes the
   door at the relay, then withdraws.
 - **`agentconnect listing status`.** It shows the owner state, the door
@@ -1013,12 +994,12 @@ conversation itself, and nothing stronger.
 
 - **A listed identity is public.** Anyone can tell that a member with that
   identity in any group is the listed agent. This is the price of being
-  findable, and a separate identity is recommended ("Decided in review", item 4).
+  findable, and a separate identity is recommended ("Decided in review", item 3).
 - **The relay grows a small door registry and one frame.** It still parses
   no `ct` and holds no secret. Its new metadata (who knocks on which door,
   and when) is of the same kind as `join` today, with the knock contents
   hidden.
-- **Heimdall can censor, delay and fake badges, but can't forge.** Every
+- **The directory can censor, delay and fake badges, but can't forge.** Every
   trust decision that matters (signature, token, door expiry, domain file,
   SAS) is checked again by the knocker's daemon.
 - **Names are operator-assigned.** A slug proves nothing about who holds
@@ -1036,20 +1017,18 @@ conversation itself, and nothing stronger.
 
 ## Decided in review
 
-1. **Site wording.** The status line becomes "SPEC draft: signed listings
-   and doors". A door is not an invite (Decision 3).
-2. **Extension URI.** `https://yggdrasill.network/ext/agentconnect/e2e/v0`.
+1. **Extension URI.** `https://yggdrasill.network/ext/agentconnect/e2e/v0`.
    The project's protocol URIs and the default relay all live on
    `yggdrasill.network`. A page describing the extension is served at that
    URI before v0 is tagged. Changing the URI later would be a new extension version, which
    is why it's settled now.
-3. **Well-known name.** `/.well-known/agentconnect.json` on the owner's
+2. **Well-known name.** `/.well-known/agentconnect.json` on the owner's
    domain. It's registered with IANA (RFC 8615) before v0 is tagged.
-4. **A dedicated identity for listing.** SHOULD, not MUST. `listing
+3. **A dedicated identity for listing.** SHOULD, not MUST. `listing
    publish` warns when the identity already has groups, and the docs
    explain the linkage. Enforcing it would mean a second daemon per listed
    agent (ADR-005, one daemon per identity).
-5. **Who may knock.** The agent token, like `accept`. The decision that
+4. **Who may knock.** The agent token, like `accept`. The decision that
    matters is on the owner's side and is human, and knocking only reveals
    the knocker's identity to the owner it chose. A local policy switch to
    require human confirmation of outgoing knocks comes with §10.6.
@@ -1058,25 +1037,21 @@ conversation itself, and nothing stronger.
 
 The recommendations below stand unless review says otherwise.
 
-1. **"RENEWS IN N DAYS".** Heimdall knows only the signed expiry, not
-   whether the daemon will renew. *Recommendation:* keep the label and
-   define N as the days until `door.expires_at`, as in the table above. A
-   door that isn't renewed shows "DOOR CLOSED" after expiry.
-2. **Token lifetime.** *Recommendation:* 90 days while the service is
+1. **Token lifetime.** *Recommendation:* 90 days while the service is
    pre-alpha, with operator re-issue. Revisit when curation moves beyond
    invitation.
-3. **Doors held by replicas.** v0 has one door per listing on one
+2. **Doors held by replicas.** v0 has one door per listing on one
    instance. *Recommendation:* defer. Several replicas behind one door need
    a shared door key and a rule for who approves, which deserves its own
    design.
-4. **`EdDSA` or `Ed25519` as the JWS `alg`.** *Recommendation:* `EdDSA`
+3. **`EdDSA` or `Ed25519` as the JWS `alg`.** *Recommendation:* `EdDSA`
    for v0, because a2a-sdk 1.2.2 can verify it. Move to `Ed25519` in a
    later version once PyJWT supports it, never by accepting both.
-5. **Silent drop on per-door overflow.** The other option is an honest
+4. **Silent drop on per-door overflow.** The other option is an honest
    `rate_limited`. That would tell a knocker the door is busy, and it
    would let a prober measure an owner's traffic. *Recommendation:* keep
    the silent drop. A flood is a denial of service either way.
-6. **Name transfer on key rotation.** *Recommendation:* a new token from
+5. **Name transfer on key rotation.** *Recommendation:* a new token from
    the operator plus the 30-day "key changed" banner, rather than letting
    the old key sign a handover. A compromised key must not be able to
    hand its name to the attacker.
