@@ -269,6 +269,40 @@ async def test_a_leave_proposal_survives_a_crash(group: GroupFixture, advance: A
     assert len(a.daemon.client.members(raw(gid))) == 2
 
 
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("step", ["in_tx", "after_tx", "after_consume"])
+async def test_designated_committer_restarts_with_a_pending_leave(
+    group: GroupFixture, advance: Advance, malicious_relay: Proxy, step: str
+) -> None:
+    """The member that commits a leave crashes around recording the leave
+    proposal: after the restart it still commits it, and every member
+    reports a leave, not a removal (the pending leaves come from the core,
+    never from memory)."""
+    (a, b, c), gid = await group(3)
+    held: list[dict[str, object]] = []
+
+    def hold(frame: dict[str, object]) -> list[dict[str, object]]:
+        env = frame.get("env")
+        if frame.get("t") == "deliver" and isinstance(env, dict) and env.get("kind") == "proposal":
+            held.append(frame)
+            return []
+        return [frame]
+
+    malicious_relay(a).server_filters.append(hold)
+    await c.daemon.leave(gid)
+    await until(lambda: bool(held))
+    malicious_relay(a).server_filters.remove(hold)
+    fired = daemon_point(a, f"receive.{step}", "crash")
+    await malicious_relay(a).inject(held[0])
+    await recover(a, advance, "crash", fired)
+    await until(lambda: status(c, gid) == "left")
+    await settled([a, b], gid)
+    for n in (a, b):
+        assert [e["identity"] for e in events(n, "member_left")] == [c.me]
+        assert events(n, "member_removed") == []
+    assert [e["by"] for e in events(c, "left")] == [a.me]
+
+
 async def test_an_invite_whose_registration_crashed_is_revoked(
     group: GroupFixture, advance: Advance
 ) -> None:

@@ -78,8 +78,17 @@ What works on `main` today:
   <!-- component: runtime -->
 - **CLI** (`agentconnect`): runs the daemon and covers the invite lifecycle:
   create and accept invites, approve joins, compare the short code, send a
-  test message and read events ([docs/cli.md](docs/cli.md)).
+  test message and read events, leave a group, and remove a member or only
+  some of its instances, such as a dead replica ([docs/cli.md](docs/cli.md)).
   <!-- component: cli -->
+- **Group membership** (in the runtime): every member checks each commit
+  against the group's policy. A leave is a notice and a proposal that the
+  member with the lowest leaf commits, or the next one a minute later, also
+  after a restart. A leave that can't complete because the leaver is the
+  owner's last instance says so instead of deleting the group. Events name
+  who joined, left or was removed, per member or per instance, and who
+  committed it ([docs/groups.md](docs/groups.md)).
+  <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It
   caps message size and rate, stops reply loops, can require a verified
   group, and can hold messages until a human approves them
@@ -140,8 +149,9 @@ What works on `main` today:
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
-What is coming: knocking from the SDK (`AgentConnect.knock`), and support
-for more agent platforms. With no adapter configured, a received message
+What is coming: role and policy changes and ownership hand-over from the
+CLI and the API, floor control, replica provisioning, knocking from the SDK
+(`AgentConnect.knock`), and support for more agent platforms. With no adapter configured, a received message
 waits in the daemon's inbound queue.
 
 Platform support:

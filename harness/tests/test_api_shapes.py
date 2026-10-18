@@ -3,6 +3,7 @@ docs/api.md) against a real daemon."""
 
 from __future__ import annotations
 
+import base64
 import shutil
 import tempfile
 from collections.abc import AsyncIterator
@@ -129,3 +130,28 @@ async def test_safety_routes_match_the_declared_shapes(cluster: Cluster, sockdir
     assert len(alice.seen) == 11
     await alice.server.stop()
     await bob.server.stop()
+
+
+async def test_membership_routes_match_the_declared_shapes(cluster: Cluster, sockdir: Path) -> None:
+    alice = await serve(cluster, "alice", sockdir, auto_approve=True)
+    bob = await serve(cluster, "bob", sockdir, auto_approve=True)
+    gid = (await alice.call("POST", "/v0/groups", {"name": "Ops"}))["group_id"]
+    await alice.node.idle()
+    await cluster.invite(alice.node, bob.node, gid)
+    replica = await cluster.node("bob2", identity_of=bob.node)
+    await cluster.invite(alice.node, replica, gid)
+    info = await bob.call("GET", f"/v0/groups/{gid}")
+    (mine,) = [m for m in info["members"] if m["self"]]
+    other = next(i["instance_id"] for i in mine["instances"] if not i["self"])
+    path = f"/v0/groups/{gid}/members/{bob.node.me}/remove"
+    await bob.call("POST", path, {"instances": [other]}, "human")
+    await bob.node.wait(lambda: len(bob.node.daemon.client.members(_raw(gid))) == 2)
+    await bob.call("POST", f"/v0/groups/{gid}/leave")
+    info = await bob.call("GET", f"/v0/groups/{gid}")
+    assert info["leaving"] is None or info["leaving"]["blocked"] is False
+    await alice.server.stop()
+    await bob.server.stop()
+
+
+def _raw(gid: str) -> bytes:
+    return base64.urlsafe_b64decode(gid + "=" * (-len(gid) % 4))

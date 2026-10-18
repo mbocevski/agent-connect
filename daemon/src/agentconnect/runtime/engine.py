@@ -468,8 +468,6 @@ class Engine:
         self._delivery_wake = asyncio.Event()
         self._changed = asyncio.Event()
         self._parked: dict[str, list[dict[str, Any]]] = {}
-        self._leaving: set[str] = set()
-        self._proposed_leaves: dict[str, set[str]] = {}
         self._tasks: list[asyncio.Task[None]] = []
         # Every message in and out goes through it (agentconnect.policy).
         self.safety = SafetyPolicy(
@@ -490,9 +488,12 @@ class Engine:
         self._drain = DrainBudget()
         self.running = False
         self._closed = False
+        from agentconnect.runtime.groups import GroupService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.knocks import KnockService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.listing import ListingManager  # noqa: PLC0415 - import cycle
 
+        # Membership: member state, commits' events, leaves and removals (docs/groups.md).
+        self.groups = GroupService(self)
         # The listing, its doors and the discovery worker (docs/discovery.md).
         self.listings = ListingManager(self)
         # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
@@ -528,6 +529,7 @@ class Engine:
             "held_timer": self._held_timer,
             "discovery": self.listings.run,
             "knock_timer": self.knocks.run,
+            "group_timer": self.groups.run,
             "relay_link": self.link.run,
         }
         for name, worker in workers.items():
@@ -626,13 +628,9 @@ class Engine:
                 if self.client.has_pending_commit(gid) and group.group_id not in built:
                     self.client.discard_pending_commit(gid)
                     LOG.info("discarded_unsent_commit", group=log.hid(group.group_id))
-            if self._leaving_state(group):
-                self._leaving.add(group.group_id)
+            self.groups.recover(group)
         # A join recorded as done whose secret a crash left in the keystore.
         self._forget_join_secrets()
-
-    def _leaving_state(self, group: GroupRow) -> bool:
-        return self.store.kv_get(f"leaving/{group.group_id}") == "1"
 
     def _pulse(self) -> None:
         self._changed.set()
@@ -673,6 +671,8 @@ class Engine:
         self._frames.put_nowait({"t": REPLAY_JOURNAL})
         self._outbox_wake.set()
         self._delivery_wake.set()
+        # Pending leaves this instance should commit, after a restart too.
+        self.groups.wake()
         self._pulse()
         try:
             await self.expire()
@@ -865,34 +865,9 @@ class Engine:
         sas = self.client.sas(gid)
         return {"decimal": sas.decimal, "emoji_indices": sas.emoji_indices}
 
-    def _refresh(self, group_id: str) -> tuple[set[str], set[str]]:
+    def _refresh(self, group_id: str) -> None:
         """Re-read members, roles, policy and epoch from the core."""
-        gid = unb64(group_id)
-        policy = json.loads(self.client.policy(gid))
-        admins = set(policy.get("admins", []))
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for m in self.client.members(gid):
-            grouped.setdefault(m["identity"], []).append(
-                {
-                    "instance_id": m["instance_id_hex"],
-                    "mailbox_id": m["mailbox_id"],
-                    "leaf_index": m["leaf_index"],
-                }
-            )
-        members = {
-            identity: (
-                "owner"
-                if identity == policy["owner"]
-                else "admin"
-                if identity in admins
-                else "member",
-                instances,
-            )
-            for identity, instances in grouped.items()
-        }
-        joined, gone = self.store.set_members(group_id, members)
-        self.store.update_group(group_id, policy=policy, epoch=self.client.epoch(gid))
-        return joined, gone
+        self.groups.refresh(group_id)
 
     def _core_epoch(self, gid: bytes) -> int:
         try:
@@ -901,111 +876,13 @@ class Engine:
             return 0
 
     def _trust_state(self, group_id: str) -> dict[str, Any]:
-        members = self.store.members(group_id)
-        others = [m for m in members if m.identity != self.me]
-        verified = sum(1 for m in others if m.verified)
-        return {
-            "self": "verified" if others and verified == len(others) else "unverified",
-            "verified_members": verified,
-            "members": len(members),
-        }
+        return self.groups.trust_state(group_id)
 
     def _display_name(self, group_id: str, identity: str) -> str | None:
         for m in self.store.members(group_id):
             if m.identity == identity:
                 return m.display_name
         return None
-
-    def _membership_change(
-        self, group_id: str, summary: dict[str, Any]
-    ) -> tuple[set[str], set[str]]:
-        """Identities a commit added (all their instances are new) and
-        removed (no instance left)."""
-        current: dict[str, set[str]] = {}
-        for m in self.client.members(unb64(group_id)):
-            current.setdefault(m["identity"], set()).add(m["mailbox_id"])
-        added = {m["mailbox_id"] for m in summary.get("added", [])}
-        joined = {i for i, boxes in current.items() if boxes <= added}
-        gone = {str(m["identity"]) for m in summary.get("removed", [])} - current.keys()
-        return joined, gone
-
-    async def _after_commit(
-        self, group_id: str, summary: dict[str, Any], env: dict[str, Any] | None, own: bool
-    ) -> None:
-        """Bookkeeping after any merged commit, own or another member's.
-
-        The cached members, roles, policy and epoch are re-read from the core
-        first. Who joined and left comes from the commit's summary, not from
-        the cache's diff, so a replay of the same journal entry (ADR-004)
-        emits the same events."""
-        self._refresh(group_id)
-        joined, gone = self._membership_change(group_id, summary)
-        if env is not None:
-            # Shapes were checked before processing (_envelope_problem).
-            hinted = env.get("routing") or {}
-            expected = summary["routing"]
-            if sorted(hinted.get("add", [])) != sorted(expected["add"]) or sorted(
-                hinted.get("remove", [])
-            ) != sorted(expected["remove"]):
-                await self.emit(
-                    group_id,
-                    "relay_misbehaviour",
-                    reason="routing_mismatch",
-                    epoch=summary["epoch"],
-                )
-            if env.get("epoch") is not None and env["epoch"] + 1 != summary["epoch"]:
-                await self.emit(
-                    group_id, "relay_misbehaviour", reason="epoch_mismatch", epoch=summary["epoch"]
-                )
-        if own:
-            self.store.update_group(group_id, last_own_commit_at=self.now(), msgs_since_commit=0)
-        left = set(self._proposed_leaves.get(group_id, set()))
-
-        def forget_leaves() -> None:
-            self._proposed_leaves.pop(group_id, None)
-
-        self._defer(forget_leaves)
-        for identity in sorted(joined):
-            await self.emit(group_id, "member_joined", identity=identity)
-            await self._send_card(group_id, [identity])
-        for identity in sorted(gone):
-            kind = "member_left" if identity in left else "member_removed"
-            await self.emit(group_id, kind, identity=identity)
-        if summary.get("policy_changed"):
-            await self.emit(
-                group_id, "policy_changed", policy=json.loads(self.client.policy(unb64(group_id)))
-            )
-        trust = self._trust_state(group_id)
-        await self.emit(
-            group_id,
-            "epoch_changed",
-            epoch=summary["epoch"],
-            sas=self._sas(unb64(group_id)),
-            verified=f"{trust['verified_members']} of {trust['members'] - 1} verified",
-        )
-        if group_id in self._leaving:
-            self._enqueue("proposal", group_id, {})
-
-    async def _gone(self, group_id: str, kind: str) -> None:
-        """This instance is no longer in the group (removed or left).
-
-        The daemon's record goes first and the core's state after it (a
-        crash in between is cleaned up by :meth:`_recover`): the other way
-        round, a crash would leave an "active" group with no MLS state."""
-        gid = unb64(group_id)
-        self.store.update_group(group_id, status=kind)
-        await self._drop_group_holds(group_id)
-        self.store.delete_group_data(group_id)
-        self.store.kv_set(f"leaving/{group_id}", "0")
-        await self.emit(group_id, kind)
-
-        def forget() -> None:
-            self._leaving.discard(group_id)
-            self.safety.forget_group(group_id)
-            with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
-                self.client.delete_group(gid)
-
-        self._defer(forget)
 
     # -- inbound --------------------------------------------------------------
 
@@ -1427,16 +1304,16 @@ class Engine:
                 )
             return "held" if held else "pending"
         if etype in ("commit", "own_commit_confirmed"):
-            await self._after_commit(
+            await self.groups.after_commit(
                 group_id,
                 event,
                 env if from_relay else None,
                 own=etype == "own_commit_confirmed",
             )
         elif etype == "removed":
-            await self._gone(group_id, "left" if group_id in self._leaving else "removed")
+            await self.groups.on_removed(group_id, event)
         elif etype == "leave_proposed":
-            await self._on_leave_proposed(group_id, event["member"])
+            await self.groups.on_leave_proposed(group_id, event["member"])
         self.store.record_inbox(sender, msg_id, group_id, "done", now)
         return "done"
 
@@ -1662,18 +1539,6 @@ class Engine:
             )
         except DaemonError as e:
             LOG.info("loop_guard_pause_not_sent", code=e.code)
-
-    async def _on_leave_proposed(self, group_id: str, member: dict[str, Any]) -> None:
-        self._proposed_leaves.setdefault(group_id, set()).add(member["identity"])
-        # One designated member commits pending leaves (the lowest leaf that
-        # isn't leaving), so members don't race each other into conflicts.
-        leaving = self._proposed_leaves[group_id]
-        candidates = sorted(
-            (m for m in self.client.members(unb64(group_id)) if m["identity"] not in leaving),
-            key=lambda m: m["leaf_index"],
-        )
-        if candidates and candidates[0]["mailbox_id"] == self.mailbox:
-            self._enqueue("commit", group_id, {"intent": {"type": "proposals"}})
 
     # -- joins ----------------------------------------------------------------
 
@@ -2481,7 +2346,7 @@ class Engine:
         if row.kind == "commit":
             return await self._run_commit(row, group)
         if row.kind == "proposal":
-            return await self._run_proposal(row, group)
+            return await self.groups.run_proposal(row, group)
         return "failed"
 
     async def _request(
@@ -2522,12 +2387,6 @@ class Engine:
                     self._forget_invite_requests(str(invite["invite_id"]))
         return "done"
 
-    def _update_due(self, group: GroupRow) -> bool:
-        return (
-            self.now() - group.last_own_commit_at >= UPDATE_AFTER_SECS
-            or group.msgs_since_commit >= UPDATE_AFTER_MESSAGES
-        )
-
     async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:
         if group.out_of_sync:
             self._fail_codes[row.seq] = "out_of_sync"
@@ -2536,7 +2395,7 @@ class Engine:
         payload = dict(row.payload)
         for _ in range(MAX_COMMIT_ATTEMPTS):
             if "env" not in payload:
-                if self._update_due(group):
+                if self.groups.update_due(group):
                     # SPEC §3.1: renew keys just before the next send.
                     group = await self._cadence_update(row, payload, group)
                 inner = canonical(payload["inner"])
@@ -2567,34 +2426,7 @@ class Engine:
         self._fail_codes[row.seq] = "attempts_exhausted"
         return "failed"
 
-    async def _run_proposal(self, row: OutboxRow, group: GroupRow) -> str:
-        gid = unb64(group.group_id)
-        payload = dict(row.payload)
-        if "env" not in payload:
-            try:
-                proposal = self.client.propose_leave(gid)
-            except ac.AgentConnectError as e:
-                LOG.info("leave_not_possible", reason=str(e)[:60])
-                return "failed"
-            payload["env"] = {
-                "v": 0,
-                "kind": "proposal",
-                "group_id": group.group_id,
-                "epoch": self.client.epoch(gid),
-                "msg_id": new_msg_id(),
-                "sender": self.mailbox,
-                "ct": b64(proposal),
-            }
-            self.store.update_outbox(row.seq, payload=payload)
-        try:
-            await self._request({"t": "send", "env": payload["env"]}, str(payload["env"]["msg_id"]))
-        except RelayError as e:
-            # A stale proposal: the next commit we process triggers a resend.
-            LOG.info("proposal_failed", code=e.code)
-            return "failed"
-        return "done"
-
-    def _build(self, gid: bytes, intent: dict[str, Any]) -> dict[str, Any]:
+    def _build(self, gid: bytes, intent: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0911
         t = intent["type"]
         if t == "update":
             return self.client.update(gid)
@@ -2602,6 +2434,8 @@ class Engine:
             return self.client.commit_pending_proposals(gid)
         if t == "remove":
             return self.client.remove(gid, intent["identity"])
+        if t == "remove_instances":
+            return self.client.remove_instances(gid, list(intent["instances"]))
         if t == "policy":
             return self.client.set_policy(gid, canonical(intent["policy"]))
         if t == "knock_add":
@@ -3305,10 +3139,10 @@ class Engine:
         self._enqueue("commit", group.group_id, {"intent": {"type": "update"}})
 
     def remove_member(self, group_id: str, identity: str) -> None:
-        group = self._group_or_raise(group_id)
-        self._enqueue(
-            "commit", group.group_id, {"intent": {"type": "remove", "identity": identity}}
-        )
+        self.groups.remove_member(group_id, identity)
+
+    def remove_instances(self, group_id: str, identity: str, instance_ids: list[str]) -> None:
+        self.groups.remove_instances(group_id, identity, instance_ids)
 
     def set_policy(self, group_id: str, **changes: Any) -> None:
         """Commit a policy change (the core checks this instance's role)."""
@@ -3317,18 +3151,7 @@ class Engine:
         self._enqueue("commit", group.group_id, {"intent": {"type": "policy", "policy": policy}})
 
     async def leave(self, group_id: str) -> str:
-        group = self._group_or_raise(group_id)
-        members = self.store.members(group_id)
-        if len(members) == 1 and len(members[0].instances) == 1:
-            await self._gone(group_id, "left")  # sole member: just delete (§9.2)
-            return "left"
-        mine = next((m for m in members if m.identity == self.me), None)
-        if group.policy.get("owner") == self.me and mine is not None and len(mine.instances) == 1:
-            raise DaemonError("forbidden", "transfer ownership before leaving (SPEC 9.2)")
-        self._leaving.add(group_id)
-        self.store.kv_set(f"leaving/{group_id}", "1")
-        self._enqueue("proposal", group_id, {})
-        return "leaving"
+        return await self.groups.leave(group_id)
 
     def mark_verified(self, group_id: str, identity: str, verified: bool = True) -> None:
         """**Human-only.** Records that the human compared the SAS with this
@@ -3342,168 +3165,15 @@ class Engine:
         self._pulse()
 
     async def sas_mismatch(self, group_id: str, epoch: int | None = None) -> str:
-        """**Human-only.** The human compared the SAS of the current epoch and
-        the codes differ (SPEC 11): the group view may be forked. Leave at
-        once and raise ``sas_mismatch``.
-
-        * The owner's last instance first makes a best-effort ownership
-          transfer (SPEC 9.2): a policy commit naming the lowest-index admin,
-          or else the lowest-index other member, sent and awaited for at most
-          :data:`TRANSFER_TIMEOUT_SECS`. If the relay confirms it, this
-          instance is now a plain member and proposes its own removal.
-        * Anyone else sends a leave proposal when one is allowed.
-        * A sole member just deletes.
-
-        The local group state is deleted in every case, since nothing more
-        from this view can be trusted. ``epoch`` guards against answering
-        for a code from an earlier epoch."""
-        group = self._group_or_raise(group_id)
-        gid = unb64(group_id)
-        current = self._core_epoch(gid)
-        if epoch is not None and epoch != current:
-            msg = f"the SAS shown was for epoch {epoch}; the group is at epoch {current}"
-            raise DaemonError("stale_epoch", msg)
-        sas = self._sas(gid)
-        transfer: dict[str, Any] | None = None
-        if self._is_last_owner_instance(group):
-            transfer = await self._transfer_ownership(group)
-        if transfer is None or transfer["confirmed"]:
-            self._propose_own_leave(group)
-        await self._gone(group_id, "left")
-        self.store.update_group(group_id, out_of_sync=True, out_of_sync_reason="sas_mismatch")
-        data: dict[str, Any] = {"epoch": current, "sas": sas}
-        if transfer is not None:
-            data["transfer"] = transfer
-        await self.emit(group_id, "sas_mismatch", **data)
-        return "left"
-
-    def _is_last_owner_instance(self, group: GroupRow) -> bool:
-        if group.policy.get("owner") != self.me:
-            return False
-        mine = [m for m in self.client.members(unb64(group.group_id)) if m["identity"] == self.me]
-        return len(mine) == 1
-
-    def _next_owner(self, group: GroupRow) -> str | None:
-        """The lowest-index admin, else the lowest-index other member."""
-        members = sorted(
-            (m for m in self.client.members(unb64(group.group_id)) if m["identity"] != self.me),
-            key=lambda m: m["leaf_index"],
-        )
-        admins = set(group.policy.get("admins", []))
-        for m in members:
-            if m["identity"] in admins:
-                return str(m["identity"])
-        return str(members[0]["identity"]) if members else None
+        """**Human-only.** The codes differ (SPEC 11): see
+        :meth:`GroupService.sas_mismatch`."""
+        return await self.groups.sas_mismatch(group_id, epoch)
 
     async def _transfer_ownership(self, group: GroupRow) -> dict[str, Any] | None:
-        """Commit ``owner = next owner`` and wait (bounded) for the relay.
-        ``None`` for a sole member; otherwise who and whether it landed."""
-        new_owner = self._next_owner(group)
-        if new_owner is None:
-            return None
-        gid = unb64(group.group_id)
-        policy = {**json.loads(self.client.policy(gid)), "owner": new_owner}
-        policy["admins"] = [a for a in policy.get("admins", []) if a != new_owner]
-        result: dict[str, Any] = {"new_owner": new_owner, "confirmed": False}
-        try:
-            out = self.client.set_policy(gid, canonical(policy))
-        except (ac.AgentConnectError, ac.CoreError) as e:
-            LOG.info("ownership_transfer_not_built", reason=str(e)[:60])
-            return result
-        env = {
-            "v": 0,
-            "kind": "commit",
-            "group_id": group.group_id,
-            "epoch": out["epoch"],
-            "msg_id": out["msg_id"],
-            "sender": self.mailbox,
-            "routing": out["routing"],
-            "ct": b64(out["commit"]),
-        }
-        send = asyncio.ensure_future(self._request({"t": "send", "env": env}, out["msg_id"]))
-        timer = asyncio.ensure_future(self._sleep(TRANSFER_TIMEOUT_SECS))
-        try:
-            await asyncio.wait({send, timer}, return_when=asyncio.FIRST_COMPLETED)
-        except BaseException:
-            await cancel_and_wait(send, timer, ignore=(Exception,))
-            raise
-        timer.cancel()
-        if send.done() and not send.cancelled() and send.exception() is None:
-            # Accepted; the fan-out echo may already have merged it.
-            with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
-                self.client.confirm_pending_commit(gid, str(out["msg_id"]))
-        try:
-            confirmed = json.loads(self.client.policy(gid)).get("owner") == new_owner
-        except (ac.AgentConnectError, ac.CoreError, ValueError):
-            confirmed = False
-        # Stops the send if it is still waiting; a cancellation of this task
-        # meanwhile propagates (a restart discards the unsent commit, §8.3).
-        await cancel_and_wait(send, timer, ignore=(Exception,))
-        if not confirmed:
-            with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
-                self.client.discard_pending_commit(gid)
-        result["confirmed"] = confirmed
-        LOG.info("ownership_transfer", confirmed=confirmed)
-        return result
-
-    def _propose_own_leave(self, group: GroupRow) -> None:
-        """Queue a self-Remove proposal when SPEC 9.2 allows one."""
-        gid = unb64(group.group_id)
-        try:
-            proposal = self.client.propose_leave(gid)
-        except (ac.AgentConnectError, ac.CoreError) as e:
-            LOG.info("sas_mismatch_no_proposal", reason=str(e)[:60])
-            return
-        msg_id = new_msg_id()
-        env = {
-            "v": 0,
-            "kind": "proposal",
-            "group_id": group.group_id,
-            "epoch": self._core_epoch(gid),
-            "msg_id": msg_id,
-            "sender": self.mailbox,
-            "ct": b64(proposal),
-        }
-        self._enqueue("frame", None, {"frame": {"t": "send", "env": env}, "msg_id": msg_id})
+        return await self.groups.transfer_ownership(group)
 
     def group_info(self, group_id: str) -> dict[str, Any]:
-        group = self.store.group(group_id)
-        if group is None:
-            raise DaemonError("not_found", "no such group")
-        info: dict[str, Any] = {
-            "group_id": group.group_id,
-            "name": group.name,
-            "purpose": group.purpose,
-            "status": group.status,
-            "epoch": group.epoch,
-            "policy": group.policy,
-            "out_of_sync": group.out_of_sync,
-            "out_of_sync_reason": group.out_of_sync_reason,
-            "adapter": group.adapter,
-            "trust_state": self._trust_state(group_id),
-            "members": [
-                {
-                    "identity": m.identity,
-                    "fingerprint": ac.fingerprint(ac_identity_key(m.identity)),
-                    "display_name": m.display_name,
-                    "display_name_verified": False,
-                    "role": m.role,
-                    "verified": m.verified,
-                    "instances": m.instances,
-                    "self": m.identity == self.me,
-                }
-                for m in self.store.members(group_id)
-            ],
-            # SPEC 10.1: peer-supplied, so framed as untrusted.
-            "agent_cards": {
-                identity: {"untrusted": True, "card": card}
-                for identity, card in self.store.cards(group_id).items()
-            },
-        }
-        if group.status == "active":
-            info["sas"] = self._sas(unb64(group_id))
-        self._knock_origin(group_id, info)
-        return info
+        return self.groups.group_info(group_id)
 
     def _knock_origin(self, group_id: str, info: dict[str, Any]) -> None:
         """A group that started from a knock says so: ``origin`` on both

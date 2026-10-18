@@ -32,7 +32,7 @@ def member(identity: str, *, me: bool = False, verified: bool = False) -> dict[s
         "display_name_verified": False,
         "role": "owner" if me else "member",
         "verified": verified,
-        "instances": [{"instance_id": "i"}],
+        "instances": [{"instance_id": ("0" if me else "1") * 16, "self": me}],
         "self": me,
     }
 
@@ -361,6 +361,23 @@ def test_groups_show_json_hint_only_while_unverified(fake: Fake) -> None:
     assert out["verified_summary"] == "1 of 1 verified"
     fake.routes[f"GET /v0/groups/{GID}"] = group_info(members=1)
     assert fake.json("groups", "show", GID)[1]["hint"] is None
+
+
+def test_groups_show_lists_instances_and_a_blocked_leave(fake: Fake) -> None:
+    out = fake.run("groups", "show", GID).stdout
+    assert f"instance {'0' * 16}  (this one)" in out
+    assert f"instance {'1' * 16}" in out
+    assert "Leaving" not in out
+    info = group_info()
+    info["leaving"] = {"since": 1_700_000_000, "blocked": True}
+    fake.routes[f"GET /v0/groups/{GID}"] = info
+    out = fake.run("groups", "show", GID).stdout
+    assert "Leaving   since 2023-11-14 22:13 UTC" in out
+    assert "hand ownership over" in out
+    _, view = fake.json("groups", "show", GID)
+    assert conforms(view, SCHEMAS["groups show"])
+    assert view["leaving"] == {"since": 1_700_000_000, "blocked": True}
+    assert view["members"][0]["instances"] == [{"instance_id": "0" * 16, "self": True}]
 
 
 def test_unknown_and_ambiguous_group(fake: Fake) -> None:
@@ -804,6 +821,25 @@ def test_remove_confirms_and_uses_the_human_token(held: Fake) -> None:
     assert all(human for human, _ in held.posts("/remove"))
     assert held.json("remove", GID, BOB)[1]["error"]["code"] == "needs_yes"
     assert held.json("remove", GID, "ac:v0:nobody", "--yes")[1]["error"]["code"] == "not_found"
+
+
+def test_remove_some_instances(held: Fake) -> None:
+    route = f"POST /v0/groups/{GID}/members/{BOB}/remove"
+    held.routes[route] = {"status": "removing"}
+    result = held.run("remove", GID, BOB, "--instance", "1" * 16, input="y\n")
+    assert result.exit_code == 0
+    assert "instance_removed" in result.stdout
+    assert held.posts("/remove") == [(True, {"instances": ["1" * 16]})]
+    code, out = held.json("remove", GID, BOB, "--instance", "1" * 16, "--yes")
+    assert out["instances"] == ["1" * 16]
+    assert conforms(out, SCHEMAS["remove"])
+    # One's own identity: only its other instances, named.
+    me = f"POST /v0/groups/{GID}/members/{ME}/remove"
+    held.routes[me] = {"status": "removing"}
+    code, out = held.json("remove", GID, ME, "--yes")
+    assert (code, out["error"]["code"]) == (2, "bad_request")
+    code, out = held.json("remove", GID, ME, "--instance", "2" * 16, "--yes")
+    assert code == 0
 
 
 ROW: dict[str, Any] = {

@@ -26,6 +26,10 @@ are implemented, and so is
 discovery end to end: the core and the relay support signed listings, doors
 and knocks, and the daemon and CLI publish and withdraw a listing, register
 and renew its doors, knock on a listing and let the human approve knocks.
+Group membership in the runtime (`runtime/groups.py`: leaves, removing
+members or instances, and their events) is implemented; role, policy and
+ownership changes from the API and the CLI, floor control and replica
+provisioning are not yet.
 The README's Status section lists what works; `docs/MAP.toml` keeps it in step.
 
 ## Layout

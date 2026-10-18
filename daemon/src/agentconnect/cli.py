@@ -491,14 +491,23 @@ def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) 
             typer.echo(f"  {view['sas']['emoji']}")
             typer.echo(f"  ({', '.join(view['sas']['emoji_names'])})")
             typer.echo(f"  {view['sas']['decimal']}")
+        if view["leaving"] is not None:
+            typer.echo(f"Leaving   since {_when(view['leaving']['since'])}")
+            if view["leaving"]["blocked"]:
+                typer.echo("  This is the owner's last instance: hand ownership over to another")
+                typer.echo("  member first, and the leave goes on.")
         typer.echo(f"Pending approvals  {view['pending_approvals']}")
         typer.echo("Members (names are claimed by each member, not verified):")
         for m in view["members"]:
             mark = "verified" if m["verified"] else ("you" if m["self"] else "not verified")
             typer.echo(
-                f"  {clean(m['display_name'] or '?')}  {m['role']}  {m['instances']} instance(s)  "
-                f"{mark}  {m['fingerprint']}"
+                f"  {clean(m['display_name'] or '?')}  {m['role']}  "
+                f"{len(m['instances'])} instance(s)  {mark}  {m['fingerprint']}"
             )
+            for i in m["instances"]:
+                typer.echo(
+                    f"    instance {i['instance_id']}" + ("  (this one)" if i["self"] else "")
+                )
 
 
 # -- approvals (human) -----------------------------------------------------------------------
@@ -1063,11 +1072,21 @@ def safety_set(
 
 
 @app.command(
-    cls=IdArgsCommand, help=f"Remove a member from a group (owner or admin). {HUMAN_ONLY_HELP}"
+    cls=IdArgsCommand,
+    help="Remove a member from a group (owner or admin), or with --instance only some of its "
+    f"instances, such as a dead replica (also of your own identity). {HUMAN_ONLY_HELP}",
 )
-def remove(
+def remove(  # noqa: PLR0913, PLR0917
     group: str,
     identity: str,
+    instance: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--instance",
+            help="Remove only this instance (its id, 16 hex characters, from `groups show`; "
+            "repeatable).",
+        ),
+    ] = None,
     yes: YesOpt = False,
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
@@ -1077,19 +1096,35 @@ def remove(
         api = connect(config, human=True)
         gid = resolve_group(api, group)
         info = api.request("GET", f"/v0/groups/{gid}")
-        names = {m["identity"]: m["display_name"] for m in info["members"]}
-        if identity not in names:
+        member = next((m for m in info["members"] if m["identity"] == identity), None)
+        if member is None:
             raise CliError("not_found", f"{identity!r} is not a member", EXIT_FAILED)
-        _say(f"Remove {clean(names[identity] or identity)} ({identity})", as_json=as_json)
-        _say(f"from {clean(info['name'])}?", as_json=as_json)
-        if not _confirm("Remove every instance of this member?", yes=yes, as_json=as_json):
-            raise CliError("declined", "not removed", EXIT_REFUSED)
-        state = api.request("POST", f"/v0/groups/{gid}/members/{identity}/remove")["status"]
-        if as_json:
-            emit_json({"group_id": gid, "identity": identity, "status": state})
+        if instance is None and member["self"]:
+            msg = "that is your own identity: name its other instances with --instance, or leave"
+            raise CliError("bad_request", msg, EXIT_USAGE)
+        name = clean(member["display_name"] or identity)
+        if instance is None:
+            question = "Remove every instance of this member?"
+            _say(f"Remove {name} ({identity})", as_json=as_json)
         else:
-            typer.echo("Removal queued. `agentconnect events` reports a `member_removed` event")
-            typer.echo("once it lands, or `commit_failed` if your role doesn't allow it.")
+            question = f"Remove {len(instance)} instance(s) of this member?"
+            _say(
+                f"Remove instance(s) {', '.join(instance)} of {name} ({identity})", as_json=as_json
+            )
+        _say(f"from {clean(info['name'])}?", as_json=as_json)
+        if not _confirm(question, yes=yes, as_json=as_json):
+            raise CliError("declined", "not removed", EXIT_REFUSED)
+        body = None if instance is None else {"instances": instance}
+        state = api.request("POST", f"/v0/groups/{gid}/members/{identity}/remove", body)["status"]
+        if as_json:
+            out: dict[str, Any] = {"group_id": gid, "identity": identity, "status": state}
+            if instance is not None:
+                out["instances"] = instance
+            emit_json(out)
+        else:
+            event = "member_removed" if instance is None else "instance_removed"
+            typer.echo(f"Removal queued. `agentconnect events` reports `{event}` once it lands,")
+            typer.echo("or `commit_failed` if your role doesn't allow it.")
 
 
 @app.command(

@@ -393,6 +393,7 @@ def group_view(api: ApiClient, group_id: str) -> dict[str, Any]:
         "trust_state": trust,
         "verified_summary": f"{trust['verified_members']} of {others} verified",
         "sas": sas,
+        "leaving": info.get("leaving"),
         "members": [
             {
                 "identity": m["identity"],
@@ -402,7 +403,10 @@ def group_view(api: ApiClient, group_id: str) -> dict[str, Any]:
                 "role": m["role"],
                 "verified": m["verified"],
                 "self": m["self"],
-                "instances": len(m["instances"]),
+                "instances": [
+                    {"instance_id": i["instance_id"], "self": bool(i.get("self"))}
+                    for i in m["instances"]
+                ],
             }
             for m in info["members"]
         ],
