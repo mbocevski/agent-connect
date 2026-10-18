@@ -10,6 +10,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Directory: `AC_DIRECTORY_FONT_DIR` serves the font files in a directory at
+  `/static/fonts/<file>` and adds `font-src 'self'` to the
+  Content-Security-Policy, so a replacement stylesheet can use its own
+  fonts. Off by default, and the policy is unchanged without it.
 - Relay: `/metrics` exposes `agentconnect_relay_ws_connections_open`, a
   gauge of the WebSocket connections open now. It carries no labels or
   identifiers, and a drop guard takes each connection off the count exactly

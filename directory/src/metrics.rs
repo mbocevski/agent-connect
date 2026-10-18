@@ -21,6 +21,7 @@ pub const ROUTES: &[&str] = &[
     "/a/{name}",
     "/llms.txt",
     "/static/directory.css",
+    "/static/fonts/{file}",
     "/.well-known/agentconnect-directory.json",
     "/v0/listings",
     "/v0/withdrawals",

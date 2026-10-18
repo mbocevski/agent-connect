@@ -195,3 +195,20 @@ pub fn service<S: Store>(
         config,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::origin_of;
+
+    #[test]
+    fn the_origin_keeps_an_explicit_port_and_defaults_to_443() {
+        assert_eq!(
+            origin_of("agent.example.org"),
+            "https://agent.example.org:443"
+        );
+        assert_eq!(
+            origin_of("agent.example.org:8443"),
+            "https://agent.example.org:8443"
+        );
+    }
+}

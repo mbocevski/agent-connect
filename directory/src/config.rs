@@ -107,6 +107,9 @@ pub struct Config {
     /// `AC_DIRECTORY_STYLESHEET`: a CSS file served instead of the default
     /// stylesheet.
     pub stylesheet: Option<PathBuf>,
+    /// `AC_DIRECTORY_FONT_DIR`: a directory of font files served under
+    /// `/static/fonts/`; it also adds `font-src 'self'` to the CSP.
+    pub font_dir: Option<PathBuf>,
     /// `AC_DIRECTORY_METRICS_ADDR`: serve `/metrics` on this address only
     /// (for example a private interface) instead of the public listener.
     pub metrics_addr: Option<SocketAddr>,
@@ -206,6 +209,9 @@ impl Config {
             stylesheet: get("AC_DIRECTORY_STYLESHEET")
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from),
+            font_dir: get("AC_DIRECTORY_FONT_DIR")
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from),
             metrics_addr,
         })
     }
@@ -249,6 +255,7 @@ mod tests {
         assert_eq!(c.trusted_proxies, Vec::new());
         assert!(!c.db_insecure);
         assert!(c.stylesheet.is_none());
+        assert!(c.font_dir.is_none());
         assert!(c.metrics_addr.is_none());
     }
 
@@ -280,6 +287,7 @@ mod tests {
             ("AC_DIRECTORY_CLIENT_IP_HEADER", "X-Forwarded-For"),
             ("AC_DIRECTORY_TRUSTED_PROXIES", "10.0.0.0/8, ::1"),
             ("AC_DIRECTORY_STYLESHEET", "/etc/directory/site.css"),
+            ("AC_DIRECTORY_FONT_DIR", "/etc/directory/fonts"),
             ("AC_DIRECTORY_METRICS_ADDR", "127.0.0.1:9100"),
         ]))
         .unwrap();
@@ -291,6 +299,7 @@ mod tests {
         assert_eq!(c.trusted_proxies.len(), 2);
         assert!(c.db_insecure);
         assert_eq!(c.stylesheet, Some(PathBuf::from("/etc/directory/site.css")));
+        assert_eq!(c.font_dir, Some(PathBuf::from("/etc/directory/fonts")));
         assert_eq!(c.metrics_addr.map(|a| a.port()), Some(9100));
     }
 
