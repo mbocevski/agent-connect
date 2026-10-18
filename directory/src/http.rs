@@ -35,12 +35,20 @@ use crate::store::Store;
 /// Content-Security-Policy of every response: no script at all.
 pub const CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; \
 form-action 'self'; frame-ancestors 'none'";
+/// [`CSP`] with `font-src 'self'`, when the operator serves fonts.
+pub const CSP_FONTS: &str = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; \
+form-action 'self'; frame-ancestors 'none'; font-src 'self'";
+/// Largest font file served.
+const MAX_FONT_BYTES: u64 = 4 * 1024 * 1024;
 /// Cache policy of readable pages and cards (Decision 6).
 pub const CACHE_PUBLIC: &str = "public, max-age=60, must-revalidate";
 /// Cache policy of 404 and 410 answers.
 pub const CACHE_MISSING: &str = "public, max-age=60";
 /// Cache policy of writes and operational endpoints.
 pub const CACHE_NONE: &str = "no-store";
+
+/// Where the operator's fonts are served (route template).
+const FONT_ROUTE: &str = "/static/fonts/{file}";
 
 const HTML: &str = "text/html; charset=utf-8";
 const MARKDOWN: &str = "text/markdown; charset=utf-8";
@@ -63,6 +71,9 @@ pub struct HttpConfig {
     pub hide_metrics: bool,
     /// The stylesheet served at [`render::CSS_PATH`] instead of the default.
     pub stylesheet: Option<Arc<str>>,
+    /// A directory of fonts served at `/static/fonts/{file}`. Setting it also
+    /// adds `font-src 'self'` to the CSP.
+    pub font_dir: Option<std::path::PathBuf>,
 }
 
 struct App<S: Store> {
@@ -409,6 +420,64 @@ async fn stylesheet<S: Store>(State(app): State<Shared<S>>) -> Response {
     )
 }
 
+/// The font directory as the router will use it: canonical, and a directory.
+///
+/// # Errors
+/// The path does not exist or is not a directory.
+pub fn resolve_font_dir(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::fs::canonicalize(path)?;
+    if dir.is_dir() {
+        Ok(dir)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AC_DIRECTORY_FONT_DIR is not a directory",
+        ))
+    }
+}
+
+/// The font media type of a file name, chosen by extension only.
+fn font_type(file: &str) -> Option<&'static str> {
+    let (_, ext) = file.rsplit_once('.')?;
+    match ext.to_ascii_lowercase().as_str() {
+        "woff2" => Some("font/woff2"),
+        "woff" => Some("font/woff"),
+        "ttf" => Some("font/ttf"),
+        "otf" => Some("font/otf"),
+        _ => None,
+    }
+}
+
+/// A font from the operator's directory: one regular file directly in it,
+/// never a symlink, a subdirectory or a name with a separator.
+async fn font<S: Store>(State(app): State<Shared<S>>, Path(file): Path<String>) -> Response {
+    let not_found = || {
+        respond(
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            CACHE_MISSING,
+            "not found\n",
+        )
+    };
+    let (Some(dir), Some(ty)) = (app.config.font_dir.as_ref(), font_type(&file)) else {
+        return not_found();
+    };
+    if file.starts_with('.') || file.contains(['/', '\\', '\0']) {
+        return not_found();
+    }
+    let path = dir.join(&file);
+    let Ok(meta) = tokio::fs::symlink_metadata(&path).await else {
+        return not_found();
+    };
+    if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
+        return not_found();
+    }
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => respond(StatusCode::OK, ty, "public, max-age=3600", bytes),
+        Err(_) => not_found(),
+    }
+}
+
 async fn well_known<S: Store>(State(app): State<Shared<S>>) -> Response {
     let s = app.dir.settings();
     let body = json!({
@@ -621,7 +690,11 @@ async fn guard<S: Store>(State(app): State<Shared<S>>, mut req: Request, next: N
     let h = resp.headers_mut();
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
+        HeaderValue::from_static(if app.config.font_dir.is_some() {
+            CSP_FONTS
+        } else {
+            CSP
+        }),
     );
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -652,6 +725,7 @@ pub fn metrics_app<S: Store>(dir: Arc<Directory<S>>) -> Router {
 pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
     let mcp = crate::mcp::service(Arc::clone(&dir), &dir.settings().host);
     let hide_metrics = config.hide_metrics;
+    let has_fonts = config.font_dir.is_some();
     let state = Arc::new(App { dir, config });
     let router = Router::new()
         .route("/", get(home::<S>))
@@ -680,6 +754,11 @@ pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
         )
         .route_service("/mcp", mcp)
         .route("/healthz", get(healthz));
+    let router = if has_fonts {
+        router.route(FONT_ROUTE, get(font::<S>))
+    } else {
+        router
+    };
     let router = if hide_metrics {
         router
     } else {
@@ -697,6 +776,12 @@ pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_accept_ranges_are_ignored() {
+        assert!(wants_markdown(&accept("text/markdown,, ,")));
+        assert!(!wants_markdown(&accept(",,")));
+    }
 
     fn accept(v: &str) -> HeaderMap {
         let mut h = HeaderMap::new();

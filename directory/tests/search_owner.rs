@@ -81,6 +81,11 @@ async fn search_ranks_names_above_descriptions_and_filters_by_skill() {
         names(&h.get("/search?q=release+-planner").await.json()),
         ["code-reviewer"]
     );
+    // A bare `or` is not a term.
+    assert_eq!(
+        names(&h.get("/search?q=release+or+planner").await.json()),
+        names(&h.get("/search?q=release+planner").await.json())
+    );
     assert_eq!(
         names(&h.get("/search?q=nothingmatches").await.json()),
         Vec::<String>::new()
