@@ -409,9 +409,9 @@ fn invite_url_vectors() {
 use crate::knock::{Door, Knock, KnockSecret};
 use crate::listing::testing::{DIRECTORY, T0, card_for, grant};
 use crate::listing::{
-    DirectoryKey, FetchResult, ListingCard, ListingToken, OwnerChecks, OwnerFile, RevocationReason,
-    SignedListing, TokenGrant, TokenRevocation, TrustedDirectory, Vouch, Withdrawal, owner_state,
-    protected_header,
+    DirectoryKey, FetchResult, ListingCard, ListingContent, ListingToken, OwnerChecks, OwnerFile,
+    RevocationReason, SignedListing, TokenGrant, TokenRevocation, TrustedDirectory, Vouch,
+    Withdrawal, owner_state, protected_header,
 };
 
 fn s(bytes: &[u8]) -> String {
@@ -813,7 +813,7 @@ fn listing_vectors() {
     l.check_token(&trusted(&d.dk), T0, |_| false).unwrap();
     l.check_publish(T0).unwrap();
     let mut out = header(
-        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Each check runs at `now` against its own `directory_keys` (base64url Ed25519 public keys) for `directory`, with the `revoked` token id; `error` is the core's message and `kind` its stable kind. `replacements` say whether `listing` may replace `stored_listing` (SPEC 13.2.2: seq per identity; another identity needs a later token), `tombstones` whether a tombstone (identity, seq) blocks `stored_listing`. `identities` and `directory_key_secret` are seed-derived secrets for signing more test listings and tokens.",
+        "SPEC 13.1 signed listings. `listing` is the published canonical bytes (UTF-8). payload = JCS(card without signatures); signing_input = protected || '.' || base64url(payload); Ed25519 by the key in kid. Each check runs at `now` against its own `directory_keys` (base64url Ed25519 public keys) for `directory`, with the `revoked` token id; `error` is the core's message and `kind` its stable kind. `replacements` say whether `listing` may replace `stored_listing` (SPEC 13.2.2: seq per identity; another identity needs a later token), `tombstones` whether a tombstone (identity, seq) blocks `stored_listing`. `identities` and `directory_key_secret` are seed-derived secrets for signing more test listings and tokens. `renewal`: `previous` renewed by the identity `ik_secret` at `seq` and `issued_at` with the door whose key pair is DeriveKeyPair(`ikm`) gives exactly `renewed` (SPEC 6.6.1, 13.2.2: only door, seq and issued_at change), and each of `refused` (a `seq` that does not increase, an `issued_at` before the previous one) is refused. `content`: the card text a human approves (ListingContent), `input` in any formatting canonicalises to `canonical`; each `invalid` input is refused.",
         &seed,
     );
     out["directory"] = DIRECTORY.into();
@@ -905,7 +905,106 @@ fn listing_vectors() {
     });
     out["invalid"] = invalid.into();
     out["checks"] = checks.into();
+    out["renewal"] = renewal_vector(&rng, &d);
+    out["content"] = content_vectors(&d.card);
     check_or_write("listings.json", &out);
+}
+
+/// SPEC 6.6.1 and 13.2.2: an automatic renewal re-signs `door`, `seq`
+/// and `issued_at` only. The door's key pair is derived from the stored
+/// `ikm`, so a consumer rebuilds it and renews `previous` to exactly
+/// `renewed`.
+fn renewal_vector(rng: &Rng, d: &Discovery) -> Value {
+    let token = d.dk.issue_token(rng, &grant(&d.ik.id())).unwrap();
+    let mut card = card_for(&d.ik, token, None);
+    card.params.relay = "relay.example.org".into();
+    let previous = card.sign(&d.ik).unwrap();
+    let (door_id, ikm): ([u8; 16], [u8; 32]) = (rng.array().unwrap(), rng.array().unwrap());
+    let issued_at = T0 + 3 * 24 * 3600;
+    let expires_at = issued_at + 7 * 24 * 3600 - 3600;
+    let door = Door::derive(door_id, &ikm, expires_at).unwrap();
+    let seq = previous.params().seq + 1;
+    let renewed = previous
+        .renew(&d.ik, seq, issued_at, Some(door.listed()))
+        .unwrap();
+    assert_eq!(renewed.card().content(), previous.card().content());
+    let refusals: Vec<Value> = [
+        ("seq does not increase", seq - 1, issued_at),
+        ("issued_at goes back", seq, previous.params().issued_at - 1),
+    ]
+    .into_iter()
+    .map(|(name, seq, issued_at)| {
+        let e = previous.renew(&d.ik, seq, issued_at, None).expect_err(name);
+        json!({"name": name, "seq": seq, "issued_at": issued_at, "error": e.to_string(), "kind": e.kind().as_str()})
+    })
+    .collect();
+    json!({
+        "previous": s(previous.bytes()),
+        "ik_secret": hex(d.ik.secret_bytes().as_slice()),
+        "seq": seq,
+        "issued_at": issued_at,
+        "door": {"id": b64(&door_id), "ikm": hex(&ikm), "expires_at": expires_at},
+        "renewed": s(renewed.bytes()),
+        "refused": refusals,
+    })
+}
+
+/// The text a human approves (`ListingContent`): an input in another
+/// formatting, its canonical form, and inputs it refuses.
+fn content_vectors(card: &ListingCard) -> Value {
+    let canonical = card.content().to_json().unwrap();
+    let v: Value = serde_json::from_slice(&canonical).unwrap();
+    let input = serde_json::to_string_pretty(&v).unwrap();
+    assert_eq!(
+        ListingContent::from_json(input.as_bytes())
+            .unwrap()
+            .to_json()
+            .unwrap(),
+        canonical
+    );
+    let with = |k: &str, x: Value| {
+        let mut m = v.clone();
+        m[k] = x;
+        serde_json::to_string(&m).unwrap()
+    };
+    let card_json = s(&card.to_unsigned_json().unwrap());
+    let invalid: Vec<Value> = [
+        ("a full unsigned card", card_json),
+        (
+            "an interface",
+            with(
+                "supportedInterfaces",
+                json!([{"url": "https://agents.example/a/x.json"}]),
+            ),
+        ),
+        (
+            "an extension",
+            with(
+                "capabilities",
+                json!({"extensions": [{"uri": crate::listing::E2E_EXTENSION_URI}]}),
+            ),
+        ),
+        (
+            "a default value",
+            with("capabilities", json!({"streaming": false})),
+        ),
+        ("an empty value", with("version", json!(""))),
+        (
+            "a line separator",
+            with("description", json!("one\u{2028}two")),
+        ),
+        (
+            "a duplicate key",
+            format!("{{\"name\":\"a\",{}", &s(&canonical)[1..]),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, input)| {
+        let e = ListingContent::from_json(input.as_bytes()).expect_err(name);
+        json!({"name": name, "input": input, "error": e.to_string(), "kind": e.kind().as_str()})
+    })
+    .collect();
+    json!({"input": input, "canonical": s(&canonical), "invalid": invalid})
 }
 
 #[test]

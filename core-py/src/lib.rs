@@ -814,8 +814,9 @@ impl Client {
 
     /// Builds a sealed, signed knock on a door (SPEC §6.6.2): returns the
     /// sealed bytes (the `knock` envelope's `ct`) and the pending knock to
-    /// keep until it joins or lapses.
-    #[pyo3(signature = (door_id, door_key, display_name, note=None))]
+    /// keep until it joins or lapses. `ts` is the caller's clock (Unix
+    /// seconds); without it, the client's.
+    #[pyo3(signature = (door_id, door_key, display_name, note=None, *, ts=None))]
     fn create_knock<'py>(
         &self,
         py: Python<'py>,
@@ -823,17 +824,102 @@ impl Client {
         door_key: &[u8],
         display_name: &str,
         note: Option<&str>,
+        ts: Option<u64>,
     ) -> PyResult<(Bound<'py, PyBytes>, discovery::PendingKnock)> {
         let id: [u8; 16] = array(door_id, "door id")?;
         let (sealed, knock) = py.detach(|| {
-            with_client!(self, |c, _g| c.create_knock(
-                &id,
-                door_key,
-                display_name,
-                note
-            ))
+            with_client!(self, |c, _g| match ts {
+                Some(ts) => c.create_knock_at(&id, door_key, display_name, note, ts),
+                None => c.create_knock(&id, door_key, display_name, note),
+            })
         })?;
         Ok((PyBytes::new(py, &sealed), discovery::PendingKnock(knock)))
+    }
+
+    /// Rebuilds a knock this owner verified earlier from
+    /// `VerifiedKnock.to_secret_bytes()`: the KeyPackage (still unused) and
+    /// signature checks run again, the door and time checks don't.
+    fn restore_knock(&self, py: Python<'_>, data: &[u8]) -> PyResult<discovery::VerifiedKnock> {
+        py.detach(|| with_client!(self, |c, _g| c.restore_knock(data)))
+            .map(discovery::VerifiedKnock)
+    }
+
+    /// The approved knock's Add (SPEC §6.6.4), committed in the fresh group
+    /// `group_id` (pending until confirmed); `welcome` is wrapped under the
+    /// knock key. Refused, on the client's clock, after the knock's
+    /// `lapses_at` (kind `expired`).
+    fn add_knock<'py>(
+        &self,
+        py: Python<'py>,
+        group_id: &[u8],
+        knock: &discovery::VerifiedKnock,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let out = py.detach(|| {
+            with_client!(self, |c, groups| group(c, groups, group_id)?
+                .add_knocker(c, &knock.0))
+        })?;
+        commit_out(py, &out)
+    }
+
+    /// Joins from the Welcome of a knock on the listing of `identity` named
+    /// `name` (SPEC §6.6.5). Returns the group id. Kind `expired`: past the
+    /// knock's `gives_up_at` on the client's clock. Kind `welcome_mismatch`:
+    /// the Welcome opened but is not that group; the KeyPackage is spent.
+    /// With `key`, journalled with `context` as `join` is.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (pending, identity, name, wrapped_welcome, key=None, context=None))]
+    fn join_knock<'py>(
+        &self,
+        py: Python<'py>,
+        pending: &discovery::PendingKnock,
+        identity: &str,
+        name: &str,
+        wrapped_welcome: &[u8],
+        key: Option<&str>,
+        context: Option<&[u8]>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let expected = core::knock::KnockExpectation {
+            identity: identity.to_owned(),
+            name: name.to_owned(),
+        };
+        let knock = pending.0.clone();
+        let id = py.detach(|| {
+            with_client!(self, |c, groups| {
+                let g = match key {
+                    Some(k) => {
+                        c.join_knock_journaled(
+                            &knock,
+                            &expected,
+                            wrapped_welcome,
+                            k,
+                            context.unwrap_or_default(),
+                        )?
+                        .value
+                    }
+                    None => c.join_from_knock_welcome(&knock, &expected, wrapped_welcome)?,
+                };
+                let id = g.group_id().to_vec();
+                groups.insert(id.clone(), g);
+                Ok(id)
+            })
+        })?;
+        Ok(PyBytes::new(py, &id))
+    }
+
+    /// A fresh door (SPEC §6.6.1) from this client's randomness (seeded
+    /// under `_for_testing`).
+    fn generate_door(&self, expires_at: u64) -> PyResult<discovery::Door> {
+        with_client!(self, |c, _g| core::knock::Door::generate(
+            c.rng(),
+            expires_at
+        ))
+        .map(discovery::Door)
+    }
+
+    /// **Tests only**: records a KeyPackageRef as used, as merging an Add
+    /// of it would.
+    fn _mark_key_package_used_for_testing(&self, kp_ref: &[u8]) -> PyResult<()> {
+        with_client!(self, |c, _g| c.mark_key_package_used_for_testing(kp_ref))
     }
 
     /// Deletes a lapsed (or joined) knock's KeyPackage private keys

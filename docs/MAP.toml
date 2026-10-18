@@ -26,6 +26,7 @@ internal = [
     "core/src/error.rs",
     "core/src/failpoint.rs",
     "core/src/group/tests.rs",
+    "core/src/group/knock_tests.rs",
     "core/src/journal.rs",
     "core/src/mls.rs",
     "core/src/provider.rs",
@@ -147,7 +148,8 @@ docs = ["SPEC.md"]
 name = "discovery-core"
 # Signed listings, tokens, withdrawals, owner verification (§13), doors and
 # knocks (§6.6).
-code = ["core/src/listing/**", "core/src/knock*"]
+# The address rule for fetches from listing text (§13.2.4) is `net`.
+code = ["core/src/listing/**", "core/src/knock*", "core/src/net.rs"]
 docs = ["SPEC.md"]
 
 [[rule]]
@@ -192,7 +194,7 @@ doc = "directory/README.md"
 
 [[component]]
 name = "discovery"
-paths = ["core/src/listing/**", "core/src/knock*", "core-py/src/discovery.rs"]
+paths = ["core/src/listing/**", "core/src/knock*", "core/src/net.rs", "core-py/src/discovery.rs"]
 doc = "docs/adr/006-discovery.md"
 
 [[component]]

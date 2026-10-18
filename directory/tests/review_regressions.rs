@@ -375,7 +375,7 @@ fn l4_fqdn_lookup_and_6to4_relay_block() {
         agentconnect_directory::owner::fqdn("owner.example"),
         "owner.example."
     );
-    assert!(!agentconnect_directory::owner::is_public(
+    assert!(!agentconnect_core::net::is_public_ip(
         "192.88.99.1".parse().unwrap()
     ));
 }
