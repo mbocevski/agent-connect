@@ -49,7 +49,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   checks 1 to 5, and the knock Welcome wrap. Vectors in `testdata/`
   (`listings.json`, `listing-tokens.json`, `withdrawals.json`,
   `owner-files.json`, `knocks.json`), property tests and a `core/fuzz`
-  target for the parsers.
+  target for the parsers. Every core error has a stable kind
+  (`Error::kind()`, `AgentConnectError.kind` in Python: `signature`,
+  `unknown_key`, `expired`, `revoked`, `token_mismatch`, `door_expired`,
+  `stale_timestamp` and so on), so callers never match on messages.
 - Protocol: discovery (ADR-006). SPEC gains signed listings, a closed A2A
   AgentCard profile carrying the `e2e` extension
   (`https://yggdrasill.network/ext/agentconnect/e2e/v0`) and one `EdDSA`

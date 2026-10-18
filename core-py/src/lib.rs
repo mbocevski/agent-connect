@@ -49,8 +49,27 @@ create_exception!(
      from storage on next use."
 );
 
+/// The core error as `AgentConnectError(message)` with a `kind` attribute:
+/// the stable `ErrorKind` name, which callers branch on instead of the
+/// message.
 fn err(e: core::Error) -> PyErr {
-    AgentConnectError::new_err(e.to_string())
+    with_kind(e.to_string(), e.kind().as_str())
+}
+
+/// An `AgentConnectError` for a bad argument from Python (`kind`
+/// `"malformed"`).
+fn bad_arg(message: impl Into<String>) -> PyErr {
+    with_kind(message.into(), core::ErrorKind::Malformed.as_str())
+}
+
+fn with_kind(message: String, kind: &'static str) -> PyErr {
+    let py_err = AgentConnectError::new_err(message);
+    Python::attach(|py| {
+        // Setting an attribute on a fresh exception instance can't fail in
+        // practice; if it did, the error is still raised, without `kind`.
+        let _ = py_err.value(py).setattr("kind", kind);
+    });
+    py_err
 }
 
 fn panicked() -> PyErr {
@@ -72,14 +91,14 @@ fn panic_for_testing() -> CoreResult<()> {
 
 fn array<const N: usize>(b: &[u8], what: &'static str) -> PyResult<[u8; N]> {
     b.try_into()
-        .map_err(|_| AgentConnectError::new_err(format!("{what} must be {N} bytes")))
+        .map_err(|_| bad_arg(format!("{what} must be {N} bytes")))
 }
 
 /// A 32-byte secret copied straight into a zeroizing buffer.
 fn secret32(b: &[u8]) -> PyResult<Zeroizing<[u8; 32]>> {
     let mut out = Zeroizing::new([0u8; 32]);
     if b.len() != 32 {
-        return Err(AgentConnectError::new_err("secret must be 32 bytes"));
+        return Err(bad_arg("secret must be 32 bytes"));
     }
     out.copy_from_slice(b);
     Ok(out)
@@ -90,7 +109,7 @@ const MAX_TEST_TIME: u64 = 253_402_300_799;
 
 fn test_time(now: u64) -> PyResult<u64> {
     if now == 0 || now > MAX_TEST_TIME {
-        return Err(AgentConnectError::new_err(
+        return Err(bad_arg(
             "time must be between 1 and 253402300799 (Unix seconds)",
         ));
     }
@@ -963,7 +982,7 @@ impl Client {
         let action = match action {
             "error" => core::failpoint::Action::Error,
             "panic" => core::failpoint::Action::Panic,
-            _ => return Err(AgentConnectError::new_err("action must be error or panic")),
+            _ => return Err(bad_arg("action must be error or panic")),
         };
         with_client!(self, |c, _g| c.failpoints().arm(name, action, times))
     }

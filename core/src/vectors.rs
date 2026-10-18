@@ -596,7 +596,7 @@ fn listing_vectors() {
         .into_iter()
         .map(|(name, listing)| {
             let e = SignedListing::from_bytes(listing.as_bytes()).expect_err(name);
-            json!({"name": name, "listing": listing, "error": e.to_string()})
+            json!({"name": name, "listing": listing, "error": e.to_string(), "kind": e.kind().as_str()})
         })
         .collect();
     // Valid listings that fail a later check.
@@ -657,13 +657,15 @@ fn listing_vectors() {
     let checks: Vec<Value> = checks
         .into_iter()
         .map(|(name, check, listing, now, revoked, result)| {
+            let e = result.expect_err(name);
             json!({
                 "name": name,
                 "check": check,
                 "listing": listing,
                 "now": now,
                 "revoked": revoked,
-                "error": result.expect_err(name).to_string(),
+                "error": e.to_string(),
+                "kind": e.kind().as_str(),
             })
         })
         .collect();
@@ -728,7 +730,7 @@ fn listing_token_vectors() {
         let e = ListingToken::from_json(json.as_bytes())
             .and_then(|t2| t2.verify(&t, now))
             .expect_err(name);
-        json!({"name": name, "token": json, "now": now, "directory_key": key, "error": e.to_string()})
+        json!({"name": name, "token": json, "now": now, "directory_key": key, "error": e.to_string(), "kind": e.kind().as_str()})
     })
     .collect();
     let id = d.ik.id();
@@ -742,7 +744,7 @@ fn listing_token_vectors() {
     .into_iter()
     .map(|(name, dir, n, i, dom)| {
         let e = token.check_binding(dir, n, i, dom).expect_err(name);
-        json!({"name": name, "directory": dir, "listing_name": n, "identity": i, "owner_domain": dom, "error": e.to_string()})
+        json!({"name": name, "directory": dir, "listing_name": n, "identity": i, "owner_domain": dom, "error": e.to_string(), "kind": e.kind().as_str()})
     })
     .collect();
     let rev = d.dk.revoke_token(&token.token_id, T0 + 60, "spam").unwrap();
@@ -774,6 +776,7 @@ fn listing_token_vectors() {
         "signing_input": s(&rev.signing_input().unwrap()),
         "tampered": tampered_rev,
         "tampered_error": tampered_err.to_string(),
+        "tampered_kind": tampered_err.kind().as_str(),
     });
     check_or_write("listing-tokens.json", &out);
 }
@@ -797,7 +800,7 @@ fn withdrawal_vectors() {
     .into_iter()
     .map(|(name, json)| {
         let e = Withdrawal::from_json(json.as_bytes()).expect_err(name);
-        json!({"name": name, "withdrawal": json, "error": e.to_string()})
+        json!({"name": name, "withdrawal": json, "error": e.to_string(), "kind": e.kind().as_str()})
     })
     .collect();
     let mut out = header(
@@ -812,6 +815,7 @@ fn withdrawal_vectors() {
         "fresh_at": [ts - 300, ts + 300],
         "stale_at": [ts - 301, ts + 301],
         "stale_error": w.check_fresh(DIRECTORY, ts + 301).unwrap_err().to_string(),
+        "stale_kind": w.check_fresh(DIRECTORY, ts + 301).unwrap_err().kind().as_str(),
         "applies": true,
     });
     out["old_seq"] = json!({"withdrawal": s(&old.to_json().unwrap()), "applies": false});
@@ -1049,7 +1053,7 @@ fn knock_vectors() {
             .into_iter()
             .map(|(name, env, sealed, now)| {
                 let e = door.open_knock(&env, &sealed, now).expect_err(name);
-                json!({"name": name, "envelope_door_id": b64(&env), "sealed": b64(&sealed), "now": now, "error": e.to_string()})
+                json!({"name": name, "envelope_door_id": b64(&env), "sealed": b64(&sealed), "now": now, "error": e.to_string(), "kind": e.kind().as_str()})
             })
             .collect::<Vec<_>>()
             .into();
@@ -1093,6 +1097,7 @@ fn knock_vectors() {
                 .open_knock(&env, &d(&case["sealed"]), case["now"].as_u64().unwrap())
                 .unwrap_err();
             assert_eq!(e.to_string(), exp, "{}", case["name"]);
+            assert_eq!(json!(e.kind().as_str()), case["kind"], "{}", case["name"]);
         }
         let bs = &raw["bad_signature"];
         let forged = door.open_knock(&door_id, &d(&bs["sealed"]), now).unwrap();

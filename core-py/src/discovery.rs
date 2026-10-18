@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use zeroize::Zeroizing;
 
-use crate::{AgentConnectError, Identity, array, err, guarded, secret32};
+use crate::{Identity, array, bad_arg, err, guarded, secret32};
 
 fn trusted(directory: &str, keys: &[Vec<u8>]) -> PyResult<listing::TrustedDirectory> {
     let keys = keys
@@ -504,16 +504,14 @@ pub(crate) fn owner_state(
             "does_not_vouch" => Ok(FetchResult::Fetched(Vouch::DoesNotVouch)),
             "revoked" => Ok(FetchResult::Fetched(Vouch::Revoked)),
             "failed" => Ok(FetchResult::Failed),
-            _ => Err(AgentConnectError::new_err("unknown fetch result")),
+            _ => Err(bad_arg("unknown fetch result")),
         })
         .transpose()?;
     let latest = match (result, latest_at) {
         (Some(result), Some(at)) => Some(LatestFetch { at, result }),
         (None, None) => None,
         _ => {
-            return Err(AgentConnectError::new_err(
-                "latest_result and latest_at go together",
-            ));
+            return Err(bad_arg("latest_result and latest_at go together"));
         }
     };
     let checks = OwnerChecks {

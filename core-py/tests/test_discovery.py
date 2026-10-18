@@ -179,6 +179,25 @@ def test_knock_round_trip(rng: random.Random) -> None:
     assert "VerifiedKnock" in repr(verified)
 
 
+def test_errors_carry_a_stable_kind(rng: random.Random) -> None:
+    """Callers branch on `.kind`, never on the message."""
+    knocker = make_client(rng)
+    door = ac.Door.generate(T0 + 86_400)
+    sealed, _ = knocker.create_knock(door.id, door.public_key, "b")
+    other = ac.Door.generate(T0 + 86_400)
+    for call, kind in [
+        (lambda: door.open_knock(other.id, sealed, T0), "wrong_door"),
+        (lambda: door.open_knock(door.id, sealed, T0 + 3601), "stale_timestamp"),
+        (lambda: door.open_knock(door.id, sealed[:-1], T0), "authentication"),
+        (lambda: knocker.create_knock(door.id, door.public_key[:-1], "b"), "key_length"),
+        (lambda: ac.verify_listing(b"{}"), "malformed"),
+        (lambda: door.open_knock(b"short", sealed, T0), "malformed"),
+    ]:
+        with pytest.raises(ac.AgentConnectError) as e:
+            call()
+        assert e.value.kind == kind, str(e.value)
+
+
 def test_door_checks_and_persistence(rng: random.Random) -> None:
     knocker = make_client(rng)
     door = ac.Door.generate(T0 + 86_400)

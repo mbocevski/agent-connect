@@ -6,7 +6,9 @@ CIPHERSUITE_V0: str
 PADDING_BUCKETS: list[int]
 DB_KEY_LEN: int
 
-class AgentConnectError(ValueError): ...
+class AgentConnectError(ValueError):
+    kind: str
+
 class CoreError(Exception): ...
 
 @final

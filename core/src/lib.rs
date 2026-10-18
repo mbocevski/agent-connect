@@ -47,7 +47,7 @@ pub mod sas;
 mod vectors;
 
 pub use db::EncryptedDb;
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use group::{
     ApplicationMessage, Client, CommitOut, CommitSummary, Event, Group, MemberInfo, MessageHeader,
     MessageKind, Routing, VerifiedJoinRequest,

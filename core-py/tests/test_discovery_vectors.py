@@ -80,6 +80,7 @@ def test_listings() -> None:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.verify_listing(case["listing"].encode())
         assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case.get("kind", "malformed"), case["name"]
     for case in v["checks"]:
         listing = ac.verify_listing(case["listing"].encode())
         key_set = [b64d(v["other_directory_key"])] if "unpinned" in case["name"] else keys
@@ -91,6 +92,7 @@ def test_listings() -> None:
             with pytest.raises(ac.AgentConnectError) as e:
                 listing.check_token(v["directory"], key_set, case["now"], revoked)
         assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case.get("kind", "malformed"), case["name"]
 
 
 def test_listing_tokens() -> None:
@@ -110,6 +112,7 @@ def test_listing_tokens() -> None:
                 case["token"].encode(), v["directory"], [b64d(case["directory_key"])], case["now"]
             )
         assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case.get("kind", "malformed"), case["name"]
     for case in v["binding_invalid"]:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.check_token_binding(
@@ -120,12 +123,14 @@ def test_listing_tokens() -> None:
                 case["owner_domain"],
             )
         assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case.get("kind", "malformed"), case["name"]
     rev = v["revocation"]
     fields = ac.verify_token_revocation(rev["revocation"].encode(), v["directory"], [key])
     assert fields["token_id"] == b64d(token["token_id"])
     with pytest.raises(ac.AgentConnectError) as e:
         ac.verify_token_revocation(rev["tampered"].encode(), v["directory"], [key])
     assert str(e.value) == rev["tampered_error"]
+    assert e.value.kind == rev["tampered_kind"]
 
 
 def test_withdrawals() -> None:
@@ -145,12 +150,14 @@ def test_withdrawals() -> None:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.check_withdrawal_fresh(data, v["directory"], now)
         assert str(e.value) == good["stale_error"]
+        assert e.value.kind == good["stale_kind"]
     assert ac.withdrawal_applies(data, listing) is good["applies"]
     assert ac.withdrawal_applies(v["old_seq"]["withdrawal"].encode(), listing) is False
     for case in v["invalid"]:
         with pytest.raises(ac.AgentConnectError) as e:
             ac.verify_withdrawal(case["withdrawal"].encode())
         assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case.get("kind", "malformed"), case["name"]
 
 
 def test_owner_files() -> None:
@@ -163,6 +170,7 @@ def test_owner_files() -> None:
             with pytest.raises(ac.AgentConnectError) as e:
                 ac.parse_owner_file(data)
             assert str(e.value) == case["error"], case["name"]
+            assert e.value.kind == case.get("kind", "malformed"), case["name"]
         for r in case["results"]:
             got = ac.owner_vouch(data, r["identity"], r["directory"], r["name"])
             assert got == r["vouch"], (case["name"], r)
@@ -203,6 +211,7 @@ def test_knocks() -> None:
         with pytest.raises(ac.AgentConnectError) as e:
             door.open_knock(b64d(case["envelope_door_id"]), b64d(case["sealed"]), case["now"])
         assert str(e.value) == case["error"], case["name"]
+        assert e.value.kind == case.get("kind", "malformed"), case["name"]
     bad = v["bad_signature"]
     forged = door.open_knock(b64d(d["id"]), b64d(bad["sealed"]), bad["now"])
     assert not ed25519_ok(b64d(bad["sig_key"]), forged.signing_input, forged.sig)
