@@ -441,14 +441,22 @@ reach the human again, for as long as its invite is open. Therefore:
   passes steps 1–3, and the envelope `msg_id` it arrived under, whatever
   happens to it next (held for approval, approved, rejected, dropped by a
   limit or by local policy, lapsed), until its invite's `expires_at` +
-  300 s. After that, step 1 refuses any copy.
+  300 s, or until the invite is revoked or has expired, whichever comes
+  first. Revoked and expired are final, so from then on step 1 refuses any
+  copy.
 - It MUST silently drop a JoinRequest whose KeyPackageRef or `msg_id` it
   remembers: no approval, nothing to the joiner, nothing to its agent. It
   MAY record the drop in a metadata-only audit log.
 - This record MUST survive a restart (the inviter persists it in its
   encrypted store), and it MUST be bounded without ever forgetting an
   entry before its time: when it is full, the inviter drops new
-  JoinRequests silently until entries expire.
+  JoinRequests silently until entries expire. Whoever holds an invite's
+  link can make any number of valid JoinRequests, so the inviter SHOULD
+  also bound each invite's share of the record and its pending approvals,
+  drop the rest silently, and tell its human, who can revoke the invite.
+  (Informative: the reference daemon gives an invite at most
+  max(4 × `max_uses`, 64) entries, and at most 1024, and at most 32
+  pending approvals.)
 
 §6.6.3 step 6 is the same rule for knocks.
 
@@ -1517,7 +1525,8 @@ events, and the inbox and outbox, which hold message plaintext while a
 message is in flight) in a second SQLCipher database (ADR-003). The second
 database also holds the discovery secrets: door private keys (§6.6.1), the
 `welcome_secret` and KeyPackage of every knock sent and every knock waiting
-for approval, and the owner's knock ledger (§6.6.3 step 6), each deleted as
+for approval, the owner's knock ledger (§6.6.3 step 6) and the inviter's
+JoinRequest ledger (§6.2, "Replays"), each deleted as
 soon as it is no longer needed. Every page of
 each file, its journal and its WAL is encrypted and authenticated, so the
 schema, key names and row counts are hidden too. The MLS store's key is a
