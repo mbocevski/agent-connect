@@ -8,3 +8,4 @@
 - [ ] `CHANGELOG.md` `[Unreleased]` updated, or the PR is labelled `skip-changelog`
 - [ ] Tests added or updated (regression test for bug fixes)
 - [ ] `SPEC.md` / docs updated if behaviour or the wire format changed
+- [ ] `README.md` Status updated for a new feature, or the PR is labelled `skip-readme`

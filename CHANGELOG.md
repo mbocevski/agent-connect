@@ -431,6 +431,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   randomness via `AC_TEST_SEED` and Hypothesis profiles, cross-language
   contract data in `testdata/` (with the Matrix SAS emoji table) checked by
   `just contract`, and a coverage ratchet (`coverage-baseline.json`).
+- README gate (`docs/MAP.toml`, `scripts/check_docs.py`): the Status section
+  has one bullet per `[[component]]`, marked `<!-- component: name -->`, and
+  `just docs-check` fails when a bullet and a component don't match, when a
+  Cargo or uv workspace member is in no component, or when a `.rs` or `.py`
+  source file is in no rule and not `internal`. A branch that adds a
+  CHANGELOG `Added` entry and changes a component's paths must change
+  `README.md` too, unless the PR has the `skip-readme` label. New rules
+  cover signed listings and knocks in the core, the embeddable runtime, the
+  separate-OS-user mode and the whole directory.
 
 ### Changed
 

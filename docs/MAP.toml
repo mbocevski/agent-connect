@@ -1,14 +1,70 @@
-# User-facing code and the docs that must change with it.
+# What scripts/check_docs.py (just docs-check, pre-push, the CI `docs` job)
+# enforces. Globs use fnmatch syntax (`*` also matches `/`).
 #
-# scripts/check_docs.py fails a branch when a commit that isn't
-# docs/test/ci/chore/build/style changes a `code` path and none of the rule's
-# `docs` changed anywhere on the branch. Globs use fnmatch syntax (`*` also
-# matches `/`). Add a rule only for code whose behaviour users read about;
-# keep this list small and honest. Escape hatch: the `skip-docs` PR label.
+# [[rule]]      User-facing code and the docs that must change with it. A
+#                commit that isn't docs/test/ci/chore/build/style and changes
+#                `code` fails unless one of the rule's `docs` changed anywhere
+#                on the branch. Escape hatch: the `skip-docs` PR label.
+# [[component]]  The inventory behind the README Status section. Each
+#                component has exactly one Status bullet, marked
+#                `<!-- component: <name> -->`, which links the component's
+#                `doc`. A branch with a new CHANGELOG `### Added` entry that
+#                changes a component's `paths` must also change README.md.
+#                Escape hatch: the `skip-readme` PR label. `readme = false`
+#                is for parts with no Status bullet (test tooling, spikes).
+#                Every Cargo and uv workspace member needs a component whose
+#                `paths` cover its directory (`member/**`).
+# internal       Source files that are not user-facing. Every .rs/.py file
+#                under a crate or package's src directory must match a rule's
+#                `code` or `internal`, so new files get classified.
+
+internal = [
+    # core: storage, time, errors, test support.
+    "core/src/lib.rs",
+    "core/src/clock.rs",
+    "core/src/db.rs",
+    "core/src/error.rs",
+    "core/src/failpoint.rs",
+    "core/src/group/tests.rs",
+    "core/src/journal.rs",
+    "core/src/mls.rs",
+    "core/src/provider.rs",
+    "core/src/records.rs",
+    "core/src/rng.rs",
+    "core/src/vectors.rs",
+    # core-py: bindings; the checks they call are in core.
+    "core-py/src/**",
+    # relay: process entry point and storage.
+    "relay/src/lib.rs",
+    "relay/src/main.rs",
+    "relay/src/sqlite.rs",
+    "relay/src/store.rs",
+    # daemon: plumbing behind the CLI, the API and the adapters.
+    "daemon/src/agentconnect/__init__.py",
+    "daemon/src/agentconnect/adapter.py",
+    "daemon/src/agentconnect/apiclient.py",
+    "daemon/src/agentconnect/backoff.py",
+    "daemon/src/agentconnect/clock.py",
+    "daemon/src/agentconnect/failpoints.py",
+    "daemon/src/agentconnect/identity.py",
+    "daemon/src/agentconnect/log.py",
+    "daemon/src/agentconnect/relay.py",
+    "daemon/src/agentconnect/sas_emoji.py",
+    "daemon/src/agentconnect/shapes.py",
+    "daemon/src/agentconnect/sockets.py",
+    "daemon/src/agentconnect/store.py",
+    "daemon/src/agentconnect/tasks.py",
+    # harness: test tooling.
+    "harness/src/**",
+]
 
 [[rule]]
 name = "cli"
-code = ["daemon/src/agentconnect/cli.py"]
+code = [
+    "daemon/src/agentconnect/cli.py",
+    "daemon/src/agentconnect/cli_json.py",
+    "daemon/src/agentconnect/cli_support.py",
+]
 docs = ["docs/cli.md"]
 
 [[rule]]
@@ -43,12 +99,24 @@ docs = ["docs/safety.md"]
 [[rule]]
 name = "runtime-hosts"
 code = [
-    "daemon/src/agentconnect/runtime/runtime.py",
-    "daemon/src/agentconnect/runtime/agent.py",
+    "daemon/src/agentconnect/runtime/**",
     "daemon/src/agentconnect/callback.py",
     "daemon/src/agentconnect/daemon/*.py",
 ]
+# The local API's routes are documented in docs/api.md (rule local-api).
+exclude = ["daemon/src/agentconnect/runtime/api.py"]
 docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
+
+[[rule]]
+name = "isolation"
+code = ["daemon/src/agentconnect/isolation.py"]
+docs = ["docs/isolation.md"]
+
+[[rule]]
+name = "local-secrets"
+# Where the keys and the local API tokens live, and who can read them.
+code = ["daemon/src/agentconnect/keystore.py", "daemon/src/agentconnect/tokens.py"]
+docs = ["docs/isolation.md", "docs/config.md", "docs/safety.md"]
 
 [[rule]]
 name = "python-sdk"
@@ -61,19 +129,43 @@ code = ["daemon/src/agentconnect/a2a_adapter/*.py"]
 docs = ["docs/adapters/a2a.md"]
 
 [[rule]]
+name = "core-protocol"
+# The modules that implement a SPEC section, other than discovery.
+code = [
+    "core/src/encoding.rs",
+    "core/src/group.rs",
+    "core/src/identity.rs",
+    "core/src/invite.rs",
+    "core/src/join.rs",
+    "core/src/padding.rs",
+    "core/src/policy.rs",
+    "core/src/sas.rs",
+]
+docs = ["SPEC.md"]
+
+[[rule]]
+name = "discovery-core"
+# Signed listings, tokens, withdrawals, owner verification (§13), doors and
+# knocks (§6.6).
+code = ["core/src/listing/**", "core/src/knock*"]
+docs = ["SPEC.md"]
+
+[[rule]]
 name = "relay-protocol"
-code = ["relay/src/proto.rs", "relay/src/rest.rs", "relay/src/ws.rs"]
+code = [
+    "relay/src/auth.rs",
+    "relay/src/config.rs",
+    "relay/src/landing.rs",
+    "relay/src/proto.rs",
+    "relay/src/relay.rs",
+    "relay/src/rest.rs",
+    "relay/src/ws.rs",
+]
 docs = ["SPEC.md", "relay/README.md"]
 
 [[rule]]
 name = "directory-protocol"
-code = [
-    "directory/src/http.rs",
-    "directory/src/api.rs",
-    "directory/src/mcp.rs",
-    "directory/src/directory.rs",
-    "directory/src/config.rs",
-]
+code = ["directory/src/**"]
 docs = ["SPEC.md", "directory/README.md"]
 
 [[rule]]
@@ -82,3 +174,83 @@ code = ["testdata/*.json"]
 # The manifest lists files; it isn't a wire format.
 exclude = ["testdata/MANIFEST.json"]
 docs = ["SPEC.md"]
+
+[[component]]
+name = "core"
+paths = ["core/**", "core-py/**"]
+doc = "SPEC.md"
+
+[[component]]
+name = "relay"
+paths = ["relay/**"]
+doc = "relay/README.md"
+
+[[component]]
+name = "directory"
+paths = ["directory/**"]
+doc = "directory/README.md"
+
+[[component]]
+name = "discovery"
+paths = ["core/src/listing/**", "core/src/knock*", "core-py/src/discovery.rs"]
+doc = "docs/adr/006-discovery.md"
+
+[[component]]
+name = "runtime"
+paths = ["daemon/**"]
+doc = "docs/adr/005-deployment-modes.md"
+
+[[component]]
+name = "cli"
+paths = ["daemon/src/agentconnect/cli*.py", "daemon/src/agentconnect/apiclient.py"]
+doc = "docs/cli.md"
+
+[[component]]
+name = "safety-policy"
+paths = [
+    "daemon/src/agentconnect/policy.py",
+    "daemon/src/agentconnect/limits.py",
+    "daemon/src/agentconnect/schemas.py",
+]
+doc = "docs/safety.md"
+
+[[component]]
+name = "isolation"
+paths = ["daemon/src/agentconnect/isolation.py"]
+doc = "docs/isolation.md"
+
+[[component]]
+name = "sdk"
+paths = [
+    "sdk/python/**",
+    "daemon/src/agentconnect/runtime/**",
+    "daemon/src/agentconnect/callback.py",
+]
+doc = "docs/sdk.md"
+
+[[component]]
+name = "a2a-adapter"
+paths = ["daemon/src/agentconnect/a2a_adapter/**"]
+doc = "docs/adapters/a2a.md"
+
+[[component]]
+name = "webhook-adapter"
+paths = [
+    "daemon/src/agentconnect/webhook.py",
+    "daemon/src/agentconnect/sse.py",
+    "daemon/src/agentconnect/payloads.py",
+    "daemon/src/agentconnect/adapters.py",
+]
+doc = "docs/adapters/webhook.md"
+
+[[component]]
+name = "harness"
+paths = ["harness/**"]
+doc = "TESTING.md"
+readme = false
+
+[[component]]
+name = "spikes"
+paths = ["spikes/**"]
+doc = "docs/spikes/mls-xwing.md"
+readme = false
