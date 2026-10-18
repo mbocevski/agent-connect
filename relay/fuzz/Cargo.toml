@@ -25,3 +25,10 @@ path = "fuzz_targets/frame_parser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "knock_frame"
+path = "fuzz_targets/knock_frame.rs"
+test = false
+doc = false
+bench = false

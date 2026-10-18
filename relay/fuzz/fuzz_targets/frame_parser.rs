@@ -10,7 +10,11 @@ fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
     let limit = 1 << 20;
     match parse_client_frame(&text, limit) {
-        Ok(ClientFrame::Send { env } | ClientFrame::Join { env, .. }) => {
+        Ok(
+            ClientFrame::Send { env }
+            | ClientFrame::Join { env, .. }
+            | ClientFrame::Knock { env, .. },
+        ) => {
             // Accepted envelopes always re-validate and re-serialise.
             assert!(env.validate().is_ok());
             let _ = serde_json::to_string(&env).unwrap();

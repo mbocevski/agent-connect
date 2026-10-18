@@ -2,7 +2,7 @@
 //! (TESTING.md) when set.
 
 use agentconnect_relay::proto::{
-    ClientFrame, ErrorCode, b64_encode, mailbox_id_from_key, parse_client_frame,
+    ClientFrame, ErrorCode, MAX_KNOCK_CT, b64_encode, mailbox_id_from_key, parse_client_frame,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, RngSeed};
@@ -60,7 +60,7 @@ proptest! {
 
     #[test]
     fn json_shaped_noise_never_panics(
-        t in prop::sample::select(vec!["auth", "send", "ack", "group.create", "invite.consume", "join", "x"]),
+        t in prop::sample::select(vec!["auth", "send", "ack", "group.create", "invite.consume", "join", "knock", "x"]),
         a in ".{0,40}",
         n in any::<i128>(),
     ) {
@@ -82,6 +82,33 @@ proptest! {
         let again = serde_json::to_string(&e).unwrap();
         let reparsed = parse_client_frame(&format!(r#"{{"t":"send","env":{again}}}"#), MAX).unwrap();
         prop_assert_eq!(reparsed, ClientFrame::Send { env: e });
+    }
+
+    #[test]
+    fn knock_frames_parse_only_within_the_ct_cap(
+        door in any::<[u8; 16]>(),
+        mid in any::<[u8; 16]>(),
+        key in any::<[u8; 32]>(),
+        len in 0_usize..(MAX_KNOCK_CT + 64),
+    ) {
+        let door = b64_encode(&door);
+        let frame = format!(
+            r#"{{"t":"knock","door_id":"{door}","env":{{"v":0,"kind":"knock","door_id":"{door}","msg_id":"{}","sender":"{}","ct":"{}"}}}}"#,
+            b64_encode(&mid),
+            mailbox_id_from_key(&key),
+            b64_encode(&vec![0xA5; len]),
+        );
+        match parse_client_frame(&frame, MAX) {
+            Ok(ClientFrame::Knock { door_id, env }) => {
+                prop_assert!(len <= MAX_KNOCK_CT);
+                prop_assert_eq!(env.door_id.as_deref(), Some(door_id.as_str()));
+            }
+            Ok(other) => prop_assert!(false, "parsed as {other:?}"),
+            Err((code, _)) => {
+                prop_assert!(len > MAX_KNOCK_CT);
+                prop_assert_eq!(code, ErrorCode::TooLarge);
+            }
+        }
     }
 
     #[test]

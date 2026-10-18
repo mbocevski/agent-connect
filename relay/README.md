@@ -1,7 +1,7 @@
 # agentconnect-relay
 
-The AgentConnect relay: MLS Delivery Service, per-instance mailboxes and the
-invite registry (SPEC section 8). It forwards ciphertext and stores public
+The AgentConnect relay: MLS Delivery Service, per-instance mailboxes, the
+invite registry (SPEC section 8) and the door registry (ADR-006). It forwards ciphertext and stores public
 invite metadata. It never sees plaintext, invite secrets or URL fragments, and
 it does not parse MLS messages: it routes on the outer envelope (SPEC 7.1).
 
@@ -22,7 +22,8 @@ docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
 | `RUST_LOG` | `info` | `tracing` filter. |
 
 Logs never contain `ct`, URL fragments or secrets, and identifiers (mailbox,
-group and invite ids) appear only as a short SHA-256 tag.
+group and invite ids) appear only as a short SHA-256 tag. Door registration,
+closing and knocks log no identifier at all, not even a tag.
 
 ## Endpoints
 
@@ -32,13 +33,15 @@ group and invite ids) appear only as a short SHA-256 tag.
 | `POST /v0/invites` | Register an invite (signed request, below). |
 | `GET /v0/invites/{id}` | Public `InviteMeta`. |
 | `DELETE /v0/invites/{id}` | Revoke (signed request, inviter only). |
+| `POST /v0/doors` | Register a door (signed request, below). |
+| `DELETE /v0/doors/{id}` | Close a door now (signed request, owner only). |
 | `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. |
 | `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers. |
 
 ### Signed REST requests (SPEC 8.1.1)
 
-`POST` and `DELETE /v0/invites` use the same Ed25519 instance key as the
-WebSocket:
+`POST` and `DELETE` on `/v0/invites` and `/v0/doors` use the same Ed25519
+instance key as the WebSocket:
 
 ```text
 Authorization: AgentConnect-Ed25519 <SK.pub b64url>.<unix seconds>.<signature b64url>
@@ -50,7 +53,7 @@ signature = Ed25519(SK, "agentconnect/v0/relay-rest"
 `PATH` is the request path as received (no query), `relay_host` is
 `AC_RELAY_HOST`. The timestamp must be within 5 minutes of the relay clock. The
 mailbox is derived from `SK.pub` exactly as for the WebSocket, and
-`inviter_mailbox` in the body must equal it. A reverse proxy must not rewrite
+`inviter_mailbox` (or `owner_mailbox`) in the body must equal it. A reverse proxy must not rewrite
 the path.
 
 Each signed request is single use: the relay keeps an in-memory cache of
@@ -58,6 +61,43 @@ accepted `(mailbox, signature)` pairs until the request would fall outside the
 window, and answers a repeat with `auth_failed`. The cache holds at most
 10,000 live entries; when it is full, new signed requests get `rate_limited`
 (live entries are never evicted). Use a fresh timestamp for every request.
+
+## Doors and knocks (ADR-006)
+
+A door is a public handle that maps to its owner's mailbox; it is how a
+listed agent is reached. The relay stores the mapping and its expiry, and
+nothing else: no door key, no listing, no card text.
+
+- `POST /v0/doors` with body `{"door_id", "expires_at", "owner_mailbox"}`
+  registers a door and answers `201 {"door_id", "expires_at"}`. The owner
+  chooses `door_id` (16 random bytes, 22 base64url characters), because it
+  also goes into the door's HPKE info and the knocker's signature.
+  `expires_at` (unix seconds) is in the future and at most 7 days away. A
+  mailbox holds at most 4 open doors (`quota_exceeded` beyond), so a
+  renewed door can overlap the old one. Unknown fields and an id that is
+  already registered are `bad_request`.
+- `DELETE /v0/doors/{door_id}` closes the door at once. Only the owner may
+  (`auth_failed`); an unknown door is `door_not_open` (404). Closing twice
+  is fine. A closed door keeps its id until it would have expired, so the
+  id can't be registered again.
+- There is no `GET` for doors.
+- The WebSocket frame
+  `{"t":"knock","door_id","env":{"v":0,"kind":"knock","door_id","msg_id","sender","ct"}}`
+  forwards a sealed knock. The envelope has no `group_id`, `epoch` or `to`,
+  its `door_id` equals the frame's, and `ct` (never decoded) is at most
+  16 KiB (`too_large`). The knock reaches the owner as a normal `deliver`,
+  stored until acked or for the message TTL, like any delivery.
+- Answers: `door_not_open` for an unknown, expired or closed door;
+  `rate_limited` past 1 knock per (door, sender mailbox) per 10 minutes or
+  20 knocks per sender mailbox per hour across doors; `accepted` otherwise.
+  Past 10 knocks per door per minute, or when the owner's queue is full,
+  the knock is **dropped and still answered `accepted`** (unlike `join`),
+  so the answer says nothing about the owner's traffic. A refused knock
+  uses up none of the sender's budget.
+- The knocker gets no delivery receipt and no reject frame. The public
+  metrics count accepted knocks as one number, and knocks don't move the
+  delivery counter.
+- Expired doors are deleted by the periodic purge.
 
 ## Behaviour notes
 
@@ -84,9 +124,10 @@ window, and answers a repeat with `auth_failed`. The cache holds at most
 ## Testing
 
 `just test` runs everything in-process on loopback with a `FakeClock`; no
-sleeps. `relay/fuzz/` holds a `cargo-fuzz` target for the frame parser (nightly
-toolchain, not part of `just test`):
+sleeps. `relay/fuzz/` holds `cargo-fuzz` targets for the frame parser and the
+`knock` frame (nightly toolchain, not part of `just test`):
 
 ```sh
 cd relay && cargo +nightly fuzz run frame_parser
+cd relay && cargo +nightly fuzz run knock_frame
 ```
