@@ -128,6 +128,12 @@ pub enum Error {
     /// door key or sealed knock of the wrong shape.
     #[error("invalid knock: {0}")]
     InvalidKnock(&'static str),
+    /// A Welcome that unwrapped under a knock's `welcome_key` but is not
+    /// the group the knock asked for (SPEC §6.6.5): the wrong owner, name
+    /// or members. Only the knock's two ends know the key, so raise
+    /// `relay_misbehaviour`. The KeyPackage is spent.
+    #[error("knock Welcome mismatch: {0}")]
+    KnockWelcome(&'static str),
     /// An error reported by OpenMLS.
     #[error("MLS error: {0}")]
     Mls(String),
@@ -197,6 +203,9 @@ pub enum ErrorKind {
     KeyLength,
     /// An AEAD or HPKE open that failed: wrong key, wrong secret or tampering.
     Authentication,
+    /// A knock Welcome that isn't the group the knock asked for (SPEC
+    /// §6.6.5).
+    WelcomeMismatch,
     /// Anything else (storage, MLS, randomness, internal).
     Other,
 }
@@ -225,6 +234,7 @@ impl ErrorKind {
             Self::CredentialMismatch => "credential_mismatch",
             Self::KeyLength => "key_length",
             Self::Authentication => "authentication",
+            Self::WelcomeMismatch => "welcome_mismatch",
             Self::Other => "other",
         }
     }
@@ -237,20 +247,22 @@ fn reason_kind(reason: &str) -> ErrorKind {
     match reason {
         "signature" | "revocation signature" => K::Signature,
         "unknown key_id" => K::UnknownKey,
-        "expired" => K::Expired,
+        "expired" | "lapsed" => K::Expired,
         "not yet valid" => K::NotYetValid,
         "revoked" => K::Revoked,
         r if r.starts_with("bound to another") => K::TokenMismatch,
         "door has expired" | "door expired" => K::DoorExpired,
         "not this door" | "door_id mismatch" => K::WrongDoor,
         "for another directory" => K::WrongDirectory,
-        "ts not within 300 s" | "ts out of range" | "issued_at is in the future" => {
-            K::StaleTimestamp
-        }
+        "ts not within 300 s"
+        | "ts out of range"
+        | "issued_at is in the future"
+        | "issued_at goes back" => K::StaleTimestamp,
         "replayed" => K::Replay,
         "token older than the name's newest"
         | "does not replace the stored listing"
-        | "tombstoned" => K::Superseded,
+        | "tombstoned"
+        | "seq does not increase" => K::Superseded,
         "ledger full" => K::Busy,
         "seal does not open" => K::Authentication,
         _ => K::Malformed,
@@ -280,6 +292,7 @@ impl Error {
             Self::HpkeKeyLength | Self::KemOutputLength => K::KeyLength,
             Self::WelcomeAuth | Self::BadMac => K::Authentication,
             Self::InviteExpired => K::Expired,
+            Self::KnockWelcome(_) => K::WelcomeMismatch,
             _ => K::Other,
         }
     }
@@ -326,12 +339,22 @@ mod tests {
             ),
             (Error::InvalidKnock("ts out of range"), K::StaleTimestamp),
             (
+                Error::InvalidListing("issued_at goes back"),
+                K::StaleTimestamp,
+            ),
+            (
                 Error::InvalidListing("issued_at is in the future"),
                 K::StaleTimestamp,
             ),
             (Error::InvalidKnock("replayed"), K::Replay),
             (Error::InvalidListing("tombstoned"), K::Superseded),
+            (
+                Error::InvalidListing("seq does not increase"),
+                K::Superseded,
+            ),
             (Error::InvalidKnock("ledger full"), K::Busy),
+            (Error::InvalidKnock("lapsed"), K::Expired),
+            (Error::KnockWelcome("name"), K::WelcomeMismatch),
             (Error::InvalidKnock("seal does not open"), K::Authentication),
             (Error::InvalidListing("not canonical JCS"), K::Malformed),
             (Error::InvalidOwnerFile("not I-JSON"), K::Malformed),
@@ -366,11 +389,12 @@ mod tests {
             K::CredentialMismatch,
             K::KeyLength,
             K::Authentication,
+            K::WelcomeMismatch,
             K::Other,
         ]
         .into_iter()
         .map(ErrorKind::as_str)
         .collect();
-        assert_eq!(names.len(), 20, "kind names are distinct");
+        assert_eq!(names.len(), 21, "kind names are distinct");
     }
 }

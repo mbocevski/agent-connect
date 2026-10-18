@@ -115,10 +115,43 @@ pub(crate) fn key_package_used<S: Store>(store: &S, kp_ref: &[u8]) -> Result<boo
         .is_some())
 }
 
+/// Which pending own commit reserved a KeyPackage for its Add: the group
+/// and the commit's [`wire_hash`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Reservation {
+    pub group_id: Vec<u8>,
+    pub hash: String,
+}
+
+/// The reservation of a KeyPackage (by `KeyPackageRef`), if any. It counts
+/// only while its commit is still the group's pending one; the caller
+/// checks that against the MLS state.
+pub(crate) fn key_package_reservation<S: Store>(
+    store: &S,
+    kp_ref: &[u8],
+) -> Result<Option<Reservation>> {
+    load(store, &group_key("key-package-reserved", kp_ref))
+}
+
+/// Reserves the KeyPackages a pending own commit Adds, so that no other
+/// group's commit Adds them before it merges or is dropped (SPEC §6.2,
+/// "KeyPackage reuse").
+pub(crate) fn reserve_key_packages<S: Store>(
+    store: &S,
+    kp_refs: &[Vec<u8>],
+    reservation: &Reservation,
+) -> Result<()> {
+    for r in kp_refs {
+        save(store, &group_key("key-package-reserved", r), reservation)?;
+    }
+    Ok(())
+}
+
 /// Records KeyPackages used by a merged Add.
 pub(crate) fn mark_key_packages_used<S: Store>(store: &S, kp_refs: &[Vec<u8>]) -> Result<()> {
     for r in kp_refs {
         store.put_record(&group_key("key-package-used", r), Some(b"1"))?;
+        store.put_record(&group_key("key-package-reserved", r), None)?;
     }
     Ok(())
 }
@@ -161,8 +194,18 @@ mod tests {
         assert_eq!(PreviousMembers::load(store, gid).unwrap(), None);
 
         assert!(!key_package_used(store, b"ref").unwrap());
+        let reservation = Reservation {
+            group_id: gid.to_vec(),
+            hash: wire_hash(b"x"),
+        };
+        reserve_key_packages(store, &[b"ref".to_vec()], &reservation).unwrap();
+        assert_eq!(
+            key_package_reservation(store, b"ref").unwrap(),
+            Some(reservation)
+        );
         mark_key_packages_used(store, &[b"ref".to_vec()]).unwrap();
         assert!(key_package_used(store, b"ref").unwrap());
+        assert_eq!(key_package_reservation(store, b"ref").unwrap(), None);
 
         store.put_record(b"junk", Some(b"not json")).unwrap();
         assert_eq!(

@@ -488,6 +488,10 @@ and is never consumed. Every approved knock creates a **new** group.
 - **One door per listing, held by one instance.** The owner instance
   registers the door with the relay (`POST /v0/doors`, §8.1), which maps
   `door_id` to that instance's mailbox. A door lives at most 7 days.
+  (Informative: the relay measures the 7 days from its own clock, so a
+  door that asks for exactly 7 days is refused when the owner's clock runs
+  ahead of the relay's. An owner therefore asks for a little less, for
+  example 7 days less 1 hour.)
 - **Renewal.** Once half of a door's lifetime has passed, the owner instance
   creates a **fresh** door (new `door_id`, new key pair), registers it, and
   then publishes a re-signed listing (`seq` + 1, the new `door`, a new
@@ -598,11 +602,16 @@ counts toward local rate limiting.
   drop a knock, but its result MUST NOT approve one.
 - **Timeout.** The approval lapses at `ts + 3600`, measured from the
   knocker's timestamp, not from receipt. A lapse is silent.
+  (Informative: so the owner commits no Add after `ts + 3600`. The knocker
+  stops waiting at `ts + 3600 + 300` (§6.6.6) and deletes the knock key,
+  so a Welcome sent after that finds nobody to join, and the Add has left
+  a leaf nobody controls. An owner that can't send the Welcome by then
+  removes that leaf again.)
 - **On approve,** A:
-  1. creates a new group (§5) with `owner` = A's identity and
-     `floor: "free"`. `ac_group_meta.name` is the listing's `name`;
-     `purpose` is chosen by A's human and defaults to the listing's
-     description;
+  1. creates a new group (§5) with `owner` = A's identity,
+     `floor: "free"`, and no admin or floor moderator but A's identity.
+     `ac_group_meta.name` is the listing's `name`; `purpose` is chosen
+     by A's human and defaults to the listing's description;
   2. sends `group.create`;
   3. commits `Add(B.key_package)`;
   4. wraps the Welcome as a `WrappedWelcome` (§6.4) under the knock
@@ -627,6 +636,13 @@ with `InviteMeta` is replaced by these:
 - The group has exactly two leaves: B's own, and one leaf of the listed
   identity whose instance certificate verifies.
 - `ac_group_meta.name` equals the listing's `name`.
+- The group is the new one of §6.6.4: the Welcome is for epoch 1, so the
+  commit that added B is the group's only commit and no member came or went
+  before it. `ac_group_policy.floor` is `free`, and every `admins` entry and
+  the `floor_moderator`, if set, is the listing's `identity`.
+- B is still waiting for it: by B's clock it arrives no later than
+  `ts + 3600 + 300` (§6.6.6). A later Welcome is dropped before it is
+  unwrapped.
 
 A Welcome that unwraps but fails these checks MUST be dropped and MUST
 raise `relay_misbehaviour`: only the knock's two ends know the key, so
@@ -1785,6 +1801,12 @@ idempotent. Choosing to publish, and any change to the card's text, MUST be
 a **human** decision: an agent can't put itself into a public directory.
 Automatic door renewal (§6.6.1) re-signs only `door`, `seq` and `issued_at`
 of the listing its human approved.
+(Informative: `seq` never repeats for one (directory, name, identity),
+even after the owner loses or restores its state, because a directory
+refuses a `seq` that isn't above the listed one or that a tombstone covers.
+An owner keeps it so by signing with `max(previous + 1, issued_at)`, which
+stays below 2^53 − 1. A renewal's `issued_at` is never before the previous
+listing's.)
 
 #### 13.2.3 Withdrawal
 
