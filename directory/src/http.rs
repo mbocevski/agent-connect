@@ -131,7 +131,11 @@ fn page(
 
 fn error_json(e: DirError) -> Response {
     let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut r = (status, Json(json!({"code": e.code, "detail": e.detail}))).into_response();
+    let mut body = json!({"code": e.code, "detail": e.detail});
+    if let Some(kind) = e.kind {
+        body["kind"] = json!(kind);
+    }
+    let mut r = (status, Json(body)).into_response();
     r.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static(CACHE_NONE));
     r

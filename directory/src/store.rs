@@ -58,28 +58,28 @@ impl From<sqlx::migrate::MigrateError> for StoreError {
 /// Result alias for storage operations.
 pub type StoreResult<T> = Result<T, StoreError>;
 
-/// The result of the last owner check (Decision 2).
+/// The result of one owner-file fetch (Decision 2), as the core names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerCheck {
-    /// No check has finished yet.
-    Pending,
     /// The file vouched for the identity.
     Vouched,
-    /// The file fetched but does not vouch for the identity.
+    /// The file doesn't vouch for the identity in this listing.
     NotVouched,
-    /// The fetch failed or the file was invalid.
-    Error,
+    /// The file revokes the identity.
+    Revoked,
+    /// No file was fetched, or it isn't a valid owner file.
+    Failed,
 }
 
 impl OwnerCheck {
-    /// The stored name.
+    /// The stored name (the core's `Vouch` and `FetchResult` names).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            OwnerCheck::Pending => "pending",
-            OwnerCheck::Vouched => "vouched",
-            OwnerCheck::NotVouched => "not_vouched",
-            OwnerCheck::Error => "error",
+            OwnerCheck::Vouched => "vouches",
+            OwnerCheck::NotVouched => "does_not_vouch",
+            OwnerCheck::Revoked => "revoked",
+            OwnerCheck::Failed => "failed",
         }
     }
 
@@ -87,33 +87,41 @@ impl OwnerCheck {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "pending" => OwnerCheck::Pending,
-            "vouched" => OwnerCheck::Vouched,
-            "not_vouched" => OwnerCheck::NotVouched,
-            "error" => OwnerCheck::Error,
+            "vouches" => OwnerCheck::Vouched,
+            "does_not_vouch" => OwnerCheck::NotVouched,
+            "revoked" => OwnerCheck::Revoked,
+            "failed" => OwnerCheck::Failed,
             _ => return None,
         })
     }
 }
 
-/// The stored owner state and its check times.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The stored owner-check history: exactly what the core's `owner_state`
+/// needs (`OwnerChecks`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OwnerStatus {
-    /// The last finished check.
-    pub last: OwnerCheck,
-    /// Unix seconds of the last finished check.
-    pub checked_at: Option<u64>,
-    /// Unix seconds of the last check that vouched.
+    /// The latest completed fetch and its time.
+    pub latest: Option<(u64, OwnerCheck)>,
+    /// When a fetch last vouched.
     pub verified_at: Option<u64>,
+    /// The latest negative result (doesn't vouch, or revoked) and its time.
+    /// It stays until a later fetch vouches.
+    pub negative: Option<(u64, OwnerCheck)>,
 }
 
 impl OwnerStatus {
     /// No check yet.
     pub const PENDING: Self = Self {
-        last: OwnerCheck::Pending,
-        checked_at: None,
+        latest: None,
         verified_at: None,
+        negative: None,
     };
+
+    /// When the latest fetch completed.
+    #[must_use]
+    pub fn checked_at(&self) -> Option<u64> {
+        self.latest.map(|(t, _)| t)
+    }
 }
 
 /// The full-text fields of a listing.
@@ -148,6 +156,8 @@ pub struct ListingRecord {
     pub door_expires_at: Option<u64>,
     /// The embedded token's `expires_at`.
     pub token_expires_at: u64,
+    /// The embedded token's `issued_at`.
+    pub token_issued_at: u64,
     /// Unix seconds when this version was published.
     pub published_at: u64,
     /// Unix seconds when the name last changed identity, for the 30-day
@@ -195,7 +205,9 @@ impl GoneKind {
     }
 }
 
-/// The tombstone of a name: the highest withdrawn `seq` and who held it.
+/// The tombstone a withdrawal leaves for a (name, identity): the highest
+/// withdrawn `seq`. `seq` belongs to (directory, name, identity), so another
+/// identity's tombstone never blocks a listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tombstone {
     /// The listing name.
@@ -224,6 +236,17 @@ pub struct FeedEntry {
     pub created_at: u64,
 }
 
+/// What the caller saw when it decided that a listing may be stored. The
+/// store refuses the write ([`PublishOutcome::Conflict`]) if either has
+/// changed since, so the decision and the write are atomic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PublishGuard {
+    /// The SHA-256 of the listing stored under the name, if any.
+    pub prev_sha256: Option<String>,
+    /// The tombstoned `seq` of this (name, identity), if any.
+    pub tombstone_seq: Option<u64>,
+}
+
 /// Outcome of [`Store::publish`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishOutcome {
@@ -234,13 +257,13 @@ pub enum PublishOutcome {
     },
     /// The same bytes are already stored; nothing changed.
     Unchanged,
-    /// `seq` is not above the stored or tombstoned `seq`.
-    StaleSeq {
-        /// The highest `seq` seen for the name.
-        current: u64,
-    },
+    /// The stored listing or the tombstone changed since the caller
+    /// decided; decide again.
+    Conflict,
     /// The token was revoked.
     TokenRevoked,
+    /// The name was held under a token issued later than this listing's.
+    NameHeld,
 }
 
 /// A withdrawal to apply.
@@ -311,21 +334,37 @@ pub trait Store: Send + Sync + 'static {
     /// The listing under `name`.
     fn get(&self, name: &str) -> impl Future<Output = StoreResult<Option<ListingRecord>>> + Send;
 
-    /// The tombstone of `name`.
+    /// Whether the operator revoked `token_id`.
+    fn token_revoked(&self, token_id: &str) -> impl Future<Output = StoreResult<bool>> + Send;
+
+    /// The latest tombstone of `name`, whichever identity it is for.
     fn tombstone(&self, name: &str) -> impl Future<Output = StoreResult<Option<Tombstone>>> + Send;
 
-    /// Store a verified listing, atomically applying the publish rules: the
-    /// token isn't revoked, the same bytes are idempotent, and `seq` is above
-    /// both the stored and the tombstoned `seq`. On a change of identity the
-    /// store sets `key_changed_at` to `published_at`; otherwise it keeps the
-    /// previous value. A new version starts with the owner state given.
+    /// The tombstone of (`name`, `identity`).
+    fn tombstone_for(
+        &self,
+        name: &str,
+        identity: &str,
+    ) -> impl Future<Output = StoreResult<Option<Tombstone>>> + Send;
+
+    /// Store a listing the caller decided may replace what `guard` saw
+    /// (`SignedListing::replaces`, `tombstoned_by`), atomically: the token
+    /// isn't revoked, the same bytes are idempotent, and the stored listing
+    /// and this identity's tombstone are still what `guard` says, and the
+    /// token is no older than the newest token ever accepted for the name
+    /// (kept after withdrawal, expiry and revocation, so an old key can't
+    /// take a name back). On a
+    /// change of identity the store sets `key_changed_at` to
+    /// `published_at`; otherwise it keeps the previous value.
     fn publish(
         &self,
         record: &ListingRecord,
+        guard: &PublishGuard,
     ) -> impl Future<Output = StoreResult<PublishOutcome>> + Send;
 
-    /// In one transaction: delete the listing, write the tombstone and
-    /// append the signed entry to the feed.
+    /// In one transaction: delete the listing (if it is the withdrawal's
+    /// identity's, at a `seq` no higher), raise that (name, identity)'s
+    /// tombstone and append the signed entry to the feed.
     fn withdraw(
         &self,
         w: &WithdrawalRecord<'_>,
@@ -400,14 +439,15 @@ mod tests {
     #[test]
     fn names_round_trip() {
         for c in [
-            OwnerCheck::Pending,
             OwnerCheck::Vouched,
             OwnerCheck::NotVouched,
-            OwnerCheck::Error,
+            OwnerCheck::Revoked,
+            OwnerCheck::Failed,
         ] {
             assert_eq!(OwnerCheck::parse(c.as_str()), Some(c));
         }
         assert_eq!(OwnerCheck::parse("x"), None);
+        assert_eq!(OwnerStatus::PENDING.checked_at(), None);
         for k in [
             GoneKind::Withdrawal,
             GoneKind::TokenRevocation,

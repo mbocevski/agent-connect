@@ -390,7 +390,8 @@ async fn owner_states_and_the_key_changed_banner_show() {
             .contains("no verified owner")
     );
     s.agent = new;
-    s.seq = 2;
+    s.seq = 1;
+    s.token_issued_at = h.now();
     h.publish(&s).await;
     let today = agentconnect_directory::render::date(h.now());
     let banner = format!("key changed on {today}");

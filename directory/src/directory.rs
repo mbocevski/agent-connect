@@ -7,15 +7,15 @@ use std::sync::Arc;
 use agentconnect_core::clock::Clock;
 use agentconnect_core::encoding::{b64, hex};
 use agentconnect_core::identity::{fingerprint, parse_identity};
-use agentconnect_core::listing::MAX_LISTING_BYTES;
+use agentconnect_core::listing::{MAX_LISTING_BYTES, SignedListing};
 
 use crate::card::Card;
 use crate::metrics::Metrics;
-use crate::owner::{OwnerFetcher, OwnerState, RECHECK_EVERY_SECS, owner_state};
+use crate::owner::{OwnerFetcher, OwnerState, RECHECK_EVERY_SECS, owner_state, record_fetch};
 use crate::ratelimit::{Class, Limits, RateLimiter};
 use crate::store::{
-    FeedEntry, GoneKind, ListingRecord, OwnerCheck, OwnerStatus, PublishOutcome, RevokeOutcome,
-    SearchDoc, SearchQuery, Store, WithdrawOutcome, WithdrawalRecord,
+    FeedEntry, GoneKind, ListingRecord, OwnerCheck, OwnerStatus, PublishGuard, PublishOutcome,
+    RevokeOutcome, SearchDoc, SearchQuery, Store, WithdrawOutcome, WithdrawalRecord,
 };
 use crate::verify::{OwnerVerdict, Rejection, TokenKey, Verifier};
 
@@ -43,6 +43,8 @@ pub struct DirError {
     pub code: &'static str,
     /// Human-readable reason.
     pub detail: &'static str,
+    /// The core's error kind, for refusals the core decided.
+    pub kind: Option<&'static str>,
 }
 
 impl DirError {
@@ -51,6 +53,7 @@ impl DirError {
             status,
             code,
             detail,
+            kind: None,
         }
     }
 
@@ -69,25 +72,41 @@ fn internal(e: &dyn std::fmt::Display) -> DirError {
     DirError::INTERNAL
 }
 
-fn rejected(r: &Rejection, what: &'static str) -> DirError {
-    match *r {
-        Rejection::Malformed(why) => DirError::new(400, what, why),
-        Rejection::BadSignature => DirError::new(403, "bad_signature", "signature does not verify"),
-        Rejection::DoorExpired => DirError::new(400, "bad_door", "the door has expired"),
-        Rejection::UnknownKey => {
-            DirError::new(403, "unknown_key", "not signed by a pinned operator key")
-        }
-        Rejection::BadToken(why) => DirError::new(403, "bad_token", why),
-        Rejection::WrongDirectory => {
-            DirError::new(400, "wrong_directory", "this is for another directory")
-        }
-        Rejection::StaleTs => DirError::new(
-            400,
-            "stale_ts",
-            "ts must be within 300 s of the directory clock",
-        ),
+/// The refusal for a core [`Rejection`]: the code comes from the core's
+/// error kind (`malformed` uses `malformed_code`), the detail is the core's
+/// reason.
+fn rejected(r: &Rejection, malformed_code: &'static str) -> DirError {
+    use agentconnect_core::ErrorKind as K;
+    let (status, code) = match r.kind {
+        K::Signature => (403, "bad_signature"),
+        K::UnknownKey => (403, "unknown_key"),
+        K::Expired | K::NotYetValid | K::TokenMismatch => (403, "bad_token"),
+        K::Revoked => (403, "token_revoked"),
+        K::DoorExpired => (400, "bad_door"),
+        K::WrongDirectory => (400, "wrong_directory"),
+        K::StaleTimestamp => (400, "stale_ts"),
+        _ => (400, malformed_code),
+    };
+    DirError {
+        status,
+        code,
+        detail: r.reason,
+        kind: Some(r.kind.as_str()),
     }
 }
+
+/// `seq` isn't above this identity's listed or withdrawn `seq`.
+const STALE_SEQ: DirError = DirError::new(
+    409,
+    "stale_seq",
+    "seq must be above every seq this identity listed or withdrew for the name",
+);
+/// Another identity holds the name under a token issued no earlier.
+const NAME_HELD: DirError = DirError::new(
+    409,
+    "name_held",
+    "another identity holds the name; a new identity needs a later token",
+);
 
 /// The door as a page shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,6 +446,7 @@ impl<S: Store> Directory<S> {
             owner: OwnerStatus::PENDING,
             door_expires_at: p.door.as_ref().map(|d| d.expires_at),
             token_expires_at: token.grant.expires_at,
+            token_issued_at: token.grant.issued_at,
             published_at: now,
             key_changed_at: None,
             bytes: bytes.to_vec(),
@@ -438,29 +458,7 @@ impl<S: Store> Directory<S> {
                 skill_keys: card.skill_keys(),
             },
         };
-        let changed = match self
-            .store
-            .publish(&record)
-            .await
-            .map_err(|e| internal(&e))?
-        {
-            PublishOutcome::Published { .. } => true,
-            PublishOutcome::Unchanged => false,
-            PublishOutcome::StaleSeq { .. } => {
-                return Err(DirError::new(
-                    409,
-                    "stale_seq",
-                    "seq must be above every seq seen for this name",
-                ));
-            }
-            PublishOutcome::TokenRevoked => {
-                return Err(DirError::new(
-                    403,
-                    "token_revoked",
-                    "token has been revoked",
-                ));
-            }
-        };
+        let changed = self.store_listing(&listing, &record).await?;
         if changed {
             self.check_owner(&record).await?;
         }
@@ -479,6 +477,73 @@ impl<S: Store> Directory<S> {
             changed,
             owner,
         })
+    }
+
+    /// Store `record` if `listing` may replace what is stored (the core's
+    /// `replaces` and `tombstoned_by`). The store re-checks that nothing
+    /// changed in between; on a race the decision is taken again.
+    async fn store_listing(
+        &self,
+        listing: &SignedListing,
+        record: &ListingRecord,
+    ) -> Result<bool, DirError> {
+        let p = listing.params();
+        let revoked = DirError::new(403, "token_revoked", "token has been revoked");
+        // A revoked token is refused as such, whatever else the name's
+        // state says; the store checks it again atomically.
+        if self
+            .store
+            .token_revoked(&record.token_id)
+            .await
+            .map_err(|e| internal(&e))?
+        {
+            return Err(revoked);
+        }
+        for _ in 0..3 {
+            let stored = self.store.get(&p.name).await.map_err(|e| internal(&e))?;
+            if let Some(s) = stored.as_ref().filter(|s| s.sha256 != record.sha256)
+                && let Ok(old) = self.verifier.listing(&s.bytes)
+                && !listing.replaces(&old)
+            {
+                return Err(if old.params().identity == p.identity {
+                    STALE_SEQ
+                } else {
+                    NAME_HELD
+                });
+            }
+            let tomb = self
+                .store
+                .tombstone_for(&p.name, &p.identity)
+                .await
+                .map_err(|e| internal(&e))?;
+            if tomb
+                .as_ref()
+                .is_some_and(|t| listing.tombstoned_by(&t.identity, t.seq))
+            {
+                return Err(STALE_SEQ);
+            }
+            let guard = PublishGuard {
+                prev_sha256: stored.map(|s| s.sha256),
+                tombstone_seq: tomb.map(|t| t.seq),
+            };
+            match self
+                .store
+                .publish(record, &guard)
+                .await
+                .map_err(|e| internal(&e))?
+            {
+                PublishOutcome::Published { .. } => return Ok(true),
+                PublishOutcome::Unchanged => return Ok(false),
+                PublishOutcome::Conflict => {}
+                PublishOutcome::TokenRevoked => return Err(revoked),
+                PublishOutcome::NameHeld => return Err(NAME_HELD),
+            }
+        }
+        Err(DirError::new(
+            409,
+            "conflict",
+            "the listing changed while it was published; retry",
+        ))
     }
 
     /// Withdraw a listing (Decision 6). `bytes` is the signed `Withdrawal`.
@@ -617,31 +682,17 @@ impl<S: Store> Directory<S> {
         };
         let fetched = self.fetcher.fetch(domain).await;
         let now = self.now();
-        let status = |last| OwnerStatus {
-            last,
-            checked_at: Some(now),
-            verified_at: if last == OwnerCheck::Vouched {
-                Some(now)
-            } else {
-                r.owner.verified_at
-            },
-        };
-        let outcome = match fetched {
+        let (check, outcome) = match fetched {
             Err(e) => {
                 tracing::debug!(error = e.as_str(), "owner file fetch failed");
-                self.set_owner(r, status(OwnerCheck::Error)).await?;
-                e.as_str()
+                (OwnerCheck::Failed, e.as_str())
             }
             Ok(file) => match self.verifier.owner_verdict(&file, &r.identity, &r.name) {
-                OwnerVerdict::Vouched => {
-                    self.set_owner(r, status(OwnerCheck::Vouched)).await?;
-                    "vouched"
-                }
-                OwnerVerdict::NotVouched => {
-                    self.set_owner(r, status(OwnerCheck::NotVouched)).await?;
-                    "not_vouched"
-                }
+                OwnerVerdict::Vouched => (OwnerCheck::Vouched, "vouched"),
+                OwnerVerdict::NotVouched => (OwnerCheck::NotVouched, "not_vouched"),
+                OwnerVerdict::Unreadable => (OwnerCheck::Failed, "unreadable"),
                 OwnerVerdict::Revoked { revoked_at, reason } => {
+                    // A revoked key is withdrawn at once (Decision 2).
                     let entry = serde_json::json!({
                         "v": 0,
                         "directory": self.settings.host,
@@ -657,10 +708,12 @@ impl<S: Store> Directory<S> {
                         .owner_revoked(&r.name, &r.sha256, &entry, now)
                         .await
                         .map_err(|e| internal(&e))?;
-                    "revoked"
+                    self.metrics.event("owner_check", "revoked");
+                    return Ok(());
                 }
             },
         };
+        self.set_owner(r, record_fetch(r.owner, now, check)).await?;
         self.metrics.event("owner_check", outcome);
         Ok(())
     }
@@ -735,18 +788,33 @@ mod tests {
 
     #[test]
     fn rejections_map_to_stable_codes() {
-        let code = |r| rejected(&r, "bad_listing").code;
-        assert_eq!(code(Rejection::Malformed("x")), "bad_listing");
-        assert_eq!(
-            rejected(&Rejection::Malformed("x"), "bad_listing").detail,
-            "x"
-        );
-        assert_eq!(code(Rejection::BadSignature), "bad_signature");
-        assert_eq!(code(Rejection::DoorExpired), "bad_door");
-        assert_eq!(code(Rejection::UnknownKey), "unknown_key");
-        assert_eq!(code(Rejection::BadToken("expired")), "bad_token");
-        assert_eq!(code(Rejection::WrongDirectory), "wrong_directory");
-        assert_eq!(code(Rejection::StaleTs), "stale_ts");
+        use agentconnect_core::ErrorKind as K;
+        let code = |kind| {
+            rejected(
+                &Rejection {
+                    kind,
+                    reason: "why",
+                },
+                "bad_listing",
+            )
+        };
+        for (kind, status, c) in [
+            (K::Malformed, 400, "bad_listing"),
+            (K::UnsupportedVersion, 400, "bad_listing"),
+            (K::Signature, 403, "bad_signature"),
+            (K::UnknownKey, 403, "unknown_key"),
+            (K::Expired, 403, "bad_token"),
+            (K::NotYetValid, 403, "bad_token"),
+            (K::TokenMismatch, 403, "bad_token"),
+            (K::Revoked, 403, "token_revoked"),
+            (K::DoorExpired, 400, "bad_door"),
+            (K::WrongDirectory, 400, "wrong_directory"),
+            (K::StaleTimestamp, 400, "stale_ts"),
+        ] {
+            let e = code(kind);
+            assert_eq!((e.status, e.code, e.detail), (status, c, "why"));
+            assert_eq!(e.kind, Some(kind.as_str()));
+        }
         assert_eq!(fingerprint_of("nope"), "unavailable");
     }
 }

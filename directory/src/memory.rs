@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::store::{
-    FeedEntry, GoneKind, ListingRecord, OwnerStatus, PublishOutcome, PurgeStats,
+    FeedEntry, GoneKind, ListingRecord, OwnerStatus, PublishGuard, PublishOutcome, PurgeStats,
     REVOKED_TOKEN_TTL_SECS, RevokeOutcome, SEARCH_CANDIDATES, SearchQuery, Store, StoreResult,
     TOMBSTONE_TTL_SECS, Tombstone, WithdrawOutcome, WithdrawalRecord,
 };
@@ -23,13 +23,29 @@ use crate::store::{
 #[derive(Debug, Default)]
 struct State {
     listings: BTreeMap<String, ListingRecord>,
-    tombstones: HashMap<String, Tombstone>,
+    tombstones: HashMap<(String, String), Tombstone>,
     feed: Vec<FeedEntry>,
     next_cursor: i64,
     revoked: HashMap<String, u64>,
+    /// Per name, the newest token `issued_at` ever accepted.
+    marks: HashMap<String, u64>,
 }
 
 impl State {
+    /// The latest tombstone of `name`, any identity.
+    fn latest_tombstone(&self, name: &str) -> Option<&Tombstone> {
+        self.tombstones
+            .values()
+            .filter(|t| t.name == name)
+            .max_by_key(|t| (t.created_at, t.identity.clone()))
+    }
+
+    fn tombstone_seq(&self, name: &str, identity: &str) -> Option<u64> {
+        self.tombstones
+            .get(&(name.to_owned(), identity.to_owned()))
+            .map(|t| t.seq)
+    }
+
     fn append(&mut self, kind: GoneKind, entry: &str, now: u64) {
         self.next_cursor += 1;
         self.feed.push(FeedEntry {
@@ -41,9 +57,10 @@ impl State {
     }
 
     fn tombstone(&mut self, name: &str, identity: &str, seq: u64, kind: GoneKind, now: u64) {
-        let seq = self.tombstones.get(name).map_or(seq, |t| t.seq.max(seq));
+        let key = (name.to_owned(), identity.to_owned());
+        let seq = self.tombstones.get(&key).map_or(seq, |t| t.seq.max(seq));
         self.tombstones.insert(
-            name.to_owned(),
+            key,
             Tombstone {
                 name: name.to_owned(),
                 identity: identity.to_owned(),
@@ -125,11 +142,27 @@ impl Store for MemoryStore {
         Ok(self.lock().listings.get(name).cloned())
     }
 
-    async fn tombstone(&self, name: &str) -> StoreResult<Option<Tombstone>> {
-        Ok(self.lock().tombstones.get(name).cloned())
+    async fn token_revoked(&self, token_id: &str) -> StoreResult<bool> {
+        Ok(self.lock().revoked.contains_key(token_id))
     }
 
-    async fn publish(&self, record: &ListingRecord) -> StoreResult<PublishOutcome> {
+    async fn tombstone(&self, name: &str) -> StoreResult<Option<Tombstone>> {
+        Ok(self.lock().latest_tombstone(name).cloned())
+    }
+
+    async fn tombstone_for(&self, name: &str, identity: &str) -> StoreResult<Option<Tombstone>> {
+        Ok(self
+            .lock()
+            .tombstones
+            .get(&(name.to_owned(), identity.to_owned()))
+            .cloned())
+    }
+
+    async fn publish(
+        &self,
+        record: &ListingRecord,
+        guard: &PublishGuard,
+    ) -> StoreResult<PublishOutcome> {
         let mut st = self.lock();
         if st.revoked.contains_key(&record.token_id) {
             return Ok(PublishOutcome::TokenRevoked);
@@ -138,18 +171,22 @@ impl Store for MemoryStore {
         if prev.as_ref().is_some_and(|p| p.sha256 == record.sha256) {
             return Ok(PublishOutcome::Unchanged);
         }
-        let tomb = st.tombstones.get(&record.name).cloned();
-        let current = prev
-            .as_ref()
-            .map(|p| p.seq)
-            .max(tomb.as_ref().map(|t| t.seq));
-        if let Some(current) = current.filter(|c| record.seq <= *c) {
-            return Ok(PublishOutcome::StaleSeq { current });
+        if st
+            .marks
+            .get(&record.name)
+            .is_some_and(|m| *m > record.token_issued_at)
+        {
+            return Ok(PublishOutcome::NameHeld);
         }
-        let prev_identity = prev
-            .as_ref()
-            .map(|p| p.identity.clone())
-            .or_else(|| tomb.map(|t| t.identity));
+        if prev.as_ref().map(|p| &p.sha256) != guard.prev_sha256.as_ref()
+            || st.tombstone_seq(&record.name, &record.identity) != guard.tombstone_seq
+        {
+            return Ok(PublishOutcome::Conflict);
+        }
+        let prev_identity = prev.as_ref().map(|p| p.identity.clone()).or_else(|| {
+            st.latest_tombstone(&record.name)
+                .map(|t| t.identity.clone())
+        });
         let key_changed = prev_identity.is_some_and(|i| i != record.identity);
         let mut stored = record.clone();
         stored.key_changed_at = if key_changed {
@@ -158,6 +195,8 @@ impl Store for MemoryStore {
             prev.and_then(|p| p.key_changed_at)
         };
         st.listings.insert(record.name.clone(), stored);
+        let mark = st.marks.entry(record.name.clone()).or_default();
+        *mark = (*mark).max(record.token_issued_at);
         Ok(PublishOutcome::Published { key_changed })
     }
 
@@ -165,9 +204,8 @@ impl Store for MemoryStore {
         let mut st = self.lock();
         let Some(listing) = st.listings.get(w.name).cloned() else {
             let repeat = st
-                .tombstones
-                .get(w.name)
-                .is_some_and(|t| t.identity == w.identity && t.seq >= w.seq);
+                .tombstone_seq(w.name, w.identity)
+                .is_some_and(|t| t >= w.seq);
             return Ok(if repeat {
                 WithdrawOutcome::Repeat
             } else {
@@ -254,10 +292,10 @@ impl Store for MemoryStore {
             .listings
             .values()
             .filter(|l| l.owner_domain.is_some())
-            .filter(|l| l.owner.checked_at.is_none_or(|t| t < checked_before))
+            .filter(|l| l.owner.checked_at().is_none_or(|t| t < checked_before))
             .cloned()
             .collect();
-        due.sort_by_key(|l| (l.owner.checked_at.unwrap_or(0), l.name.clone()));
+        due.sort_by_key(|l| (l.owner.checked_at().unwrap_or(0), l.name.clone()));
         due.truncate(limit as usize);
         Ok(due)
     }

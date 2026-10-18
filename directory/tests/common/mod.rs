@@ -64,6 +64,24 @@ pub fn identity() -> Agent {
     Arc::new(Identity::generate(&rng()).unwrap())
 }
 
+/// The identity whose secret is `hex` (a published vector value).
+pub fn agent_from_hex(hex: &str) -> Agent {
+    let secret: [u8; 32] = agentconnect_core::encoding::hex_decode(hex, "secret")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    Arc::new(Identity::from_secret_bytes(&secret))
+}
+
+/// The operator key whose secret is `hex` (a published vector value).
+pub fn directory_key_from_hex(hex: &str) -> DirectoryKey {
+    let secret: [u8; 32] = agentconnect_core::encoding::hex_decode(hex, "secret")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    DirectoryKey::from_secret_bytes(&secret)
+}
+
 /// A fresh identity id (`ac:v0:...`).
 pub fn identity_id() -> String {
     identity().id()
@@ -73,6 +91,7 @@ pub fn identity_id() -> String {
 #[derive(Default)]
 pub struct FakeFetcher {
     files: Mutex<HashMap<String, Result<Vec<u8>, FetchError>>>,
+    gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub calls: AtomicU64,
 }
 
@@ -90,6 +109,13 @@ impl FakeFetcher {
 
     pub fn fail(&self, domain: &str, e: FetchError) {
         self.files.lock().unwrap().insert(domain.to_owned(), Err(e));
+    }
+
+    /// Hold the next fetch until the returned sender fires (or drops).
+    pub fn hold(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.gate.lock().unwrap() = Some(rx);
+        tx
     }
 
     /// Serve a file that vouches for `identity`.
@@ -111,7 +137,13 @@ impl OwnerFetcher for FakeFetcher {
             .get(domain)
             .cloned()
             .unwrap_or(Err(FetchError::Transport));
-        Box::pin(async move { r })
+        let gate = self.gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(g) = gate {
+                let _ = g.await;
+            }
+            r
+        })
     }
 }
 
@@ -372,7 +404,7 @@ impl Harness {
 
     /// A signed withdrawal, timestamped now.
     pub fn withdrawal(&self, name: &str, agent: &Agent, seq: u64) -> Vec<u8> {
-        Withdrawal::sign(agent, HOST, name, seq, self.now())
+        Withdrawal::sign(agent, &self.dir.settings().host, name, seq, self.now())
             .unwrap()
             .to_json()
             .unwrap()

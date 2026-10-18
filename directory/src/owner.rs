@@ -388,26 +388,73 @@ impl OwnerState {
     }
 }
 
+fn to_core(c: OwnerCheck) -> core::FetchResult {
+    match c {
+        OwnerCheck::Vouched => core::FetchResult::Fetched(core::Vouch::Vouches),
+        OwnerCheck::NotVouched => core::FetchResult::Fetched(core::Vouch::DoesNotVouch),
+        OwnerCheck::Revoked => core::FetchResult::Fetched(core::Vouch::Revoked {
+            revoked_at: None,
+            reason: None,
+        }),
+        OwnerCheck::Failed => core::FetchResult::Failed,
+    }
+}
+
+fn from_core(r: core::FetchResult) -> OwnerCheck {
+    match r {
+        core::FetchResult::Fetched(v) => from_vouch(v),
+        core::FetchResult::Failed => OwnerCheck::Failed,
+    }
+}
+
+fn from_vouch(v: core::Vouch) -> OwnerCheck {
+    match v {
+        core::Vouch::Vouches => OwnerCheck::Vouched,
+        core::Vouch::DoesNotVouch => OwnerCheck::NotVouched,
+        core::Vouch::Revoked { .. } => OwnerCheck::Revoked,
+    }
+}
+
+/// The stored history as the core's `OwnerChecks`. Heimdall never skips a
+/// fetch.
+fn checks(s: &OwnerStatus) -> core::OwnerChecks {
+    core::OwnerChecks {
+        last_vouched_at: s.verified_at,
+        last_negative: s.negative.map(|(t, c)| {
+            let core::FetchResult::Fetched(v) = to_core(c) else {
+                unreachable!("a negative result is a fetched file")
+            };
+            (t, v)
+        }),
+        latest: s.latest.map(|(at, c)| core::LatestFetch {
+            at,
+            result: to_core(c),
+        }),
+        skipped: false,
+    }
+}
+
+/// Fold one fetch at `at` into the stored history, with the core's
+/// `OwnerChecks::record`.
+#[must_use]
+pub fn record_fetch(s: OwnerStatus, at: u64, check: OwnerCheck) -> OwnerStatus {
+    let mut c = checks(&s);
+    c.record(at, to_core(check));
+    OwnerStatus {
+        latest: c.latest.map(|l| (l.at, from_core(l.result))),
+        verified_at: c.last_vouched_at,
+        negative: c.last_negative.map(|(t, v)| (t, from_vouch(v))),
+    }
+}
+
 /// The state to show for a listing at `now`: the core's `owner_state` on
-/// the stored check history. A revoked key never reaches a live page (the
-/// listing is withdrawn), so the core's `revoked` shows as `failed`.
+/// the stored history. A revoked key is withdrawn at once, so `revoked`
+/// never reaches a live page; Heimdall never skips a fetch, so `unchecked`
+/// can't occur. Both show as the nearest live state.
 #[must_use]
 pub fn owner_state(domain: Option<&str>, s: &OwnerStatus, now: u64) -> OwnerState {
-    let result = match s.last {
-        OwnerCheck::Pending => None,
-        OwnerCheck::Vouched => Some(core::FetchResult::Fetched(core::Vouch::Vouches)),
-        OwnerCheck::NotVouched => Some(core::FetchResult::Fetched(core::Vouch::DoesNotVouch)),
-        OwnerCheck::Error => Some(core::FetchResult::Failed),
-    };
-    let checks = core::OwnerChecks {
-        last_vouched_at: s.verified_at,
-        latest: result.map(|result| core::LatestFetch {
-            at: s.checked_at.unwrap_or(now),
-            result,
-        }),
-    };
-    match core::owner_state(domain, &checks, now) {
-        core::OwnerState::Unchecked => OwnerState::Checking,
+    match core::owner_state(domain, &checks(s), now) {
+        core::OwnerState::Checking | core::OwnerState::Unchecked => OwnerState::Checking,
         core::OwnerState::Verified => OwnerState::Verified,
         core::OwnerState::Unclaimed => OwnerState::Unclaimed,
         core::OwnerState::Stale => OwnerState::Stale,
@@ -610,58 +657,44 @@ mod tests {
     }
 
     #[test]
-    fn states_follow_the_decision_2_table() {
+    fn states_come_from_the_recorded_history() {
         let now = 10 * 86_400;
-        let s = |last, verified_at: Option<u64>| OwnerStatus {
-            last,
-            checked_at: Some(now),
-            verified_at,
-        };
         let d = Some("example.com");
+        let h = |fetches: &[(u64, OwnerCheck)]| {
+            fetches
+                .iter()
+                .fold(OwnerStatus::PENDING, |s, (at, c)| record_fetch(s, *at, *c))
+        };
         assert_eq!(
-            owner_state(None, &s(OwnerCheck::Vouched, Some(now)), now),
+            owner_state(None, &h(&[(now, OwnerCheck::Vouched)]), now),
             OwnerState::Unclaimed
         );
         assert_eq!(
             owner_state(d, &OwnerStatus::PENDING, now),
             OwnerState::Checking
         );
+        let vouched_then_failed =
+            h(&[(now - 3600, OwnerCheck::Vouched), (now, OwnerCheck::Failed)]);
         assert_eq!(
-            owner_state(d, &s(OwnerCheck::Vouched, Some(now - 3600)), now),
+            owner_state(d, &vouched_then_failed, now),
             OwnerState::Verified
         );
-        assert_eq!(
-            owner_state(d, &s(OwnerCheck::Error, Some(now - 3600)), now),
-            OwnerState::Verified
-        );
-        assert_eq!(
-            owner_state(
-                d,
-                &s(OwnerCheck::Error, Some(now - core::VERIFIED_FOR_SECS - 1)),
-                now
-            ),
-            OwnerState::Stale
-        );
-        assert_eq!(
-            owner_state(
-                d,
-                &s(OwnerCheck::Error, Some(now - core::STALE_AFTER_SECS - 1)),
-                now
-            ),
-            OwnerState::Failed
-        );
-        assert_eq!(
-            owner_state(d, &s(OwnerCheck::NotVouched, Some(now)), now),
-            OwnerState::Failed
-        );
-        assert_eq!(
-            owner_state(d, &s(OwnerCheck::Error, None), now),
-            OwnerState::Failed
-        );
-        assert_eq!(
-            owner_state(d, &s(OwnerCheck::Vouched, None), now),
-            OwnerState::Verified
-        );
+        assert_eq!(vouched_then_failed.latest, Some((now, OwnerCheck::Failed)));
+        let stale = h(&[
+            (now - 2 * 86_400, OwnerCheck::Vouched),
+            (now, OwnerCheck::Failed),
+        ]);
+        assert_eq!(owner_state(d, &stale, now), OwnerState::Stale);
+        // A negative result sticks through later failed fetches.
+        let sticky = h(&[
+            (now - 7200, OwnerCheck::Vouched),
+            (now - 3600, OwnerCheck::NotVouched),
+            (now, OwnerCheck::Failed),
+        ]);
+        assert_eq!(sticky.negative, Some((now - 3600, OwnerCheck::NotVouched)));
+        assert_eq!(owner_state(d, &sticky, now), OwnerState::Failed);
+        let revoked = h(&[(now, OwnerCheck::Revoked)]);
+        assert_eq!(owner_state(d, &revoked, now), OwnerState::Failed);
         for st in [
             OwnerState::Checking,
             OwnerState::Verified,

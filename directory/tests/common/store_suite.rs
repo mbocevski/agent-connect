@@ -1,11 +1,15 @@
 //! Store conformance: every backend must pass these. The memory store runs
 //! them in the fast tier (`tests/store_memory.rs`), Postgres in the
 //! integration tier (`tests/store_postgres.rs`).
+//!
+//! The replacement rules themselves are the core's (`replaces`,
+//! `tombstoned_by`); the store's part is the guarded, atomic write, the
+//! per-(name, identity) tombstones and the per-name token mark.
 
 use agentconnect_directory::Store;
 use agentconnect_directory::store::{
-    GoneKind, ListingRecord, OwnerCheck, OwnerStatus, PublishOutcome, RevokeOutcome, SearchDoc,
-    SearchQuery, TOMBSTONE_TTL_SECS, WithdrawOutcome, WithdrawalRecord,
+    GoneKind, ListingRecord, OwnerCheck, OwnerStatus, PublishGuard, PublishOutcome, RevokeOutcome,
+    SearchDoc, SearchQuery, TOMBSTONE_TTL_SECS, WithdrawOutcome, WithdrawalRecord,
 };
 
 use super::{DAY, identity_id, random_b64};
@@ -27,6 +31,7 @@ pub fn record(name: &str, identity: &str, seq: u64) -> ListingRecord {
         owner: OwnerStatus::PENDING,
         door_expires_at: Some(NOW + DAY),
         token_expires_at: NOW + 90 * DAY,
+        token_issued_at: NOW - DAY,
         published_at: NOW,
         key_changed_at: None,
         sha256: agentconnect_core::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
@@ -56,51 +61,107 @@ fn with_text(
     r
 }
 
-pub async fn publish_rules<S: Store>(s: &S) {
+/// The guard for what is stored now.
+pub async fn guard<S: Store>(s: &S, r: &ListingRecord) -> PublishGuard {
+    PublishGuard {
+        prev_sha256: s.get(&r.name).await.unwrap().map(|p| p.sha256),
+        tombstone_seq: s
+            .tombstone_for(&r.name, &r.identity)
+            .await
+            .unwrap()
+            .map(|t| t.seq),
+    }
+}
+
+/// Publish against the current state.
+pub async fn put<S: Store>(s: &S, r: &ListingRecord) -> PublishOutcome {
+    let g = guard(s, r).await;
+    s.publish(r, &g).await.unwrap()
+}
+
+fn wd(name: &str, identity: &str, seq: u64) -> WithdrawalRecord<'static> {
+    WithdrawalRecord {
+        name: Box::leak(name.to_owned().into_boxed_str()),
+        identity: Box::leak(identity.to_owned().into_boxed_str()),
+        seq,
+        entry: "{\"w\":1}",
+    }
+}
+
+pub async fn guarded_publish<S: Store>(s: &S) {
     let id = identity_id();
     let r1 = record("alpha", &id, 3);
     assert_eq!(
-        s.publish(&r1).await.unwrap(),
+        s.publish(&r1, &PublishGuard::default()).await.unwrap(),
         PublishOutcome::Published { key_changed: false }
     );
-    assert_eq!(s.publish(&r1).await.unwrap(), PublishOutcome::Unchanged);
-    let stale = record("alpha", &id, 3);
+    // The same bytes are idempotent whatever the guard says.
     assert_eq!(
-        s.publish(&stale).await.unwrap(),
-        PublishOutcome::StaleSeq { current: 3 }
-    );
-    let lower = record("alpha", &id, 2);
-    assert_eq!(
-        s.publish(&lower).await.unwrap(),
-        PublishOutcome::StaleSeq { current: 3 }
+        s.publish(&r1, &PublishGuard::default()).await.unwrap(),
+        PublishOutcome::Unchanged
     );
     let r2 = record("alpha", &id, 4);
+    // A guard that missed r1 is a conflict.
     assert_eq!(
-        s.publish(&r2).await.unwrap(),
+        s.publish(&r2, &PublishGuard::default()).await.unwrap(),
+        PublishOutcome::Conflict
+    );
+    assert_eq!(
+        put(s, &r2).await,
         PublishOutcome::Published { key_changed: false }
     );
-    let got = s.get("alpha").await.unwrap().unwrap();
-    assert_eq!(got, r2);
+    assert_eq!(s.get("alpha").await.unwrap().unwrap(), r2);
     assert!(s.get("nobody").await.unwrap().is_none());
+    // A guard that missed a tombstone is a conflict, too.
+    s.withdraw(&wd("alpha", &id, 4), NOW).await.unwrap();
+    let r3 = record("alpha", &id, 5);
+    assert_eq!(
+        s.publish(&r3, &PublishGuard::default()).await.unwrap(),
+        PublishOutcome::Conflict
+    );
+    assert!(matches!(
+        put(s, &r3).await,
+        PublishOutcome::Published { .. }
+    ));
+}
+
+pub async fn name_marks_keep_the_newest_token<S: Store>(s: &S) {
+    let (a, b) = (identity_id(), identity_id());
+    let mut first = record("marked", &a, 1);
+    first.token_issued_at = NOW;
+    put(s, &first).await;
+    s.withdraw(&wd("marked", &a, 1), NOW).await.unwrap();
+    // After the withdrawal, a token older than the newest accepted is
+    // refused, whoever holds it.
+    let mut old = record("marked", &b, 1);
+    old.token_issued_at = NOW - 1;
+    assert_eq!(put(s, &old).await, PublishOutcome::NameHeld);
+    let mut same = record("marked", &b, 1);
+    same.token_issued_at = NOW;
+    assert!(matches!(
+        put(s, &same).await,
+        PublishOutcome::Published { key_changed: true }
+    ));
 }
 
 pub async fn key_change_is_recorded<S: Store>(s: &S) {
     let (a, b) = (identity_id(), identity_id());
-    s.publish(&record("rotating", &a, 1)).await.unwrap();
-    let mut new = record("rotating", &b, 2);
+    put(s, &record("rotating", &a, 1)).await;
+    let mut new = record("rotating", &b, 1);
     new.published_at = NOW + 10;
+    new.token_issued_at = NOW;
     assert_eq!(
-        s.publish(&new).await.unwrap(),
+        put(s, &new).await,
         PublishOutcome::Published { key_changed: true }
     );
     assert_eq!(
         s.get("rotating").await.unwrap().unwrap().key_changed_at,
         Some(NOW + 10)
     );
-    // A later version by the same key keeps the date.
-    let mut again = record("rotating", &b, 3);
+    let mut again = record("rotating", &b, 2);
     again.published_at = NOW + 20;
-    s.publish(&again).await.unwrap();
+    again.token_issued_at = NOW;
+    put(s, &again).await;
     assert_eq!(
         s.get("rotating").await.unwrap().unwrap().key_changed_at,
         Some(NOW + 10)
@@ -109,73 +170,55 @@ pub async fn key_change_is_recorded<S: Store>(s: &S) {
 
 pub async fn withdraw_rules<S: Store>(s: &S) {
     let (id, other) = (identity_id(), identity_id());
-    s.publish(&record("beta", &id, 5)).await.unwrap();
-    fn mk(identity: &str, seq: u64) -> WithdrawalRecord<'_> {
-        WithdrawalRecord {
-            name: "beta",
-            identity,
-            seq,
-            entry: "{\"w\":1}",
-        }
-    }
+    put(s, &record("beta", &id, 5)).await;
     assert_eq!(
-        s.withdraw(&mk(&other, 5), NOW).await.unwrap(),
+        s.withdraw(&wd("beta", &other, 5), NOW).await.unwrap(),
         WithdrawOutcome::WrongIdentity
     );
     assert_eq!(
-        s.withdraw(&mk(&id, 4), NOW).await.unwrap(),
+        s.withdraw(&wd("beta", &id, 4), NOW).await.unwrap(),
         WithdrawOutcome::StaleSeq
     );
     assert_eq!(
-        s.withdraw(&mk(&id, 5), NOW).await.unwrap(),
+        s.withdraw(&wd("beta", &id, 5), NOW).await.unwrap(),
         WithdrawOutcome::Withdrawn
     );
     assert_eq!(
-        s.withdraw(&mk(&id, 5), NOW).await.unwrap(),
+        s.withdraw(&wd("beta", &id, 5), NOW).await.unwrap(),
         WithdrawOutcome::Repeat
     );
     assert_eq!(
-        s.withdraw(&mk(&id, 6), NOW).await.unwrap(),
+        s.withdraw(&wd("beta", &id, 6), NOW).await.unwrap(),
+        WithdrawOutcome::NotListed
+    );
+    assert_eq!(
+        s.withdraw(&wd("beta", &other, 1), NOW).await.unwrap(),
         WithdrawOutcome::NotListed
     );
     assert!(s.get("beta").await.unwrap().is_none());
-    let t = s.tombstone("beta").await.unwrap().unwrap();
-    assert_eq!(
-        (t.seq, t.kind, t.identity.as_str()),
-        (5, GoneKind::Withdrawal, id.as_str())
-    );
-    // The tombstone keeps lower seqs out; a higher one is accepted.
-    assert_eq!(
-        s.publish(&record("beta", &id, 5)).await.unwrap(),
-        PublishOutcome::StaleSeq { current: 5 }
-    );
-    assert!(matches!(
-        s.publish(&record("beta", &id, 6)).await.unwrap(),
-        PublishOutcome::Published { .. }
-    ));
-    assert_eq!(
-        s.withdraw(
-            &WithdrawalRecord {
-                name: "nothing",
-                identity: &id,
-                seq: 1,
-                entry: "{}"
-            },
-            NOW
-        )
-        .await
-        .unwrap(),
-        WithdrawOutcome::NotListed
-    );
+    let t = s.tombstone_for("beta", &id).await.unwrap().unwrap();
+    assert_eq!((t.seq, t.kind), (5, GoneKind::Withdrawal));
+    assert!(s.tombstone_for("beta", &other).await.unwrap().is_none());
+    assert_eq!(s.tombstone("beta").await.unwrap().unwrap().identity, id);
+    // A second identity's tombstone is its own; the latest names the page.
+    put(s, &{
+        let mut r = record("beta", &other, 1);
+        r.token_issued_at = NOW;
+        r
+    })
+    .await;
+    s.withdraw(&wd("beta", &other, 1), NOW + 5).await.unwrap();
+    assert_eq!(s.tombstone_for("beta", &id).await.unwrap().unwrap().seq, 5);
+    assert_eq!(s.tombstone("beta").await.unwrap().unwrap().identity, other);
     let feed = s.feed(0, 10).await.unwrap();
-    assert_eq!(feed.len(), 1);
+    assert_eq!(feed.len(), 2);
     assert_eq!(feed[0].entry, "{\"w\":1}");
 }
 
 pub async fn token_revocation<S: Store>(s: &S) {
     let id = identity_id();
     let r = record("gamma", &id, 1);
-    s.publish(&r).await.unwrap();
+    put(s, &r).await;
     assert_eq!(
         s.revoke_token(&r.token_id, "{\"r\":1}", NOW).await.unwrap(),
         RevokeOutcome::Revoked {
@@ -188,17 +231,14 @@ pub async fn token_revocation<S: Store>(s: &S) {
     );
     assert!(s.get("gamma").await.unwrap().is_none());
     assert_eq!(
-        s.tombstone("gamma").await.unwrap().unwrap().kind,
+        s.tombstone_for("gamma", &id).await.unwrap().unwrap().kind,
         GoneKind::TokenRevocation
     );
-    // A revoked token can't publish again, even at a higher seq.
     let mut again = record("gamma", &id, 9);
     again.token_id.clone_from(&r.token_id);
-    assert_eq!(
-        s.publish(&again).await.unwrap(),
-        PublishOutcome::TokenRevoked
-    );
-    // Revoking an unused token is recorded with nothing withdrawn.
+    assert_eq!(put(s, &again).await, PublishOutcome::TokenRevoked);
+    assert!(s.token_revoked(&r.token_id).await.unwrap());
+    assert!(!s.token_revoked(&random_b64(16)).await.unwrap());
     let unused = random_b64(16);
     assert_eq!(
         s.revoke_token(&unused, "{}", NOW).await.unwrap(),
@@ -211,20 +251,19 @@ pub async fn owner_updates<S: Store>(s: &S) {
     let id = identity_id();
     let mut r = record("delta", &id, 1);
     r.owner_domain = Some("example.com".to_owned());
-    s.publish(&r).await.unwrap();
+    put(s, &r).await;
     let st = OwnerStatus {
-        last: OwnerCheck::Vouched,
-        checked_at: Some(NOW),
-        verified_at: Some(NOW),
+        latest: Some((NOW, OwnerCheck::Failed)),
+        verified_at: Some(NOW - 10),
+        negative: Some((NOW - 5, OwnerCheck::NotVouched)),
     };
     assert!(s.set_owner("delta", &r.sha256, st).await.unwrap());
     assert!(!s.set_owner("delta", "other-version", st).await.unwrap());
     assert_eq!(s.get("delta").await.unwrap().unwrap().owner, st);
     assert!(s.due_owner_checks(NOW, 10).await.unwrap().is_empty());
     assert_eq!(s.due_owner_checks(NOW + 1, 10).await.unwrap().len(), 1);
-    let mut plain = record("no-domain", &id, 1);
-    plain.owner_domain = None;
-    s.publish(&plain).await.unwrap();
+    let plain = record("no-domain", &id, 1);
+    put(s, &plain).await;
     assert_eq!(s.due_owner_checks(NOW + 1, 10).await.unwrap().len(), 1);
     assert_eq!(s.by_identity(&id).await.unwrap().len(), 2);
     assert!(
@@ -279,7 +318,7 @@ pub async fn search_ranking_and_filters<S: Store>(s: &S) {
     );
     expired.token_expires_at = NOW;
     for r in [&a, &b, &c, &expired] {
-        s.publish(r).await.unwrap();
+        put(s, r).await;
     }
     let q = |text: Option<&str>, skill: Option<&str>| SearchQuery {
         text: text.map(str::to_owned),
@@ -287,7 +326,6 @@ pub async fn search_ranking_and_filters<S: Store>(s: &S) {
         now: NOW,
     };
     let names = |v: Vec<ListingRecord>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
-    // A title match outranks a description-only match.
     assert_eq!(
         names(s.search(&q(Some("release"), None)).await.unwrap()),
         ["release-planner", "code-reviewer"]
@@ -318,7 +356,6 @@ pub async fn search_ranking_and_filters<S: Store>(s: &S) {
         ),
         ["release-planner"]
     );
-    // No text: everything unexpired, by name.
     assert_eq!(
         names(s.search(&q(None, None)).await.unwrap()),
         ["code-reviewer", "pg-helper", "release-planner"]
@@ -328,19 +365,9 @@ pub async fn search_ranking_and_filters<S: Store>(s: &S) {
 pub async fn feed_and_purge<S: Store>(s: &S) {
     let id = identity_id();
     for (i, name) in ["e1", "e2", "e3"].iter().enumerate() {
-        s.publish(&record(name, &id, 1)).await.unwrap();
+        put(s, &record(name, &id, 1)).await;
         let at = NOW + i as u64;
-        s.withdraw(
-            &WithdrawalRecord {
-                name,
-                identity: &id,
-                seq: 1,
-                entry: "{}",
-            },
-            at,
-        )
-        .await
-        .unwrap();
+        s.withdraw(&wd(name, &id, 1), at).await.unwrap();
     }
     let all = s.feed(0, 10).await.unwrap();
     assert_eq!(all.len(), 3);
@@ -356,7 +383,8 @@ pub async fn feed_and_purge<S: Store>(s: &S) {
 
 /// Run the whole suite against fresh stores from `make`.
 pub async fn run<S: Store, F: std::future::Future<Output = S>>(make: impl Fn() -> F) {
-    publish_rules(&make().await).await;
+    guarded_publish(&make().await).await;
+    name_marks_keep_the_newest_token(&make().await).await;
     key_change_is_recorded(&make().await).await;
     withdraw_rules(&make().await).await;
     token_revocation(&make().await).await;

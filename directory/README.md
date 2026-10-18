@@ -85,21 +85,36 @@ listing answers `410 Gone`.
 Publishing is authenticated by the listing's JWS and the operator token
 inside it; withdrawing by an IK-signed `Withdrawal`. There are no accounts.
 
+Refusals are `{"code", "detail", "kind"?}`. When the core decided, `kind` is
+the core's stable error kind (`malformed`, `signature`, `unknown_key`,
+`expired`, `not_yet_valid`, `token_mismatch`, `door_expired`,
+`wrong_directory`, `stale_timestamp`, ...), which picks the code, and
+`detail` is the core's reason.
+
 | Code | Status | Meaning |
 |---|---|---|
 | `bad_listing` | 400 | Not canonical, not the closed schema, or an invalid field. |
 | `bad_signature` | 403 | The JWS, withdrawal or revocation signature doesn't verify. |
-| `unknown_key` | 403 | The token isn't signed by a configured operator key. |
-| `bad_token` | 403 | The token is for another directory, name, identity or domain, or has expired. |
+| `unknown_key` | 403 | The token isn't signed by a pinned operator key. |
+| `bad_token` | 403 | The token binds other params, has expired or isn't valid yet. |
 | `token_revoked` | 403 | The operator revoked the token. |
-| `wrong_directory`, `wrong_relay` | 400 | The listing names another directory, or a relay this one doesn't list. |
+| `wrong_directory`, `wrong_relay` | 400 | The object names another directory, or a relay this one doesn't list. |
 | `bad_door` | 400 | The door has expired. (A door more than 7 days past `issued_at` is `bad_listing`.) |
-| `stale_seq` | 409 | `seq` isn't above every `seq` seen or withdrawn for the name. |
-| `stale_ts` | 400 | A withdrawal's `ts` is more than 300 s from the directory clock. |
-| `wrong_identity` | 403 | The name is listed by another identity. |
+| `stale_ts` | 400 | `issued_at` more than 300 s ahead, or a withdrawal's `ts` more than 300 s off. |
+| `stale_seq` | 409 | This identity's `seq` isn't above its listed or withdrawn `seq` for the name. |
+| `name_held` | 409 | Another identity holds the name, or held it under a newer token. |
+| `conflict` | 409 | The name changed during the publish; retry. |
+| `wrong_identity` | 403 | A withdrawal by an identity that doesn't hold the name. |
 | `not_found` | 404 | Nothing is listed under that name. |
 | `too_large` | 413 | Over 32 KiB. |
 | `rate_limited` | 429 | Over the per-address limit; see `Retry-After`. |
+
+Replacement follows the core: `seq` and tombstones belong to (directory,
+name, identity), so the same identity needs a higher `seq`
+(`SignedListing::replaces`, `tombstoned_by`), and another identity needs a
+later-issued token. Heimdall also keeps, per name, the newest token
+`issued_at` it ever accepted, through withdrawal, expiry and revocation, so a
+name can't go back to a key it was rotated away from.
 
 ## Owner verification
 
@@ -107,10 +122,13 @@ On publish and every 6 hours Heimdall fetches
 `https://<owner_domain>/.well-known/agentconnect.json`: HTTPS on port 443, the
 system roots, no redirects, no proxies, `application/json`, at most 64 KiB,
 5 s in all. Names that resolve only to loopback, private, link-local, ULA or
-other special-use addresses are never connected to. The states are
-`checking`, `verified` (a vouching check within 24 h), `unclaimed`, `stale`
-(24 h to 7 days) and `failed` (out of search, still served). A revoked key
-withdraws the listing.
+other special-use addresses are never connected to. Each fetch is recorded
+in the core's history (`OwnerChecks::record`) and the state is the core's
+`owner_state`: `checking` (no fetch has finished), `verified` (vouched within
+24 h), `unclaimed`, `stale` (24 h to 7 days) and `failed` (a file that
+doesn't vouch, which sticks until a later fetch vouches, or nothing for 7
+days; out of search, still served). A file that revokes the key withdraws
+the listing at once.
 
 ## Verifier
 
@@ -118,16 +136,18 @@ Every signature, token and canonical-form check goes through the `Verifier`
 trait in `src/verify.rs`, implemented by `CoreVerifier` on
 `agentconnect_core::listing` with the pinned operator keys. The `detail` of a
 `bad_listing`, `bad_token` or `bad_request` refusal is the core's reason.
-Heimdall itself checks only what needs its own state: its host and relays,
-`seq` and tombstones, and revoked token ids. The token is checked before the
-publish-time rules, so an unauthorised listing is refused as such.
+Heimdall itself keeps only what needs its own state: its host and relays,
+the stored listing, tombstones and name marks, and revoked token ids. The
+token is checked before the publish-time rules, so an unauthorised listing
+is refused as such.
 
 ## Tests
 
 `just test` runs everything on the in-memory store with a fake clock, a fake
 owner-file fetcher and the real verifier, with keys from the per-run seed.
 `tests/vectors.rs` runs the core's `testdata/` vectors (`listings.json`,
-`listing-tokens.json`, `withdrawals.json`, `owner-files.json`) through the
-endpoints. `just test-int` runs the same
+`listing-tokens.json`, `withdrawals.json`, `owner-files.json`) end to end
+through the endpoints, with the keys and secrets the files publish.
+`just test-int` runs the same
 store suite on Postgres (`compose.test.yaml`). The fuzz target is in `fuzz/`
 (`cargo +nightly fuzz run card_text`).

@@ -82,10 +82,13 @@ async fn token_scope_and_lifetime_are_enforced() {
     let mut s = h.spec("tok", &id);
     s.issuer = Issuer::Stranger;
     refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "unknown_key").await;
-    // Issued to another identity.
+    // Issued to another identity: a mismatch the core refuses at parse time.
     let mut s = h.spec("tok", &id);
     s.token_identity = Some(identity().id());
-    refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "bad_token").await;
+    assert!(
+        h.try_build(&s).is_err(),
+        "the core refuses to sign a mismatched token"
+    );
     // A token for another directory can't be signed into a valid card.
     let mut s = h.spec("tok", &id);
     s.token_directory = "elsewhere.test".into();
@@ -98,7 +101,10 @@ async fn token_scope_and_lifetime_are_enforced() {
     // Pins a domain the listing doesn't claim.
     let mut s = h.spec("tok", &id);
     s.token_domain = Some("example.com".into());
-    refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "bad_token").await;
+    assert!(
+        h.try_build(&s).is_err(),
+        "the core refuses to sign a mismatched token"
+    );
     // A token for another name can't even be signed into a valid card.
     let other = h.build(&h.spec("other-name", &id)).token;
     let mut s = h.spec("tok", &id);
@@ -138,13 +144,7 @@ async fn listing_params_are_checked_against_this_directory() {
     let mut s = h.spec("params", &id);
     s.issued_at = h.now() + 301;
     s.door_expires_at = Some(h.now() + DAY);
-    refused(
-        &h,
-        h.build(&s).bytes,
-        StatusCode::BAD_REQUEST,
-        "bad_listing",
-    )
-    .await;
+    refused(&h, h.build(&s).bytes, StatusCode::BAD_REQUEST, "stale_ts").await;
     // A door that has expired by the time it is published.
     let mut s = h.spec("params", &id);
     s.issued_at = h.now() - 2 * DAY;

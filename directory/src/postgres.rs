@@ -14,9 +14,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::store::{
-    FeedEntry, GoneKind, ListingRecord, OwnerCheck, OwnerStatus, PublishOutcome, PurgeStats,
-    REVOKED_TOKEN_TTL_SECS, RevokeOutcome, SEARCH_CANDIDATES, SearchDoc, SearchQuery, Store,
-    StoreError, StoreResult, TOMBSTONE_TTL_SECS, Tombstone, WithdrawOutcome, WithdrawalRecord,
+    FeedEntry, GoneKind, ListingRecord, OwnerCheck, OwnerStatus, PublishGuard, PublishOutcome,
+    PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome, SEARCH_CANDIDATES, SearchDoc, SearchQuery,
+    Store, StoreError, StoreResult, TOMBSTONE_TTL_SECS, Tombstone, WithdrawOutcome,
+    WithdrawalRecord,
 };
 
 /// A Postgres-backed store.
@@ -36,14 +37,22 @@ fn u64_of(v: i64) -> u64 {
 // A macro, not a const, so every query stays a string literal (`concat!`).
 macro_rules! columns {
     () => {
-        "name, identity, seq, token_id, owner_domain, owner_last, owner_checked_at, \
-         owner_verified_at, door_expires_at, token_expires_at, published_at, key_changed_at, \
+        "name, identity, seq, token_id, owner_domain, owner_latest, owner_checked_at, \
+         owner_verified_at, owner_negative, owner_negative_at, door_expires_at, token_expires_at, \
+         token_issued_at, published_at, key_changed_at, \
          bytes, sha256, search_title, search_skills, search_description, skill_keys"
     };
 }
 
 fn record(row: &PgRow) -> StoreResult<ListingRecord> {
-    let last: String = row.try_get("owner_last")?;
+    let check = |kind: Option<String>, at: Option<i64>| -> StoreResult<Option<(u64, OwnerCheck)>> {
+        match (kind, at) {
+            (Some(k), Some(t)) => OwnerCheck::parse(&k)
+                .map(|c| Some((u64_of(t), c)))
+                .ok_or_else(|| StoreError("unknown owner check".to_owned())),
+            _ => Ok(None),
+        }
+    };
     Ok(ListingRecord {
         name: row.try_get("name")?,
         identity: row.try_get("identity")?,
@@ -51,19 +60,23 @@ fn record(row: &PgRow) -> StoreResult<ListingRecord> {
         token_id: row.try_get("token_id")?,
         owner_domain: row.try_get("owner_domain")?,
         owner: OwnerStatus {
-            last: OwnerCheck::parse(&last)
-                .ok_or_else(|| StoreError("unknown owner state".to_owned()))?,
-            checked_at: row
-                .try_get::<Option<i64>, _>("owner_checked_at")?
-                .map(u64_of),
+            latest: check(
+                row.try_get("owner_latest")?,
+                row.try_get("owner_checked_at")?,
+            )?,
             verified_at: row
                 .try_get::<Option<i64>, _>("owner_verified_at")?
                 .map(u64_of),
+            negative: check(
+                row.try_get("owner_negative")?,
+                row.try_get("owner_negative_at")?,
+            )?,
         },
         door_expires_at: row
             .try_get::<Option<i64>, _>("door_expires_at")?
             .map(u64_of),
         token_expires_at: u64_of(row.try_get("token_expires_at")?),
+        token_issued_at: u64_of(row.try_get("token_issued_at")?),
         published_at: u64_of(row.try_get("published_at")?),
         key_changed_at: row.try_get::<Option<i64>, _>("key_changed_at")?.map(u64_of),
         bytes: row.try_get("bytes")?,
@@ -116,14 +129,46 @@ async fn get_in(
 async fn tombstone_in(
     tx: &mut Transaction<'_, Postgres>,
     name: &str,
+    identity: &str,
 ) -> StoreResult<Option<Tombstone>> {
-    sqlx::query("SELECT name, identity, seq, kind, created_at FROM tombstones WHERE name = $1")
-        .bind(name)
-        .fetch_optional(&mut **tx)
-        .await?
-        .as_ref()
-        .map(tombstone)
-        .transpose()
+    sqlx::query(
+        "SELECT name, identity, seq, kind, created_at FROM tombstones \
+         WHERE name = $1 AND identity = $2",
+    )
+    .bind(name)
+    .bind(identity)
+    .fetch_optional(&mut **tx)
+    .await?
+    .as_ref()
+    .map(tombstone)
+    .transpose()
+}
+
+async fn name_mark(tx: &mut Transaction<'_, Postgres>, name: &str) -> StoreResult<Option<u64>> {
+    Ok(
+        sqlx::query("SELECT token_issued_at FROM name_marks WHERE name = $1")
+            .bind(name)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|row| row.try_get::<i64, _>("token_issued_at"))
+            .transpose()?
+            .map(u64_of),
+    )
+}
+
+async fn latest_tombstone_identity(
+    tx: &mut Transaction<'_, Postgres>,
+    name: &str,
+) -> StoreResult<Option<String>> {
+    Ok(sqlx::query(
+        "SELECT identity FROM tombstones WHERE name = $1 \
+         ORDER BY created_at DESC, identity DESC LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(|row| row.try_get::<String, _>("identity"))
+    .transpose()?)
 }
 
 /// Delete a listing, raise its tombstone and append to the feed.
@@ -142,7 +187,7 @@ async fn bury(
         .await?;
     sqlx::query(
         "INSERT INTO tombstones (name, identity, seq, kind, created_at) VALUES ($1, $2, $3, $4, $5) \
-         ON CONFLICT (name) DO UPDATE SET identity = EXCLUDED.identity, \
+         ON CONFLICT (name, identity) DO UPDATE SET \
          seq = GREATEST(tombstones.seq, EXCLUDED.seq), kind = EXCLUDED.kind, \
          created_at = EXCLUDED.created_at",
     )
@@ -212,17 +257,48 @@ impl Store for PgStore {
         .transpose()
     }
 
-    async fn tombstone(&self, name: &str) -> StoreResult<Option<Tombstone>> {
-        sqlx::query("SELECT name, identity, seq, kind, created_at FROM tombstones WHERE name = $1")
-            .bind(name)
-            .fetch_optional(&self.pool)
-            .await?
-            .as_ref()
-            .map(tombstone)
-            .transpose()
+    async fn token_revoked(&self, token_id: &str) -> StoreResult<bool> {
+        Ok(
+            sqlx::query("SELECT 1 FROM revoked_tokens WHERE token_id = $1")
+                .bind(token_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some(),
+        )
     }
 
-    async fn publish(&self, r: &ListingRecord) -> StoreResult<PublishOutcome> {
+    async fn tombstone(&self, name: &str) -> StoreResult<Option<Tombstone>> {
+        sqlx::query(
+            "SELECT name, identity, seq, kind, created_at FROM tombstones WHERE name = $1 \
+             ORDER BY created_at DESC, identity DESC LIMIT 1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(tombstone)
+        .transpose()
+    }
+
+    async fn tombstone_for(&self, name: &str, identity: &str) -> StoreResult<Option<Tombstone>> {
+        sqlx::query(
+            "SELECT name, identity, seq, kind, created_at FROM tombstones \
+             WHERE name = $1 AND identity = $2",
+        )
+        .bind(name)
+        .bind(identity)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(tombstone)
+        .transpose()
+    }
+
+    async fn publish(
+        &self,
+        r: &ListingRecord,
+        guard: &PublishGuard,
+    ) -> StoreResult<PublishOutcome> {
         let mut tx = self.pool.begin().await?;
         // Lock order everywhere: token, then name.
         lock(&mut tx, &format!("token:{}", r.token_id)).await?;
@@ -238,18 +314,22 @@ impl Store for PgStore {
         if prev.as_ref().is_some_and(|p| p.sha256 == r.sha256) {
             return Ok(PublishOutcome::Unchanged);
         }
-        let tomb = tombstone_in(&mut tx, &r.name).await?;
-        let current = prev
-            .as_ref()
-            .map(|p| p.seq)
-            .max(tomb.as_ref().map(|t| t.seq));
-        if let Some(current) = current.filter(|c| r.seq <= *c) {
-            return Ok(PublishOutcome::StaleSeq { current });
+        if name_mark(&mut tx, &r.name)
+            .await?
+            .is_some_and(|m| m > r.token_issued_at)
+        {
+            return Ok(PublishOutcome::NameHeld);
         }
-        let prev_identity = prev
-            .as_ref()
-            .map(|p| p.identity.clone())
-            .or_else(|| tomb.map(|t| t.identity));
+        let tomb = tombstone_in(&mut tx, &r.name, &r.identity).await?;
+        if prev.as_ref().map(|p| &p.sha256) != guard.prev_sha256.as_ref()
+            || tomb.as_ref().map(|t| t.seq) != guard.tombstone_seq
+        {
+            return Ok(PublishOutcome::Conflict);
+        }
+        let prev_identity = match &prev {
+            Some(p) => Some(p.identity.clone()),
+            None => latest_tombstone_identity(&mut tx, &r.name).await?,
+        };
         let key_changed = prev_identity.is_some_and(|i| i != r.identity);
         let key_changed_at = if key_changed {
             Some(r.published_at)
@@ -260,13 +340,17 @@ impl Store for PgStore {
             "INSERT INTO listings (",
             columns!(),
             ") VALUES \
-             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) \
+             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
+             $19, $20, $21) \
              ON CONFLICT (name) DO UPDATE SET identity = EXCLUDED.identity, seq = EXCLUDED.seq, \
              token_id = EXCLUDED.token_id, owner_domain = EXCLUDED.owner_domain, \
-             owner_last = EXCLUDED.owner_last, owner_checked_at = EXCLUDED.owner_checked_at, \
+             owner_latest = EXCLUDED.owner_latest, owner_checked_at = EXCLUDED.owner_checked_at, \
              owner_verified_at = EXCLUDED.owner_verified_at, \
+             owner_negative = EXCLUDED.owner_negative, \
+             owner_negative_at = EXCLUDED.owner_negative_at, \
              door_expires_at = EXCLUDED.door_expires_at, \
-             token_expires_at = EXCLUDED.token_expires_at, published_at = EXCLUDED.published_at, \
+             token_expires_at = EXCLUDED.token_expires_at, \
+             token_issued_at = EXCLUDED.token_issued_at, published_at = EXCLUDED.published_at, \
              key_changed_at = EXCLUDED.key_changed_at, bytes = EXCLUDED.bytes, \
              sha256 = EXCLUDED.sha256, search_title = EXCLUDED.search_title, \
              search_skills = EXCLUDED.search_skills, \
@@ -277,11 +361,14 @@ impl Store for PgStore {
         .bind(i64_of(r.seq))
         .bind(&r.token_id)
         .bind(&r.owner_domain)
-        .bind(r.owner.last.as_str())
-        .bind(r.owner.checked_at.map(i64_of))
+        .bind(r.owner.latest.map(|(_, c)| c.as_str()))
+        .bind(r.owner.latest.map(|(t, _)| i64_of(t)))
         .bind(r.owner.verified_at.map(i64_of))
+        .bind(r.owner.negative.map(|(_, c)| c.as_str()))
+        .bind(r.owner.negative.map(|(t, _)| i64_of(t)))
         .bind(r.door_expires_at.map(i64_of))
         .bind(i64_of(r.token_expires_at))
+        .bind(i64_of(r.token_issued_at))
         .bind(i64_of(r.published_at))
         .bind(key_changed_at.map(i64_of))
         .bind(&r.bytes)
@@ -292,6 +379,15 @@ impl Store for PgStore {
         .bind(&r.search.skill_keys)
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "INSERT INTO name_marks (name, token_issued_at) VALUES ($1, $2) \
+             ON CONFLICT (name) DO UPDATE SET \
+             token_issued_at = GREATEST(name_marks.token_issued_at, EXCLUDED.token_issued_at)",
+        )
+        .bind(&r.name)
+        .bind(i64_of(r.token_issued_at))
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(PublishOutcome::Published { key_changed })
     }
@@ -300,9 +396,9 @@ impl Store for PgStore {
         let mut tx = self.pool.begin().await?;
         lock(&mut tx, &format!("name:{}", w.name)).await?;
         let Some(listing) = get_in(&mut tx, w.name).await? else {
-            let repeat = tombstone_in(&mut tx, w.name)
+            let repeat = tombstone_in(&mut tx, w.name, w.identity)
                 .await?
-                .is_some_and(|t| t.identity == w.identity && t.seq >= w.seq);
+                .is_some_and(|t| t.seq >= w.seq);
             return Ok(if repeat {
                 WithdrawOutcome::Repeat
             } else {
@@ -367,8 +463,8 @@ impl Store for PgStore {
                     .await?;
                 sqlx::query(
                     "INSERT INTO tombstones (name, identity, seq, kind, created_at) \
-                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (name) DO UPDATE SET \
-                     identity = EXCLUDED.identity, seq = GREATEST(tombstones.seq, EXCLUDED.seq), \
+                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (name, identity) DO UPDATE SET \
+                     seq = GREATEST(tombstones.seq, EXCLUDED.seq), \
                      kind = EXCLUDED.kind, created_at = EXCLUDED.created_at",
                 )
                 .bind(&name)
@@ -414,14 +510,17 @@ impl Store for PgStore {
 
     async fn set_owner(&self, name: &str, sha256: &str, s: OwnerStatus) -> StoreResult<bool> {
         let n = sqlx::query(
-            "UPDATE listings SET owner_last = $3, owner_checked_at = $4, owner_verified_at = $5 \
+            "UPDATE listings SET owner_latest = $3, owner_checked_at = $4, \
+             owner_verified_at = $5, owner_negative = $6, owner_negative_at = $7 \
              WHERE name = $1 AND sha256 = $2",
         )
         .bind(name)
         .bind(sha256)
-        .bind(s.last.as_str())
-        .bind(s.checked_at.map(i64_of))
+        .bind(s.latest.map(|(_, c)| c.as_str()))
+        .bind(s.latest.map(|(t, _)| i64_of(t)))
         .bind(s.verified_at.map(i64_of))
+        .bind(s.negative.map(|(_, c)| c.as_str()))
+        .bind(s.negative.map(|(t, _)| i64_of(t)))
         .execute(&self.pool)
         .await?
         .rows_affected();

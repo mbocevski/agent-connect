@@ -6,11 +6,16 @@ CREATE TABLE listings (
     seq BIGINT NOT NULL,
     token_id TEXT NOT NULL,
     owner_domain TEXT,
-    owner_last TEXT NOT NULL,
+    -- The owner-check history the core's owner_state reads: the latest
+    -- fetch, the last vouching fetch and the latest negative result.
+    owner_latest TEXT,
     owner_checked_at BIGINT,
     owner_verified_at BIGINT,
+    owner_negative TEXT,
+    owner_negative_at BIGINT,
     door_expires_at BIGINT,
     token_expires_at BIGINT NOT NULL,
+    token_issued_at BIGINT NOT NULL,
     published_at BIGINT NOT NULL,
     key_changed_at BIGINT,
     bytes BYTEA NOT NULL,
@@ -32,13 +37,14 @@ CREATE INDEX listings_identity ON listings (identity);
 CREATE INDEX listings_token_id ON listings (token_id);
 CREATE INDEX listings_owner_checked_at ON listings (owner_checked_at);
 
--- The highest withdrawn seq per name, kept 30 days.
+-- The highest withdrawn seq per (name, identity), kept 30 days.
 CREATE TABLE tombstones (
-    name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     identity TEXT NOT NULL,
     seq BIGINT NOT NULL,
     kind TEXT NOT NULL,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (name, identity)
 );
 
 -- Signed withdrawals and revocations, in order, kept 30 days.
@@ -47,6 +53,13 @@ CREATE TABLE feed (
     kind TEXT NOT NULL,
     entry TEXT NOT NULL,
     created_at BIGINT NOT NULL
+);
+
+-- Per name, the newest token issued_at ever accepted. Kept for good, so a
+-- name can't go back to a key it was rotated away from.
+CREATE TABLE name_marks (
+    name TEXT PRIMARY KEY,
+    token_issued_at BIGINT NOT NULL
 );
 
 CREATE TABLE revoked_tokens (
