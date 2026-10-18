@@ -356,6 +356,106 @@ async fn an_operator_stylesheet_replaces_the_default() {
     assert_eq!(css, "body { color: rebeccapurple; }");
 }
 
+const CSP_DEFAULT: &str = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; \
+form-action 'self'; frame-ancestors 'none'";
+
+fn font_harness() -> (Harness, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::new();
+    h.http.font_dir = Some(dir.path().to_path_buf());
+    (h, dir)
+}
+
+#[tokio::test]
+async fn the_csp_is_unchanged_without_a_font_directory() {
+    let h = Harness::new();
+    for path in ["/", "/static/directory.css", "/nope"] {
+        let r = h.get(path).await;
+        assert_eq!(
+            r.header("content-security-policy").as_deref(),
+            Some(CSP_DEFAULT),
+            "{path}"
+        );
+    }
+    assert_eq!(h.get("/static/fonts/a.woff2").await.status, 404);
+}
+
+#[tokio::test]
+async fn a_font_directory_adds_font_src_self_only() {
+    let (h, _dir) = font_harness();
+    for path in ["/", "/static/directory.css", "/nope"] {
+        let csp = h.get(path).await.header("content-security-policy").unwrap();
+        assert_eq!(csp, format!("{CSP_DEFAULT}; font-src 'self'"), "{path}");
+        assert!(!csp.contains("data:") && !csp.contains("http"), "{csp}");
+    }
+}
+
+#[tokio::test]
+async fn fonts_are_served_with_their_media_type() {
+    let (h, dir) = font_harness();
+    for (file, ty) in [
+        ("a.woff2", "font/woff2"),
+        ("b.woff", "font/woff"),
+        ("c.ttf", "font/ttf"),
+        ("d.otf", "font/otf"),
+        ("E.WOFF2", "font/woff2"),
+    ] {
+        std::fs::write(dir.path().join(file), file.as_bytes()).unwrap();
+        let r = h.get(&format!("/static/fonts/{file}")).await;
+        assert_eq!(r.status, 200, "{file}");
+        assert_eq!(r.header("content-type").as_deref(), Some(ty));
+        assert_eq!(
+            r.header("cache-control").as_deref(),
+            Some("public, max-age=3600")
+        );
+        assert_eq!(
+            r.header("x-content-type-options").as_deref(),
+            Some("nosniff")
+        );
+        assert_eq!(r.body, file.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn font_requests_that_are_not_plain_font_files_are_404() {
+    let root = tempfile::tempdir().unwrap();
+    let fonts = root.path().join("fonts");
+    std::fs::create_dir(&fonts).unwrap();
+    let mut h = Harness::new();
+    h.http.font_dir = Some(fonts.clone());
+    std::fs::write(fonts.join("a.woff2"), b"font").unwrap();
+    std::fs::write(fonts.join("secret.txt"), b"secret").unwrap();
+    std::fs::write(fonts.join("noext"), b"x").unwrap();
+    std::fs::write(fonts.join(".hidden.woff2"), b"x").unwrap();
+    std::fs::create_dir(fonts.join("sub.woff2")).unwrap();
+    std::fs::write(root.path().join("outer.woff2"), b"outer").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("out.woff2"), b"outside").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("out.woff2"), fonts.join("link.woff2")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), fonts.join("dirlink")).unwrap();
+    for path in [
+        "/static/fonts/secret.txt",
+        "/static/fonts/noext",
+        "/static/fonts/.hidden.woff2",
+        "/static/fonts/missing.woff2",
+        "/static/fonts/sub.woff2",
+        "/static/fonts/link.woff2",
+        "/static/fonts/dirlink/out.woff2",
+        "/static/fonts/../outer.woff2",
+        "/static/fonts/..%2Fouter.woff2",
+        "/static/fonts/%2e%2e/outer.woff2",
+        "/static/fonts/..%5Couter.woff2",
+        "/static/fonts/a.woff2%00.txt",
+        "/static/fonts/",
+        "/static/fonts",
+    ] {
+        let r = h.get(path).await;
+        assert_eq!(r.status, 404, "{path}");
+        assert!(!r.text().contains("outside") && !r.text().contains("outer"));
+    }
+    assert_eq!(h.get("/static/fonts/a.woff2").await.status, 200);
+}
+
 #[tokio::test]
 async fn owner_states_and_the_key_changed_banner_show() {
     let h = Harness::new();

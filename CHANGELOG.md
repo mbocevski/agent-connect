@@ -10,6 +10,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Directory: `AC_DIRECTORY_FONT_DIR` serves the font files in a directory at
+  `/static/fonts/<file>` and adds `font-src 'self'` to the
+  Content-Security-Policy, so a replacement stylesheet can use its own
+  fonts. Off by default, and the policy is unchanged without it.
 - Embedded SDK mode (ADR-005): `AgentConnect.embedded(name="my-agent")`
   runs the AgentConnect runtime inside the agent's own process and asyncio
   loop, so a headless agent needs no separate daemon, and no second

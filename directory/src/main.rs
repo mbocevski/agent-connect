@@ -77,6 +77,10 @@ async fn serve<S: Store>(
             Some(path) => Some(std::fs::read_to_string(path)?.into()),
             None => None,
         },
+        font_dir: match &config.font_dir {
+            Some(path) => Some(std::fs::canonicalize(path)?),
+            None => None,
+        },
     };
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %config.addr, "directory listening");
