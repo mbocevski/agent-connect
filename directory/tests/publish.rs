@@ -1,11 +1,13 @@
-//! Publish, withdraw and revoke (ADR-006 Decision 6), over HTTP.
+//! Publish, withdraw and revoke (ADR-006 Decision 6), over HTTP, with the
+//! core verifier.
 
 mod common;
 
-use agentconnect_core::encoding::jcs;
+use agentconnect_core::encoding::b64;
+use agentconnect_core::listing::{DirectoryKey, Withdrawal};
 use axum::http::StatusCode;
-use common::{DAY, HOST, Harness, identity, random_b64};
-use serde_json::{Value, json};
+use common::{DAY, HOST, Harness, Issuer, identity, rng};
+use serde_json::json;
 
 #[tokio::test]
 async fn publish_stores_the_exact_bytes_and_is_idempotent() {
@@ -27,31 +29,33 @@ async fn publish_stores_the_exact_bytes_and_is_idempotent() {
     assert_eq!(again.status, StatusCode::OK);
     let card = h.get("/a/release-planner.json").await;
     assert_eq!(card.body, b.bytes);
+    let rec = h.record("release-planner").await.unwrap();
+    assert_eq!(rec.token_id, b64(&b.token.token_id));
+    assert_eq!(rec.token_expires_at, b.token.grant.expires_at);
 }
 
 async fn refused(h: &Harness, bytes: Vec<u8>, status: StatusCode, code: &str) {
     let r = h.post("/v0/listings", bytes).await;
     assert_eq!(r.status, status, "{}", r.text());
-    assert_eq!(r.json()["code"], code, "{}", r.text());
+    assert_eq!(r.code(), code, "{}", r.text());
 }
 
 #[tokio::test]
-async fn bad_signatures_and_non_canonical_bytes_are_refused_by_the_verifier() {
+async fn tampered_and_malformed_bodies_are_refused() {
     let h = Harness::new();
-    let id = identity();
-    let b = h.build(&h.spec("signed", &id));
-    // Tampered text: still canonical, but not what was signed.
-    let mut card: Value = serde_json::from_slice(&b.bytes).unwrap();
-    card["description"] = json!("Now does something else.");
+    let b = h.build(&h.spec("signed", &identity()));
+    let text = String::from_utf8(b.bytes.clone()).unwrap();
+    let tampered = text.replacen("does things", "does others", 1);
     refused(
         &h,
-        jcs(&card).unwrap(),
+        tampered.into_bytes(),
         StatusCode::FORBIDDEN,
         "bad_signature",
     )
     .await;
-    // Not canonical (pretty-printed): the canonical check fails first.
-    let pretty = serde_json::to_vec_pretty(&card).unwrap();
+    let pretty =
+        serde_json::to_vec_pretty(&serde_json::from_slice::<serde_json::Value>(&b.bytes).unwrap())
+            .unwrap();
     refused(&h, pretty, StatusCode::BAD_REQUEST, "bad_listing").await;
     refused(
         &h,
@@ -60,7 +64,6 @@ async fn bad_signatures_and_non_canonical_bytes_are_refused_by_the_verifier() {
         "bad_listing",
     )
     .await;
-    // Over the 32 KiB card cap.
     refused(
         &h,
         vec![b' '; 33 * 1024],
@@ -75,38 +78,38 @@ async fn bad_signatures_and_non_canonical_bytes_are_refused_by_the_verifier() {
 async fn token_scope_and_lifetime_are_enforced() {
     let h = Harness::new();
     let id = identity();
-    // A token the operator never issued (wrong key).
+    // Issued by a key this directory doesn't pin.
     let mut s = h.spec("tok", &id);
-    s.token_id = random_b64(16);
+    s.issuer = Issuer::Stranger;
     refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "unknown_key").await;
-    // Issued for another name.
+    // Issued to another identity.
     let mut s = h.spec("tok", &id);
-    s.token_name = Some("other-name".into());
+    s.token_identity = Some(identity().id());
     refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "bad_token").await;
-    // Issued for another identity: the token embeds the spec's identity, so
-    // sign a card whose params name a different one.
-    let s = h.spec("tok", &id);
-    let mut card = s.card();
-    card["capabilities"]["extensions"][0]["params"]["token"]["identity"] = json!(identity());
-    let bytes = jcs(&card).unwrap();
-    h.verifier.sign(&bytes);
-    refused(&h, bytes, StatusCode::FORBIDDEN, "bad_token").await;
-    // For another directory.
+    // A token for another directory can't be signed into a valid card.
     let mut s = h.spec("tok", &id);
     s.token_directory = "elsewhere.test".into();
-    refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "bad_token").await;
+    assert!(h.try_build(&s).is_err());
     // Expired.
     let mut s = h.spec("tok", &id);
+    s.token_issued_at = h.now() - 10 * DAY;
     s.token_expires_at = h.now();
     refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "bad_token").await;
     // Pins a domain the listing doesn't claim.
-    let s = h.spec("tok", &id);
-    let mut card = s.card();
-    card["capabilities"]["extensions"][0]["params"]["token"]["owner_domain"] = json!("example.com");
-    let bytes = jcs(&card).unwrap();
-    h.verifier.sign(&bytes);
-    refused(&h, bytes, StatusCode::FORBIDDEN, "bad_token").await;
+    let mut s = h.spec("tok", &id);
+    s.token_domain = Some("example.com".into());
+    refused(&h, h.build(&s).bytes, StatusCode::FORBIDDEN, "bad_token").await;
+    // A token for another name can't even be signed into a valid card.
+    let other = h.build(&h.spec("other-name", &id)).token;
+    let mut s = h.spec("tok", &id);
+    s.token = Some(other);
+    assert!(h.try_build(&s).is_err());
     assert!(h.record("tok").await.is_none());
+    // With the pinned domain claimed, it is accepted.
+    let mut s = h.spec("tok", &id);
+    s.token_domain = Some("example.com".into());
+    s.owner_domain = Some("example.com".into());
+    h.publish(&s).await;
 }
 
 #[tokio::test]
@@ -115,6 +118,7 @@ async fn listing_params_are_checked_against_this_directory() {
     let id = identity();
     let mut s = h.spec("params", &id);
     s.directory = "elsewhere.test".into();
+    s.token_directory = "elsewhere.test".into();
     refused(
         &h,
         h.build(&s).bytes,
@@ -141,20 +145,15 @@ async fn listing_params_are_checked_against_this_directory() {
         "bad_listing",
     )
     .await;
+    // A door that has expired by the time it is published.
     let mut s = h.spec("params", &id);
+    s.issued_at = h.now() - 2 * DAY;
     s.door_expires_at = Some(h.now());
     refused(&h, h.build(&s).bytes, StatusCode::BAD_REQUEST, "bad_door").await;
+    // A door past 7 days can't be signed at all.
     let mut s = h.spec("params", &id);
     s.door_expires_at = Some(s.issued_at + 7 * DAY + 1);
-    refused(&h, h.build(&s).bytes, StatusCode::BAD_REQUEST, "bad_door").await;
-    let s = h.spec("Bad_Name", &id);
-    refused(
-        &h,
-        h.build(&s).bytes,
-        StatusCode::BAD_REQUEST,
-        "bad_listing",
-    )
-    .await;
+    assert!(h.try_build(&s).is_err());
     // A closed door (no door at all) is fine.
     let mut s = h.spec("params", &id);
     s.door_expires_at = None;
@@ -176,14 +175,14 @@ async fn seq_must_rise_across_versions_and_tombstones() {
     }
     let mut newer = s.clone();
     newer.seq = 6;
-    h.publish(&newer).await;
+    let newer_bytes = h.publish(&newer).await.bytes;
     assert_eq!(h.record("seq-test").await.unwrap().seq, 6);
     // After a withdrawal, the withdrawn seq and anything below stay out.
     let w = h
         .post("/v0/withdrawals", h.withdrawal("seq-test", &id, 6))
         .await;
     assert_eq!(w.status, StatusCode::OK, "{}", w.text());
-    refused(&h, h.build(&newer).bytes, StatusCode::CONFLICT, "stale_seq").await;
+    refused(&h, newer_bytes, StatusCode::CONFLICT, "stale_seq").await;
     let mut back = s.clone();
     back.seq = 7;
     h.publish(&back).await;
@@ -210,18 +209,18 @@ async fn withdrawal_is_immediate_and_writes_a_tombstone_and_a_feed_entry() {
             Some("public, max-age=60")
         );
     }
-    let search = h.get("/search?q=going").await.json();
-    assert_eq!(search["results"], json!([]));
-    // A repeat changes nothing.
+    assert_eq!(h.get("/search?q=going").await.json()["results"], json!([]));
     let again = h.post("/v0/withdrawals", wd.clone()).await;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(again.json()["changed"], false);
-    // The feed carries the signed entry, verbatim once canonicalised.
+    // The feed entry re-encodes to the signed bytes, and the core verifies it.
     let feed = h.get("/v0/withdrawals?after=0").await.json();
     assert_eq!(feed["entries"].as_array().unwrap().len(), 1);
     let entry = &feed["entries"][0];
     assert_eq!(entry["kind"], "withdrawal");
-    assert_eq!(jcs(&entry["entry"]).unwrap(), wd);
+    let bytes = agentconnect_core::encoding::jcs(&entry["entry"]).unwrap();
+    assert_eq!(bytes, wd);
+    Withdrawal::from_json(&bytes).unwrap();
     let cursor = feed["next"].as_i64().unwrap();
     let after = h
         .get(&format!("/v0/withdrawals?after={cursor}"))
@@ -239,37 +238,47 @@ async fn withdrawals_are_checked() {
     s.seq = 4;
     h.publish(&s).await;
     let post = |b: Vec<u8>| h.post("/v0/withdrawals", b);
-    // Unsigned (tampered after signing).
-    let mut w: Value = serde_json::from_slice(&h.withdrawal("held", &id, 4)).unwrap();
-    w["seq"] = json!(9);
-    let r = post(jcs(&w).unwrap()).await;
+    // Tampered after signing.
+    let tampered = String::from_utf8(h.withdrawal("held", &id, 4))
+        .unwrap()
+        .replacen("\"seq\":4", "\"seq\":9", 1);
+    let r = post(tampered.into_bytes()).await;
     assert_eq!(
-        (r.status, r.json()["code"].clone()),
+        (r.status, r.code()),
         (StatusCode::FORBIDDEN, json!("bad_signature"))
     );
     // By another identity.
     let r = post(h.withdrawal("held", &other, 4)).await;
-    assert_eq!(r.json()["code"], "wrong_identity");
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::FORBIDDEN, json!("wrong_identity"))
+    );
     // Below the listed seq.
     let r = post(h.withdrawal("held", &id, 3)).await;
-    assert_eq!(r.json()["code"], "stale_seq");
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::CONFLICT, json!("stale_seq"))
+    );
     // Unknown name.
-    let r = post(h.withdrawal("nobody", &id, 1)).await;
-    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        post(h.withdrawal("nobody", &id, 1)).await.status,
+        StatusCode::NOT_FOUND
+    );
     // Stale timestamp.
     let old = h.withdrawal("held", &id, 4);
     h.advance(301);
-    let r = post(old).await;
-    assert_eq!(r.json()["code"], "stale_ts");
+    assert_eq!(post(old).await.code(), "stale_ts");
     // Another directory.
-    let mut w: Value = serde_json::from_slice(&h.withdrawal("held", &id, 4)).unwrap();
-    w["directory"] = json!("elsewhere.test");
-    let bytes = jcs(&w).unwrap();
-    h.verifier.sign(&bytes);
-    assert_eq!(post(bytes).await.json()["code"], "wrong_directory");
+    let elsewhere = Withdrawal::sign(&id, "elsewhere.test", "held", 4, h.now())
+        .unwrap()
+        .to_json()
+        .unwrap();
+    assert_eq!(post(elsewhere).await.code(), "wrong_directory");
     // Not canonical.
-    let r = post(b"{ \"v\": 0 }".to_vec()).await;
-    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        post(b"{ \"v\": 0 }".to_vec()).await.status,
+        StatusCode::BAD_REQUEST
+    );
     assert!(h.record("held").await.is_some());
 }
 
@@ -278,32 +287,61 @@ async fn token_revocation_withdraws_the_listing_and_bars_the_token() {
     let h = Harness::new();
     let id = identity();
     let s = h.spec("revoked", &id);
-    h.publish(&s).await;
-    let rev = h.revocation(&s.token_id);
+    let b = h.publish(&s).await;
+    let rev = h.revocation(&b.token);
     let r = h.post("/v0/revocations", rev.clone()).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     assert_eq!(r.json()["changed"], true);
     assert_eq!(h.get("/a/revoked").await.status, StatusCode::GONE);
-    let again = h.post("/v0/revocations", rev).await;
-    assert_eq!(again.json()["changed"], false);
+    assert_eq!(
+        h.post("/v0/revocations", rev).await.json()["changed"],
+        false
+    );
     let mut next = s.clone();
     next.seq = 2;
-    let r = h.post("/v0/listings", h.build(&next).bytes).await;
-    assert_eq!(r.json()["code"], "token_revoked");
-    let feed = h.get("/v0/withdrawals").await.json();
-    assert_eq!(feed["entries"][0]["kind"], "token_revocation");
-    // An unsigned revocation is refused.
-    let mut forged: Value = serde_json::from_slice(&h.revocation(&random_b64(16))).unwrap();
-    forged["token_id"] = json!(random_b64(16));
-    let r = h.post("/v0/revocations", jcs(&forged).unwrap()).await;
-    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    next.token = Some(b.token.clone());
+    refused(
+        &h,
+        h.build(&next).bytes,
+        StatusCode::FORBIDDEN,
+        "token_revoked",
+    )
+    .await;
+    assert_eq!(
+        h.get("/v0/withdrawals").await.json()["entries"][0]["kind"],
+        "token_revocation"
+    );
+    // A revocation by a key this directory doesn't pin.
+    let stranger = DirectoryKey::generate(&rng()).unwrap();
+    let forged = stranger
+        .revoke_token(&b.token.token_id, h.now(), "spam")
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let r = h.post("/v0/revocations", forged).await;
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::FORBIDDEN, json!("unknown_key"))
+    );
+    // Tampered.
+    let t = String::from_utf8(h.revocation(&b.token))
+        .unwrap()
+        .replacen("spam", "spam!", 1);
+    let r = h.post("/v0/revocations", t.into_bytes()).await;
+    assert_eq!(
+        (r.status, r.code()),
+        (StatusCode::FORBIDDEN, json!("bad_signature"))
+    );
+    assert_eq!(
+        h.post("/v0/revocations", b"{}".to_vec()).await.status,
+        StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
 async fn expired_tokens_hide_the_listing() {
     let h = Harness::new();
-    let id = identity();
-    let mut s = h.spec("short-lived", &id);
+    let mut s = h.spec("short-lived", &identity());
     s.token_expires_at = h.now() + DAY;
     h.publish(&s).await;
     assert_eq!(h.get("/a/short-lived").await.status, StatusCode::OK);
@@ -313,38 +351,14 @@ async fn expired_tokens_hide_the_listing() {
 }
 
 #[tokio::test]
-async fn a_build_without_a_verifier_accepts_nothing() {
-    use std::sync::Arc;
-
-    use agentconnect_core::clock::FakeClock;
-    use agentconnect_directory::verify::Unavailable;
-    use agentconnect_directory::{Directory, MemoryStore, Settings};
-
+async fn the_well_known_file_lists_the_pinned_keys() {
     let h = Harness::new();
-    let dir = Directory::new(
-        MemoryStore::new(),
-        Arc::new(Unavailable),
-        h.fetcher.clone(),
-        Arc::new(FakeClock::default()),
-        Settings {
-            host: HOST.into(),
-            relays: vec![common::RELAY.into()],
-        },
-    );
-    let b = h.build(&h.spec("anything", &identity()));
-    let e = dir.publish(&b.bytes).await.unwrap_err();
-    assert_eq!((e.status, e.code), (503, "unavailable"));
-    assert_eq!(dir.withdraw(b"{}").await.unwrap_err().status, 503);
-    assert_eq!(dir.revoke(b"{}").await.unwrap_err().status, 503);
-}
-
-#[tokio::test]
-async fn the_well_known_file_lists_the_operator_keys() {
-    let h = Harness::new();
-    let r = h.get("/.well-known/agentconnect-directory.json").await;
-    assert_eq!(r.status, StatusCode::OK);
-    let v = r.json();
+    let v = h
+        .get("/.well-known/agentconnect-directory.json")
+        .await
+        .json();
     assert_eq!(v["directory"], HOST);
     assert_eq!(v["relays"], json!([common::RELAY]));
-    assert_eq!(v["token_keys"][0]["key_id"], "test-key");
+    assert_eq!(v["token_keys"][0]["public_key"], b64(&h.dk.public_key()));
+    assert_eq!(v["token_keys"][0]["key_id"], b64(&h.dk.key_id()));
 }

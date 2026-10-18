@@ -109,7 +109,7 @@ async fn a_verified_owner_shows_the_organization() {
     let mut s = h.spec("owned", &id);
     s.owner_domain = Some("example.com".into());
     s.organization = Some("Example Ltd".into());
-    h.fetcher.vouch("example.com", &id);
+    h.fetcher.vouch("example.com", &id.id());
     let r = h.post("/v0/listings", h.build(&s).bytes).await;
     assert_eq!(r.json()["owner_state"], "verified");
     let v = h.get("/search?q=owned").await.json();
@@ -127,7 +127,7 @@ async fn owner_states_move_from_verified_to_stale_to_failed() {
     let mut s = h.spec("aging", &id);
     s.owner_domain = Some("example.com".into());
     s.organization = Some("Example Ltd".into());
-    h.fetcher.vouch("example.com", &id);
+    h.fetcher.vouch("example.com", &id.id());
     h.publish(&s).await;
     let page = || async { h.get("/a/aging.md").await.text() };
     assert!(page().await.contains("owner verified · example.com"));
@@ -162,7 +162,7 @@ async fn owner_states_move_from_verified_to_stale_to_failed() {
     );
     assert_eq!(h.get("/a/aging").await.status, StatusCode::OK);
     // It vouches again.
-    h.fetcher.vouch("example.com", &id);
+    h.fetcher.vouch("example.com", &id.id());
     h.advance(6 * 3600);
     h.dir.recheck_due().await.unwrap();
     assert!(page().await.contains("owner verified · example.com"));
@@ -174,7 +174,7 @@ async fn a_file_that_does_not_list_the_key_fails_at_once() {
     let id = identity();
     let mut s = h.spec("unvouched", &id);
     s.owner_domain = Some("example.com".into());
-    h.fetcher.vouch("example.com", &identity());
+    h.fetcher.vouch("example.com", &identity().id());
     let r = h.post("/v0/listings", h.build(&s).bytes).await;
     assert_eq!(r.json()["owner_state"], "failed");
     assert!(
@@ -187,7 +187,7 @@ async fn a_file_that_does_not_list_the_key_fails_at_once() {
     // Scoped to other listings only.
     h.fetcher.serve(
         "example.com",
-        &json!({"v": 0, "identities": [{"identity": id, "listings": ["agents.test/a/other"]}]}),
+        &json!({"v": 0, "identities": [{"identity": id.id(), "listings": ["agents.test/a/other"]}]}),
     );
     h.advance(6 * 3600);
     h.dir.recheck_due().await.unwrap();
@@ -199,7 +199,7 @@ async fn a_file_that_does_not_list_the_key_fails_at_once() {
     );
     h.fetcher.serve(
         "example.com",
-        &json!({"v": 0, "identities": [{"identity": id, "listings": ["agents.test/a/unvouched"]}]}),
+        &json!({"v": 0, "identities": [{"identity": id.id(), "listings": ["agents.test/a/unvouched"]}]}),
     );
     h.advance(6 * 3600);
     h.dir.recheck_due().await.unwrap();
@@ -234,11 +234,11 @@ async fn a_revoked_key_is_withdrawn_with_a_feed_entry() {
     let id = identity();
     let mut s = h.spec("compromised", &id);
     s.owner_domain = Some("example.com".into());
-    h.fetcher.vouch("example.com", &id);
+    h.fetcher.vouch("example.com", &id.id());
     h.publish(&s).await;
     h.fetcher.serve(
         "example.com",
-        &json!({"v": 0, "identities": [], "revoked": [{"identity": id, "revoked_at": 1, "reason": "compromised"}]}),
+        &json!({"v": 0, "identities": [], "revoked": [{"identity": id.id(), "revoked_at": 1, "reason": "compromised"}]}),
     );
     h.advance(6 * 3600);
     h.dir.recheck_due().await.unwrap();
@@ -254,7 +254,7 @@ async fn a_revoked_key_is_withdrawn_with_a_feed_entry() {
     let feed = h.get("/v0/withdrawals").await.json();
     let e = &feed["entries"][0];
     assert_eq!(e["kind"], "owner_revocation");
-    assert_eq!(e["entry"]["identity"], id.as_str());
+    assert_eq!(e["entry"]["identity"], id.id());
     assert_eq!(e["entry"]["reason"], "compromised");
 }
 
@@ -266,7 +266,7 @@ async fn a_withdrawal_rechecks_the_identitys_other_listings() {
     a.owner_domain = Some("example.com".into());
     let mut b = h.spec("second-name", &id);
     b.owner_domain = Some("example.com".into());
-    h.fetcher.vouch("example.com", &id);
+    h.fetcher.vouch("example.com", &id.id());
     h.publish(&a).await;
     h.publish(&b).await;
     let before = h.fetcher.calls.load(std::sync::atomic::Ordering::Relaxed);

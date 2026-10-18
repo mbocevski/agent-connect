@@ -27,7 +27,7 @@ pub struct Config {
     /// at. The first is shown on the site.
     pub relays: Vec<String>,
     /// `AC_DIRECTORY_TOKEN_KEYS`: comma-separated operator token public keys
-    /// (`DK.pub`, base64url), at most two.
+    /// (`DK.pub`, base64url): one, or two while rotating. Required.
     pub token_keys: Vec<String>,
     /// `AC_DIRECTORY_CLIENT_IP_HEADER`: a header set by a trusted reverse
     /// proxy that carries the client address (its last value is used), for
@@ -78,8 +78,8 @@ impl Config {
             relays.push(DEFAULT_RELAY.to_owned());
         }
         let token_keys = list(get("AC_DIRECTORY_TOKEN_KEYS"));
-        if token_keys.len() > 2 {
-            return Err("AC_DIRECTORY_TOKEN_KEYS takes at most two keys".to_owned());
+        if token_keys.is_empty() || token_keys.len() > 2 {
+            return Err("AC_DIRECTORY_TOKEN_KEYS takes one or two keys".to_owned());
         }
         let client_ip_header = get("AC_DIRECTORY_CLIENT_IP_HEADER")
             .map(|h| h.trim().to_ascii_lowercase())
@@ -124,13 +124,16 @@ mod tests {
         }
     }
 
+    const DB: (&str, &str) = ("AC_DIRECTORY_DB", "memory:");
+    const KEYS: (&str, &str) = ("AC_DIRECTORY_TOKEN_KEYS", "k");
+
     #[test]
     fn defaults() {
-        let c = Config::from_lookup(lookup(&[("AC_DIRECTORY_DB", "memory:")])).unwrap();
+        let c = Config::from_lookup(lookup(&[DB, KEYS])).unwrap();
         assert_eq!(c.addr.to_string(), DEFAULT_ADDR);
         assert_eq!(c.host, DEFAULT_HOST);
         assert_eq!(c.relays, [DEFAULT_RELAY]);
-        assert_eq!(c.token_keys, Vec::<String>::new());
+        assert_eq!(c.token_keys, ["k"]);
         assert!(c.client_ip_header.is_none());
     }
 
@@ -157,15 +160,15 @@ mod tests {
 
     #[test]
     fn rejects_bad_values() {
-        let db = ("AC_DIRECTORY_DB", "memory:");
         for bad in [
-            vec![],
-            vec![("AC_DIRECTORY_DB", "sqlite://x")],
-            vec![db, ("AC_DIRECTORY_ADDR", "nope")],
-            vec![db, ("AC_DIRECTORY_HOST", "a b")],
-            vec![db, ("AC_DIRECTORY_RELAYS", "x/y")],
-            vec![db, ("AC_DIRECTORY_TOKEN_KEYS", "a,b,c")],
-            vec![db, ("AC_DIRECTORY_CLIENT_IP_HEADER", "bad header")],
+            vec![KEYS],
+            vec![DB],
+            vec![KEYS, ("AC_DIRECTORY_DB", "sqlite://x")],
+            vec![DB, KEYS, ("AC_DIRECTORY_ADDR", "nope")],
+            vec![DB, KEYS, ("AC_DIRECTORY_HOST", "a b")],
+            vec![DB, KEYS, ("AC_DIRECTORY_RELAYS", "x/y")],
+            vec![DB, ("AC_DIRECTORY_TOKEN_KEYS", "a,b,c")],
+            vec![DB, KEYS, ("AC_DIRECTORY_CLIENT_IP_HEADER", "bad header")],
         ] {
             assert!(Config::from_lookup(lookup(&bad)).is_err(), "{bad:?}");
         }

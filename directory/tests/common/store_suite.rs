@@ -8,7 +8,7 @@ use agentconnect_directory::store::{
     SearchQuery, TOMBSTONE_TTL_SECS, WithdrawOutcome, WithdrawalRecord,
 };
 
-use super::{DAY, identity, random_b64};
+use super::{DAY, identity_id, random_b64};
 
 pub const NOW: u64 = 1_735_689_600;
 
@@ -57,7 +57,7 @@ fn with_text(
 }
 
 pub async fn publish_rules<S: Store>(s: &S) {
-    let id = identity();
+    let id = identity_id();
     let r1 = record("alpha", &id, 3);
     assert_eq!(
         s.publish(&r1).await.unwrap(),
@@ -85,7 +85,7 @@ pub async fn publish_rules<S: Store>(s: &S) {
 }
 
 pub async fn key_change_is_recorded<S: Store>(s: &S) {
-    let (a, b) = (identity(), identity());
+    let (a, b) = (identity_id(), identity_id());
     s.publish(&record("rotating", &a, 1)).await.unwrap();
     let mut new = record("rotating", &b, 2);
     new.published_at = NOW + 10;
@@ -108,7 +108,7 @@ pub async fn key_change_is_recorded<S: Store>(s: &S) {
 }
 
 pub async fn withdraw_rules<S: Store>(s: &S) {
-    let (id, other) = (identity(), identity());
+    let (id, other) = (identity_id(), identity_id());
     s.publish(&record("beta", &id, 5)).await.unwrap();
     fn mk(identity: &str, seq: u64) -> WithdrawalRecord<'_> {
         WithdrawalRecord {
@@ -173,7 +173,7 @@ pub async fn withdraw_rules<S: Store>(s: &S) {
 }
 
 pub async fn token_revocation<S: Store>(s: &S) {
-    let id = identity();
+    let id = identity_id();
     let r = record("gamma", &id, 1);
     s.publish(&r).await.unwrap();
     assert_eq!(
@@ -208,7 +208,7 @@ pub async fn token_revocation<S: Store>(s: &S) {
 }
 
 pub async fn owner_updates<S: Store>(s: &S) {
-    let id = identity();
+    let id = identity_id();
     let mut r = record("delta", &id, 1);
     r.owner_domain = Some("example.com".to_owned());
     s.publish(&r).await.unwrap();
@@ -248,7 +248,7 @@ pub async fn owner_updates<S: Store>(s: &S) {
 }
 
 pub async fn search_ranking_and_filters<S: Store>(s: &S) {
-    let id = identity();
+    let id = identity_id();
     let a = with_text(
         record("release-planner", &id, 1),
         "release planner Release planner",
@@ -326,7 +326,7 @@ pub async fn search_ranking_and_filters<S: Store>(s: &S) {
 }
 
 pub async fn feed_and_purge<S: Store>(s: &S) {
-    let id = identity();
+    let id = identity_id();
     for (i, name) in ["e1", "e2", "e3"].iter().enumerate() {
         s.publish(&record(name, &id, 1)).await.unwrap();
         let at = NOW + i as u64;

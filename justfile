@@ -142,7 +142,7 @@ ci: lint test cov changelog-check docs-check
 relay:
     cargo run -p agentconnect-relay
 
-# Run Heimdall locally on the in-memory store (AC_DIRECTORY_ADDR, default 127.0.0.1:8090)
+# Run Heimdall locally on the in-memory store (needs AC_DIRECTORY_TOKEN_KEYS; AC_DIRECTORY_ADDR, default 127.0.0.1:8090)
 directory:
     AC_DIRECTORY_DB="${AC_DIRECTORY_DB:-memory:}" cargo run -p agentconnect-directory
 

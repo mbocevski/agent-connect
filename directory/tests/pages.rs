@@ -43,7 +43,7 @@ fn verified_spec(h: &Harness) -> Spec {
         "Release planning",
         &["release planning", "scheduling"],
     )];
-    h.fetcher.vouch("example.com", &id);
+    h.fetcher.vouch("example.com", &id.id());
     s
 }
 
@@ -389,10 +389,8 @@ async fn owner_states_and_the_key_changed_banner_show() {
             .text()
             .contains("no verified owner")
     );
-    s.identity.clone_from(&new);
+    s.agent = new;
     s.seq = 2;
-    s.token_id = common::random_b64(16);
-    h.verifier.issue(&s.token_id);
     h.publish(&s).await;
     let today = agentconnect_directory::render::date(h.now());
     let banner = format!("key changed on {today}");
@@ -471,7 +469,7 @@ async fn health_and_metrics_carry_no_identifiers() {
     assert!(m.contains("route=\"/a/{name}\",status=\"200\""), "{m}");
     assert!(m.contains("route=\"/v0/listings\",status=\"201\""), "{m}");
     assert!(m.contains("kind=\"publish\",outcome=\"published\""), "{m}");
-    for leak in ["metered", id.as_str(), common::CLIENT] {
+    for leak in ["metered", id.id().as_str(), common::CLIENT] {
         assert!(!m.contains(leak), "metrics leak {leak}");
     }
 }

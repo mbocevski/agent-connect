@@ -1,48 +1,42 @@
 //! Shared harness: an in-process directory on the in-memory store, a fake
-//! clock, a fake owner-file fetcher and a test double for the verifier.
-//! Nothing here sleeps or touches the network.
+//! clock and a fake owner-file fetcher, verifying with the real
+//! [`CoreVerifier`]. Nothing here sleeps or touches the network.
 //!
-//! The verifier double never does cryptography. A test "signs" an object by
-//! registering the hash of its exact bytes, and "issues" a token by
-//! registering its id; anything else is refused as the real verifier would
-//! (tampered bytes: bad signature; unknown token: unknown key). Canonical
-//! form is checked with the core's own JCS check. The double lives in tests
-//! only and is never linked into the binary.
+//! Keys are never literals: identities and the operator key come from the
+//! per-run seed (`Rng::for_test`), and the vector tests read theirs from
+//! `testdata/`.
 
 #![allow(dead_code, clippy::missing_panics_doc, clippy::must_use_candidate)]
 
 pub mod store_suite;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agentconnect_core::clock::FakeClock;
-use agentconnect_core::encoding::{b64, from_jcs, hex, jcs};
-use agentconnect_core::{Identity, Rng};
-use agentconnect_directory::owner::{BoxFuture, FetchError, OwnerFetcher};
-use agentconnect_directory::verify::{
-    Door, ListingToken, OwnerVerdict, Rejection, TokenKey, TokenRevocation, VerifiedListing,
-    Verifier, Withdrawal,
+use agentconnect_core::encoding::b64;
+use agentconnect_core::listing::{
+    DirectoryKey, E2eParams, ListedDoor, ListingCard, ListingProvider, ListingSkill, ListingToken,
+    TokenGrant, Withdrawal,
 };
+use agentconnect_core::{HPKE_PUBLIC_KEY_LEN, Identity, Rng};
+use agentconnect_directory::owner::{BoxFuture, FetchError, OwnerFetcher};
+use agentconnect_directory::verify::CoreVerifier;
 use agentconnect_directory::{Directory, HttpConfig, MemoryStore, Settings, Store, app};
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 pub const HOST: &str = "agents.test";
 pub const RELAY: &str = "relay.test";
 pub const DAY: u64 = 86_400;
-
-fn sha(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
-}
+pub const CLIENT: &str = "198.51.100.7";
 
 /// A fresh label for per-run randomness.
 pub fn label(prefix: &str) -> String {
@@ -50,161 +44,29 @@ pub fn label(prefix: &str) -> String {
     format!("{prefix}:{}", N.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A fresh seeded RNG.
+pub fn rng() -> Rng {
+    Rng::for_test(&label("rng"))
+}
+
 /// Random bytes from the per-run seed, as base64url.
 pub fn random_b64(n: usize) -> String {
     let mut buf = vec![0_u8; n];
-    Rng::for_test(&label("bytes")).fill(&mut buf).unwrap();
+    rng().fill(&mut buf).unwrap();
     b64(&buf)
 }
 
-/// A fresh identity id (`ac:v0:...`) from the per-run seed.
-pub fn identity() -> String {
-    Identity::generate(&Rng::for_test(&label("identity")))
-        .unwrap()
-        .id()
+/// An identity key the test can sign with.
+pub type Agent = Arc<Identity>;
+
+/// A fresh identity from the per-run seed.
+pub fn identity() -> Agent {
+    Arc::new(Identity::generate(&rng()).unwrap())
 }
 
-/// The verifier double.
-#[derive(Default)]
-pub struct FakeVerifier {
-    signed: Mutex<HashSet<String>>,
-    tokens: Mutex<HashSet<String>>,
-    pub calls: AtomicU64,
-}
-
-impl FakeVerifier {
-    /// Treat `bytes` as validly signed by the key it names.
-    pub fn sign(&self, bytes: &[u8]) {
-        self.signed.lock().unwrap().insert(sha(bytes));
-    }
-
-    /// Treat `token_id` as issued by a configured operator key.
-    pub fn issue(&self, token_id: &str) {
-        self.tokens.lock().unwrap().insert(token_id.to_owned());
-    }
-
-    fn canonical(bytes: &[u8]) -> Result<Value, Rejection> {
-        from_jcs::<Value>(bytes, "object").map_err(|_| Rejection::Malformed("not canonical"))
-    }
-
-    fn check_signed(&self, bytes: &[u8]) -> Result<(), Rejection> {
-        if self.signed.lock().unwrap().contains(&sha(bytes)) {
-            Ok(())
-        } else {
-            Err(Rejection::BadSignature)
-        }
-    }
-}
-
-fn s(v: &Value, k: &str) -> Result<String, Rejection> {
-    v[k].as_str()
-        .map(str::to_owned)
-        .ok_or(Rejection::Malformed("missing field"))
-}
-
-fn n(v: &Value, k: &str) -> Result<u64, Rejection> {
-    v[k].as_u64().ok_or(Rejection::Malformed("missing field"))
-}
-
-impl Verifier for FakeVerifier {
-    fn verify_listing(&self, bytes: &[u8]) -> Result<VerifiedListing, Rejection> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        let card = Self::canonical(bytes)?;
-        self.check_signed(bytes)?;
-        let p = &card["capabilities"]["extensions"][0]["params"];
-        Ok(VerifiedListing {
-            name: s(p, "name")?,
-            identity: s(p, "identity")?,
-            directory: s(p, "directory")?,
-            relay: s(p, "relay")?,
-            seq: n(p, "seq")?,
-            issued_at: n(p, "issued_at")?,
-            door: match p.get("door") {
-                Some(d) => Some(Door {
-                    id: s(d, "id")?,
-                    expires_at: n(d, "expires_at")?,
-                }),
-                None => None,
-            },
-            owner_domain: p["owner_domain"].as_str().map(str::to_owned),
-            token: p["token"].clone(),
-        })
-    }
-
-    fn verify_token(&self, t: &Value) -> Result<ListingToken, Rejection> {
-        let token_id = s(t, "token_id")?;
-        if !self.tokens.lock().unwrap().contains(&token_id) {
-            return Err(Rejection::UnknownKey);
-        }
-        Ok(ListingToken {
-            token_id,
-            directory: s(t, "directory")?,
-            name: s(t, "name")?,
-            identity: s(t, "identity")?,
-            owner_domain: t["owner_domain"].as_str().map(str::to_owned),
-            issued_at: n(t, "issued_at")?,
-            expires_at: n(t, "expires_at")?,
-            key_id: s(t, "key_id")?,
-        })
-    }
-
-    fn verify_withdrawal(&self, bytes: &[u8]) -> Result<Withdrawal, Rejection> {
-        let w = Self::canonical(bytes)?;
-        self.check_signed(bytes)?;
-        Ok(Withdrawal {
-            directory: s(&w, "directory")?,
-            name: s(&w, "name")?,
-            identity: s(&w, "identity")?,
-            seq: n(&w, "seq")?,
-            ts: n(&w, "ts")?,
-        })
-    }
-
-    fn verify_revocation(&self, bytes: &[u8]) -> Result<TokenRevocation, Rejection> {
-        let r = Self::canonical(bytes)?;
-        self.check_signed(bytes)?;
-        Ok(TokenRevocation {
-            token_id: s(&r, "token_id")?,
-            revoked_at: n(&r, "revoked_at")?,
-            reason: s(&r, "reason")?,
-            key_id: s(&r, "key_id")?,
-        })
-    }
-
-    fn owner_verdict(&self, file: &[u8], identity: &str, listing: &str) -> OwnerVerdict {
-        let Ok(f) = serde_json::from_slice::<Value>(file) else {
-            return OwnerVerdict::Invalid;
-        };
-        if let Some(r) = f["revoked"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|r| r["identity"] == identity)
-        {
-            return OwnerVerdict::Revoked {
-                revoked_at: r["revoked_at"].as_u64().unwrap_or(0),
-                reason: r["reason"].as_str().unwrap_or("compromised").to_owned(),
-            };
-        }
-        let listed = f["identities"].as_array().into_iter().flatten().any(|e| {
-            e["identity"] == identity
-                && e.get("listings")
-                    .and_then(Value::as_array)
-                    .is_none_or(|ls| ls.iter().any(|l| l == listing))
-        });
-        if listed {
-            OwnerVerdict::Vouched
-        } else {
-            OwnerVerdict::NotVouched
-        }
-    }
-
-    fn token_keys(&self) -> Vec<TokenKey> {
-        vec![TokenKey {
-            key_id: "test-key".to_owned(),
-            public_key: "test-public-key".to_owned(),
-        }]
-    }
+/// A fresh identity id (`ac:v0:...`).
+pub fn identity_id() -> String {
+    identity().id()
 }
 
 /// The owner-file fetcher double.
@@ -216,10 +78,14 @@ pub struct FakeFetcher {
 
 impl FakeFetcher {
     pub fn serve(&self, domain: &str, file: &Value) {
+        self.serve_bytes(domain, serde_json::to_vec(file).unwrap());
+    }
+
+    pub fn serve_bytes(&self, domain: &str, file: Vec<u8>) {
         self.files
             .lock()
             .unwrap()
-            .insert(domain.to_owned(), Ok(serde_json::to_vec(file).unwrap()));
+            .insert(domain.to_owned(), Ok(file));
     }
 
     pub fn fail(&self, domain: &str, e: FetchError) {
@@ -252,11 +118,20 @@ impl OwnerFetcher for FakeFetcher {
 /// One skill: id, name, tags.
 pub type SkillSpec = (&'static str, &'static str, &'static [&'static str]);
 
+/// Which operator key issues the token.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Issuer {
+    /// The key the directory pins.
+    Pinned,
+    /// A key it doesn't know.
+    Stranger,
+}
+
 /// A listing to build.
 #[derive(Clone)]
 pub struct Spec {
     pub name: String,
-    pub identity: String,
+    pub agent: Agent,
     pub seq: u64,
     pub issued_at: u64,
     pub door_expires_at: Option<u64>,
@@ -265,96 +140,30 @@ pub struct Spec {
     pub description: String,
     pub organization: Option<String>,
     pub skills: Vec<SkillSpec>,
-    pub token_id: String,
+    /// Reuse this token instead of issuing one.
+    pub token: Option<ListingToken>,
+    pub token_issued_at: u64,
     pub token_expires_at: u64,
     pub token_directory: String,
-    pub token_name: Option<String>,
+    pub token_identity: Option<String>,
+    pub token_domain: Option<String>,
+    pub issuer: Issuer,
     pub directory: String,
     pub relay: String,
 }
 
-/// A built listing: its exact bytes and how it was made.
+/// A built listing: its exact bytes and its token.
 pub struct Built {
     pub bytes: Vec<u8>,
-    pub spec: Spec,
-}
-
-impl Spec {
-    pub fn card(&self) -> Value {
-        let mut params = json!({
-            "directory": self.directory,
-            "identity": self.identity,
-            "issued_at": self.issued_at,
-            "name": self.name,
-            "relay": self.relay,
-            "seq": self.seq,
-            "token": self.token(),
-            "v": 0,
-        });
-        if let Some(t) = self.door_expires_at {
-            params["door"] =
-                json!({"expires_at": t, "id": random_b64(16), "key": random_b64(1216)});
-        }
-        if let Some(d) = &self.owner_domain {
-            params["owner_domain"] = json!(d);
-        }
-        let skills: Vec<Value> = self
-            .skills
-            .iter()
-            .map(|(id, name, tags)| json!({"id": id, "name": name, "tags": tags}))
-            .collect();
-        let mut card = json!({
-            "capabilities": {"extensions": [{
-                "description": "Reachable end-to-end encrypted through AgentConnect.",
-                "params": params,
-                "required": true,
-                "uri": "https://yggdrasill.network/ext/agentconnect/e2e/v0",
-            }]},
-            "defaultInputModes": ["text/plain"],
-            "defaultOutputModes": ["text/plain"],
-            "description": self.description,
-            "name": self.card_name,
-            "signatures": [{"protected": random_b64(48), "signature": random_b64(64)}],
-            "supportedInterfaces": [{
-                "protocolBinding": "AGENTCONNECT",
-                "protocolVersion": "0",
-                "url": format!("https://{}/a/{}.json", self.directory, self.name),
-            }],
-            "version": "1.0.0",
-        });
-        if !skills.is_empty() {
-            card["skills"] = json!(skills);
-        }
-        if let (Some(org), Some(d)) = (&self.organization, &self.owner_domain) {
-            card["provider"] = json!({"organization": org, "url": format!("https://{d}")});
-        }
-        card
-    }
-
-    pub fn token(&self) -> Value {
-        let mut t = json!({
-            "directory": self.token_directory,
-            "expires_at": self.token_expires_at,
-            "identity": self.identity,
-            "issued_at": self.issued_at.saturating_sub(DAY),
-            "key_id": "test-key",
-            "name": self.token_name.clone().unwrap_or_else(|| self.name.clone()),
-            "sig": random_b64(64),
-            "token_id": self.token_id,
-            "v": 0,
-        });
-        if let Some(d) = &self.owner_domain {
-            t["owner_domain"] = json!(d);
-        }
-        t
-    }
+    pub token: ListingToken,
 }
 
 pub struct Harness {
     pub dir: Arc<Directory<MemoryStore>>,
     pub clock: Arc<FakeClock>,
-    pub verifier: Arc<FakeVerifier>,
     pub fetcher: Arc<FakeFetcher>,
+    pub dk: DirectoryKey,
+    pub stranger_dk: DirectoryKey,
     pub http: HttpConfig,
 }
 
@@ -374,6 +183,10 @@ impl Resp {
         serde_json::from_slice(&self.body).unwrap()
     }
 
+    pub fn code(&self) -> Value {
+        self.json()["code"].clone()
+    }
+
     pub fn header(&self, name: &str) -> Option<String> {
         self.headers
             .get(name)
@@ -381,32 +194,50 @@ impl Resp {
     }
 }
 
-pub const CLIENT: &str = "198.51.100.7";
-
 impl Harness {
     pub fn new() -> Self {
         Self::with(|d| d)
     }
 
     pub fn with(f: impl FnOnce(Directory<MemoryStore>) -> Directory<MemoryStore>) -> Self {
+        let dk = DirectoryKey::generate(&rng()).unwrap();
+        let keys = vec![b64(&dk.public_key())];
+        let mut h = Self::pinned(HOST, RELAY, &keys, None, f);
+        h.dk = dk;
+        h
+    }
+
+    /// A directory for `host` and `relay` pinning `keys` (base64url), with
+    /// the clock at `now` if given.
+    pub fn pinned(
+        host: &str,
+        relay: &str,
+        keys: &[String],
+        now: Option<u64>,
+        f: impl FnOnce(Directory<MemoryStore>) -> Directory<MemoryStore>,
+    ) -> Self {
         let clock = Arc::new(FakeClock::default());
-        let verifier = Arc::new(FakeVerifier::default());
+        if let Some(t) = now {
+            clock.set(std::time::UNIX_EPOCH + Duration::from_secs(t));
+        }
         let fetcher = Arc::new(FakeFetcher::default());
+        let verifier = CoreVerifier::new(host, keys).unwrap();
         let dir = Directory::new(
             MemoryStore::new(),
-            verifier.clone(),
+            Arc::new(verifier),
             fetcher.clone(),
             clock.clone(),
             Settings {
-                host: HOST.to_owned(),
-                relays: vec![RELAY.to_owned()],
+                host: host.to_owned(),
+                relays: vec![relay.to_owned()],
             },
         );
         Self {
             dir: Arc::new(f(dir)),
             clock,
-            verifier,
             fetcher,
+            dk: DirectoryKey::generate(&rng()).unwrap(),
+            stranger_dk: DirectoryKey::generate(&rng()).unwrap(),
             http: HttpConfig::default(),
         }
     }
@@ -419,14 +250,12 @@ impl Harness {
         self.clock.advance(Duration::from_secs(secs));
     }
 
-    /// A listing spec with sensible defaults and a fresh, issued token.
-    pub fn spec(&self, name: &str, identity: &str) -> Spec {
+    /// A listing spec with sensible defaults.
+    pub fn spec(&self, name: &str, agent: &Agent) -> Spec {
         let now = self.now();
-        let token_id = random_b64(16);
-        self.verifier.issue(&token_id);
         Spec {
             name: name.to_owned(),
-            identity: identity.to_owned(),
+            agent: agent.clone(),
             seq: 1,
             issued_at: now,
             door_expires_at: Some(now + 5 * DAY + 3600),
@@ -434,54 +263,128 @@ impl Harness {
             card_name: format!("Card {name}"),
             description: format!("Agent {name} does things."),
             organization: None,
-            skills: vec![],
-            token_id,
-            token_expires_at: now + 90 * DAY,
+            skills: vec![("general", "General", &["general"])],
+            token: None,
+            token_issued_at: now - DAY,
+            token_expires_at: now + 80 * DAY,
             token_directory: HOST.to_owned(),
-            token_name: None,
+            token_identity: None,
+            token_domain: None,
+            issuer: Issuer::Pinned,
             directory: HOST.to_owned(),
             relay: RELAY.to_owned(),
         }
     }
 
-    /// Canonical, signed bytes for `spec`.
-    pub fn build(&self, spec: &Spec) -> Built {
-        let bytes = jcs(&spec.card()).unwrap();
-        self.verifier.sign(&bytes);
-        Built {
-            bytes,
-            spec: spec.clone(),
+    fn token(&self, s: &Spec) -> ListingToken {
+        if let Some(t) = &s.token {
+            return t.clone();
         }
+        let key = match s.issuer {
+            Issuer::Pinned => &self.dk,
+            Issuer::Stranger => &self.stranger_dk,
+        };
+        key.issue_token(
+            &rng(),
+            &TokenGrant {
+                directory: s.token_directory.clone(),
+                name: s.name.clone(),
+                identity: s.token_identity.clone().unwrap_or_else(|| s.agent.id()),
+                owner_domain: s.token_domain.clone(),
+                issued_at: s.token_issued_at,
+                expires_at: s.token_expires_at,
+            },
+        )
+        .unwrap()
+    }
+
+    /// Canonical, signed bytes for `spec`, or the core's refusal to sign.
+    pub fn try_build(&self, s: &Spec) -> agentconnect_core::Result<Built> {
+        let token = self.token(s);
+        let r = rng();
+        let door = s.door_expires_at.map(|expires_at| {
+            let mut key = vec![0_u8; HPKE_PUBLIC_KEY_LEN];
+            r.fill(&mut key).unwrap();
+            ListedDoor {
+                id: r.array().unwrap(),
+                key,
+                expires_at,
+            }
+        });
+        let card = ListingCard {
+            name: s.card_name.clone(),
+            description: s.description.clone(),
+            version: "1.0.0".into(),
+            provider: s.organization.as_ref().map(|o| ListingProvider {
+                organization: o.clone(),
+                url: format!("https://{}", s.owner_domain.as_deref().unwrap_or_default()),
+            }),
+            streaming: false,
+            push_notifications: false,
+            default_input_modes: vec!["text/plain".into()],
+            default_output_modes: vec!["text/plain".into()],
+            skills: s
+                .skills
+                .iter()
+                .map(|(id, name, tags)| ListingSkill {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                    description: format!("Does {name}."),
+                    tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+                    examples: vec![],
+                    input_modes: vec![],
+                    output_modes: vec![],
+                })
+                .collect(),
+            extension_description: Some(
+                "Reachable end-to-end encrypted through AgentConnect.".into(),
+            ),
+            params: E2eParams {
+                identity: s.agent.id(),
+                name: s.name.clone(),
+                directory: s.directory.clone(),
+                relay: s.relay.clone(),
+                seq: s.seq,
+                issued_at: s.issued_at,
+                door,
+                owner_domain: s.owner_domain.clone(),
+                token: token.clone(),
+            },
+        };
+        let signed = card.sign(&s.agent)?;
+        Ok(Built {
+            bytes: signed.bytes().to_vec(),
+            token,
+        })
+    }
+
+    pub fn build(&self, s: &Spec) -> Built {
+        self.try_build(s).unwrap()
     }
 
     /// Build and publish; panics unless accepted.
-    pub async fn publish(&self, spec: &Spec) -> Built {
-        let b = self.build(spec);
+    pub async fn publish(&self, s: &Spec) -> Built {
+        let b = self.build(s);
         let r = self.post("/v0/listings", b.bytes.clone()).await;
         assert!(r.status.is_success(), "{} {}", r.status, r.text());
         b
     }
 
-    /// A signed withdrawal.
-    pub fn withdrawal(&self, name: &str, identity: &str, seq: u64) -> Vec<u8> {
-        let w = json!({
-            "directory": HOST, "identity": identity, "name": name, "seq": seq,
-            "sig": random_b64(64), "ts": self.now(), "v": 0,
-        });
-        let bytes = jcs(&w).unwrap();
-        self.verifier.sign(&bytes);
-        bytes
+    /// A signed withdrawal, timestamped now.
+    pub fn withdrawal(&self, name: &str, agent: &Agent, seq: u64) -> Vec<u8> {
+        Withdrawal::sign(agent, HOST, name, seq, self.now())
+            .unwrap()
+            .to_json()
+            .unwrap()
     }
 
-    /// A signed token revocation.
-    pub fn revocation(&self, token_id: &str) -> Vec<u8> {
-        let r = json!({
-            "key_id": "test-key", "reason": "spam", "revoked_at": self.now(),
-            "sig": random_b64(64), "token_id": token_id, "v": 0,
-        });
-        let bytes = jcs(&r).unwrap();
-        self.verifier.sign(&bytes);
-        bytes
+    /// A revocation of `token` by the pinned operator key.
+    pub fn revocation(&self, token: &ListingToken) -> Vec<u8> {
+        self.dk
+            .revoke_token(&token.token_id, self.now(), "spam")
+            .unwrap()
+            .to_json()
+            .unwrap()
     }
 
     pub async fn send(&self, req: Request<Body>) -> Resp {
@@ -508,7 +411,8 @@ impl Harness {
     }
 
     pub async fn get_with(&self, path: &str, headers: &[(&str, &str)]) -> Resp {
-        let mut b = Request::get(path).header("host", HOST);
+        let host = self.dir.settings().host.clone();
+        let mut b = Request::get(path).header("host", host);
         for (k, v) in headers {
             b = b.header(*k, *v);
         }
@@ -516,9 +420,10 @@ impl Harness {
     }
 
     pub async fn post(&self, path: &str, body: Vec<u8>) -> Resp {
+        let host = self.dir.settings().host.clone();
         self.send(
             Request::post(path)
-                .header("host", HOST)
+                .header("host", host)
                 .header("content-type", "application/json")
                 .body(Body::from(body))
                 .unwrap(),

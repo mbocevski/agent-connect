@@ -5,8 +5,9 @@
 use std::sync::Arc;
 
 use agentconnect_core::clock::Clock;
+use agentconnect_core::encoding::{b64, hex};
 use agentconnect_core::identity::{fingerprint, parse_identity};
-use sha2::{Digest, Sha256};
+use agentconnect_core::listing::MAX_LISTING_BYTES;
 
 use crate::card::Card;
 use crate::metrics::Metrics;
@@ -18,10 +19,6 @@ use crate::store::{
 };
 use crate::verify::{OwnerVerdict, Rejection, TokenKey, Verifier};
 
-/// Longest a door may stay open after `issued_at` (Decision 1).
-pub const DOOR_MAX_SECS: u64 = 7 * 86_400;
-/// Allowed clock skew for `issued_at` and withdrawal `ts` (Decision 6).
-pub const SKEW_SECS: u64 = 300;
 /// How long the "key changed" banner shows (Decision 2).
 pub const KEY_CHANGED_SECS: u64 = 30 * 86_400;
 /// Most results a search returns.
@@ -33,17 +30,8 @@ pub const FEED_PAGE: u32 = 100;
 /// Owner checks run per maintenance pass.
 pub const CHECKS_PER_PASS: u32 = 100;
 
-/// Whether `name` is a listing slug: 3 to 32 of `[a-z0-9-]`, starting and
-/// ending with a letter or digit (Decision 1).
-#[must_use]
-pub fn valid_name(name: &str) -> bool {
-    let b = name.as_bytes();
-    (3..=32).contains(&b.len())
-        && b.iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
-        && b.first().is_some_and(u8::is_ascii_alphanumeric)
-        && b.last().is_some_and(u8::is_ascii_alphanumeric)
-}
+/// Whether `name` is a listing slug (the core's rule, SPEC §13.1.1).
+pub use agentconnect_core::listing::is_listing_name as valid_name;
 
 /// A refusal, with the HTTP status and a stable code. `detail` is a fixed
 /// string: no request data is ever echoed back.
@@ -82,17 +70,22 @@ fn internal(e: &dyn std::fmt::Display) -> DirError {
 }
 
 fn rejected(r: &Rejection, what: &'static str) -> DirError {
-    match r {
-        Rejection::Malformed(_) => DirError::new(400, what, "malformed or not canonical"),
+    match *r {
+        Rejection::Malformed(why) => DirError::new(400, what, why),
         Rejection::BadSignature => DirError::new(403, "bad_signature", "signature does not verify"),
-        Rejection::UnknownKey => DirError::new(
-            403,
-            "unknown_key",
-            "not signed by a configured operator key",
-        ),
-        Rejection::Unavailable => {
-            DirError::new(503, "unavailable", "verification is not available")
+        Rejection::DoorExpired => DirError::new(400, "bad_door", "the door has expired"),
+        Rejection::UnknownKey => {
+            DirError::new(403, "unknown_key", "not signed by a pinned operator key")
         }
+        Rejection::BadToken(why) => DirError::new(403, "bad_token", why),
+        Rejection::WrongDirectory => {
+            DirError::new(400, "wrong_directory", "this is for another directory")
+        }
+        Rejection::StaleTs => DirError::new(
+            400,
+            "stale_ts",
+            "ts must be within 300 s of the directory clock",
+        ),
     }
 }
 
@@ -194,10 +187,6 @@ pub struct Directory<S: Store> {
     settings: Settings,
     metrics: Metrics,
     limiter: RateLimiter,
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    agentconnect_core::encoding::hex(&Sha256::digest(bytes))
 }
 
 fn fingerprint_of(identity: &str) -> String {
@@ -398,90 +387,52 @@ impl<S: Store> Directory<S> {
         r
     }
 
-    /// Verify the embedded token and check its scope and lifetime.
-    fn check_token(
-        &self,
-        listing: &crate::verify::VerifiedListing,
-        now: u64,
-    ) -> Result<crate::verify::ListingToken, DirError> {
-        let token = self
-            .verifier
-            .verify_token(&listing.token)
-            .map_err(|r| rejected(&r, "bad_token"))?;
-        let bad_token = |detail| Err(DirError::new(403, "bad_token", detail));
-        if token.directory != self.settings.host {
-            return bad_token("token is for another directory");
-        }
-        if token.name != listing.name || token.identity != listing.identity {
-            return bad_token("token is for another name or identity");
-        }
-        if token
-            .owner_domain
-            .as_ref()
-            .is_some_and(|d| listing.owner_domain.as_ref() != Some(d))
-        {
-            return bad_token("token pins another owner domain");
-        }
-        if token.expires_at <= now {
-            return bad_token("token has expired");
-        }
-        if token.issued_at > now + SKEW_SECS {
-            return bad_token("token is not yet valid");
-        }
-        Ok(token)
-    }
-
     async fn publish_inner(&self, bytes: &[u8]) -> Result<Published, DirError> {
         let bad = |code, detail| Err(DirError::new(400, code, detail));
-        if bytes.len() > crate::card::MAX_CARD_BYTES {
+        if bytes.len() > MAX_LISTING_BYTES {
             return Err(DirError::TOO_LARGE);
         }
         let now = self.now();
         let listing = self
             .verifier
-            .verify_listing(bytes)
+            .listing(bytes)
             .map_err(|r| rejected(&r, "bad_listing"))?;
-        if !valid_name(&listing.name) {
-            return bad("bad_listing", "invalid listing name");
-        }
-        if listing.directory != self.settings.host {
+        let p = listing.params();
+        if p.directory != self.settings.host {
             return bad("wrong_directory", "listing is for another directory");
         }
-        if !self.settings.relays.contains(&listing.relay) {
+        if !self.settings.relays.contains(&p.relay) {
             return bad(
                 "wrong_relay",
                 "listing points at a relay this directory doesn't list",
             );
         }
-        if listing.issued_at > now + SKEW_SECS {
-            return bad("bad_listing", "issued_at is in the future");
-        }
-        if let Some(door) = &listing.door
-            && (door.expires_at <= now || door.expires_at > listing.issued_at + DOOR_MAX_SECS)
-        {
-            return bad(
-                "bad_door",
-                "door must expire in the future and at most 7 days after issued_at",
-            );
-        }
-        let token = self.check_token(&listing, now)?;
+        // Authorisation first: a listing without a valid token is refused
+        // for that, whatever else is wrong with it.
+        self.verifier
+            .check_token(&listing, now)
+            .map_err(|r| rejected(&r, "bad_token"))?;
+        self.verifier
+            .check_publish(&listing, now)
+            .map_err(|r| rejected(&r, "bad_listing"))?;
+        let token = listing.token();
         let card = Card::parse(bytes)
             .map_err(|_| DirError::new(400, "bad_listing", "card text is not readable"))?;
         let record = ListingRecord {
-            name: listing.name.clone(),
-            identity: listing.identity.clone(),
-            seq: listing.seq,
-            token_id: token.token_id.clone(),
-            owner_domain: listing.owner_domain.clone(),
+            name: p.name.clone(),
+            identity: p.identity.clone(),
+            seq: p.seq,
+            token_id: b64(&token.token_id),
+            owner_domain: p.owner_domain.clone(),
             owner: OwnerStatus::PENDING,
-            door_expires_at: listing.door.as_ref().map(|d| d.expires_at),
-            token_expires_at: token.expires_at,
+            door_expires_at: p.door.as_ref().map(|d| d.expires_at),
+            token_expires_at: token.grant.expires_at,
             published_at: now,
             key_changed_at: None,
             bytes: bytes.to_vec(),
-            sha256: sha256_hex(bytes),
+            sha256: hex(&listing.sha256()),
             search: SearchDoc {
-                title: format!("{} {}", listing.name.replace('-', " "), card.name),
+                title: format!("{} {}", p.name.replace('-', " "), card.name),
                 skills: card.skills_text(),
                 description: card.description.clone(),
                 skill_keys: card.skill_keys(),
@@ -549,24 +500,28 @@ impl<S: Store> Directory<S> {
     }
 
     async fn withdraw_inner(&self, bytes: &[u8]) -> Result<Withdrawn, DirError> {
+        let now = self.now();
         let w = self
             .verifier
-            .verify_withdrawal(bytes)
+            .withdrawal(bytes, now)
             .map_err(|r| rejected(&r, "bad_request"))?;
-        let now = self.now();
-        if w.directory != self.settings.host {
-            return Err(DirError::new(
-                400,
-                "wrong_directory",
-                "withdrawal is for another directory",
-            ));
-        }
-        if w.ts.abs_diff(now) > SKEW_SECS {
-            return Err(DirError::new(
-                400,
-                "stale_ts",
-                "ts must be within 300 s of the directory clock",
-            ));
+        let wrong_identity = DirError::new(
+            403,
+            "wrong_identity",
+            "the name is listed by another identity",
+        );
+        let stale = DirError::new(409, "stale_seq", "seq is below the listed seq");
+        // The core decides whether the withdrawal covers the listed version;
+        // the store repeats the check atomically with the delete.
+        if let Some(rec) = self.store.get(&w.name).await.map_err(|e| internal(&e))?
+            && let Ok(listed) = self.verifier.listing(&rec.bytes)
+            && !self.verifier.applies(&w, &listed)
+        {
+            return Err(if listed.params().identity == w.identity {
+                stale
+            } else {
+                wrong_identity
+            });
         }
         let entry = std::str::from_utf8(bytes)
             .map_err(|_| DirError::new(400, "bad_request", "malformed or not canonical"))?;
@@ -585,20 +540,8 @@ impl<S: Store> Directory<S> {
             WithdrawOutcome::Withdrawn => true,
             WithdrawOutcome::Repeat => false,
             WithdrawOutcome::NotListed => return Err(DirError::NOT_FOUND),
-            WithdrawOutcome::WrongIdentity => {
-                return Err(DirError::new(
-                    403,
-                    "wrong_identity",
-                    "the name is listed by another identity",
-                ));
-            }
-            WithdrawOutcome::StaleSeq => {
-                return Err(DirError::new(
-                    409,
-                    "stale_seq",
-                    "seq is below the listed seq",
-                ));
-            }
+            WithdrawOutcome::WrongIdentity => return Err(wrong_identity),
+            WithdrawOutcome::StaleSeq => return Err(stale),
         };
         if changed {
             self.recheck_identity(&w.identity).await?;
@@ -631,13 +574,13 @@ impl<S: Store> Directory<S> {
     async fn revoke_inner(&self, bytes: &[u8]) -> Result<bool, DirError> {
         let rev = self
             .verifier
-            .verify_revocation(bytes)
+            .revocation(bytes)
             .map_err(|r| rejected(&r, "bad_request"))?;
         let entry = std::str::from_utf8(bytes)
             .map_err(|_| DirError::new(400, "bad_request", "malformed or not canonical"))?;
         match self
             .store
-            .revoke_token(&rev.token_id, entry, self.now())
+            .revoke_token(&b64(&rev.token_id), entry, self.now())
             .await
             .map_err(|e| internal(&e))?
         {
@@ -689,44 +632,34 @@ impl<S: Store> Directory<S> {
                 self.set_owner(r, status(OwnerCheck::Error)).await?;
                 e.as_str()
             }
-            Ok(file) => {
-                let listing = self.knock_ref(&r.name);
-                match self.verifier.owner_verdict(&file, &r.identity, &listing) {
-                    OwnerVerdict::Vouched => {
-                        self.set_owner(r, status(OwnerCheck::Vouched)).await?;
-                        "vouched"
-                    }
-                    OwnerVerdict::NotVouched => {
-                        self.set_owner(r, status(OwnerCheck::NotVouched)).await?;
-                        "not_vouched"
-                    }
-                    OwnerVerdict::Invalid => {
-                        self.set_owner(r, status(OwnerCheck::Error)).await?;
-                        "invalid"
-                    }
-                    OwnerVerdict::Revoked { revoked_at, reason } => {
-                        let entry = serde_json::json!({
-                            "v": 0,
-                            "directory": self.settings.host,
-                            "name": r.name,
-                            "identity": r.identity,
-                            "owner_domain": domain,
-                            "revoked_at": revoked_at,
-                            "reason": reason,
-                            "seq": r.seq,
-                        });
-                        let entry = agentconnect_core::encoding::jcs(&entry)
-                            .ok()
-                            .and_then(|b| String::from_utf8(b).ok())
-                            .ok_or(DirError::INTERNAL)?;
-                        self.store
-                            .owner_revoked(&r.name, &r.sha256, &entry, now)
-                            .await
-                            .map_err(|e| internal(&e))?;
-                        "revoked"
-                    }
+            Ok(file) => match self.verifier.owner_verdict(&file, &r.identity, &r.name) {
+                OwnerVerdict::Vouched => {
+                    self.set_owner(r, status(OwnerCheck::Vouched)).await?;
+                    "vouched"
                 }
-            }
+                OwnerVerdict::NotVouched => {
+                    self.set_owner(r, status(OwnerCheck::NotVouched)).await?;
+                    "not_vouched"
+                }
+                OwnerVerdict::Revoked { revoked_at, reason } => {
+                    let entry = serde_json::json!({
+                        "v": 0,
+                        "directory": self.settings.host,
+                        "name": r.name,
+                        "identity": r.identity,
+                        "owner_domain": domain,
+                        "revoked_at": revoked_at,
+                        "reason": reason,
+                        "seq": r.seq,
+                    });
+                    let entry = serde_json::to_string(&entry).map_err(|_| DirError::INTERNAL)?;
+                    self.store
+                        .owner_revoked(&r.name, &r.sha256, &entry, now)
+                        .await
+                        .map_err(|e| internal(&e))?;
+                    "revoked"
+                }
+            },
         };
         self.metrics.event("owner_check", outcome);
         Ok(())
@@ -802,19 +735,18 @@ mod tests {
 
     #[test]
     fn rejections_map_to_stable_codes() {
+        let code = |r| rejected(&r, "bad_listing").code;
+        assert_eq!(code(Rejection::Malformed("x")), "bad_listing");
         assert_eq!(
-            rejected(&Rejection::Malformed("x"), "bad_listing").code,
-            "bad_listing"
+            rejected(&Rejection::Malformed("x"), "bad_listing").detail,
+            "x"
         );
-        assert_eq!(
-            rejected(&Rejection::BadSignature, "bad_listing").status,
-            403
-        );
-        assert_eq!(
-            rejected(&Rejection::UnknownKey, "bad_token").code,
-            "unknown_key"
-        );
-        assert_eq!(rejected(&Rejection::Unavailable, "bad_token").status, 503);
+        assert_eq!(code(Rejection::BadSignature), "bad_signature");
+        assert_eq!(code(Rejection::DoorExpired), "bad_door");
+        assert_eq!(code(Rejection::UnknownKey), "unknown_key");
+        assert_eq!(code(Rejection::BadToken("expired")), "bad_token");
+        assert_eq!(code(Rejection::WrongDirectory), "wrong_directory");
+        assert_eq!(code(Rejection::StaleTs), "stale_ts");
         assert_eq!(fingerprint_of("nope"), "unavailable");
     }
 }

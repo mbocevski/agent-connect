@@ -7,7 +7,7 @@ use std::time::Duration;
 use agentconnect_core::clock::SystemClock;
 use agentconnect_directory::config::{Config, MEMORY_DB};
 use agentconnect_directory::owner::HttpsFetcher;
-use agentconnect_directory::verify::{Unavailable, Verifier};
+use agentconnect_directory::verify::{CoreVerifier, Verifier};
 use agentconnect_directory::{Directory, HttpConfig, MemoryStore, PgStore, Settings, Store, app};
 use axum::http::HeaderName;
 use tracing_subscriber::EnvFilter;
@@ -66,10 +66,12 @@ async fn main() -> std::io::Result<()> {
 
     let config =
         Config::from_env().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    // The listing verifier of agentconnect_core plugs in here. This build has
-    // none, so every publish, withdrawal and revocation is refused.
-    let verifier: Arc<dyn Verifier> = Arc::new(Unavailable);
-    tracing::warn!("no listing verifier in this build: publishing is disabled");
+    // Every signature, token and canonical-form check, under the pinned
+    // operator keys.
+    let verifier: Arc<dyn Verifier> = Arc::new(
+        CoreVerifier::new(&config.host, &config.token_keys)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
+    );
     if config.db == MEMORY_DB {
         serve(MemoryStore::new(), config, verifier).await
     } else {

@@ -27,16 +27,14 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::connect::dns::Name;
 use hyper_util::rt::TokioExecutor;
 
+use agentconnect_core::listing as core;
+
 use crate::store::{OwnerCheck, OwnerStatus};
 
-/// Largest accepted owner file.
-pub const MAX_OWNER_FILE: usize = 64 * 1024;
+/// Largest accepted owner file (the core's limit).
+pub const MAX_OWNER_FILE: usize = core::MAX_OWNER_FILE_BYTES;
 /// Budget for one fetch, connection to last byte.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-/// A check younger than this keeps the owner `verified`.
-pub const VERIFIED_FOR_SECS: u64 = 24 * 3600;
-/// After this long without a successful check the owner is `failed`.
-pub const STALE_FOR_SECS: u64 = 7 * 86_400;
 /// How often every listing is re-checked.
 pub const RECHECK_EVERY_SECS: u64 = 6 * 3600;
 
@@ -87,27 +85,11 @@ pub trait OwnerFetcher: Send + Sync + 'static {
     fn fetch<'a>(&'a self, domain: &'a str) -> BoxFuture<'a, Result<Vec<u8>, FetchError>>;
 }
 
-/// Whether `d` is an acceptable owner domain: lower-case ASCII LDH labels,
-/// at least two of them, no trailing dot, no port, and not an IP literal.
+/// Whether `d` is an acceptable owner domain: the core's rule (lower-case
+/// A-labels, at least two, no trailing dot, no port, not an IP literal).
 #[must_use]
 pub fn valid_domain(d: &str) -> bool {
-    if d.is_empty() || d.len() > 253 {
-        return false;
-    }
-    let labels: Vec<&str> = d.split('.').collect();
-    let ldh = |l: &&str| {
-        !l.is_empty()
-            && l.len() <= 63
-            && !l.starts_with('-')
-            && !l.ends_with('-')
-            && l.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    };
-    labels.len() >= 2
-        && labels.iter().all(ldh)
-        && !labels
-            .last()
-            .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()))
+    core::is_owner_domain(d)
 }
 
 fn v4_public(ip: Ipv4Addr) -> bool {
@@ -406,27 +388,30 @@ impl OwnerState {
     }
 }
 
-/// The state to show for a listing at `now`.
+/// The state to show for a listing at `now`: the core's `owner_state` on
+/// the stored check history. A revoked key never reaches a live page (the
+/// listing is withdrawn), so the core's `revoked` shows as `failed`.
 #[must_use]
 pub fn owner_state(domain: Option<&str>, s: &OwnerStatus, now: u64) -> OwnerState {
-    if domain.is_none() {
-        return OwnerState::Unclaimed;
-    }
-    match (s.last, s.verified_at) {
-        (OwnerCheck::Pending, _) => OwnerState::Checking,
-        (OwnerCheck::NotVouched, _) | (OwnerCheck::Error | OwnerCheck::Vouched, None) => {
-            OwnerState::Failed
-        }
-        (OwnerCheck::Vouched | OwnerCheck::Error, Some(t)) => {
-            let age = now.saturating_sub(t);
-            if age < VERIFIED_FOR_SECS {
-                OwnerState::Verified
-            } else if age < STALE_FOR_SECS {
-                OwnerState::Stale
-            } else {
-                OwnerState::Failed
-            }
-        }
+    let result = match s.last {
+        OwnerCheck::Pending => None,
+        OwnerCheck::Vouched => Some(core::FetchResult::Fetched(core::Vouch::Vouches)),
+        OwnerCheck::NotVouched => Some(core::FetchResult::Fetched(core::Vouch::DoesNotVouch)),
+        OwnerCheck::Error => Some(core::FetchResult::Failed),
+    };
+    let checks = core::OwnerChecks {
+        last_vouched_at: s.verified_at,
+        latest: result.map(|result| core::LatestFetch {
+            at: s.checked_at.unwrap_or(now),
+            result,
+        }),
+    };
+    match core::owner_state(domain, &checks, now) {
+        core::OwnerState::Unchecked => OwnerState::Checking,
+        core::OwnerState::Verified => OwnerState::Verified,
+        core::OwnerState::Unclaimed => OwnerState::Unclaimed,
+        core::OwnerState::Stale => OwnerState::Stale,
+        core::OwnerState::Failed | core::OwnerState::Revoked => OwnerState::Failed,
     }
 }
 
@@ -650,11 +635,19 @@ mod tests {
             OwnerState::Verified
         );
         assert_eq!(
-            owner_state(d, &s(OwnerCheck::Error, Some(now - VERIFIED_FOR_SECS)), now),
+            owner_state(
+                d,
+                &s(OwnerCheck::Error, Some(now - core::VERIFIED_FOR_SECS - 1)),
+                now
+            ),
             OwnerState::Stale
         );
         assert_eq!(
-            owner_state(d, &s(OwnerCheck::Error, Some(now - STALE_FOR_SECS)), now),
+            owner_state(
+                d,
+                &s(OwnerCheck::Error, Some(now - core::STALE_AFTER_SECS - 1)),
+                now
+            ),
             OwnerState::Failed
         );
         assert_eq!(
@@ -667,7 +660,7 @@ mod tests {
         );
         assert_eq!(
             owner_state(d, &s(OwnerCheck::Vouched, None), now),
-            OwnerState::Failed
+            OwnerState::Verified
         );
         for st in [
             OwnerState::Checking,

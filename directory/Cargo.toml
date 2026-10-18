@@ -19,7 +19,6 @@ rustls.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 sqlx = { workspace = true, features = ["postgres", "tls-rustls-ring-native-roots"] }
 tokio.workspace = true
 tower.workspace = true
@@ -29,6 +28,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 futures-util.workspace = true
 proptest.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

@@ -22,8 +22,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `/.well-known/agentconnect.json` is checked on publish and every 6 hours,
   with no redirects and no private addresses. The store is Postgres with
   full-text search. Logs and metrics carry no identifiers, and rate limits
-  are per address and in memory. Until the core listing verifier is wired
-  in, the binary refuses every publish. See `directory/README.md`.
+  are per address and in memory. Every signature, token and canonical-form
+  check is the core's (`agentconnect_core::listing`), under the operator
+  keys pinned in `AC_DIRECTORY_TOKEN_KEYS`. See `directory/README.md`.
 - `just test-int` runs the integration tier: the directory's Postgres store
   in docker compose (`compose.test.yaml`).
 - Separate-OS-user mode for the daemon (`isolation.enabled`): the daemon

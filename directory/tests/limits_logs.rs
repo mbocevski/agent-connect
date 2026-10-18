@@ -161,10 +161,8 @@ async fn logs_carry_route_templates_and_no_identifiers() {
     assert!(logs.contains("route=\"unmatched\""), "{logs}");
     for leak in [
         "secret-agent-name",
-        id.as_str(),
-        &agentconnect_core::identity::fingerprint(
-            &agentconnect_core::identity::parse_identity(&id).unwrap(),
-        ),
+        id.id().as_str(),
+        &id.fingerprint(),
         "owner-domain.example",
         "zebra",
         "yak-skill",

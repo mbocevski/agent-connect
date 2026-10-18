@@ -12,7 +12,7 @@ learns mailbox ids. A listing proves who signed it, not what the agent does.
 ## Run
 
 ```sh
-just directory                                   # in-memory store, 127.0.0.1:8090
+AC_DIRECTORY_TOKEN_KEYS=<DK.pub> just directory   # in-memory store, 127.0.0.1:8090
 docker build -f directory/Dockerfile -t agentconnect-directory .   # from the repo root
 ```
 
@@ -24,7 +24,7 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | `AC_DIRECTORY_DB` | required | A `postgres://` URL, or `memory:` for a throwaway store. Migrations run at start. |
 | `AC_DIRECTORY_HOST` | `agents.yggdrasill.network` | This directory's host. Listings, tokens and withdrawals must name it, and MCP requests must carry it as `Host`. |
 | `AC_DIRECTORY_RELAYS` | `connect.yggdrasill.network` | Comma-separated relays a listing may point at. The first is shown on the site. |
-| `AC_DIRECTORY_TOKEN_KEYS` | none | Comma-separated operator token public keys (`DK.pub`, base64url), at most two. |
+| `AC_DIRECTORY_TOKEN_KEYS` | required | Comma-separated operator token public keys (`DK.pub`, base64url): one, or two while rotating. Tokens, revocations and the well-known file use them. |
 | `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header a trusted reverse proxy sets to the client address (its last value is used) for rate limiting. Unset: the TCP peer. |
 | `RUST_LOG` | `info` | `tracing` filter. |
 
@@ -88,19 +88,18 @@ inside it; withdrawing by an IK-signed `Withdrawal`. There are no accounts.
 | Code | Status | Meaning |
 |---|---|---|
 | `bad_listing` | 400 | Not canonical, not the closed schema, or an invalid field. |
-| `bad_signature` | 403 | The JWS or the withdrawal signature doesn't verify. |
+| `bad_signature` | 403 | The JWS, withdrawal or revocation signature doesn't verify. |
 | `unknown_key` | 403 | The token isn't signed by a configured operator key. |
 | `bad_token` | 403 | The token is for another directory, name, identity or domain, or has expired. |
 | `token_revoked` | 403 | The operator revoked the token. |
 | `wrong_directory`, `wrong_relay` | 400 | The listing names another directory, or a relay this one doesn't list. |
-| `bad_door` | 400 | The door has expired or lives more than 7 days past `issued_at`. |
+| `bad_door` | 400 | The door has expired. (A door more than 7 days past `issued_at` is `bad_listing`.) |
 | `stale_seq` | 409 | `seq` isn't above every `seq` seen or withdrawn for the name. |
 | `stale_ts` | 400 | A withdrawal's `ts` is more than 300 s from the directory clock. |
 | `wrong_identity` | 403 | The name is listed by another identity. |
 | `not_found` | 404 | Nothing is listed under that name. |
 | `too_large` | 413 | Over 32 KiB. |
 | `rate_limited` | 429 | Over the per-address limit; see `Retry-After`. |
-| `unavailable` | 503 | This build has no listing verifier. |
 
 ## Owner verification
 
@@ -116,14 +115,19 @@ withdraws the listing.
 ## Verifier
 
 Every signature, token and canonical-form check goes through the `Verifier`
-trait in `src/verify.rs`, whose production implementation wraps
-`agentconnect_core`'s listing module. The binary uses `Unavailable` until that
-module is wired in: it refuses every publish, withdrawal and revocation, so
-the site serves an empty directory.
+trait in `src/verify.rs`, implemented by `CoreVerifier` on
+`agentconnect_core::listing` with the pinned operator keys. The `detail` of a
+`bad_listing`, `bad_token` or `bad_request` refusal is the core's reason.
+Heimdall itself checks only what needs its own state: its host and relays,
+`seq` and tombstones, and revoked token ids. The token is checked before the
+publish-time rules, so an unauthorised listing is refused as such.
 
 ## Tests
 
 `just test` runs everything on the in-memory store with a fake clock, a fake
-owner-file fetcher and a verifier test double. `just test-int` runs the same
+owner-file fetcher and the real verifier, with keys from the per-run seed.
+`tests/vectors.rs` runs the core's `testdata/` vectors (`listings.json`,
+`listing-tokens.json`, `withdrawals.json`, `owner-files.json`) through the
+endpoints. `just test-int` runs the same
 store suite on Postgres (`compose.test.yaml`). The fuzz target is in `fuzz/`
 (`cargo +nightly fuzz run card_text`).

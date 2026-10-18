@@ -1,121 +1,36 @@
-//! The seam to `agentconnect_core` for every signature, token and
+//! The seam to `agentconnect_core::listing` for every signature, token and
 //! canonical-form check (ADR-006, Decisions 1, 2 and 6).
 //!
 //! Heimdall never checks a signature, parses a JWS or canonicalises JSON on
 //! its own. Everything that decides whether a signed object is genuine goes
-//! through a [`Verifier`]. What Heimdall does itself is policy: comparing the
-//! verified fields with its own host, its relays, its clock and its store.
-//!
-//! The production implementation wraps `agentconnect_core::listing`. Until
-//! that module is available, the binary runs with [`Unavailable`], which
-//! refuses every signed object, so nothing can be published.
+//! through a [`Verifier`], implemented by [`CoreVerifier`]. What Heimdall
+//! does itself is policy that needs its own state: its host and relays, the
+//! `seq` and tombstone rules and the revoked token ids.
 
+use agentconnect_core::Error;
+use agentconnect_core::encoding::{b64, b64_decode_array};
+use agentconnect_core::listing::{
+    ListingToken, OwnerFile, RevocationReason, SignedListing, TokenRevocation, TrustedDirectory,
+    Vouch, Withdrawal, directory_key_id,
+};
 use serde::Serialize;
 
-/// The door of a listing (`params.door`, Decision 3). The public key is not
-/// needed by the directory and is not carried here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Door {
-    /// The relay-side door handle, 22 base64url characters.
-    pub id: String,
-    /// Unix seconds after which the door is closed.
-    pub expires_at: u64,
-}
-
-/// The `e2e` extension params of a listing whose JWS, canonical form, closed
-/// schema and text limits have been verified (Decision 1).
-#[derive(Debug, Clone, PartialEq)]
-pub struct VerifiedListing {
-    /// The listing name (slug).
-    pub name: String,
-    /// The listed identity, `ac:v0:<b64url IK.pub>`; the JWS `kid`.
-    pub identity: String,
-    /// The directory host the listing is for, in canonical form.
-    pub directory: String,
-    /// The relay host a knock goes through, in canonical form.
-    pub relay: String,
-    /// The listing sequence number.
-    pub seq: u64,
-    /// Unix seconds at signing.
-    pub issued_at: u64,
-    /// The door, absent when the listing takes no new connections.
-    pub door: Option<Door>,
-    /// The claimed owner domain.
-    pub owner_domain: Option<String>,
-    /// The embedded `ListingToken`, still to be checked with
-    /// [`Verifier::verify_token`].
-    pub token: serde_json::Value,
-}
-
-/// A `ListingToken` whose signature verified against a configured operator
-/// key (Decision 6). Its scope and lifetime are not yet compared with
-/// anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListingToken {
-    /// The token id (16 random bytes, base64url).
-    pub token_id: String,
-    /// The directory host the token is for.
-    pub directory: String,
-    /// The listing name it authorises.
-    pub name: String,
-    /// The identity it authorises.
-    pub identity: String,
-    /// The only owner domain the listing may claim, if pinned.
-    pub owner_domain: Option<String>,
-    /// Unix seconds at issue.
-    pub issued_at: u64,
-    /// Unix seconds after which the token is void.
-    pub expires_at: u64,
-    /// The operator key that signed it.
-    pub key_id: String,
-}
-
-/// An IK-signed `Withdrawal` whose signature verified (Decision 6).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Withdrawal {
-    /// The directory host.
-    pub directory: String,
-    /// The listing name.
-    pub name: String,
-    /// The signing identity.
-    pub identity: String,
-    /// The highest `seq` withdrawn.
-    pub seq: u64,
-    /// Unix seconds at signing.
-    pub ts: u64,
-}
-
-/// An operator-signed `TokenRevocation` whose signature verified against a
-/// configured operator key (Decision 6).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TokenRevocation {
-    /// The revoked token.
-    pub token_id: String,
-    /// Unix seconds of the revocation.
-    pub revoked_at: u64,
-    /// The operator's reason.
-    pub reason: String,
-    /// The operator key that signed it.
-    pub key_id: String,
-}
-
 /// What an owner's `/.well-known/agentconnect.json` says about one identity
-/// in one listing (Decision 2).
+/// in one listing (Decision 2). A file that doesn't parse vouches for
+/// nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerVerdict {
     /// The file lists the identity, and this listing if it scopes listings.
     Vouched,
-    /// The file is valid but does not vouch for the identity here.
+    /// The file doesn't vouch for the identity here, or isn't valid.
     NotVouched,
     /// The identity is in the file's `revoked` list.
     Revoked {
-        /// Unix seconds of the revocation.
-        revoked_at: u64,
-        /// `superseded` or `compromised`.
-        reason: String,
+        /// Unix seconds of the revocation, if the file gives one.
+        revoked_at: Option<u64>,
+        /// `superseded` or `compromised`, if the file gives one.
+        reason: Option<&'static str>,
     },
-    /// The file is not valid (not I-JSON, too large, duplicate keys, ...).
-    Invalid,
 }
 
 /// An operator token key, published for information at
@@ -128,96 +43,219 @@ pub struct TokenKey {
     pub public_key: String,
 }
 
-/// Why a signed object was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a signed object was refused. The strings are the core's reasons and
+/// are safe to return to the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
     /// Not canonical, not the closed schema, over a limit or otherwise
-    /// malformed. The detail is safe to return to the client.
+    /// malformed.
     Malformed(&'static str),
-    /// The signature does not verify.
+    /// The listing, withdrawal or revocation signature doesn't verify.
     BadSignature,
-    /// The signing key is not one this directory is configured with.
+    /// The door has expired.
+    DoorExpired,
+    /// The token isn't signed by a pinned operator key.
     UnknownKey,
-    /// No verifier is available in this build.
-    Unavailable,
+    /// The token doesn't verify, doesn't bind this listing or has expired.
+    BadToken(&'static str),
+    /// The object is for another directory.
+    WrongDirectory,
+    /// A withdrawal's `ts` is more than 300 s from the directory clock.
+    StaleTs,
 }
 
 /// Every cryptographic and canonical-form check Heimdall needs.
-///
-/// Implementations must be pure: no I/O, no clock. Time-dependent and
-/// store-dependent rules (expiry, `seq`, revoked token ids) are the
-/// directory's job.
 pub trait Verifier: Send + Sync + 'static {
-    /// Verify a listing (Decision 1): byte-for-byte canonical JCS, the closed
-    /// schema and text limits, exactly one interface and one JWS, the
-    /// protected header, and the Ed25519 signature under the key in `kid`.
+    /// Verify published listing bytes: canonical JCS, the closed schema and
+    /// field rules, the one JWS and its Ed25519 signature.
     ///
     /// # Errors
     ///
-    /// A [`Rejection`] naming the first failed check.
-    fn verify_listing(&self, bytes: &[u8]) -> Result<VerifiedListing, Rejection>;
+    /// [`Rejection::Malformed`] or [`Rejection::BadSignature`].
+    fn listing(&self, bytes: &[u8]) -> Result<SignedListing, Rejection>;
 
-    /// Verify an embedded `ListingToken`'s signature against the configured
-    /// operator keys.
+    /// The publish-time checks: `issued_at` at most 300 s ahead, an
+    /// unexpired door.
     ///
     /// # Errors
     ///
-    /// [`Rejection::UnknownKey`] for a `key_id` that isn't configured, else
-    /// as for [`Verifier::verify_listing`].
-    fn verify_token(&self, token: &serde_json::Value) -> Result<ListingToken, Rejection>;
+    /// [`Rejection::Malformed`] or [`Rejection::DoorExpired`].
+    fn check_publish(&self, listing: &SignedListing, now: u64) -> Result<(), Rejection>;
 
-    /// Verify a `Withdrawal`: canonical JCS and the IK signature under the
-    /// `agentconnect/v0/listing-withdraw` label.
+    /// The embedded token verifies under a pinned key, binds this listing
+    /// and hasn't expired. Revocation is the store's to check, atomically
+    /// with the publish.
     ///
     /// # Errors
     ///
-    /// A [`Rejection`].
-    fn verify_withdrawal(&self, bytes: &[u8]) -> Result<Withdrawal, Rejection>;
+    /// [`Rejection::UnknownKey`] or [`Rejection::BadToken`].
+    fn check_token(&self, listing: &SignedListing, now: u64) -> Result<(), Rejection>;
 
-    /// Verify a `TokenRevocation` against the configured operator keys.
+    /// Verify a `Withdrawal` and that it is for this directory and fresh.
     ///
     /// # Errors
     ///
-    /// A [`Rejection`].
-    fn verify_revocation(&self, bytes: &[u8]) -> Result<TokenRevocation, Rejection>;
+    /// [`Rejection::Malformed`], [`Rejection::BadSignature`],
+    /// [`Rejection::WrongDirectory`] or [`Rejection::StaleTs`].
+    fn withdrawal(&self, bytes: &[u8], now: u64) -> Result<Withdrawal, Rejection>;
 
-    /// Decide what an owner's well-known file says about `identity` in the
-    /// listing `listing` (`<directory>/a/<name>`), including the fingerprint
-    /// consistency rule.
-    fn owner_verdict(&self, file: &[u8], identity: &str, listing: &str) -> OwnerVerdict;
+    /// Whether `withdrawal` removes `listing`.
+    fn applies(&self, withdrawal: &Withdrawal, listing: &SignedListing) -> bool;
 
-    /// The configured operator token keys.
+    /// Verify an operator `TokenRevocation` under the pinned keys.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejection::Malformed`], [`Rejection::UnknownKey`] or
+    /// [`Rejection::BadSignature`].
+    fn revocation(&self, bytes: &[u8]) -> Result<TokenRevocation, Rejection>;
+
+    /// What an owner file says about `identity` listed as `name` here.
+    fn owner_verdict(&self, file: &[u8], identity: &str, name: &str) -> OwnerVerdict;
+
+    /// The pinned operator token keys.
     fn token_keys(&self) -> Vec<TokenKey>;
 }
 
-/// The verifier of a build without `agentconnect_core::listing`. It refuses
-/// every signed object, so the directory serves pages but accepts nothing.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Unavailable;
+/// The [`Verifier`] on `agentconnect_core::listing`, with the operator keys
+/// pinned for this directory.
+#[derive(Debug, Clone)]
+pub struct CoreVerifier {
+    trusted: TrustedDirectory,
+}
 
-impl Verifier for Unavailable {
-    fn verify_listing(&self, _: &[u8]) -> Result<VerifiedListing, Rejection> {
-        Err(Rejection::Unavailable)
+impl CoreVerifier {
+    /// Pin `keys` (base64url `DK.pub`, one or two) for `host`.
+    ///
+    /// # Errors
+    ///
+    /// A message if a key isn't base64url of 32 bytes, or the core refuses
+    /// the set (no keys, more than two, a duplicate, not an Ed25519 point,
+    /// a host that isn't canonical).
+    pub fn new(host: &str, keys: &[String]) -> Result<Self, String> {
+        let keys = keys
+            .iter()
+            .map(|k| b64_decode_array::<32>(k, "token key"))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "a token key is not base64url of 32 bytes".to_owned())?;
+        TrustedDirectory::new(host, &keys)
+            .map(|trusted| Self { trusted })
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Map a core error to a rejection. The core names the failed check in a
+/// fixed string; the signature checks are the ones a client must tell apart
+/// from format errors.
+fn rejection(e: &Error) -> Rejection {
+    match e {
+        Error::InvalidListing("signature")
+        | Error::InvalidWithdrawal("signature")
+        | Error::InvalidToken("revocation signature") => Rejection::BadSignature,
+        Error::InvalidListing("door has expired") => Rejection::DoorExpired,
+        Error::InvalidToken("unknown key_id") => Rejection::UnknownKey,
+        Error::InvalidWithdrawal("for another directory") => Rejection::WrongDirectory,
+        Error::InvalidWithdrawal("ts not within 300 s") => Rejection::StaleTs,
+        Error::InvalidListing(why)
+        | Error::InvalidWithdrawal(why)
+        | Error::InvalidToken(why)
+        | Error::Malformed(why) => Rejection::Malformed(why),
+        Error::UnsupportedVersion => Rejection::Malformed("unsupported version"),
+        _ => Rejection::Malformed("malformed"),
+    }
+}
+
+impl CoreVerifier {
+    /// Check a token on its own against a listing's binding fields: it binds
+    /// `directory`, `name`, `identity` (and the domain, if it pins one), and
+    /// it verifies under a pinned key and hasn't expired at `now`. This is
+    /// [`Verifier::check_token`] without a signed card around the token.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejection::UnknownKey`] or [`Rejection::BadToken`].
+    pub fn check_listing_token(
+        &self,
+        token: &ListingToken,
+        binding: (&str, &str, &str, Option<&str>),
+        now: u64,
+    ) -> Result<(), Rejection> {
+        let (directory, name, identity, owner_domain) = binding;
+        token
+            .check_binding(directory, name, identity, owner_domain)
+            .and_then(|()| token.verify(&self.trusted, now))
+            .map_err(|e| token_rejection(&e))
+    }
+}
+
+fn token_rejection(e: &Error) -> Rejection {
+    match rejection(e) {
+        Rejection::Malformed(why) => Rejection::BadToken(why),
+        r => r,
+    }
+}
+
+impl Verifier for CoreVerifier {
+    fn listing(&self, bytes: &[u8]) -> Result<SignedListing, Rejection> {
+        SignedListing::from_bytes(bytes).map_err(|e| rejection(&e))
     }
 
-    fn verify_token(&self, _: &serde_json::Value) -> Result<ListingToken, Rejection> {
-        Err(Rejection::Unavailable)
+    fn check_publish(&self, listing: &SignedListing, now: u64) -> Result<(), Rejection> {
+        listing.check_publish(now).map_err(|e| rejection(&e))
     }
 
-    fn verify_withdrawal(&self, _: &[u8]) -> Result<Withdrawal, Rejection> {
-        Err(Rejection::Unavailable)
+    fn check_token(&self, listing: &SignedListing, now: u64) -> Result<(), Rejection> {
+        listing
+            .check_token(&self.trusted, now, |_| false)
+            .map_err(|e| token_rejection(&e))
     }
 
-    fn verify_revocation(&self, _: &[u8]) -> Result<TokenRevocation, Rejection> {
-        Err(Rejection::Unavailable)
+    fn withdrawal(&self, bytes: &[u8], now: u64) -> Result<Withdrawal, Rejection> {
+        let w = Withdrawal::from_json(bytes).map_err(|e| rejection(&e))?;
+        w.check_fresh(self.trusted.host(), now)
+            .map_err(|e| rejection(&e))?;
+        Ok(w)
     }
 
-    fn owner_verdict(&self, _: &[u8], _: &str, _: &str) -> OwnerVerdict {
-        OwnerVerdict::Invalid
+    fn applies(&self, withdrawal: &Withdrawal, listing: &SignedListing) -> bool {
+        withdrawal.applies_to(listing)
+    }
+
+    fn revocation(&self, bytes: &[u8]) -> Result<TokenRevocation, Rejection> {
+        let r = TokenRevocation::from_json(bytes).map_err(|e| rejection(&e))?;
+        r.verify(&self.trusted).map_err(|e| rejection(&e))?;
+        Ok(r)
+    }
+
+    fn owner_verdict(&self, file: &[u8], identity: &str, name: &str) -> OwnerVerdict {
+        let Ok(file) = OwnerFile::parse(file) else {
+            return OwnerVerdict::NotVouched;
+        };
+        match file.vouch(identity, self.trusted.host(), name) {
+            Vouch::Vouches => OwnerVerdict::Vouched,
+            Vouch::DoesNotVouch => OwnerVerdict::NotVouched,
+            Vouch::Revoked => {
+                let entry = file.revoked().iter().find(|r| r.identity == identity);
+                OwnerVerdict::Revoked {
+                    revoked_at: entry.and_then(|r| r.revoked_at),
+                    reason: entry.and_then(|r| r.reason).map(|r| match r {
+                        RevocationReason::Superseded => "superseded",
+                        RevocationReason::Compromised => "compromised",
+                    }),
+                }
+            }
+        }
     }
 
     fn token_keys(&self) -> Vec<TokenKey> {
-        Vec::new()
+        self.trusted
+            .keys()
+            .iter()
+            .map(|k| TokenKey {
+                key_id: b64(&directory_key_id(k)),
+                public_key: b64(k),
+            })
+            .collect()
     }
 }
 
@@ -226,16 +264,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unavailable_refuses_everything() {
-        let v = Unavailable;
-        assert_eq!(v.verify_listing(b"{}"), Err(Rejection::Unavailable));
+    fn keys_are_checked() {
+        assert!(CoreVerifier::new("agents.test", &[]).is_err());
+        assert!(CoreVerifier::new("agents.test", &["not base64!".into()]).is_err());
+        let k = b64(&[0_u8; 31]);
+        assert!(CoreVerifier::new("agents.test", &[k]).is_err());
+    }
+
+    #[test]
+    fn core_errors_map_to_rejections() {
         assert_eq!(
-            v.verify_token(&serde_json::json!({})),
-            Err(Rejection::Unavailable)
+            rejection(&Error::InvalidListing("signature")),
+            Rejection::BadSignature
         );
-        assert_eq!(v.verify_withdrawal(b"{}"), Err(Rejection::Unavailable));
-        assert_eq!(v.verify_revocation(b"{}"), Err(Rejection::Unavailable));
-        assert_eq!(v.owner_verdict(b"{}", "x", "y"), OwnerVerdict::Invalid);
-        assert_eq!(v.token_keys(), Vec::new());
+        assert_eq!(
+            rejection(&Error::InvalidListing("schema")),
+            Rejection::Malformed("schema")
+        );
+        assert_eq!(
+            rejection(&Error::UnsupportedVersion),
+            Rejection::Malformed("unsupported version")
+        );
+        assert_eq!(
+            rejection(&Error::WelcomeAuth),
+            Rejection::Malformed("malformed")
+        );
+        assert_eq!(
+            rejection(&Error::InvalidWithdrawal("ts not within 300 s")),
+            Rejection::StaleTs
+        );
     }
 }
