@@ -21,25 +21,50 @@ fn v4_public(ip: Ipv4Addr) -> bool {
         || (a == 198 && (b == 18 || b == 19)))
 }
 
+/// The IPv6 special-purpose and non-global blocks, each refused by its own
+/// rule (the IANA IPv6 Special-Purpose Address Registry and RFC 9637), so
+/// that none of them depends on the `2000::/3` rule below.
+fn v6_special(ip: Ipv6Addr) -> bool {
+    let s = ip.segments();
+    let zero = |n: usize| s[..n].iter().all(|x| *x == 0);
+    // ::/96: unspecified, loopback and the deprecated IPv4-compatible form.
+    zero(6)
+        // ::ffff:0:0:0/96, IPv4-translated (SIIT).
+        || (zero(4) && s[4] == 0xffff && s[5] == 0)
+        // 64:ff9b::/96 and 64:ff9b:1::/48, NAT64.
+        || (s[0] == 0x0064 && s[1] == 0xff9b)
+        // 100::/64, discard-only.
+        || (s[0] == 0x0100 && s[1] == 0 && s[2] == 0 && s[3] == 0)
+        // 2001::/23, IETF protocol assignments: Teredo, benchmarking
+        // (2001:2::/48), ORCHIDv2 (2001:20::/28) and the rest.
+        || (s[0] == 0x2001 && s[1] < 0x0200)
+        // 2001:db8::/32 and 3fff::/20, documentation.
+        || (s[0] == 0x2001 && s[1] == 0x0db8)
+        || (s[0] == 0x3fff && s[1] < 0x1000)
+        // 2002::/16, 6to4.
+        || s[0] == 0x2002
+        // fc00::/7 unique local, fe80::/10 link-local, fec0::/10
+        // site-local, ff00::/8 multicast.
+        || (s[0] & 0xfe00) == 0xfc00
+        || (s[0] & 0xffc0) == 0xfe80
+        || (s[0] & 0xffc0) == 0xfec0
+        || (s[0] & 0xff00) == 0xff00
+}
+
 fn v6_public(ip: Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return v4_public(v4);
     }
-    let s = ip.segments();
-    // Global unicast only, without documentation, Teredo, 6to4, NAT64 and
-    // the other IETF special-purpose blocks.
-    (s[0] & 0xe000) == 0x2000
-        && !(s[0] == 0x2001 && s[1] == 0x0db8)
-        && !(s[0] == 0x2001 && s[1] < 0x0200)
-        && s[0] != 0x2002
-        && !(s[0] == 0x0064 && s[1] == 0xff9b)
+    // Global unicast only, without the special-purpose blocks.
+    !v6_special(ip) && (ip.segments()[0] & 0xe000) == 0x2000
 }
 
 /// Whether `ip` may be connected to: public unicast only. Loopback,
 /// private, shared (CGNAT), link-local, unique local, multicast,
-/// documentation, benchmarking, 6to4, Teredo, NAT64 and the other IETF
-/// special-purpose blocks are refused, and an IPv4-mapped IPv6 address is
-/// judged as its IPv4 address.
+/// documentation (including `3fff::/20`), benchmarking, 6to4, Teredo, NAT64,
+/// `ORCHIDv2`, discard-only, site-local, IPv4-compatible and -translated, and
+/// the other IETF special-purpose blocks are refused, and an IPv4-mapped
+/// IPv6 address is judged as its IPv4 address.
 #[must_use]
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
@@ -83,6 +108,25 @@ mod tests {
         }
         for (ip, why) in allowed {
             assert!(is_public_ip(ip), "{ip} ({why}) must be allowed");
+        }
+    }
+
+    /// Review L5: every blocked IPv6 class is refused by its own rule, not
+    /// only because it falls outside `2000::/3`, so narrowing that rule can't
+    /// let one through.
+    #[test]
+    fn every_blocked_ipv6_class_is_named() {
+        for (ip, why) in cases("blocked") {
+            let IpAddr::V6(v6) = ip else { continue };
+            if v6.to_ipv4_mapped().is_some() {
+                continue;
+            }
+            assert!(v6_special(v6), "{ip} ({why}) has no rule of its own");
+        }
+        for (ip, why) in cases("allowed") {
+            if let IpAddr::V6(v6) = ip {
+                assert!(!v6_special(v6), "{ip} ({why})");
+            }
         }
     }
 }

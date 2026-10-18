@@ -39,7 +39,7 @@
       "suites": ["rust", "python"]
     },
     "public-addresses.json": {
-      "description": "Addresses an outbound fetch may and may not connect to, SPEC section 13.2.4 (only public addresses after DNS resolution): loopback, private, shared, link-local, unique local, multicast, documentation, benchmarking, 6to4, Teredo, NAT64 and IPv4-mapped forms of them are blocked. agentconnect_core::net::is_public_ip, the directory's resolver and the bindings must agree. Hand-written.",
+      "description": "Addresses an outbound fetch may and may not connect to, SPEC section 13.2.4 (only public addresses after DNS resolution): loopback, private, shared, link-local, unique local, site-local, multicast, documentation (including 3fff::/20), benchmarking, discard-only, 6to4, Teredo, NAT64, ORCHIDv2, IPv4-compatible and IPv4-translated addresses and IPv4-mapped forms of the IPv4 blocks are blocked. agentconnect_core::net::is_public_ip, the directory's resolver and the bindings must agree. Hand-written.",
       "suites": ["rust", "python"]
     },
     "relay-auth.json": {
