@@ -279,6 +279,23 @@ scenarios are in `harness/tests/`.
     `epoch_conflict` for a commit it did forward, any error for any
     frame), hold a Welcome back, and fork (confirm a node's commits without
     forwarding them).
+  - `directory`: the real directory binary (`agentconnect-directory`, built
+    like the relay; `AC_DIRECTORY_BIN` points at a prebuilt one) on the
+    in-memory store, one per session, listing the harness relay and pinning
+    one operator key derived from the run seed. `directory.config` is the
+    `[[directory]]` a node pins (`cluster.node(directories=...)`) and
+    `directory.token(name, identity, now)` issues a listing token. The
+    directory is shared, so each scenario lists names of its own. Like the
+    relay it uses the system clock: a scenario moves daemon time by less
+    than the 300 s a signed request may be off, and a short door lifetime
+    (`options={"door_lifetime_secs": 240}`) covers renewal.
+- **Fakes for days-long behaviour.** The daemon tier runs a listing's whole
+  life (renewal at half-life, key deletion, token expiry) on the fake clock
+  against `agentconnect_harness.fake_directory`: `FakeDirectory` checks
+  publishes and withdrawals through the core as the directory does, and
+  `FakeDoors` is the relay's door registry, both on `httpx.MockTransport`
+  (`Options.directory_transport`, `Options.relay_transport`), with queued
+  failures.
 - **Seeded.** Each daemon's core randomness and backoff jitter come from the
   `rng` fixture (so from `AC_TEST_SEED`), with a fresh derived seed on every
   restart so a restarted daemon never replays its previous keys.
@@ -296,7 +313,7 @@ daemon, so in-process daemons don't affect each other.
 | Layer | Arm | Points | Actions |
 |---|---|---|---|
 | core | `client.failpoints().arm(name, Action, times)` (Rust); `Client._arm_failpoint_for_testing(name, "error"\|"panic", times)` (Python) | `process.before_mls`, `process.after_mls`, `process.after_merge`, `process.before_commit`, `confirm.after_merge`, `confirm.before_commit`, `join.after_stage`, `join.before_commit`, `consume.before_commit` (`agentconnect_core::failpoint::POINTS`) | `error`: a storage error (the daemon retries it); `panic`: a panic. Both fire inside the operation's transaction, so the store rolls back as after a crash at that point. |
-| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register`; `event.after_record` and `event.after_notify` (around telling the adapter about a recorded event); `held_timer.expire` (the safety policy's expiry timer, before it expires held messages); `delivery.after_adapter` (the adapter accepted a message, the inbox doesn't record it yet) (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
+| daemon | `daemon.failpoints.arm(name, "raise"\|"crash", times)` | `receive.*`, `confirm.*`, `welcome.*` at `before_core`, `after_core`, `in_tx` (inside the daemon transaction), `after_tx`, `after_consume` (before the relay ack); `invite.after_register`; `event.after_record` and `event.after_notify` (around telling the adapter about a recorded event); `held_timer.expire` (the safety policy's expiry timer, before it expires held messages); `delivery.after_adapter` (the adapter accepted a message, the inbox doesn't record it yet); publishing a listing: `door.after_register` (the relay has the door, the daemon hasn't recorded it), `listing.after_sign` (signed and stored, not posted), `listing.after_post` (the directory took it, not recorded yet), and `withdraw.after_close` (the doors are closed, the withdrawal not sent) (`agentconnect.failpoints.POINTS`) | `raise`: `FailpointError`, a transient failure the daemon retries after a backoff; `crash`: `SimulatedCrash`, a `BaseException` nothing in the daemon catches, so the worker dies there; the test restarts the node. |
 
 `core/tests/journal.rs` runs every core point with both actions and checks
 that the state is unchanged, the retry succeeds and a second retry gets the

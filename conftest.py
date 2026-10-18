@@ -123,6 +123,12 @@ def test_seed(request: pytest.FixtureRequest) -> int:
     return request.config.stash[_SEED_KEY]
 
 
+@pytest.fixture(scope="session")
+def session_seed(pytestconfig: pytest.Config) -> int:
+    """The run seed, for session-scoped fixtures (the harness directory's key)."""
+    return pytestconfig.stash[_SEED_KEY]
+
+
 @pytest.fixture
 def rng(test_seed: int, request: pytest.FixtureRequest) -> random.Random:
     """A ``random.Random`` seeded from the run seed and the test id.

@@ -104,9 +104,21 @@ code = [
     "daemon/src/agentconnect/callback.py",
     "daemon/src/agentconnect/daemon/*.py",
 ]
-# The local API's routes are documented in docs/api.md (rule local-api).
-exclude = ["daemon/src/agentconnect/runtime/api.py"]
+# The local API's routes are documented in docs/api.md (rule local-api), the
+# listing in docs/discovery.md (rule discovery).
+exclude = ["daemon/src/agentconnect/runtime/api.py", "daemon/src/agentconnect/runtime/listing.py"]
 docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
+
+[[rule]]
+name = "discovery"
+# The owner's listing, its doors and renewal, and the fetches to directories
+# and owner domains.
+code = [
+    "daemon/src/agentconnect/runtime/listing.py",
+    "daemon/src/agentconnect/directory_client.py",
+    "daemon/src/agentconnect/ownerfile.py",
+]
+docs = ["docs/discovery.md"]
 
 [[rule]]
 name = "isolation"
@@ -194,7 +206,15 @@ doc = "directory/README.md"
 
 [[component]]
 name = "discovery"
-paths = ["core/src/listing/**", "core/src/knock*", "core/src/net.rs", "core-py/src/discovery.rs"]
+paths = [
+    "core/src/listing/**",
+    "core/src/knock*",
+    "core/src/net.rs",
+    "core-py/src/discovery.rs",
+    "daemon/src/agentconnect/runtime/listing.py",
+    "daemon/src/agentconnect/directory_client.py",
+    "daemon/src/agentconnect/ownerfile.py",
+]
 doc = "docs/adr/006-discovery.md"
 
 [[component]]

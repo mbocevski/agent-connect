@@ -38,12 +38,18 @@ EXIT_CODES: tuple[tuple[int, str, str], ...] = (
         "EXIT_FAILED",
         "Failed: the daemon or relay reported an error (not found, relay down, ...).",
     ),
-    (EXIT_USAGE, "EXIT_USAGE", "Usage: bad arguments, malformed invite URL, bad configuration."),
+    (
+        EXIT_USAGE,
+        "EXIT_USAGE",
+        "Usage: bad arguments, malformed invite URL, bad configuration, an unreadable or "
+        "invalid card or token file.",
+    ),
     (
         EXIT_REFUSED,
         "EXIT_REFUSED",
         "Refused: declined at a prompt, human-only operation, the group changed while "
-        "comparing, invite for a different relay (nothing is sent).",
+        "comparing, invite for a different relay (nothing is sent), a listing token for "
+        "another identity or key.",
     ),
     (
         EXIT_INTERCEPTED,
@@ -85,6 +91,17 @@ COMPARE_REMINDER = (
 # SPEC 4.3: the maximum invite lifetime.
 MAX_TTL_SECS = 7 * 86_400
 _TTL_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
+
+
+# Publish refusals that are about the files or the token the person gave:
+# fix the input (usage) or get the right token (refused).
+LISTING_EXITS = {
+    "unknown_directory": EXIT_USAGE,
+    "bad_card": EXIT_USAGE,
+    "bad_token": EXIT_USAGE,
+    "token_not_for_identity": EXIT_REFUSED,
+    "unknown_key": EXIT_REFUSED,
+}
 
 
 class CliError(Exception):
@@ -150,6 +167,8 @@ def map_api_error(e: ApiClientError) -> CliError:  # noqa: PLR0911
         )
     if e.code == "bad_request":
         return CliError("bad_request", e.message or "invalid request", EXIT_USAGE)
+    if e.code in LISTING_EXITS:
+        return CliError(e.code, e.message or e.code, LISTING_EXITS[e.code])
     friendly = {
         "not_found": "not found",
         "expired": "expired",

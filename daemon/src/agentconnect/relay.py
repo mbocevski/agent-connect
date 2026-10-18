@@ -31,6 +31,9 @@ LOG = log.get("agentconnect.relay")
 MAX_FRAME = 4 << 20
 REQUEST_TIMEOUT = 30.0
 NONCE_LEN = 32  # SPEC 8.2
+# How far a signed request's ts may run ahead of the clock (many requests
+# in one second, or the last run's); the relay allows 300 s either way.
+REST_TS_LEAD_SECS = 60
 DRAIN_KEY = "_drain"  # set on every frame handed to the daemon
 
 
@@ -253,26 +256,43 @@ class RelayLink:
 class RelayRest:
     """Signed REST calls (SPEC §8.1.1): a fresh ``ts`` for every request."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         base_url: str,
         relay_host: str,
         instance: ac.Instance,
         clock: Clock,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        last_ts: int = 0,
+        on_ts: Callable[[int], None] | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._host = relay_host
         self._instance = instance
         self._clock = clock
         self._transport = transport
-        self._last_ts = 0
+        self._last_ts = last_ts
+        self._on_ts = on_ts
 
     def _ts(self) -> int:
-        # Strictly increasing, so two requests in one second never share a
-        # signature (each signed request is single use at the relay).
-        ts = max(unix_seconds(self._clock), self._last_ts + 1)
+        # Strictly increasing, so two requests never share a signature (each
+        # signed request is single use at the relay, and Ed25519 signs the
+        # same input the same way). `on_ts` stores it before the request
+        # goes out, and the next run starts above it (`last_ts`), so this
+        # holds across a restart in the same second too. A value far ahead of
+        # the clock (it was wrong once, then put right) is dropped: the relay
+        # refuses a ts more than 300 s off, and a repeat matters only within
+        # that window.
+        now = unix_seconds(self._clock)
+        following = self._last_ts + 1
+        if following > now + REST_TS_LEAD_SECS:
+            LOG.warning("relay_rest_ts_reset", reason="clock_behind_last_request")
+            following = now
+        ts = max(now, following)
         self._last_ts = ts
+        if self._on_ts is not None:
+            self._on_ts(ts)
         return ts
 
     def authorization(self, method: str, path: str, body: bytes) -> str:
@@ -322,3 +342,19 @@ class RelayRest:
 
     async def invite_meta(self, invite_id: str) -> dict[str, Any]:
         return await self._call("GET", f"/v0/invites/{invite_id}", signed=False)
+
+    async def create_door(self, door_id: str, expires_at: int) -> dict[str, Any]:
+        """Register a door for this instance's mailbox (SPEC 6.6.1, 8.1)."""
+        body = json.dumps(
+            {
+                "door_id": door_id,
+                "expires_at": expires_at,
+                "owner_mailbox": self._instance.mailbox_id,
+            },
+            separators=(",", ":"),
+        ).encode()
+        return await self._call("POST", "/v0/doors", body)
+
+    async def close_door(self, door_id: str) -> None:
+        """Close a door at once: from then on every knock gets ``door_not_open``."""
+        await self._call("DELETE", f"/v0/doors/{door_id}")

@@ -62,7 +62,7 @@ test: test-rust test-py contract
 test-rust:
     cargo nextest run --workspace --exclude agentconnect-core-py --locked
 
-# The harness (harness/) runs the real relay binary; build it first.
+# The harness (harness/) runs the real relay and directory binaries; build them first.
 test-py: build-relay-dev
     uv run --all-packages --frozen pytest -q -n auto
 
@@ -114,9 +114,9 @@ _cov-rust-run:
     cargo llvm-cov nextest -p agentconnect-relay --locked --fail-under-lines {{ cov_relay }} --ignore-filename-regex 'main\.rs$' --json --summary-only --output-path target/cov/relay.json
     cargo llvm-cov nextest -p agentconnect-directory --locked --fail-under-lines {{ cov_directory }} --ignore-filename-regex '(main|postgres)\.rs$' --json --summary-only --output-path target/cov/directory.json
 
-# Debug relay binary for the multi-node harness (a no-op when up to date)
+# Debug relay and directory binaries for the multi-node harness (a no-op when up to date)
 build-relay-dev:
-    cargo build --quiet --locked -p agentconnect-relay
+    cargo build --quiet --locked -p agentconnect-relay -p agentconnect-directory
 
 _cov-py-run: build-relay-dev
     mkdir -p target/cov
