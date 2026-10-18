@@ -74,6 +74,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   by the senders waiting), and a task approval covers a peer task's later
   updates for `policy.task_approval_window_secs` (600 seconds, at most
   3600) instead of `approval_ttl_secs`.
+- A facade request cancelled while its send waits for approval withdraws
+  the send (rejected, audited, `send_failed` code `cancelled`), so a late
+  approval can't send it. `send_approved` and a held send's `send_failed`
+  carry its `hold_id`, and adapters' `SendReceipt` has `hold_id` and
+  `withdraw()`.
 - The A2A facade follows a held send through: its task waits in
   `input-required`, moves to `working` when the human approves (the agent's
   adapter gets a new `send_approved` event), receives the peer's reply, and

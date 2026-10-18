@@ -245,7 +245,10 @@ and rate limits apply to them.
   ([safety.md](../safety.md#approvals)). Once the human approves, the message
   goes to the group, the task moves to `working`, and the peer's reply
   continues that same task. If the human rejects it, or the hold expires,
-  the task ends `rejected` or `failed`.
+  the task ends `rejected` or `failed`. If your client cancels the task (or
+  goes away) while it waits, the held message is withdrawn: the hold is
+  rejected and audited, the send fails with code `cancelled`, and a late
+  approval can't send it.
 
 ## Delivery guarantees
 

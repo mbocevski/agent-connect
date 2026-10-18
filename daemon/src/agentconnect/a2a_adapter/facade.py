@@ -27,6 +27,9 @@ import asyncio
 import contextlib
 import hmac
 import re
+import time
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, override
 from urllib.parse import unquote
@@ -65,6 +68,7 @@ from starlette.routing import Route
 from agentconnect import log
 from agentconnect.a2a_adapter import cards, convert
 from agentconnect.a2a_adapter.serve import LoopbackServer
+from agentconnect.adapter import SendReceipt
 
 if TYPE_CHECKING:
     from agentconnect.a2a_adapter.adapter import A2AAdapter
@@ -75,6 +79,7 @@ CARD_PATH = "/.well-known/agent-card.json"
 MAX_TO = 50
 MAX_GROUPS = 256  # facade apps kept; the oldest is dropped beyond this
 MAX_EARLY = 256  # decisions kept that arrived before their send was waited on
+EARLY_TTL_SECS = 3600.0  # ...and for at most this long
 GROUP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
@@ -159,13 +164,13 @@ class BridgeExecutor(AgentExecutor):
             return
         self._facade.waiters[msg_id] = replies
         task_mode = context.current_task is not None
-        if getattr(msg_id, "held", False):
-            # The group holds the agent's messages for the human: say so at
-            # once, wait for the human's decision, and only then for a reply.
-            if not await self._wait_for_human(context, event_queue, msg_id):
-                return
-            task_mode = True
         try:
+            if isinstance(msg_id, SendReceipt) and msg_id.held:
+                # The group holds the agent's messages for the human: say so
+                # at once, wait for the human's decision, then for a reply.
+                if not await self._wait_for_human(context, event_queue, msg_id):
+                    return
+                task_mode = True
             async with asyncio.timeout(self._facade.adapter.options.reply_timeout):
                 while True:
                     d = await replies.get()
@@ -193,11 +198,16 @@ class BridgeExecutor(AgentExecutor):
             self._facade.waiters.pop(msg_id, None)
 
     async def _wait_for_human(
-        self, context: RequestContext, queue: EventQueue, msg_id: str
+        self, context: RequestContext, queue: EventQueue, receipt: SendReceipt
     ) -> bool:
         """A held send: ``input-required`` until the human decides, then
-        ``working`` (approved, sent) or ``rejected``/``failed``. True if it went."""
-        decision = self._facade.hold(msg_id)
+        ``working`` (approved, sent) or ``rejected``/``failed``. True if it went.
+        If the request is cancelled meanwhile, the send is withdrawn."""
+        hold_id = receipt.hold_id or str(receipt)
+        task_id = context.task_id or ""
+        self._facade.track(hold_id)
+        self._facade.held_sends[task_id] = receipt
+        decision = self._facade.hold(hold_id)
         await self._start_task(context, queue)
         await self._status(
             queue,
@@ -207,14 +217,17 @@ class BridgeExecutor(AgentExecutor):
         )
         try:
             outcome = await decision
+        except asyncio.CancelledError:
+            await asyncio.shield(receipt.withdraw())
+            raise
         finally:
-            self._facade.held.pop(msg_id, None)
+            self._facade.held.pop(hold_id, None)
+            self._facade.held_sends.pop(task_id, None)
         if outcome == "approved":
             await self._status(
                 queue, context, TaskState.TASK_STATE_WORKING, "approved and sent to the group"
             )
             return True
-        self._facade.waiters.pop(msg_id, None)
         state = (
             TaskState.TASK_STATE_REJECTED if outcome == "rejected" else TaskState.TASK_STATE_FAILED
         )
@@ -287,6 +300,11 @@ class BridgeExecutor(AgentExecutor):
     @override
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         task_id = context.task_id or ""
+        held = self._facade.held_sends.pop(task_id, None)
+        if held is not None:
+            # Still waiting for the human: take the send back, so a late
+            # approval can't send what the client cancelled.
+            await held.withdraw()
         bound = self._facade.bound.get(task_id)
         if bound is not None:
             body = convert.cancel_body(bound.remote_task_id)
@@ -327,9 +345,15 @@ class Facade:
         self.waiters: dict[str, asyncio.Queue[Delivery]] = {}
         # facade task id -> its peer side
         self.bound: dict[str, Bound] = {}
-        # msg_id of a held facade send -> the human's decision, once it comes
+        # hold id of a held facade send -> the human's decision, once it comes
         self.held: dict[str, asyncio.Future[str]] = {}
-        self._decided: dict[str, str] = {}  # decisions that came before the wait
+        # facade task id -> its held send, while the human decides
+        self.held_sends: dict[str, SendReceipt] = {}
+        # Hold ids of the facade's own held sends (only theirs are buffered),
+        # and decisions that came before their wait, with a deadline.
+        self._mine: OrderedDict[str, float] = OrderedDict()
+        self._decided: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self.now: Callable[[], float] = time.monotonic
 
     @property
     def port(self) -> int:
@@ -353,22 +377,47 @@ class Facade:
         await self._server.stop()
         await self._http.aclose()
 
-    def hold(self, msg_id: str) -> asyncio.Future[str]:
+    def track(self, hold_id: str) -> None:
+        """Note one of the facade's own held sends: only their decisions are
+        kept when they come early."""
+        self._sweep()
+        self._mine[hold_id] = self.now() + EARLY_TTL_SECS
+        while len(self._mine) > MAX_EARLY:
+            self._mine.popitem(last=False)
+
+    def early(self) -> int:
+        """How many early decisions are kept (for tests)."""
+        self._sweep()
+        return len(self._decided)
+
+    def _sweep(self) -> None:
+        now = self.now()
+        for store in (self._mine, self._decided):
+            for key in [
+                k for k, v in store.items() if (v[1] if isinstance(v, tuple) else v) <= now
+            ]:
+                del store[key]
+
+    def hold(self, hold_id: str) -> asyncio.Future[str]:
         """The future of a held send's decision (``approved``, ``rejected``,
         ``expired`` or another ``send_failed`` code)."""
         future = asyncio.Future[str](loop=asyncio.get_running_loop())
-        early = self._decided.pop(msg_id, None)
+        early = self._decided.pop(hold_id, None)
+        self._mine.pop(hold_id, None)
         if early is not None:
-            future.set_result(early)
-        self.held[msg_id] = future
+            future.set_result(early[0])
+        self.held[hold_id] = future
         return future
 
-    def decided(self, msg_id: str, outcome: str) -> None:
+    def decided(self, hold_id: str, outcome: str) -> None:
         """The daemon's word on a held send (send_approved or send_failed)."""
-        future = self.held.get(msg_id)
+        self._sweep()
+        future = self.held.get(hold_id)
         if future is None:
-            if len(self._decided) < MAX_EARLY:
-                self._decided[msg_id] = outcome
+            if hold_id in self._mine:
+                self._decided[hold_id] = (outcome, self.now() + EARLY_TTL_SECS)
+                while len(self._decided) > MAX_EARLY:
+                    self._decided.popitem(last=False)
             return
         if not future.done():
             future.set_result(outcome)

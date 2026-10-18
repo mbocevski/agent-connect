@@ -145,7 +145,10 @@ class Event:
     """A daemon event: ``member_joined``, ``member_left``, ``member_removed``,
     ``epoch_changed`` (with the new SAS), ``policy_changed``, ``out_of_sync``,
     ``relay_misbehaviour``, ``unauthorized_commit``, ``pending_approval``,
-    ``joined``, ``removed``, ``loop_guard`` (SPEC 10.3: a message past
+    ``joined``, ``removed``, ``send_approved`` (the human approved the
+    adapter's held send, ``msg_id`` and ``hold_id``; it goes out now),
+    ``send_failed`` (a send that won't go out: ``code``, and ``hold_id`` for
+    a held one), ``loop_guard`` (SPEC 10.3: a message past
     ``max_agent_turns`` did not trigger the agent and the group was paused),
     and from the safety policy ``message_held`` (a message waits for the
     human's approval), ``held_expired`` (it waited too long and was dropped)
@@ -170,15 +173,33 @@ class Capabilities:
 
 
 class SendReceipt(str):
-    """What an adapter's send returns: the ``msg_id``, with ``held`` set when
-    the group's safety policy holds the message for the human's approval."""
+    """What an adapter's send returns: the ``msg_id``. When the group's
+    safety policy holds the message for the human, ``held`` is set,
+    ``hold_id`` names the hold (``send_approved`` and ``send_failed`` carry
+    it) and ``withdraw()`` takes the message back: the hold is rejected,
+    audited and ends in ``send_failed`` with code ``cancelled``."""
 
     held: bool
+    hold_id: str | None
+    _withdraw: Callable[[], Awaitable[None]] | None
 
-    def __new__(cls, msg_id: str, *, held: bool = False) -> SendReceipt:
+    def __new__(
+        cls,
+        msg_id: str,
+        *,
+        held: bool = False,
+        hold_id: str | None = None,
+        withdraw: Callable[[], Awaitable[None]] | None = None,
+    ) -> SendReceipt:
         receipt = super().__new__(cls, msg_id)
         receipt.held = held
+        receipt.hold_id = hold_id
+        receipt._withdraw = withdraw
         return receipt
+
+    async def withdraw(self) -> None:
+        if self._withdraw is not None:
+            await self._withdraw()
 
 
 # group_id, body, to, kind, reply_to, addressee -> msg_id (a SendReceipt)

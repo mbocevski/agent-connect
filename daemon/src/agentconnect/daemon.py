@@ -1834,7 +1834,7 @@ class Daemon:
                     group_id,
                     "send_approved",
                     f"hold={hold_id}/approved",
-                    {"msg_id": item["msg_id"]},
+                    {"msg_id": item["msg_id"], "hold_id": hold_id},
                 )
                 events = [] if sent is None else [sent]
             if item["task_id"] is not None and item["direction"] == "in":
@@ -1883,7 +1883,7 @@ class Daemon:
                     )
                 )
             if item["direction"] == "out":
-                data = {"msg_id": item["msg_id"], "code": code}
+                data = {"msg_id": item["msg_id"], "hold_id": hold_id, "code": code}
                 events.append(
                     self._record(group_id, "send_failed", f"hold={hold_id}/{status}", data)
                 )
@@ -2859,7 +2859,22 @@ class Daemon:
             reply_to=reply_to,
             addressee=addressee,
         )
-        return SendReceipt(msg_id, held=status == "held")
+        if status != "held":
+            return SendReceipt(msg_id)
+        hold_id = self._hold_id(group_id, "out", msg_id)
+        return SendReceipt(
+            msg_id, held=True, hold_id=hold_id, withdraw=lambda: self.withdraw_send(hold_id)
+        )
+
+    async def withdraw_send(self, hold_id: str) -> None:
+        """The adapter takes back a held send (its request was cancelled): the
+        hold is rejected and audited, and the send fails with ``cancelled``.
+        Nothing happens to one the human already decided."""
+        item = self.store.held(hold_id)
+        if item is None or item["status"] != "pending" or item["direction"] != "out":
+            return
+        for event in self._drop_hold(item, "rejected", "cancelled"):
+            await self._notify(event)
 
     def update(self, group_id: str) -> None:
         group = self._group_or_raise(group_id)

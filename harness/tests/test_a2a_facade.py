@@ -35,6 +35,7 @@ from starlette.routing import Route
 
 from agentconnect.a2a_adapter import A2AAdapter
 from agentconnect.a2a_adapter.serve import LoopbackServer
+from agentconnect.daemon import DaemonError
 from agentconnect_harness.a2a_agents import (
     AgentServer,
     HelloWorldExecutor,
@@ -395,5 +396,33 @@ async def test_a_rejected_or_expired_held_send_ends_the_task(
             await cluster.advance(61)
         await poll_task(f, first.task.id, getattr(TaskState, f"TASK_STATE_{state}"))
         assert not any("echo never" in t for t in seen_texts(scripted))
+    finally:
+        await f.http.aclose()
+
+
+async def test_cancelling_a_held_facade_request_withdraws_the_send(
+    cluster: Cluster, scripted: AgentServer
+) -> None:
+    a, _b, gid = await pair(cluster, scripted)
+    a.daemon.update_safety(gid, {"require_approval": "outbound"})
+    f = await open_facade(a, gid)
+    facade = adapter_of(a).facade
+    assert facade is not None
+    try:
+        (first,) = await collect(f.plain.send_message(user("echo cancel me")))
+        (held,) = a.daemon.held_messages()
+        await f.plain.cancel_task(CancelTaskRequest(id=first.task.id))
+        await a.wait(lambda: a.daemon.held_messages() == [])
+        await a.wait(lambda: not facade.waiters)
+        failed = [
+            e["data"] for e in a.daemon.store.events(limit=10_000) if e["type"] == "send_failed"
+        ]
+        assert [(e["msg_id"], e["code"]) for e in failed] == [(held["msg_id"], "cancelled")]
+        decisions = [
+            r["decision"] for r in a.daemon.store.audit(gid) if r["msg_id"] == held["msg_id"]
+        ]
+        assert decisions == ["hold_for_approval", "rejected"]
+        with pytest.raises(DaemonError):
+            a.daemon.approve_message(held["hold_id"])
     finally:
         await f.http.aclose()
