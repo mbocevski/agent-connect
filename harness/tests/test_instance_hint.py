@@ -222,7 +222,7 @@ async def test_a_malformed_hint_is_refused_and_a_peers_one_triggers_nobody(
     cluster: Cluster,
 ) -> None:
     a, x1, x2, gid = await replicas(cluster)
-    for bad in ("XYZ", inst(x1).upper(), inst(x1)[:15], inst(x1) + "0", x1.me):
+    for bad in ("XYZ", "A" + inst(x1)[1:], inst(x1)[:15], inst(x1) + "0", x1.me):
         with pytest.raises(DaemonError) as e:
             await send(a, gid, "bad", to=[x1.me], instance=bad)
         assert e.value.code == "bad_request"
@@ -240,7 +240,7 @@ async def test_a_malformed_hint_is_refused_and_a_peers_one_triggers_nobody(
 
     # A modified daemon skips the check: the receivers treat the peer's hint
     # as untrusted, and a value that names no instance triggers nobody.
-    for bad in ("XYZ", 7, [inst(x1)], {"id": inst(x1)}, inst(x1).upper()):
+    for bad in ("XYZ", 7, [inst(x1)], {"id": inst(x1)}, "A" + inst(x1)[1:]):
         body = {"messageId": new_msg_id(), "parts": [{"text": "forged"}], "metadata": {}}
         body["metadata"]["instance"] = bad
         inner = a.daemon.inner("a2a.message", body, [x1.me], origin="agent", hop=1)
