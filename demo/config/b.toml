@@ -1,0 +1,11 @@
+# Host B: the daemon posts group messages to the Claude Agent SDK agent's webhook.
+[relay]
+url = "ws://127.0.0.1:8080" # the host's loopback relay tap
+
+[daemon]
+display_name = "answer-bot"
+default_adapter = "webhook"
+keystore = "file"
+
+[webhook]
+callback_url = "http://127.0.0.1:8808/"

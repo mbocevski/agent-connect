@@ -18,6 +18,7 @@ import pytest
 
 from agentconnect.identity import Seeded
 from agentconnect.runtime import Options
+from agentconnect_harness.a2a_agents import AgentServer, a2a_node
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 from agentconnect_sdk import AgentConnect, Group, Message
 from agentconnect_sdk.embedded import EmbeddedHost
@@ -104,18 +105,18 @@ async def test_langgraph_group_example_in_mention_mode(cluster: Cluster) -> None
     assert human.daemon.group_info(gid)["policy"]["floor"] == "mention"
 
     # Naming one agent triggers only that agent; the others get context.
-    human.daemon.send_message(gid, {"text": "plan it"}, to=[agents["planner"].me], origin="human")
+    human.daemon.send_message(gid, {"text": "plan it?"}, to=[agents["planner"].me], origin="human")
     await human.adapter.wait_for(lambda: len(human.adapter.deliveries) == 1, WAIT)
     for role in ("researcher", "critic"):
         # The human's message (and perhaps the planner's answer by now) is
         # context for the others: nothing triggers them.
-        await agents[role].wait(lambda role=role: ("plan it", False) in context[role])
+        await agents[role].wait(lambda role=role: ("plan it?", False) in context[role])
         assert not any(addressed for _, addressed in context[role])
     assert [c[0] for c in calls] == ["planner"]
 
     # A human broadcast triggers all three. Replies go to the human alone,
     # so they don't trigger each other.
-    human.daemon.send_message(gid, {"text": "everyone"}, to=["*"], origin="human")
+    human.daemon.send_message(gid, {"text": "everyone?"}, to=["*"], origin="human")
     await human.adapter.wait_for(lambda: len(human.adapter.deliveries) == 4, WAIT)
     assert sorted(c[0] for c in calls[1:]) == sorted(example.ROLES)
     texts = sorted(d.body["parts"][0]["text"] for d in human.adapter.deliveries)
@@ -146,8 +147,8 @@ async def test_the_claude_example_main_runs_embedded(
         return f"answered {len(prompt)} characters"
 
     monkeypatch.setattr(AgentConnect, "embedded", embedded)
-    monkeypatch.setattr(example, "claude_model", lambda: model)
-    monkeypatch.setattr(example, "print", lambda *args: urls.append(args[-1]), raising=False)
+    monkeypatch.setattr(example, "choose_model", lambda: model)
+    monkeypatch.setattr(example, "print", lambda *args, **_kw: urls.append(args[-1]), raising=False)
     running = asyncio.ensure_future(example.main())
     try:
         await until(lambda: bool(urls) or running.done())
@@ -156,10 +157,58 @@ async def test_the_claude_example_main_runs_embedded(
         await peer.wait(lambda: bool(peer.daemon.list_groups()))
         gid = peer.daemon.list_groups()[0]["group_id"]
         await peer.wait(lambda: peer.daemon.group_info(gid)["status"] == "active")
-        peer.daemon.send_message(gid, {"text": "hello"})
+        peer.daemon.send_message(gid, {"text": "hello?"})
         await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 1, WAIT)
         assert peer.adapter.texts(gid)[0].startswith("answered ")
     finally:
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await running
+
+
+async def test_the_a2a_example_streams_and_the_claude_example_answers_its_question(
+    cluster: Cluster,
+) -> None:
+    """Demo 1's conversation on the harness: the A2A example streams the
+    release notes, and its deploy task's input-required is answered by the
+    Claude Agent SDK example (stub model), which continues the task."""
+    server = load("example_a2a_server", "a2a-server/agent.py")
+    answerer = load("example_claude_tasks", "claude-agent-sdk/agent.py")
+    agent = AgentServer(server.ReleaseAgent(), "release-agent")
+    await agent.start()
+    try:
+        a = await a2a_node(cluster, "a", agent)
+        gid = a.daemon.create_group("Release", "Plan the v0.1 release")
+        await a.idle()
+        b = await cluster.node("b", host="embedded")
+        answerer.attach(sdk_of(b), answerer.stub_model)
+        await cluster.invite(a, b, gid)
+        group = sdk_of(b).group(gid)
+        await group.send("Please stream the release notes for v0.1.")
+        await group.send("Please deploy v0.1.")
+
+        def done() -> list[str]:
+            return [
+                str(
+                    ((d.body["status"].get("message") or {}).get("parts") or [{}])[0].get(
+                        "text", ""
+                    )
+                )
+                for d in b.adapter.deliveries
+                if d.kind == "a2a.task_status"
+                and d.body["status"]["state"] == "TASK_STATE_COMPLETED"
+            ]
+
+        await until(lambda: len(done()) == 2)
+        assert "Deploying v0.1 to staging." in done()
+        artifacts = [d for d in b.adapter.deliveries if d.kind == "a2a.task_artifact"]
+        assert [d.body.get("append", False) for d in artifacts] == [False, True]
+        asked = [
+            d
+            for d in b.adapter.deliveries
+            if d.kind == "a2a.task_status"
+            and d.body["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+        ]
+        assert len(asked) == 1
+    finally:
+        await agent.stop()
