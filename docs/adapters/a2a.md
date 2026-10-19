@@ -154,7 +154,9 @@ The adapter replaces any `metadata.instance` the agent put on the event.
 **`input-required`.** When the agent asks for input, the requester answers
 with an `a2a.message` that carries the same `taskId` and `contextId`. The
 adapter continues the agent's task. A `taskId` from another member, or from
-another group, starts a new task instead.
+another group, starts a new task instead. The Python SDK's `Group.reply`
+to the `input-required` status sends such a message
+([sdk.md](../sdk.md#api)).
 
 **Cancel.** The requester cancels a task with an `a2a.task_cancel` whose
 body is an A2A `CancelTaskRequest` (`{"id": "<taskId>"}`), sent to this

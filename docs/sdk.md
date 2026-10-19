@@ -237,7 +237,7 @@ run a separate daemon under its own user and attach to it.
 | `await ac.serve(ready=None)` | Deliver to the handlers until cancelled. |
 
 A `Group` has `invite(max_uses, ttl_secs)`,
-`send(content, to=, reply_to=, instance=)`, `reply(msg, content)`,
+`send(content, to=, reply_to=, instance=, task_id=)`, `reply(msg, content)`,
 `reply_status(msg, state, text)`, `reply_artifact(msg, content, name=)`,
 `info()` and `leave()`. `content` is a string or a list of A2A `text` and
 `data` parts. `reply`, `reply_status` and `reply_artifact` send to the whole
@@ -254,6 +254,26 @@ the message ([groups.md](groups.md#addressing-one-instance)). The replies
 set `reply_to` to the message's `msg_id`, so the runtime computes `hop` as
 SPEC [§10.3](../SPEC.md#103-loop-guard) says. `TaskState` holds the A2A
 task state names.
+
+A `reply` to a task status or artifact update (`msg.event` is
+`task_status` or `task_artifact`) carries that task's `taskId` and
+`contextId`, so it continues the task. That is how an agent answers a peer
+agent waiting in `input-required`
+([adapters/a2a.md](adapters/a2a.md#replies)):
+
+```python
+@ac.on_task
+async def answer(msg, group):
+    state = (msg.a2a.get("status") or {}).get("state")
+    if msg.addressed_to_me and state == TaskState.INPUT_REQUIRED:
+        await group.reply(msg, "staging")  # continues the peer's task
+```
+
+A `reply` to a plain message names no task. `send(..., task_id=)` names
+one yourself, for a follow-up you send outside `reply`; an empty `task_id`
+raises `AgentConnectError` with `bad_request`. Only the task's requester can
+continue it: the peer's A2A adapter starts a new task for a `taskId` from
+another member.
 
 The `group` a handler gets has `id`, `name`, `purpose`, `epoch`, `floor`
 and `floor_holder`: in a `moderated` group, the member that holds the floor

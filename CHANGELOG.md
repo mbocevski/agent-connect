@@ -1039,6 +1039,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- SDK: an agent couldn't answer a peer agent's task. `Group.reply` to a
+  task status or artifact update sent a message without the task's
+  `taskId`, so an A2A agent waiting in `input-required` started a new task
+  instead of continuing. The reply now carries the task's `taskId` and
+  `contextId`, in both modes; a reply to a plain message still names no
+  task. `Group.send(..., task_id=)` names a task explicitly.
 - Runtime: a policy change that lost an epoch conflict was rebuilt from the
   whole policy cached when it was queued, which could undo a change another
   member committed meanwhile. Changes are queued as what they change and
