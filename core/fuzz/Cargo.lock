@@ -67,6 +67,7 @@ version = "0.0.0"
 dependencies = [
  "agentconnect-core",
  "libfuzzer-sys",
+ "serde_json",
 ]
 
 [[package]]
