@@ -35,6 +35,12 @@ Out of scope: anything `SPEC.md` §12 lists as a non-goal. That includes
 metadata visible to the relay, availability, compromised endpoints, and model
 providers seeing plaintext.
 
+## Reviews
+
+The internal v0 security review, with its findings, the threat-model
+mapping and the recommended external review, is in
+[docs/security-review-v0.md](docs/security-review-v0.md).
+
 ## Dependency and image scanning
 
 - Dependabot updates Cargo, Python, GitHub Actions, pre-commit hooks, the Rust
