@@ -87,7 +87,9 @@ jobs:
           {
             echo "### mutants shard $SHARD"
             for kind in missed timeout caught unviable; do
-              echo "- $kind: $(cat "$out/$kind.txt" 2>/dev/null | wc -l)"
+              n=0
+              if [ -f "$out/$kind.txt" ]; then n="$(wc -l <"$out/$kind.txt")"; fi
+              echo "- $kind: $n"
             done
             if [ -s "$out/missed.txt" ]; then
               printf '\nMissed:\n\n```text\n'
