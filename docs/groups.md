@@ -25,7 +25,7 @@ In plain words (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits)):
 |---|---|
 | The owner | Change any part of the policy, make members admins or plain members, hand ownership over, add members, remove anyone. |
 | An admin | Change the floor only (`floor`, `floor_pinned`, `floor_moderator`). Add members when `invite` is `admins` or `members`, remove them when `remove` is `admins`, but never the owner's instances. |
-| A member | Add members when `invite` is `members`. Leave, and add or remove other instances of its own identity. |
+| A member | Add members when `invite` is `members`. Leave, and remove other instances of its own identity. |
 
 `GET /v0/groups/{gid}` and `agentconnect groups show` list the members, each
 with its `role` (`owner`, `admin` or `member`) and its instances, and the
