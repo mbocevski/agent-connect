@@ -642,6 +642,7 @@ class Engine:
         self._held_wake = asyncio.Event()
         self._fail_codes: dict[int, str] = {}
         self._unregistered: set[str] = set()  # listed adapters warned about
+        self._background: set[asyncio.Task[None]] = set()
         self._event_wake = asyncio.Event()
         # Where each (group, adapter) delivery worker got to (a seq), and the
         # adapter list each group's rows were last settled for.
