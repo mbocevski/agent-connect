@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import random
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -433,6 +434,27 @@ async def test_a_departed_admin_loses_the_role(cluster: Cluster, cleanup: bool) 
         next(m for m in c.daemon.group_info(gid)["members"] if m["identity"] == b.me)["role"]
         == "member"
     )
+
+
+async def test_only_the_owners_first_instance_in_sync_drops_departed_roles(
+    group: GroupFixture, rng: random.Random
+) -> None:
+    (a, b), gid = await group(2)
+    ghost = ac.Identity._generate_for_testing(rng.getrandbits(63)).id  # named, never joined
+    assert a.daemon.set_policy(gid, admins=[ghost]) == "committing"
+    await converged([a, b], gid)
+    gone = {"removed": [{"identity": ghost}]}
+    b.daemon.groups._follow_policy(gid, gone)  # not the owner's
+    assert b.daemon.store.outbox() == []
+    await a.daemon.mark_out_of_sync(gid, "commit_rejected")
+    a.daemon.groups._follow_policy(gid, gone)
+    assert a.daemon.store.outbox() == []
+    a.daemon.store.update_group(gid, out_of_sync=False, out_of_sync_reason=None)
+    a.daemon.groups._follow_policy(gid, gone)
+    (row,) = a.daemon.store.outbox()
+    assert row.payload["intent"] == {"type": "drop_roles", "identities": [ghost]}
+    await converged([a, b], gid)
+    assert policy(b, gid)["admins"] == []
 
 
 # -- invites (G3) and the view (G8, G12) -----------------------------------------------------

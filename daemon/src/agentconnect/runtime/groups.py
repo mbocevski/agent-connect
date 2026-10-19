@@ -492,7 +492,9 @@ class GroupService:
         policy = self._policy(gid)
         if not may_invite(policy, e.me):
             self.close_invites(group_id)
-        if not e.config.groups_cleanup_departed_roles or self.leaving(group_id):
+        group = e.store.group(group_id)
+        out_of_sync = group is not None and group.out_of_sync  # its commits can't land
+        if not e.config.groups_cleanup_departed_roles or self.leaving(group_id) or out_of_sync:
             return
         members = self._client.members(gid)
         owner = policy.get("owner")
