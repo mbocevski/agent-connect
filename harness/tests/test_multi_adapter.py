@@ -105,6 +105,19 @@ async def pair(cluster: Cluster, other: RecordingAdapter, **kw: Any) -> tuple[No
     return a, b, gid
 
 
+def watch_acks(node: Node) -> set[str]:
+    """The msg_ids of the acks the node sends the relay from now on."""
+    acked: set[str] = set()
+
+    def count(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        if frame.get("t") == "ack":
+            acked.add(str(frame.get("msg_id")))
+        return [frame]
+
+    node.proxy.client_filters.append(count)
+    return acked
+
+
 def application_frames(node: Node) -> int:
     return len([f for f in node.proxy.delivered if f["env"].get("kind") == "application"])
 
@@ -145,6 +158,7 @@ async def test_a_failing_adapter_holds_up_and_loses_nothing_for_another(
 ) -> None:
     stuck = Stuck()
     a, b, gid = await pair(cluster, stuck)
+    acked = watch_acks(a)
     for text in TEXTS:
         b.daemon.send_message(gid, {"text": text})
     # The working adapter gets everything, in order, while the other refuses.
@@ -152,13 +166,11 @@ async def test_a_failing_adapter_holds_up_and_loses_nothing_for_another(
     await stuck.wait_for(lambda: stuck.refused > 0, WAIT)
     assert stuck.texts(gid) == []
     assert a.adapter.of_type("member_joined")
-    # The relay was acked once the messages were recorded: a reconnect
-    # brings none of them back.
-    seen = application_frames(a)
-    await partition(a)
-    await heal(a)
-    await a.wait(a.daemon.caught_up)
-    assert application_frames(a) == seen
+    # The relay was acked once the messages were recorded, although one
+    # adapter hasn't taken them.
+    ids = {d.msg_id for d in a.adapter.deliveries if d.group_id == gid}
+    await until(lambda: ids <= acked)
+    assert len(a.daemon.store.pending_deliveries()) == 3
     # The endpoint comes back: it gets what it missed, in order, once.
     stuck.working = True
     await advance(300)
@@ -442,14 +454,7 @@ async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
     monkeypatch.setattr("agentconnect.runtime.engine.PENDING_MAX_BYTES", 4096)
     stuck = Stuck()
     a, b, gid = await pair(cluster, stuck)
-    acked: set[str] = set()
-
-    def count(frame: dict[str, Any]) -> list[dict[str, Any]]:
-        if frame.get("t") == "ack":
-            acked.add(str(frame.get("msg_id")))
-        return [frame]
-
-    a.proxy.client_filters.append(count)
+    acked = watch_acks(a)
     sent = [f"secret-{i}-" + "x" * 900 for i in range(8)]
     for text in sent:
         b.daemon.send_message(gid, {"text": text})
@@ -464,24 +469,23 @@ async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
     await a.wait(a.daemon.caught_up)
     assert application_frames(a) > seen
     assert len(recorded(a, "delivery_stalled")) == 1
-    # The adapter catches up: the pending messages drain, and the early ack is back.
+    ids = {d.msg_id for d in a.adapter.deliveries if d.group_id == gid}
+    kept = ids - acked
+    assert kept, "the relay kept the copies past the limit"
+    # The adapter catches up: the pending messages drain, what the relay
+    # kept is acked, and the early ack is back.
     stuck.working = True
     await advance(300)
     await a.wait(lambda: not a.daemon.store.pending_deliveries())
     await a.wait(lambda: bool(recorded(a, "delivery_resumed")))
-    # What the relay kept is acked now (once the acks reached it, a
-    # reconnect brings nothing back).
-    ids = {d.msg_id for d in a.adapter.deliveries if d.group_id == gid}
     await until(lambda: ids <= acked)
-    seen = application_frames(a)
-    await partition(a)
-    await heal(a)
-    await a.wait(a.daemon.caught_up)
-    assert application_frames(a) == seen
     # Age alone stalls it too: one message older than the relay keeps one.
+    # Until then it is acked as soon as it is recorded, while still pending.
     stuck.working = False
     b.daemon.send_message(gid, {"text": "old"})
     await a.wait(lambda: pending_texts(a) == ["old"])
+    (old,) = a.daemon.store.pending_deliveries()
+    await until(lambda: old.msg_id in acked)
     await until(lambda: a.clock.sleepers > 0)
     await advance(8 * 24 * 3600)
     await a.wait(lambda: len(recorded(a, "delivery_stalled")) == 2)
