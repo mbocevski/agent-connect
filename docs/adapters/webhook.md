@@ -73,7 +73,7 @@ A message:
 {
   "event": "message",
   "msg_id": "…",
-  "group": {"id": "…", "name": "Ops", "purpose": "Plan the offsite", "epoch": 3, "floor": "mention"},
+  "group": {"id": "…", "name": "Ops", "purpose": "Plan the offsite", "epoch": 3, "floor": "mention", "floor_holder": null},
   "sender": {"identity": "ac:v0:…", "instance_id": "…", "display_name": "peer-bot", "verified": false},
   "to": ["ac:v0:…"],
   "addressed_to_me": true,
@@ -91,7 +91,9 @@ A message:
 ```
 
 `event` is `message`, `task_status`, `task_artifact`, `task_cancel`,
-`agent_card` or `control.<name>`, after the message kind. `addressee` is
+`agent_card` or `control.<name>`, after the message kind. `group.floor_holder`
+is the member that holds the floor of a `moderated` group as this daemon
+sees it, or `null` ([groups.md](../groups.md#floor-control)). `addressee` is
 there only when the sender named who the message triggers (SPEC
 [§9.3](../../SPEC.md#93-floor-control-and-triggering)). `a2a` is the A2A v1.0 object
 inside the encryption. The framing fields are the ones SPEC
@@ -115,15 +117,17 @@ A daemon event:
 {
   "event": "member_joined",
   "event_id": "…",
-  "group": {"id": "…", "name": "Ops", "purpose": "…", "epoch": 3, "floor": "mention"},
+  "group": {"id": "…", "name": "Ops", "purpose": "…", "epoch": 3, "floor": "mention", "floor_holder": null},
   "untrusted": true,
   "data": {}
 }
 ```
 
 `event` is the event type (`member_joined`, `member_left`, `epoch_changed`,
-`policy_changed`, `out_of_sync`, `loop_guard`, `pending_approval`,
-`send_approved`, `send_failed` and so on). `send_approved` says the human
+`policy_changed`, `role_changed`, `floor_changed`, `out_of_sync`,
+`loop_guard`, `pending_approval`, `send_approved`, `send_failed` and so on;
+the membership, role and floor events are in
+[groups.md](../groups.md#membership-events)). `send_approved` says the human
 approved one of your agent's held sends and it goes out now (`data`:
 `msg_id`, `hold_id`); `send_failed` says a send won't go out (`msg_id`,
 `code`, and `hold_id` for a held one: `rejected`, `expired`, `cancelled`,

@@ -247,6 +247,14 @@ set `reply_to` to the message's `msg_id`, so the runtime computes `hop` as
 SPEC [§10.3](../SPEC.md#103-loop-guard) says. `TaskState` holds the A2A
 task state names.
 
+The `group` a handler gets has `id`, `name`, `purpose`, `epoch`, `floor`
+and `floor_holder`: in a `moderated` group, the member that holds the floor
+as this runtime sees it, else `None`. Granting the floor is a local API
+route for the agent token (`POST /v0/groups/{gid}/floor`,
+[groups.md](groups.md#floor-control)); the runtime's agent operations
+(`AgentApi.grant_floor`) serve it, and only the effective moderator or the
+owner may.
+
 Errors are `AgentConnectError` with the local API's `code` and HTTP
 `status` in both modes, for example `not_found` (404) for an unknown group
 or `forbidden` (403) when the owner's last instance tries to leave.

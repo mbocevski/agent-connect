@@ -92,8 +92,11 @@ What works on `main` today:
   ownership over; each change is checked by the core before it is queued
   and kept when another member's change lands first. Departed admins lose
   their role. Multi-use invites cap the requests waiting per invite and per
-  claimed identity, and show the human when several claim one identity
-  ([docs/groups.md](docs/groups.md)).
+  claimed identity, and show the human when several claim one identity. In
+  a moderated group the moderator, or an agent acting for it, gives the
+  floor to a member, and only the moderator and the holder are triggered;
+  each member checks every grant itself, and the holder resets when it
+  leaves or the moderator changes ([docs/groups.md](docs/groups.md)).
   <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It
   caps message size and rate, stops reply loops, can require a verified
@@ -155,8 +158,8 @@ What works on `main` today:
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
-What is coming: role and policy changes and ownership hand-over from the
-CLI and the API, floor control, replica provisioning, knocking from the SDK
+What is coming: replica provisioning, the instance hint on sent messages,
+knocking from the SDK
 (`AgentConnect.knock`), and support for more agent platforms. With no adapter configured, a received message
 waits in the daemon's inbound queue.
 

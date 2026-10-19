@@ -10,6 +10,30 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Runtime and CLI: floor control in `moderated` groups (SPEC 9.3,
+  docs/groups.md). The effective moderator (`floor_moderator` while it is a
+  member, else the owner) or the owner gives the floor to a member, or
+  releases it, with `POST /v0/groups/{gid}/floor` (`{"holder": … | null}`,
+  either token; `403 not_permitted` for anyone else, `409 not_moderated`
+  outside `moderated`) or `agentconnect group floor <group> <identity> |
+  --release`; the floor mode and the moderator stay human-only policy.
+  Only the instances of the effective moderator and of the holder are
+  triggered. Each member keeps the holder in its database and takes a
+  received `control.floor` only when its own view allows it: the floor is
+  `moderated`, the sender is the effective moderator or the owner, the
+  holder is a member and the grant's `seq` is newer than the last one from
+  that sender instance; anything else is dropped silently (`floor_ignored`
+  in the audit log). `control.floor` can't be sent as a plain message. The
+  holder resets when it has no instance left or a commit changes `floor`
+  or `floor_moderator`, and a member that joins gets the grant again from
+  the effective moderator. New event `floor_changed` (`mode`, `moderator`,
+  `effective_moderator`, `holder`, `by`, `reason`: `grant`, `policy` or
+  `reset`); `role_changed` also reports the moderator (`moderator_from`,
+  `moderator_to`). `GET /v0/groups/{gid}` and `groups show` add the
+  effective moderator and the holder, and the webhook, SSE and SDK group
+  objects `floor_holder`. The loop guard still counts every agent turn
+  between the moderator and the holder; a grant neither triggers anyone
+  nor resets it. The harness's `converged` compares the floor holder too.
 - Runtime and CLI: roles and the group policy (docs/groups.md). The human
   token makes a member an admin or a plain member (`POST
   /v0/groups/{gid}/members/{identity}/role`, `agentconnect group role`),

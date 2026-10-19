@@ -73,7 +73,7 @@ A group message reaches the agent when it **triggers** this member (SPEC
 |---|---|
 | `free` | every message from another member |
 | `mention` | messages whose `to` names this member; `to: ["*"]` only from a human |
-| `moderated` | messages to the moderator only, until floor control exists |
+| `moderated` | every message, while this member is the effective moderator or holds the floor ([groups.md](../groups.md#floor-control)) |
 
 A message to an identity triggers all of its instances, unless the body sets
 `metadata.instance` (SPEC §9.4). Past `loop_guard.max_agent_turns`, nothing

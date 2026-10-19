@@ -285,8 +285,10 @@ def policy_events(
     summary: dict[str, Any], current: dict[str, Any]
 ) -> list[tuple[str, dict[str, Any]]]:
     """``policy_changed`` and one ``role_changed`` per identity whose role
-    (owner, admin, member) the commit changed, from the policies in the
-    summary. ``current`` is the policy the core holds now.
+    (owner, admin, member) the commit changed, or that became or stopped
+    being the ``floor_moderator`` (``moderator_from``, ``moderator_to``),
+    from the policies in the summary. ``current`` is the policy the core
+    holds now.
 
     A summary journalled before the core reported the policies says
     ``policy_changed`` with neither: the policy it set and whether any role
@@ -309,12 +311,21 @@ def policy_events(
     for p in (previous, policy):
         admins = p.get("admins")
         named.update(admins if isinstance(admins, list) else [])
+        named.add(p.get("floor_moderator"))
     for identity in sorted(str(i) for i in named if isinstance(i, str)):
         before, now = role_of(previous, identity), role_of(policy, identity)
-        if before != now:
-            out.append(
-                ("role_changed", {"identity": identity, "from": before, "to": now, "by": by})
-            )
+        was = previous.get("floor_moderator") == identity
+        moderator = policy.get("floor_moderator") == identity
+        if before != now or was != moderator:
+            data = {
+                "identity": identity,
+                "from": before,
+                "to": now,
+                "moderator_from": was,
+                "moderator_to": moderator,
+                "by": by,
+            }
+            out.append(("role_changed", data))
     return out
 
 
@@ -702,14 +713,18 @@ class GroupService:
                 )
         if own:
             e.store.update_group(group_id, last_own_commit_at=self._now(), msgs_since_commit=0)
+        joined: list[str] = []
         for kind, data in membership_events(summary, self._client.members(gid)):
             await e.emit(group_id, kind, **data)
             if kind == "member_joined":
                 await e._send_card(group_id, [data["identity"]])
+            if kind in ("member_joined", "instance_joined"):
+                joined.append(str(data["identity"]))
         if summary.get("policy_changed"):
             current = json.loads(self._client.policy(gid))
             for kind, data in policy_events(summary, current):
                 await e.emit(group_id, kind, **data)
+        await e.floor.after_commit(group_id, summary, joined)
         self._follow_policy(group_id, summary)
         trust = self.trust_state(group_id)
         await e.emit(
@@ -1292,11 +1307,7 @@ class GroupService:
                 if isinstance(guard, dict)
                 else None,
             },
-            "floor": {
-                "mode": policy.get("floor"),
-                "pinned": bool(policy.get("floor_pinned")),
-                "moderator": policy.get("floor_moderator"),
-            },
+            "floor": e.floor.view(group_id, policy, group.status == "active"),
             "pending_leaves": pending,
             "members": [
                 {

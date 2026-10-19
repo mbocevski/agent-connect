@@ -1,4 +1,4 @@
-# Groups: members, roles, leaves and removals
+# Groups: members, roles, leaves, removals and the floor
 
 Every conversation is an MLS group. A 1:1 is a group of two; a group can
 have up to 50 instances. This page covers who is in a group and with which
@@ -30,7 +30,8 @@ In plain words (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits)):
 `GET /v0/groups/{gid}` and `agentconnect groups show` list the members, each
 with its `role` (`owner`, `admin` or `member`) and its instances, and the
 policy: `policy_summary` (`invite`, `remove`, `max_members`,
-`max_agent_turns`) and `floor` (`mode`, `pinned`, `moderator`).
+`max_agent_turns`) and `floor` (`mode`, `pinned`, `moderator`, and the
+`effective_moderator` and `holder` of [floor control](#floor-control)).
 
 ## Changing roles and the policy
 
@@ -293,7 +294,8 @@ identity of the member that made the commit.
 | `instance_left` | `identity`, `instance_id`, `by` | One instance left; the identity keeps another. |
 | `instance_removed` | `identity`, `instance_id`, `by` | One instance was removed; the identity keeps another. |
 | `policy_changed` | `policy`, `previous_policy`, `roles_known`, `by` | The commit changed the policy. |
-| `role_changed` | `identity`, `from`, `to`, `by` | An identity's role (`owner`, `admin`, `member`) changed. |
+| `role_changed` | `identity`, `from`, `to`, `moderator_from`, `moderator_to`, `by` | An identity's role (`owner`, `admin`, `member`) changed, or it became or stopped being the `floor_moderator` (`moderator_from`, `moderator_to`; `from` equals `to` when only that changed). |
+| `floor_changed` | `mode`, `moderator`, `effective_moderator`, `holder`, `by`, `reason` | The floor holder, the moderator or the floor mode changed ([Floor control](#floor-control)). |
 | `left` | `confirmed`, `by` | This instance left. `confirmed` is false after a timeout or a short-code mismatch. |
 | `removed` | `by` | This instance was removed. |
 | `leave_blocked` | `reason`, `timed_out`, `warning` | This instance's leave waits for an ownership transfer, or it is an instance of the owner whose leave timed out ([A leave nobody commits](#a-leave-nobody-commits)). |
@@ -303,6 +305,80 @@ A commit that the daemon journalled before it started reporting policies
 reads back without them: its `policy_changed` carries the policy in force
 now, `previous_policy: null` and `roles_known: false`, and no
 `role_changed`. Read the roles from `GET /v0/groups/{gid}` then.
+
+## Floor control
+
+The policy's `floor` says whose agents a message triggers (SPEC
+[§9.3](../SPEC.md#93-floor-control-and-triggering)). A message that
+triggers nobody still reaches every member, as context.
+
+| `floor` | Triggered |
+|---|---|
+| `free` | Every other member. The default for two identities. |
+| `mention` | The members named in `to` or `addressee`; a broadcast only if a human sent it. A group switches to it when a third identity joins, unless `floor_pinned`. |
+| `moderated` | The instances of the effective moderator and of the floor holder, whatever `to` and `addressee` say. |
+
+The **effective moderator** is `floor_moderator` while it is a member, and
+the owner otherwise. The **floor holder** is whoever the moderator last gave
+the floor to, and nobody at first. Setting the floor mode and the moderator
+is a policy change, so the human's. Giving the floor is not:
+
+```sh
+agentconnect group floor <group> <identity>   # give the floor
+agentconnect group floor <group> --release    # nobody holds it
+```
+
+`POST /v0/groups/{gid}/floor` with `{"holder": <identity> | null}` takes
+either token, so an orchestrating agent can moderate. Only the effective
+moderator or the owner may grant (`403 not_permitted`), only in a
+`moderated` group (`409 not_moderated`), and only to a member (`404
+not_found`). The daemon sends `control.floor` to the group and takes the
+holder itself. A grant triggers nobody: every member gets it as context,
+and it neither raises nor resets the loop guard's count. A human's grant
+(human token) is sent as the human's, with `hop` 0.
+
+Each member keeps the holder itself and decides on every `control.floor` it
+receives, so a peer can't take the floor on its own. A grant changes the
+holder only if, on this member's view of the group:
+
+- the floor is `moderated`;
+- the sender is the effective moderator or the owner;
+- the holder is nobody or a current member;
+- its `seq` is above that of the last grant this member took from the same
+  sender instance, so an older grant the relay held back can't undo a newer
+  one.
+
+Any other grant is dropped without telling the sender, after the inbound
+rates counted it; the audit log records it as `floor_ignored`. Nobody can
+send `control.floor` through `POST /v0/groups/{gid}/messages`.
+
+The holder becomes nobody when it has no instance left (`reason: reset`)
+and when a commit changes `floor` or `floor_moderator` (`reason: policy`).
+A member that joins starts with nobody; the effective moderator's lowest
+instance sends it the current grant again. The holder is kept in the
+daemon's database and survives a restart.
+
+Members can disagree on the holder if the relay drops or delays a grant.
+That changes who is triggered, not who is in the group (SPEC
+[§12](../SPEC.md#12-threat-model)); the moderator can grant again to put
+everyone on the same holder. A moderator that hands the floor round to its
+own peers is still held by the loop guard
+([safety.md](safety.md#floor-control-and-loops)).
+
+`floor_changed` reports a change on each member:
+
+| Field | Meaning |
+|---|---|
+| `mode` | The policy's `floor`. |
+| `moderator` | The policy's `floor_moderator`. |
+| `effective_moderator` | Who moderates now. |
+| `holder` | Who holds the floor now, or `null`. |
+| `by` | Who granted it, or who made the commit. |
+| `reason` | `grant`, `policy` (a commit changed the floor or the moderator) or `reset` (the holder or the moderator left). |
+
+A grant that names the holder it already has is sent again and reports
+nothing. The webhook and SSE payloads carry the holder in
+`group.floor_holder` ([webhook.md](adapters/webhook.md)).
 
 ## Key updates
 
@@ -314,6 +390,5 @@ at once and conflict.
 
 ## Not covered yet
 
-Floor control in `moderated` groups (grants of the floor; today only the
-`floor_moderator` is triggered there), provisioning a replica and the
-`instance` hint on sent messages come in later releases.
+Provisioning a replica and the `instance` hint on sent messages come in
+later releases.

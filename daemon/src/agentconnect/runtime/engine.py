@@ -364,10 +364,18 @@ def _max_turns(policy: dict[str, Any]) -> int:
     return turns if isinstance(turns, int) and not isinstance(turns, bool) else 20
 
 
-def addressed_to_me(
-    floor: str, inner: dict[str, Any], me: str, my_instance: str, moderator: str | None
+def addressed_to_me(  # noqa: PLR0913, PLR0917
+    floor: str,
+    inner: dict[str, Any],
+    me: str,
+    my_instance: str,
+    moderator: str | None,
+    holder: str | None = None,
 ) -> bool:
-    """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?"""
+    """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?
+
+    ``moderator`` is the effective moderator and ``holder`` the floor
+    holder (``agentconnect.runtime.floor``); only ``moderated`` reads them."""
     to = inner.get("to") or ["*"]
     addressee = inner.get("addressee")
     if addressee is not None and floor in ("free", "mention"):
@@ -378,8 +386,8 @@ def addressed_to_me(
         hit = True
     elif floor == "mention":
         hit = me in to or (to == ["*"] and inner.get("origin") == "human")
-    else:  # moderated: floor control is a later task; only the moderator
-        hit = moderator == me
+    else:  # moderated: the effective moderator and the floor holder
+        hit = me in (moderator, holder)
     if not hit:
         return False
     body = inner.get("body")
@@ -508,12 +516,15 @@ class Engine:
         self._gave_up = 0
         self.running = False
         self._closed = False
+        from agentconnect.runtime.floor import FloorService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.groups import GroupService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.knocks import KnockService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.listing import ListingManager  # noqa: PLC0415 - import cycle
 
         # Membership: member state, commits' events, leaves and removals (docs/groups.md).
         self.groups = GroupService(self)
+        # Floor control in moderated groups: the holder and its grants (SPEC 9.3).
+        self.floor = FloorService(self)
         # The listing, its doors and the discovery worker (docs/discovery.md).
         self.listings = ListingManager(self)
         # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
@@ -733,7 +744,14 @@ class Engine:
         g = self.store.group(group_id)
         if g is None:
             return None
-        return GroupView(g.group_id, g.name, g.purpose, g.epoch, str(g.policy.get("floor", "free")))
+        return GroupView(
+            g.group_id,
+            g.name,
+            g.purpose,
+            g.epoch,
+            str(g.policy.get("floor", "free")),
+            self.floor.holder(g.group_id),
+        )
 
     def _adapter_for(self, group_id: str | None) -> Adapter | None:
         name = self.config.default_adapter
@@ -898,6 +916,7 @@ class Engine:
     def _refresh(self, group_id: str) -> None:
         """Re-read members, roles, policy and epoch from the core."""
         self.groups.refresh(group_id)
+        self.floor.ensure(group_id)
 
     def _core_epoch(self, gid: bytes) -> int:
         try:
@@ -1330,6 +1349,11 @@ class Engine:
             else:
                 self.safety.transcribe(group_id, "in", identity, msg_id, delivery.inner)
                 self._defer(self._delivery_wake.set)
+            if delivery.kind == "control.floor":
+                # Checked in _make_delivery (floor.acceptable): it may take the floor.
+                await self.floor.accept(
+                    group_id, identity, delivery.sender.instance_id, delivery.inner
+                )
             if delivery.kind == "control.close":
                 # SPEC 7.3: the owner asks everyone to leave. Leaving is the
                 # human's decision; the daemon never leaves on its own.
@@ -1464,12 +1488,14 @@ class Engine:
         hop = self._received_hop(group.group_id, inner)
         # The hop the loop guard acts on (None: a human's message, SPEC 10.3).
         guard_hop = None if inner.get("origin") == "human" else hop
+        moderator, holder = self.floor.triggers(group.group_id, policy)
         addressed = addressed_to_me(
             str(policy.get("floor", "free")),
             inner,
             self.me,
             self.instance.instance_id_hex,
-            policy.get("floor_moderator"),
+            moderator,
+            holder,
         )
         # One decision: SPEC 7.2 (unknown kinds are ignored), 7.3, 9.3, 10.2
         # (size, parts, rates; a replayed journal entry was counted when the
@@ -1491,6 +1517,16 @@ class Engine:
                 card_problem=self._card_problem(inner),
             )
         )
+        if (
+            decision.verdict is not Verdict.DROP
+            and inner["kind"] == "control.floor"
+            and not self.floor.acceptable(
+                group.group_id, identity, str(sender["instance_id_hex"]), inner
+            )
+        ):
+            # SPEC 9.3: a grant this daemon's view doesn't allow is ignored,
+            # silently, after the rates counted it.
+            decision = drop("floor_ignored")
         if decision.verdict is Verdict.DROP:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=decision.reason)
             return None, decision, kind, guard_hop
@@ -3130,7 +3166,7 @@ class Engine:
             addressee=addressee,
         )[0]
 
-    def queue_message(  # noqa: PLR0913
+    def queue_message(  # noqa: PLR0912, PLR0913
         self,
         group_id: str,
         body: dict[str, Any],
@@ -3168,6 +3204,9 @@ class Engine:
             raise DaemonError("bad_request", "origin must be agent or human")
         if kind in HUMAN_ONLY_KINDS and origin != "human":
             raise DaemonError("forbidden", f"{kind} must come from the human")
+        if kind == "control.floor" and not internal:
+            # The grant checks the role and takes the floor locally too.
+            raise DaemonError("bad_request", "grant the floor with POST /v0/groups/{gid}/floor")
         if origin == "human":
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
@@ -3295,6 +3334,14 @@ class Engine:
         """**Human-only** beyond raising ``require_verified``: the fields of
         ``POST /v0/groups/{gid}/policy`` (``groups.policy_changes``)."""
         return self.set_policy(group_id, **self.groups.policy_changes_of(fields))
+
+    def grant_floor(
+        self, group_id: str, holder: str | None, *, origin: str = "agent"
+    ) -> dict[str, Any]:
+        """Grant the floor of a ``moderated`` group to a member, or release
+        it (``None``): :meth:`FloorService.grant`. Either token: only the
+        effective moderator or the owner may, and a grant triggers nobody."""
+        return self.floor.grant(group_id, holder, origin=origin)
 
     def set_role(self, group_id: str, identity: str, role: str) -> str:
         """**Human-only.** Make a member an admin or a plain member."""

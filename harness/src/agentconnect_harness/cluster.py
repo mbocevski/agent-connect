@@ -341,13 +341,19 @@ def status(node: Node, group_id: str) -> str | None:
 
 def group_state(node: Node, group_id: str) -> tuple[Any, ...]:
     """What every member of a converged group agrees on: epoch, short code,
-    members with their roles and instances, and the policy."""
+    members with their roles and instances, the policy and the floor holder."""
     info = node.daemon.group_info(group_id)
     members = sorted(
         (m["identity"], m["role"], tuple(sorted(i["instance_id"] for i in m["instances"])))
         for m in info["members"]
     )
-    return (info["epoch"], info["sas"]["decimal"], tuple(members), sorted(info["policy"].items()))
+    return (
+        info["epoch"],
+        info["sas"]["decimal"],
+        tuple(members),
+        sorted(info["policy"].items()),
+        info["floor"]["holder"],
+    )
 
 
 async def converged(nodes: list[Node], group_id: str) -> None:

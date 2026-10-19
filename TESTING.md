@@ -284,7 +284,7 @@ scenarios are in `harness/tests/`.
     invite, waiting until every member is on the new epoch.
   - `converged(nodes, group_id)` (a function in `cluster.py`): wait until
     every node is active in the group with the same epoch, short code,
-    members, roles, instances and policy, and an idle outbox.
+    members, roles, instances, policy and floor holder, and an idle outbox.
   - `partition(node)` / `heal(node)`: cut a daemon's connection; healing
     advances the clock past its reconnect backoff.
   - `advance(seconds)`: move daemon time.

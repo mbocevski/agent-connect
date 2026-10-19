@@ -194,6 +194,8 @@ async def test_role_and_policy_routes_match_the_declared_shapes(
         "mode": "moderated",
         "pinned": True,
         "moderator": None,
+        "effective_moderator": alice.node.me,
+        "holder": None,
     }
     await alice.node.idle()
     await cluster.invite(alice.node, bob.node, gid)
@@ -245,6 +247,48 @@ async def test_role_and_policy_routes_match_the_declared_shapes(
     assert {"POST /v0/groups/{gid}/owner", "POST /v0/groups/{gid}/members/{identity}/role"} <= (
         alice.seen
     )
+    await alice.server.stop()
+    await bob.server.stop()
+
+
+async def test_the_floor_route_matches_the_declared_shapes(cluster: Cluster, sockdir: Path) -> None:
+    """`POST /v0/groups/{gid}/floor`: either token grants, only the effective
+    moderator or the owner, only in a moderated group, only to a member."""
+    alice = await serve(cluster, "alice", sockdir, auto_approve=True)
+    bob = await serve(cluster, "bob", sockdir, auto_approve=True)
+    gid = (await alice.call("POST", "/v0/groups", {"name": "Ops"}))["group_id"]
+    await alice.node.idle()
+    await cluster.invite(alice.node, bob.node, gid)
+    path = f"/v0/groups/{gid}/floor"
+    assert await refused(alice, "POST", path, {"holder": bob.node.me}, "agent") == (
+        409,
+        "not_moderated",
+    )
+    policy = {"floor": "moderated", "floor_moderator": bob.node.me}
+    await alice.call("POST", f"/v0/groups/{gid}/policy", policy, "human")
+    await bob.node.wait(
+        lambda: bob.node.daemon.group_info(gid)["floor"]["effective_moderator"] == bob.node.me
+    )
+    for body in ({}, {"holder": 1}):
+        assert await refused(bob, "POST", path, body, "agent") == (400, "bad_request")
+    nobody = {"holder": "ac:v0:nobody"}
+    assert await refused(bob, "POST", path, nobody, "agent") == (404, "not_found")
+    # Alice owns the group, so she may grant too; a plain member may not.
+    await alice.node.wait(lambda: alice.node.daemon.store.outbox() == [])
+    answer = await bob.call("POST", path, {"holder": alice.node.me})
+    assert (answer["status"], answer["holder"]) == ("granted", alice.node.me)
+    await alice.node.wait(lambda: alice.node.daemon.floor.holder(gid) == alice.node.me)
+    assert (await alice.call("POST", path, {"holder": None}, "human"))["holder"] is None
+    await bob.node.wait(lambda: bob.node.daemon.floor.holder(gid) is None)
+    info = await bob.call("GET", f"/v0/groups/{gid}")
+    assert (info["floor"]["effective_moderator"], info["floor"]["holder"]) == (bob.node.me, None)
+    assert "POST /v0/groups/{gid}/floor" in alice.seen & bob.seen
+    # Bob stops moderating: as a plain member he may not grant.
+    await alice.call("POST", f"/v0/groups/{gid}/policy", {"floor_moderator": None}, "human")
+    await bob.node.wait(
+        lambda: bob.node.daemon.group_info(gid)["floor"]["effective_moderator"] == alice.node.me
+    )
+    assert await refused(bob, "POST", path, {"holder": None}, "agent") == (403, "not_permitted")
     await alice.server.stop()
     await bob.server.stop()
 

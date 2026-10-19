@@ -77,6 +77,8 @@ class GroupInfo:
     purpose: str
     epoch: int
     floor: str
+    # Who holds the floor in a moderated group, as the daemon sees it (SPEC 9.3).
+    floor_holder: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,8 +230,14 @@ def _int(d: dict[str, Any], key: str) -> int:
 
 def _group(raw: Any) -> GroupInfo:
     g = _obj(raw, "group")
+    holder = g.get("floor_holder")
     return GroupInfo(
-        _str(g, "id"), _str(g, "name"), _str(g, "purpose"), _int(g, "epoch"), _str(g, "floor")
+        _str(g, "id"),
+        _str(g, "name"),
+        _str(g, "purpose"),
+        _int(g, "epoch"),
+        _str(g, "floor"),
+        holder if isinstance(holder, str) else None,
     )
 
 

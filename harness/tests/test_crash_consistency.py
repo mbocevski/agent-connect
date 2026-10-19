@@ -449,7 +449,16 @@ async def test_a_role_change_is_reported_once_after_a_crash(
     assert a.daemon.set_role(gid, c.me, "admin") == "committing"
     await recover(b, advance, "crash", fired)
     await settled([a, b, c], gid)
-    expected = [{"identity": c.me, "from": "member", "to": "admin", "by": a.me}]
+    expected = [
+        {
+            "identity": c.me,
+            "from": "member",
+            "to": "admin",
+            "moderator_from": False,
+            "moderator_to": False,
+            "by": a.me,
+        }
+    ]
     assert events(b, "role_changed") == expected
     await until(lambda: b.daemon.store.unnotified_events() == [])
     assert [e.data for e in b.adapter.unique_events() if e.type == "role_changed"] == expected
@@ -474,5 +483,134 @@ async def test_departed_roles_are_dropped_once_after_a_crash(
     await until(lambda: json.loads(c.daemon.client.policy(raw(gid)))["admins"] == [])
     await settled([a, c], gid)
     dropped = [e for e in events(c, "role_changed") if e["to"] == "member"]
-    assert dropped == [{"identity": b.me, "from": "admin", "to": "member", "by": a.me}]
+    assert dropped == [
+        {
+            "identity": b.me,
+            "from": "admin",
+            "to": "member",
+            "moderator_from": False,
+            "moderator_to": False,
+            "by": a.me,
+        }
+    ]
     assert [e["by"] for e in events(c, "policy_changed")] == [a.me, a.me]
+
+
+# -- floor control (docs/groups.md#floor-control) ---------------------------------------------
+
+
+def holder_of(node: Node, gid: str) -> str | None:
+    floor = node.daemon.group_info(gid)["floor"]
+    return None if floor["holder"] is None else str(floor["holder"])
+
+
+async def moderated_by(nodes: list[Node], gid: str, moderator: Node) -> None:
+    owner = nodes[0]
+    changes = {"floor": "moderated", "floor_moderator": moderator.me}
+    assert owner.daemon.change_policy(gid, changes) == "committing"
+    await settled(nodes, gid)
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("step", ["after_core", "in_tx", "after_tx", "after_consume"])
+@pytest.mark.parametrize("mode", MODES)
+async def test_a_floor_grant_is_taken_once_after_a_crash(
+    group: GroupFixture, advance: Advance, step: str, mode: str
+) -> None:
+    """A received grant changes the holder in the same transaction as its
+    inbox record: after a failure around it, the holder is taken and
+    reported once."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    fired = daemon_point(c, f"receive.{step}", mode)
+    b.daemon.grant_floor(gid, c.me)
+    await recover(c, advance, mode, fired)
+    await until(lambda: holder_of(c, gid) == c.me)
+    await settled([a, b, c], gid)
+    granted = [e for e in events(c, "floor_changed") if e["reason"] == "grant"]
+    assert [e["holder"] for e in granted] == [c.me]
+    assert c.daemon.store.floor_seq(gid, b.me, b.daemon.instance.instance_id_hex) is not None
+    if mode == "raise":
+        # A failure after the transaction leaves its events for the next
+        # start (or reconnect) to tell the adapter.
+        await c.restart()
+    await until(lambda: c.daemon.store.unnotified_events() == [])
+    told = [e.data for e in c.adapter.unique_events() if e.type == "floor_changed"]
+    assert [e["reason"] for e in told].count("grant") == 1
+    # The grant reached c's adapter once, as context.
+    await c.adapter.wait_for(
+        lambda: any(d.kind == "control.floor" for d in c.adapter.deliveries), WAIT
+    )
+    await c.idle()
+    floors = {d.msg_id for d in c.adapter.deliveries if d.kind == "control.floor"}
+    assert len(floors) == 1
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize(
+    ("side", "step"),
+    [("receive", s) for s in ("after_core", "in_tx", "after_tx", "after_consume")]
+    + [("confirm", s) for s in ("after_core", "in_tx", "after_tx")],
+)
+async def test_a_holder_reset_is_reported_once_after_a_crash(
+    group: GroupFixture, advance: Advance, malicious_relay: Proxy, side: str, step: str
+) -> None:
+    """The holder is removed: the member that receives the commit (b) or
+    the one that made it (a) crashes around recording it, and reports the
+    reset once after the restart."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: holder_of(a, gid) == holder_of(c, gid) == c.me)
+    node = b if side == "receive" else a
+    if side == "confirm":
+        hold_own_commits(malicious_relay(a), a)
+    fired = daemon_point(node, f"{side}.{step}", "crash")
+    a.daemon.remove_member(gid, c.me)
+    await recover(node, advance, "crash", fired)
+    await until(lambda: status(c, gid) == "removed")
+    await settled([a, b], gid)
+    for n in (a, b):
+        assert holder_of(n, gid) is None
+        resets = [e for e in events(n, "floor_changed") if e["reason"] == "reset"]
+        assert resets == [
+            {
+                "mode": "moderated",
+                "moderator": b.me,
+                "effective_moderator": b.me,
+                "holder": None,
+                "by": a.me,
+                "reason": "reset",
+            }
+        ]
+    await until(lambda: node.daemon.store.unnotified_events() == [])
+    told = [e.data for e in node.adapter.unique_events() if e.type == "floor_changed"]
+    assert [e["reason"] for e in told].count("reset") == 1
+
+
+@pytest.mark.hosts("daemon")
+async def test_the_floor_holder_survives_a_restart(group: GroupFixture) -> None:
+    """The holder is stored, so a restarted member still triggers the
+    holder, and still ignores a grant older than the last it took."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: holder_of(a, gid) == holder_of(c, gid) == c.me)
+    taken = a.daemon.store.floor_seq(gid, b.me, b.daemon.instance.instance_id_hex)
+    await a.restart()
+    await a.connected()
+    assert holder_of(a, gid) == c.me
+    assert a.daemon.store.floor_seq(gid, b.me, b.daemon.instance.instance_id_hex) == taken
+    send = c.adapter.send
+    assert send is not None
+    await send(gid, {"text": "after the restart"})
+    await a.adapter.wait_for(lambda: "after the restart" in a.adapter.texts(gid), WAIT)
+    hit = next(d for d in a.adapter.deliveries if d.body == {"text": "after the restart"})
+    assert hit.addressed_to_me is False  # a is neither the moderator nor the holder
+    # An older grant from b, held back by the relay, is ignored after the restart.
+    inner = b.daemon.inner("control.floor", {"holder": a.me}, ["*"])
+    inner["seq"] = 1
+    b.daemon._enqueue("app", gid, {"inner": inner, "msg_id": engine_mod.new_msg_id()})
+    b.daemon.send_message(gid, {"text": "marker"})
+    await a.adapter.wait_for(lambda: "marker" in a.adapter.texts(gid), WAIT)
+    assert holder_of(a, gid) == c.me

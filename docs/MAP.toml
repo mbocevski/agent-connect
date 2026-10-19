@@ -113,6 +113,7 @@ exclude = [
     "daemon/src/agentconnect/runtime/listing.py",
     "daemon/src/agentconnect/runtime/knocks.py",
     "daemon/src/agentconnect/runtime/groups.py",
+    "daemon/src/agentconnect/runtime/floor.py",
 ]
 docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
 
@@ -130,8 +131,9 @@ docs = ["docs/discovery.md"]
 
 [[rule]]
 name = "group-mode"
-# Membership: leaves, removals, the events they raise, the update cadence.
-code = ["daemon/src/agentconnect/runtime/groups.py"]
+# Membership: leaves, removals, the events they raise, the update cadence;
+# floor control in moderated groups.
+code = ["daemon/src/agentconnect/runtime/groups.py", "daemon/src/agentconnect/runtime/floor.py"]
 docs = ["docs/groups.md"]
 
 [[rule]]
@@ -241,7 +243,11 @@ doc = "docs/adr/006-discovery.md"
 
 [[component]]
 name = "group-mode"
-paths = ["daemon/src/agentconnect/runtime/groups.py", "core/src/policy.rs"]
+paths = [
+    "daemon/src/agentconnect/runtime/groups.py",
+    "daemon/src/agentconnect/runtime/floor.py",
+    "core/src/policy.rs",
+]
 doc = "docs/groups.md"
 
 [[component]]

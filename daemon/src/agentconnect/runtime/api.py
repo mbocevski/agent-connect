@@ -236,7 +236,13 @@ _GROUP_INFO: dict[str, Any] = {
         "max_members": Opt("int"),
         "max_agent_turns": Opt("int"),
     },
-    "floor": {"mode": Opt("str"), "pinned": "bool", "moderator": Opt("str")},
+    "floor": {
+        "mode": Opt("str"),
+        "pinned": "bool",
+        "moderator": Opt("str"),
+        "effective_moderator": Opt("str"),
+        "holder": Opt("str"),
+    },
     "pending_leaves": [{"identity": "str", "instance_id": "str"}],
     "members": [
         {
@@ -343,7 +349,8 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "saw it in; `instances_since_verified` are those that joined after you verified the "
         "member (`null`: unknown, the member was verified before the daemon recorded the "
         "epoch, so verify it again). `policy_summary` and `floor` repeat the policy's "
-        "permissions and floor, and "
+        "permissions and floor; `floor` adds the `effective_moderator` and the `holder` "
+        "of a moderated group's floor ([groups.md](groups.md#floor-control)), and "
         "`pending_leaves` the instances whose leave waits for a commit. `leaving` is set "
         "while this instance leaves the group; `blocked` says the leave waits for an "
         "ownership transfer ([groups.md](groups.md#leaving)).",
@@ -433,6 +440,21 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         request={"identity": "str", "keep_admin?": "bool"},
         response={"status": "str"},
         human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/floor",
+        "_floor",
+        "Grant the floor of a `moderated` group to a member (`holder`: an identity), or "
+        "release it (`holder: null`): the daemon sends `control.floor` (SPEC 9.3) and "
+        "takes the holder itself. Only the effective moderator or the owner may "
+        "(`403 not_permitted`); a group whose floor isn't `moderated` answers "
+        "`409 not_moderated`. Either token: a grant triggers nobody, and the floor mode and "
+        "the moderator stay the human's (`POST /v0/groups/{gid}/policy`). `status` is "
+        "`granted`; `floor_changed` follows when the holder changed "
+        "([groups.md](groups.md#floor-control)).",
+        request={"holder": Opt("str")},
+        response={"status": "str", "holder": Opt("str"), "msg_id": "str"},
     ),
     RouteSpec(
         "POST",
@@ -953,6 +975,7 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "The invite or request has expired (a knock lapses an hour after it was sent).",
     ),
     (409, "invite_not_open", "The invite was used up, revoked or never open."),
+    (409, "not_moderated", "Floor grant: the group's floor isn't `moderated`."),
     (
         409,
         "group_full",
@@ -1214,6 +1237,16 @@ class ApiServer:
             raise ApiError(400, "bad_request", "keep_admin must be a boolean")
         status = self.daemon.transfer_ownership(p["gid"], _str(b, "identity"), keep_admin=keep)
         return {"status": status}
+
+    async def _floor(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        if "holder" not in b:
+            raise ApiError(400, "bad_request", "holder is required (an identity or null)")
+        holder = b["holder"]
+        if holder is not None and not isinstance(holder, str):
+            raise ApiError(400, "bad_request", "holder must be an identity or null")
+        if p.get(SCOPE) == "human":
+            return self.daemon.grant_floor(p["gid"], holder, origin="human")
+        return await self.agent.grant_floor(p["gid"], holder)
 
     async def _revoke(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return await self.agent.revoke_invite(p["invite_id"])

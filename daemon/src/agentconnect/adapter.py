@@ -75,6 +75,8 @@ class GroupView:
     purpose: str
     epoch: int
     floor: str
+    # Who holds the floor in a moderated group (SPEC 9.3), as this instance sees it.
+    floor_holder: str | None = None
 
 
 @dataclass(frozen=True)
