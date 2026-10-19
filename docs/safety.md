@@ -101,7 +101,8 @@ What the policy checks, in order:
 3. **Protocol rules.** Only a human may send `control.resume`, and only the
    owner `control.close` ([§7.3](../SPEC.md#73-control-messages)). Control
    messages and Agent Cards reach the adapter as context
-   (`deliver_as_context`, reason `not_content`): they never trigger the
+   (`deliver_as_context`, reason `not_content`, or `card_changed` for a
+   card that says something new): they never trigger the
    agent, the SDK shows no text for them, and a card is surfaced only as a
    card (`msg.card`). Your agent can't send them either: the daemon sends
    its card and the loop-guard pauses itself, a floor grant goes out only
@@ -443,20 +444,53 @@ approval decision:
 | `msg_id` | The message, or empty for a send that was refused. |
 | `kind` | The message kind. |
 | `size` | The size of the inner message in bytes. |
-| `decision` | `deliver`, `deliver_as_context`, `hold_for_approval`, `drop`, `approved`, `rejected` or `expired`. |
+| `decision` | `deliver`, `deliver_as_context`, `hold_for_approval`, `drop`, `approved`, `rejected`, `cancelled` or `expired`. |
 | `reason` | Why: `too_large`, `rate_limited`, `require_approval`, `not_addressed` and so on. |
 
 The log never holds a message body. It lives in the daemon's encrypted
 database ([ADR-003](adr/003-daemon-storage-encryption.md)). Rows older than
-`policy.audit_retention_days` (30 days) are deleted. Rows come in two
-classes that never push each other out: drops, and decisions (deliver,
-hold, approve, reject, expire). A new drop keeps one sender's drops in a
-group to their newest `policy.audit_max_rows_per_sender` (2000); drops and
-decisions are each kept to their newest `policy.audit_max_rows_per_group`
-(20000) in a group and 100000 in all, oldest first, across senders. A
-sender flooding the log with drops pushes out only its own older drops,
-never a delivered or held message, its own included: the record of what an
-injection got through survives the flood that follows it. Read it with the human token:
+`policy.audit_retention_days` (30 days) are deleted. Rows come in four
+classes that never push each other out:
+
+| Class | Rows |
+|---|---|
+| security | in a group: what reached the agent or left it with content (delivered messages and task status and artifact updates, a changed Agent Card's text), holds and how they ended (the human's approvals, rejections and cancellations, and expiries), and refusals of what a sender may not do: `not_human`, `not_owner`, `not_for_agents`, `malformed` (content smuggled into a control, card or cancel), `part_kind` and `bad_signature`. For a knock, the human's approval or rejection |
+| decisions | delivered controls that change state (`control.close`, `control.pause`, `control.resume`, `control.floor`) and task cancels; a knock's hold and its expiry |
+| routine | the other deliveries, which carry no content and change nothing: an unchanged Agent Card, `control.leave`, `control.capabilities` |
+| drops | every other refusal: over a rate or a size, a full held queue, a task waiting for your decision, a join request or a knock refused, and so on |
+
+**Nobody else's rows trim a sender's security rows**, and age does. Each
+sender keeps `policy.audit_max_rows_per_sender` (2000) security rows per
+group and decision: its oldest half, which stays until it ages out, and a
+rolling newest half. When a new row comes past that, the oldest row after
+the oldest half goes, and the sender's count for that decision goes up,
+with the time of the first and the last row it didn't keep (`suppressed`
+in `GET /v0/audit`, "not kept" in `agentconnect audit`). So no flood
+erases a sender's earliest rows or another member's, the record of what
+an injection got through survives a flood by anyone else, and a sender's
+latest rows, an injection sent after a filler of harmless messages
+included, are stored. What a sender can still do is push its own rows out
+of the middle of the log with a flood of its own of the same decision:
+they are then only counted.
+
+These rows are bounded per admitted sender, not per group: each member's
+identity brings its own share per decision, and the group's cap doesn't
+apply. A group of 50 members can therefore hold 50 shares. Admitting a
+member takes your approval (or `policy.auto_approve` and an invite you
+created), so the total grows with whom you let in: a multi-use invite to
+many joiners raises it by one share per joiner. Replicas of one identity
+share one.
+
+The other classes are trimmed for volume. A new drop or routine row keeps
+one sender's rows of its class in a group to their newest
+`policy.audit_max_rows_per_sender` (2000). Decisions have no per-sender
+cap. Drops, routine rows and decisions each keep at most
+`policy.audit_max_rows_per_group` (20000) rows in a group. Past that, the
+senders holding the most rows of the class give way, oldest first, down to
+a common level, and the class is trimmed 1% below its cap at once. Each of
+the three also keeps at most 100000 rows in all, so together they hold at
+most 300000 rows; security rows are bounded per sender, group and decision
+instead. Read the log with the human token:
 
 ```sh
 agentconnect audit --group <group>

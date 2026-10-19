@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 import agentconnect_core as ac
 from agentconnect.keystore import private_file
+from agentconnect.limits import TASK_UPDATE_KINDS
 
 SqlParam = None | int | float | str | bytes
 HANDLED_KEEP = 50_000  # ids an in-process agent finished with (Runtime.handled, the MCP host)
@@ -74,6 +75,70 @@ class _Connection:
 
     def close(self) -> None:
         self._db.close()
+
+
+DELIVERED = frozenset({"deliver", "deliver_as_context"})
+# Kinds whose parts reach the agent: what an injection would ride in.
+CONTENT_KINDS = frozenset({"a2a.message"}) | TASK_UPDATE_KINDS
+# Delivered kinds that change the group's or a task's state.
+STATE_KINDS = frozenset(
+    {"control.close", "control.pause", "control.resume", "control.floor", "a2a.task_cancel"}
+)
+# What closes a hold: the human's approval, rejection or cancellation, or
+# its expiry.
+HOLD_OUTCOMES = frozenset({"approved", "rejected", "cancelled", "expired"})
+# Refusals that say a sender tried what it may not, rather than sent too
+# much: a human's or the owner's control, a control or card from an agent,
+# content smuggled into a control, card or cancel, a part the group doesn't
+# allow, a card that fails its pinned key.
+SECURITY_DROPS = frozenset(
+    {"not_human", "not_owner", "not_for_agents", "malformed", "part_kind", "bad_signature"}
+)
+
+
+def audit_class(group_id: str, decision: str, kind: str, reason: str) -> str:
+    """The audit row class (:meth:`Store.audit_add`).
+
+    * ``security``: in a group, content that reached the agent or left it
+      (a delivered message or task update, a changed Agent Card), a hold, a
+      hold's outcome, and the refusals in :data:`SECURITY_DROPS`. For a
+      knock (no group yet), the human's approval or rejection.
+    * ``decision``: a delivered control that changes state (close, pause,
+      resume, floor) or task cancel, and a knock's hold and expiry.
+    * ``routine``: the other deliveries (an unchanged card, a leave notice,
+      capabilities).
+    * ``drop``: every other refusal.
+    """
+    if decision == "drop":
+        return "security" if group_id and reason in SECURITY_DROPS else "drop"
+    if decision in HOLD_OUTCOMES:
+        return "security" if group_id or decision != "expired" else "decision"
+    if decision == "hold_for_approval":
+        return "security" if group_id else "decision"
+    if decision in DELIVERED:
+        if kind in CONTENT_KINDS or (kind == "a2a.agent_card" and reason == "card_changed"):
+            return "security"
+        return "decision" if kind in STATE_KINDS else "routine"
+    return "decision"
+
+
+def _water_level(counts: list[int], target: int) -> list[int]:
+    """How many rows to take from each of ``counts`` (largest first) so
+    that ``target`` go in all, taken from the top: every count above some
+    level comes down to it, and the remainder comes from the first ones."""
+    level, taken = counts[0], 0
+    while taken < target and level > 0:
+        level -= 1
+        taken = sum(max(0, n - level) for n in counts)
+    cut = [max(0, n - level) for n in counts]
+    extra = taken - target  # the last step took one too many from each of these
+    for i in reversed(range(len(cut))):
+        if extra <= 0:
+            break
+        if cut[i] > 0 and counts[i] - cut[i] == level:
+            cut[i] -= 1
+            extra -= 1
+    return cut
 
 
 def _scrubbed(payload: dict[str, Any]) -> dict[str, Any]:
@@ -254,6 +319,15 @@ CREATE TABLE IF NOT EXISTS audit (
     decision TEXT NOT NULL,
     reason TEXT NOT NULL,
     class TEXT NOT NULL DEFAULT 'decision'
+);
+CREATE TABLE IF NOT EXISTS audit_suppressed (
+    group_id TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    first_at INTEGER NOT NULL,
+    last_at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, sender, decision)
 );
 CREATE TABLE IF NOT EXISTS transcript_bytes (
     group_id TEXT PRIMARY KEY,
@@ -670,6 +744,8 @@ class Store:
             "CREATE INDEX IF NOT EXISTS audit_class ON audit (class, seq);"
             "CREATE INDEX IF NOT EXISTS audit_group ON audit (group_id, class, seq);"
             "CREATE INDEX IF NOT EXISTS audit_sender ON audit (group_id, sender, class, seq);"
+            "CREATE INDEX IF NOT EXISTS audit_security ON audit (group_id, sender, decision, seq) "
+            "WHERE class = 'security';"
             "CREATE INDEX IF NOT EXISTS transcript_group ON transcript (group_id, seq);"
             "CREATE INDEX IF NOT EXISTS transcript_sender ON transcript (group_id, sender, seq);"
         )
@@ -1106,30 +1182,107 @@ class Store:
         keep_group: int | None = None,
         keep_sender: int | None = None,
     ) -> None:
-        """One audit row, in one of two classes that never evict each other:
-        ``drop`` rows (what the policy refused) and ``decision`` rows (what
-        it delivered, held, approved, rejected or expired). A drop row keeps
-        only the newest ``keep_sender`` drops of its sender in the group, and
-        ``keep_group`` and ``keep`` drops in the group and in all; a decision
-        row is trimmed only by the group and daemon caps, across senders. So a
-        sender flooding the log with drops can't erase what it got through,
-        its own record included."""
-        row_class = "drop" if decision == "drop" else "decision"
+        """One audit row, in one of four classes that never evict each other
+        (:func:`audit_class`).
+
+        * ``security`` rows are trimmed by age (:meth:`audit_purge`), and
+          only a sender's own rows trim its own: of a decision it keeps
+          ``keep_sender`` per group, the oldest half and a rolling newest
+          half (:meth:`_trim_security`), and counts the rows between in
+          ``audit_suppressed``. So no flood erases a sender's earliest
+          record, nobody else's rows push out any of its own, and its
+          latest rows stay visible.
+        * ``drop`` and ``routine`` rows keep the newest ``keep_sender`` of
+          their class from a sender in a group.
+        * ``drop``, ``routine`` and ``decision`` rows each keep
+          ``keep_group`` in a group (:meth:`_trim_audit_fairly`) and ``keep``
+          in all.
+        """
+        row_class = audit_class(group_id, decision, kind, reason)
         self._db.execute(
             "INSERT INTO audit (group_id, at, direction, sender, msg_id, kind, size, decision, "
             "reason, class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (group_id, at, direction, sender, msg_id, kind, size, decision, reason, row_class),
         )
-        if keep_sender is not None and row_class == "drop":
+        if row_class == "security":
+            if keep_sender is not None:
+                self._trim_security(group_id, sender, decision, keep_sender)
+            return
+        if keep_sender is not None and row_class != "decision":
             self._trim_audit(
                 "group_id = ? AND sender = ? AND class = ?",
                 (group_id, sender, row_class),
                 keep_sender,
             )
         if keep_group is not None:
-            self._trim_audit("group_id = ? AND class = ?", (group_id, row_class), keep_group)
+            self._trim_audit_fairly(group_id, row_class, keep_group)
         if keep is not None:
             self._trim_audit("class = ?", (row_class,), keep)
+
+    def _trim_security(self, group_id: str, sender: str, decision: str, keep: int) -> None:
+        """Past ``keep`` security rows of one decision from a sender in a
+        group, delete the oldest row after its oldest half (which stays until
+        it ages out) and count it in ``audit_suppressed``, so the newest
+        half rolls. Two indexed walks of at most ``keep`` rows."""
+        where = "group_id = ? AND sender = ? AND decision = ? AND class = 'security'"
+        over = self._one(
+            f"SELECT 1 FROM audit WHERE {where} LIMIT 1 OFFSET ?",  # noqa: S608
+            group_id,
+            sender,
+            decision,
+            keep,
+        )
+        if over is None:
+            return
+        gap = self._one(
+            f"SELECT seq, at FROM audit WHERE {where} ORDER BY seq LIMIT 1 OFFSET ?",  # noqa: S608
+            group_id,
+            sender,
+            decision,
+            (keep + 1) // 2,
+        )
+        if gap is None:
+            return
+        self._db.execute("DELETE FROM audit WHERE seq = ?", (gap[0],))
+        self._db.execute(
+            "INSERT INTO audit_suppressed (group_id, sender, decision, count, first_at, "
+            "last_at) VALUES (?, ?, ?, 1, ?, ?) "
+            "ON CONFLICT(group_id, sender, decision) "
+            "DO UPDATE SET count = count + 1, first_at = MIN(first_at, excluded.first_at), "
+            "last_at = MAX(last_at, excluded.last_at)",
+            (group_id, sender, decision, gap[1], gap[1]),
+        )
+
+    def _trim_audit_fairly(self, group_id: str, row_class: str, keep: int) -> None:
+        """Keep at most ``keep`` of a group's rows of a class. Past that, the
+        rows go from the top: the senders holding the most give way down to
+        a common level, oldest first, and at a tie the sender whose oldest
+        row is oldest goes first. It trims 1% below ``keep`` at once, so the
+        senders are counted once per hundred rows at the cap, not per row."""
+        row = self._one(
+            "SELECT COUNT(*) FROM audit WHERE group_id = ? AND class = ?", group_id, row_class
+        )
+        total = 0 if row is None else int(row[0])
+        if total <= keep:
+            return
+        target = total - keep + keep // 100
+        counts = [
+            (str(r[0]), int(r[1]))
+            for r in self._all(
+                "SELECT sender, COUNT(*) AS n FROM audit WHERE group_id = ? AND class = ? "
+                "GROUP BY sender ORDER BY n DESC, MIN(seq)",
+                group_id,
+                row_class,
+            )
+        ]
+        cut = _water_level([n for _, n in counts], target)
+        for (sender, _), n in zip(counts, cut, strict=True):
+            if n > 0:
+                self._db.execute(
+                    "DELETE FROM audit WHERE seq IN (SELECT seq FROM audit WHERE group_id = ? "
+                    "AND sender = ? AND class = ? ORDER BY seq LIMIT ?)",
+                    (group_id, sender, row_class, n),
+                )
 
     def _trim_audit(self, where: str, args: tuple[str, ...], keep: int) -> None:
         """Delete the audit rows matching ``where`` beyond the newest ``keep``
@@ -1168,12 +1321,29 @@ class Store:
         )
         return [dict(zip(self._AUDIT_COLUMNS, r, strict=True)) for r in rows]
 
+    def audit_suppressed(self, group_id: str | None = None) -> list[dict[str, Any]]:
+        """Security rows that fell between a sender's oldest and newest half
+        of its share (:meth:`_trim_security`), counted instead of kept: per
+        group, sender and decision."""
+        rows = self._all(
+            "SELECT group_id, sender, decision, count, first_at, last_at FROM audit_suppressed "
+            "WHERE (? IS NULL OR group_id = ?) ORDER BY group_id, sender, decision",
+            group_id,
+            group_id,
+        )
+        keys = ("group_id", "sender", "decision", "count", "first_at", "last_at")
+        return [dict(zip(keys, r, strict=True)) for r in rows]
+
     def audit_purge(self, before: int, keep: int) -> None:
-        """Delete audit rows older than ``before`` and all but the newest ``keep``."""
+        """Delete audit rows and suppressed counts older than ``before`` and,
+        in each class but ``security``, all but the newest ``keep`` (one
+        class never pushes out another, and volume never trims security
+        rows)."""
         self._db.execute("DELETE FROM audit WHERE at < ?", (before,))
-        row = self._one("SELECT MAX(seq) FROM audit")
-        if row is not None and row[0] is not None:
-            self._db.execute("DELETE FROM audit WHERE seq <= ?", (int(row[0]) - keep,))
+        self._db.execute("DELETE FROM audit_suppressed WHERE last_at < ?", (before,))
+        for (row_class,) in self._all("SELECT DISTINCT class FROM audit"):
+            if row_class != "security":
+                self._trim_audit("class = ?", (str(row_class),), keep)
 
     def transcript_add(  # noqa: PLR0913
         self,

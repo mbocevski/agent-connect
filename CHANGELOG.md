@@ -1201,6 +1201,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   16 human-token requests are in progress at once, and in the
   separate-OS-user mode one OS user holds at most 16 event streams, so one
   agent user can't take every agent-token request from another.
+- Safety policy: delivered task updates and controls were audit decision
+  rows, kept only by the group's cap, oldest first. One member could push
+  out a group's 20000 decision rows in about 20 minutes, including the
+  `deliver` row of an earlier injection, and members holding more than
+  their share could push out another member's oldest rows, such as the
+  human's approval of its held message. Audit rows now come in four
+  classes. `security` rows (content delivered to the agent or sent by it,
+  a changed Agent Card's text, holds and their outcomes, and refusals of
+  what a sender may not do) are trimmed only by age and by the sender's
+  own rows: each sender keeps `policy.audit_max_rows_per_sender` per group
+  and decision, its oldest half and a rolling newest half, and the rows
+  between are counted (`suppressed` in `GET /v0/audit`, "not kept" in
+  `agentconnect audit`). They are bounded per admitted sender, not per
+  group. `decision` rows (controls that change state,
+  task cancels), `routine` rows (unchanged cards, leave notices,
+  capabilities) and drops keep the group's cap each, the senders holding
+  the most giving way first, and 100000 rows each daemon-wide. A changed
+  card that isn't held is delivered with reason `card_changed`.
 - Core and protocol: a commit after which two leaves of one identity have
   the same `instance_id` is refused by its committer and rejected by every
   member (SPEC §9.2, "One leaf per instance"), and so is a commit whose
