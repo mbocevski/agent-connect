@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
+serde_json = "1"
 
 [dependencies.agentconnect-core]
 path = ".."
@@ -43,6 +44,27 @@ bench = false
 [[bin]]
 name = "owner_file"
 path = "fuzz_targets/owner_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mls_message"
+path = "fuzz_targets/mls_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "join_and_welcome"
+path = "fuzz_targets/join_and_welcome.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_json"
+path = "fuzz_targets/wire_json.rs"
 test = false
 doc = false
 bench = false
