@@ -174,6 +174,11 @@ pub(crate) mod sealed {
         fn journal_delete_group(&self, group_id: &[u8]) -> crate::Result<()>;
         /// Deletes consumed entries written before `before`; returns how many.
         fn journal_purge(&self, before: u64) -> crate::Result<u64>;
+        /// Deletes every OpenMLS row still keyed by the group, after
+        /// `MlsGroup::delete`. That deletes the HPKE key pairs of the
+        /// current epoch only, so a member that merged its own removal kept
+        /// the previous epoch's (SR-61).
+        fn delete_group_mls_rows(&self, group_id: &[u8]) -> crate::Result<()>;
     }
 }
 
@@ -321,6 +326,19 @@ impl sealed::Backend for MemoryStore {
         journal.retain(|_, r| r.result.is_some() || r.at >= before);
         Ok((n - journal.len()) as u64)
     }
+
+    fn delete_group_mls_rows(&self, group_id: &[u8]) -> Result<()> {
+        // Every entry keyed by the group has its serialised id in the key.
+        let key = mls_group_key(group_id)?;
+        self.mls_values()?
+            .retain(|k, _| !k.windows(key.len()).any(|w| w == key.as_slice()));
+        Ok(())
+    }
+}
+
+/// A group id as both OpenMLS stores encode it in their keys (JSON).
+fn mls_group_key(group_id: &[u8]) -> Result<Vec<u8>> {
+    serde_json::to_vec(&openmls::group::GroupId::from_slice(group_id)).map_err(storage)
 }
 
 impl Store for MemoryStore {}
@@ -941,6 +959,35 @@ fn apply_key(conn: &Connection, key: &DbKey) -> Result<()> {
     Ok(())
 }
 
+/// The OpenMLS tables keyed by group id (every table of the provider's
+/// schema with a `group_id` column), whatever its migrations added.
+fn mls_group_tables(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c \
+             WHERE m.type = 'table' AND c.name = 'group_id' \
+             AND m.name NOT LIKE 'agentconnect!_%' ESCAPE '!' ORDER BY m.name",
+        )
+        .map_err(storage)?;
+    stmt.query_map((), |r| r.get(0))
+        .map_err(storage)?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(storage)
+}
+
+/// Deletes the HPKE key pairs of groups that have no state left: what
+/// deleting a group left behind before SR-61 was fixed. A group's state is
+/// always written with its key pairs, so these belong to no group.
+fn sweep_orphan_epoch_keys(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM openmls_epoch_keys_pairs \
+         WHERE group_id NOT IN (SELECT group_id FROM openmls_group_data)",
+        (),
+    )
+    .map(drop)
+    .map_err(storage)
+}
+
 pub(crate) fn open_keyed(path: &Path, key: &DbKey, flags: OpenFlags) -> Result<Connection> {
     let conn = Connection::open_with_flags(path, flags).map_err(storage)?;
     apply_key(&conn, key)?;
@@ -996,6 +1043,7 @@ impl SqliteStore {
             .run_migrations()
             .map_err(storage)?;
         conn.execute_batch(RECORDS_SCHEMA).map_err(storage)?;
+        sweep_orphan_epoch_keys(&conn)?;
         Ok(Self {
             mls: SqliteMls { conn },
         })
@@ -1103,6 +1151,19 @@ impl sealed::Backend for SqliteStore {
             )
             .map(|n| n as u64)
             .map_err(storage)
+    }
+
+    fn delete_group_mls_rows(&self, group_id: &[u8]) -> Result<()> {
+        let key = mls_group_key(group_id)?;
+        for table in mls_group_tables(self.conn())? {
+            self.conn()
+                .execute(
+                    &format!("DELETE FROM \"{table}\" WHERE group_id = ?1"),
+                    (&key,),
+                )
+                .map_err(storage)?;
+        }
+        Ok(())
     }
 
     fn get_record(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -1555,5 +1616,369 @@ mod tests {
         assert_eq!(sql.len(), "PRAGMA key = \"x''\";".len() + 64);
         assert!(sql.contains(&format!("{:02X}", k.as_bytes()[0])));
         assert_ne!(key("k2").as_bytes(), k.as_bytes());
+    }
+
+    fn rows(store: &SqliteStore, table: &str) -> i64 {
+        store
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), (), |r| r.get(0))
+            .unwrap()
+    }
+
+    /// Every table OpenMLS keeps state in.
+    const MLS_TABLES: [&str; 8] = [
+        "openmls_encryption_keys",
+        "openmls_epoch_keys_pairs",
+        "openmls_group_data",
+        "openmls_key_packages",
+        "openmls_own_leaf_nodes",
+        "openmls_proposals",
+        "openmls_psks",
+        "openmls_signature_keys",
+    ];
+
+    #[test]
+    fn old_keys_and_a_left_groups_secrets_leave_the_store() {
+        // Forward secrecy through OpenMLS on the SQLite store: the used
+        // KeyPackage, each previous epoch's keys, an update's fresh leaf key
+        // and, once the group is deleted, all of its state are gone.
+        use crate::group::Event;
+        let clock = Arc::new(FakeClock::default());
+        let a = client(MemoryStore::new(), "fs-a", &clock);
+        let b = client(SqliteStore::open_in_memory().unwrap(), "fs-b", &clock);
+        let bs = b.store_for_testing();
+        let mut ga = a.create_group("g", "p").unwrap();
+        let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
+        let req = b.create_join_request(inv.secret(), "b").unwrap();
+        assert_eq!(rows(bs, "openmls_key_packages"), 1);
+        let v = a.verify_join_request(&req, &inv).unwrap();
+        let out = ga.add_member(&a, &v, &inv, true).unwrap();
+        ga.confirm_pending_commit(&a, &out.msg_id).unwrap();
+        let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
+        let mut gb = b
+            .join_from_wrapped_welcome(inv.secret(), &meta, out.welcome.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(rows(bs, "openmls_key_packages"), 0, "the used KeyPackage");
+        assert_eq!(rows(bs, "openmls_epoch_keys_pairs"), 1);
+
+        // A's updates move the epoch: B keeps only the current epoch's keys.
+        for _ in 0..3 {
+            let up = ga.update(&a).unwrap();
+            ga.confirm_pending_commit(&a, &up.msg_id).unwrap();
+            assert!(matches!(
+                gb.process(&b, &up.commit).unwrap(),
+                Event::Commit(_)
+            ));
+            assert_eq!(gb.epoch(), ga.epoch());
+            assert_eq!(
+                rows(bs, "openmls_epoch_keys_pairs"),
+                1,
+                "epoch {}",
+                gb.epoch()
+            );
+        }
+
+        // B's own update: afterwards only the new epoch's keys are stored.
+        let up = gb.update(&b).unwrap();
+        gb.confirm_pending_commit(&b, &up.msg_id).unwrap();
+        assert_eq!(
+            rows(bs, "openmls_encryption_keys"),
+            0,
+            "the update's leaf key"
+        );
+        assert_eq!(rows(bs, "openmls_epoch_keys_pairs"), 1);
+        assert!(matches!(
+            ga.process(&a, &up.commit).unwrap(),
+            Event::Commit(_)
+        ));
+
+        // A stored proposal doesn't outlive its epoch: a commit that doesn't
+        // carry it drops it.
+        gb.propose_leave(&b).unwrap();
+        assert!(rows(bs, "openmls_proposals") > 0);
+        let up = ga.update(&a).unwrap();
+        ga.confirm_pending_commit(&a, &up.msg_id).unwrap();
+        assert!(matches!(
+            gb.process(&b, &up.commit).unwrap(),
+            Event::Commit(_)
+        ));
+        assert_eq!(rows(bs, "openmls_proposals"), 0);
+
+        // B leaves; once removed it deletes the group, and every row of it
+        // goes, the leave proposal B still holds included.
+        let leave = gb.propose_leave(&b).unwrap();
+        assert!(matches!(
+            ga.process(&a, &leave).unwrap(),
+            Event::LeaveProposed(_)
+        ));
+        let rm = ga.commit_pending_proposals(&a).unwrap();
+        ga.confirm_pending_commit(&a, &rm.msg_id).unwrap();
+        assert!(matches!(
+            gb.process(&b, &rm.commit).unwrap(),
+            Event::Removed(_)
+        ));
+        assert!(rows(bs, "openmls_group_data") > 0);
+        let gid = gb.group_id().to_vec();
+        gb.delete(&b).unwrap();
+        for table in MLS_TABLES {
+            assert_eq!(rows(bs, table), 0, "{table} after the group is deleted");
+        }
+        assert!(b.load_group(&gid).unwrap().is_none());
+    }
+
+    // SR-61: deleting a group deletes all of its key material.
+
+    /// How a group ends for B before B deletes it.
+    #[derive(Clone, Copy, Debug)]
+    enum End {
+        /// Still a member, as when it's the sole member or the last one.
+        Active,
+        /// Its leave is pending, as when nobody committed it in time.
+        LeavePending,
+        /// Another member removed it.
+        RemovedByOther,
+        /// It proposed a leave and another member committed it.
+        LeaveCommitted,
+    }
+
+    /// B joins A's group `name` through an invite.
+    fn join<S: Store, T: Store>(
+        a: &Client<S>,
+        ga: &mut crate::group::Group,
+        b: &Client<T>,
+        name: &str,
+    ) -> crate::group::Group {
+        let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
+        let req = b.create_join_request(inv.secret(), "b").unwrap();
+        let v = a.verify_join_request(&req, &inv).unwrap();
+        let out = ga.add_member(a, &v, &inv, true).unwrap();
+        ga.confirm_pending_commit(a, &out.msg_id).unwrap();
+        let meta = InviteMeta::expected(inv.secret().id(), name, "p");
+        b.join_from_wrapped_welcome(inv.secret(), &meta, out.welcome.as_ref().unwrap())
+            .unwrap()
+    }
+
+    /// A commits an update and B processes it.
+    fn epoch_moves<S: Store, T: Store>(
+        a: &Client<S>,
+        ga: &mut crate::group::Group,
+        b: &Client<T>,
+        gb: &mut crate::group::Group,
+    ) {
+        let up = ga.update(a).unwrap();
+        ga.confirm_pending_commit(a, &up.msg_id).unwrap();
+        assert!(matches!(
+            gb.process(b, &up.commit).unwrap(),
+            crate::group::Event::Commit(_)
+        ));
+    }
+
+    /// B joins a group of A's, the epoch moves and the group ends for
+    /// B as `end` says. Returns B's group.
+    fn ended<S: Store, T: Store>(a: &Client<S>, b: &Client<T>, end: End) -> crate::group::Group {
+        use crate::group::Event;
+        let mut ga = a.create_group("g", "p").unwrap();
+        let mut gb = join(a, &mut ga, b, "g");
+        epoch_moves(a, &mut ga, b, &mut gb);
+        let rm = match end {
+            End::Active => return gb,
+            End::LeavePending => {
+                gb.propose_leave(b).unwrap();
+                return gb;
+            }
+            End::RemovedByOther => ga.remove(a, b.instance().identity()).unwrap(),
+            End::LeaveCommitted => {
+                let leave = gb.propose_leave(b).unwrap();
+                assert!(matches!(
+                    ga.process(a, &leave).unwrap(),
+                    Event::LeaveProposed(_)
+                ));
+                ga.commit_pending_proposals(a).unwrap()
+            }
+        };
+        ga.confirm_pending_commit(a, &rm.msg_id).unwrap();
+        assert!(matches!(
+            gb.process(b, &rm.commit).unwrap(),
+            Event::Removed(_)
+        ));
+        gb
+    }
+
+    /// Byte strings that give a group id away: raw, as OpenMLS keys it
+    /// (JSON) and as the JSON numbers inside any serialised value.
+    fn id_forms(group_id: &[u8]) -> Vec<Vec<u8>> {
+        vec![
+            group_id.to_vec(),
+            mls_group_key(group_id).unwrap(),
+            json_id(group_id),
+        ]
+    }
+
+    /// Every `table.column` of the SQLite store with a value that contains
+    /// the group id in one of its forms.
+    fn sqlite_references(store: &SqliteStore, group_id: &[u8]) -> Vec<String> {
+        let conn = store.conn();
+        let columns: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT m.name, c.name FROM sqlite_master m, pragma_table_info(m.name) c \
+                 WHERE m.type = 'table'",
+            )
+            .unwrap()
+            .query_map((), |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(columns.len() > 20, "the schema is there");
+        let mut found = Vec::new();
+        for (table, column) in columns {
+            for form in id_forms(group_id) {
+                let n: i64 = conn
+                    .query_row(
+                        &format!(
+                            "SELECT count(*) FROM \"{table}\" \
+                             WHERE instr(CAST(\"{column}\" AS BLOB), ?1) > 0"
+                        ),
+                        (&form,),
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                if n > 0 {
+                    found.push(format!("{table}.{column}"));
+                }
+            }
+        }
+        found
+    }
+
+    /// Every memory store entry whose key or value contains the group id in
+    /// one of its forms.
+    fn memory_references(store: &MemoryStore, group_id: &[u8]) -> usize {
+        let forms = id_forms(group_id);
+        let has = |bytes: &[u8]| forms.iter().any(|f| contains(bytes, f));
+        let mls = store.mls.values.read().unwrap();
+        let records = store.records.lock().unwrap();
+        mls.iter()
+            .chain(records.iter())
+            .filter(|(k, v)| has(k) || has(v))
+            .count()
+            + store
+                .journal
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|r| r.group_id == group_id)
+                .count()
+    }
+
+    #[test]
+    fn a_removed_member_keeps_no_key_pairs_of_the_group() {
+        // The SR-61 reproduction: OpenMLS's delete left the key pairs of the
+        // epoch before the removal.
+        let clock = Arc::new(FakeClock::default());
+        let a = client(MemoryStore::new(), "sr61-a", &clock);
+        let b = client(SqliteStore::open_in_memory().unwrap(), "sr61-b", &clock);
+        let gb = ended(&a, &b, End::RemovedByOther);
+        assert_eq!(rows(b.store_for_testing(), "openmls_epoch_keys_pairs"), 1);
+        gb.delete(&b).unwrap();
+        assert_eq!(rows(b.store_for_testing(), "openmls_epoch_keys_pairs"), 0);
+    }
+
+    /// Deletes B's group after `end` on SQLite: no row of any table
+    /// references the group, and OpenMLS's tables are empty.
+    fn deleted_on_sqlite(end: End) {
+        let clock = Arc::new(FakeClock::default());
+        let a = client(MemoryStore::new(), &format!("ref-a-{end:?}"), &clock);
+        let b = client(
+            SqliteStore::open_in_memory().unwrap(),
+            &format!("ref-b-{end:?}"),
+            &clock,
+        );
+        let gb = ended(&a, &b, end);
+        let gid = gb.group_id().to_vec();
+        assert_ne!(
+            sqlite_references(b.store_for_testing(), &gid),
+            Vec::<String>::new()
+        );
+        gb.delete(&b).unwrap();
+        assert_eq!(
+            sqlite_references(b.store_for_testing(), &gid),
+            Vec::<String>::new()
+        );
+        for table in MLS_TABLES {
+            assert_eq!(rows(b.store_for_testing(), table), 0, "{table}");
+        }
+        assert!(b.load_group(&gid).unwrap().is_none());
+    }
+
+    /// The same on the memory store: no entry references the group.
+    fn deleted_in_memory(end: End) {
+        let clock = Arc::new(FakeClock::default());
+        let a = client(MemoryStore::new(), &format!("mref-a-{end:?}"), &clock);
+        let b = client(MemoryStore::new(), &format!("mref-b-{end:?}"), &clock);
+        let gb = ended(&a, &b, end);
+        let gid = gb.group_id().to_vec();
+        assert!(memory_references(b.store_for_testing(), &gid) > 0);
+        gb.delete(&b).unwrap();
+        assert_eq!(memory_references(b.store_for_testing(), &gid), 0);
+    }
+
+    #[test]
+    fn deleting_an_active_group_leaves_no_row_that_references_it() {
+        deleted_on_sqlite(End::Active);
+        deleted_in_memory(End::Active);
+    }
+
+    #[test]
+    fn deleting_a_group_with_a_pending_leave_leaves_no_row_that_references_it() {
+        deleted_on_sqlite(End::LeavePending);
+        deleted_in_memory(End::LeavePending);
+    }
+
+    #[test]
+    fn deleting_a_group_one_was_removed_from_leaves_no_row_that_references_it() {
+        deleted_on_sqlite(End::RemovedByOther);
+        deleted_in_memory(End::RemovedByOther);
+    }
+
+    #[test]
+    fn deleting_a_group_one_left_leaves_no_row_that_references_it() {
+        deleted_on_sqlite(End::LeaveCommitted);
+        deleted_in_memory(End::LeaveCommitted);
+    }
+
+    #[test]
+    fn opening_a_store_sweeps_key_pairs_an_old_delete_left() {
+        // A store written before the SR-61 fix: a removed member deleted the
+        // group the old way. Opening it deletes the orphaned key pairs and
+        // nothing of a group that is still there.
+        let dir = tempfile::tempdir().unwrap();
+        let k = key("sweep");
+        let clock = Arc::new(FakeClock::default());
+        let a = client(MemoryStore::new(), "sweep-a", &clock);
+        let b = client(SqliteStore::open(&db(&dir), &k).unwrap(), "sweep-b", &clock);
+        let mut live_a = a.create_group("live", "p").unwrap();
+        let live_b = join(&a, &mut live_a, &b, "live");
+        let live_id = live_b.group_id().to_vec();
+        let gone = ended(&a, &b, End::RemovedByOther);
+        let gone_id = gone.group_id().to_vec();
+        gone.delete_before_sr61_for_testing(&b).unwrap();
+        assert_eq!(rows(b.store_for_testing(), "openmls_epoch_keys_pairs"), 2);
+        assert_ne!(
+            sqlite_references(b.store_for_testing(), &gone_id),
+            Vec::<String>::new()
+        );
+        drop((b, live_b));
+
+        let b = client(SqliteStore::open(&db(&dir), &k).unwrap(), "sweep-b", &clock);
+        assert_eq!(rows(b.store_for_testing(), "openmls_epoch_keys_pairs"), 1);
+        assert_eq!(
+            sqlite_references(b.store_for_testing(), &gone_id),
+            Vec::<String>::new()
+        );
+        // The live group's keys are intact: B processes a commit whose path
+        // is encrypted to them.
+        let mut live_b = b.load_group(&live_id).unwrap().unwrap();
+        epoch_moves(&a, &mut live_a, &b, &mut live_b);
+        assert_eq!(live_b.epoch(), live_a.epoch());
     }
 }

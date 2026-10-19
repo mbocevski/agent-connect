@@ -1261,6 +1261,11 @@ Notes on the table:
   freely. An owner leaving after a SAS mismatch (§11) transfers ownership
   the same way before it deletes its state. A sole remaining member, owner
   or not, only deletes its local state.
+- **Deleting a group's state.** When an instance deletes a group's state
+  (it left, was removed, or was the sole member), it MUST delete all of the
+  group's key material, including the HPKE private keys of every epoch it
+  still holds. After merging a commit that removed it, those include the
+  keys of the epoch before that commit.
 - **One leaf per instance.** Within an identity, an `instance_id`
   (§3.3) names one leaf. Receivers MUST reject a commit after which two
   leaves have the same identity and `instance_id`, and a committer MUST

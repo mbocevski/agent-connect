@@ -888,7 +888,7 @@ impl<S: Store> Client<S> {
                 }
             });
             if let Err(e) = checked {
-                group.mls.delete(self.provider.storage()).map_err(storage)?;
+                delete_mls_group(self, &mut group.mls)?;
                 return Err(e);
             }
             Ok(group)
@@ -2929,11 +2929,36 @@ impl Group {
         let tx = Tx::begin(client.store())?;
         records::delete_group(client.store(), self.group_id())?;
         client.store().journal_delete_group(self.group_id())?;
+        delete_mls_group(client, &mut self.mls)?;
+        tx.commit()
+    }
+
+    /// [`Group::delete`] as it was before SR-61: OpenMLS's delete alone,
+    /// which leaves a removed member's previous-epoch key pairs. **Tests
+    /// only**, to build a store the old way.
+    #[cfg(test)]
+    pub(crate) fn delete_before_sr61_for_testing<S: Store>(
+        mut self,
+        client: &Client<S>,
+    ) -> Result<()> {
+        let tx = Tx::begin(client.store())?;
+        records::delete_group(client.store(), self.group_id())?;
+        client.store().journal_delete_group(self.group_id())?;
         self.mls
             .delete(client.provider.storage())
             .map_err(storage)?;
         tx.commit()
     }
+}
+
+/// Deletes an MLS group's state from the store: OpenMLS's delete, then
+/// every row it leaves keyed by the group. OpenMLS deletes the HPKE key
+/// pairs of the current epoch only, and a member that merged its own
+/// removal still holds the previous epoch's (SR-61).
+fn delete_mls_group<S: Store>(client: &Client<S>, mls: &mut MlsGroup) -> Result<()> {
+    let group_id = mls.group_id().as_slice().to_vec();
+    mls.delete(client.provider.storage()).map_err(storage)?;
+    client.store().delete_group_mls_rows(&group_id)
 }
 
 #[cfg(test)]
