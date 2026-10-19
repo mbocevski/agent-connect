@@ -861,3 +861,68 @@ async def test_a_grant_confirmed_after_a_join_is_copied_to_the_newcomer(
     assert target
     assert await agreed([a, b, c, d], gid) == c.me
     await converged([a, b, c, d], gid)
+
+
+# -- copies are snapshots for the instances that joined -----------------------------------------
+
+
+async def test_two_recopies_after_a_drop_leave_the_newcomer_with_the_others(
+    cluster: Cluster, group: GroupFixture
+) -> None:
+    """One commit adds d and carries c's leave (a drop of c). a, whose link
+    is slow, grants c and then itself in the epoch before; the relay orders
+    both after the commit. The copier re-copies twice: nobody (the drop
+    applies to c), then a. Each copy replaces the newcomer's last one, so d
+    ends with a like everyone else."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me, invite="members")
+    await AgentApi(b.daemon).grant_floor(gid, b.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == b.me)
+    held, holding = hold_deliveries(a)
+    epoch = a.epoch(gid)
+    assert await c.daemon.leave(gid) == "leaving"
+    await b.wait(lambda: len(b.daemon.client.pending_leaves(raw(gid))) == 1)
+    url = (await b.daemon.create_invite(gid))["url"]
+    d = await cluster.node("d")
+    await d.daemon.accept_invite(url)
+    await d.wait(lambda: d.daemon.store.group(gid) is not None)
+    await c.wait(lambda: status(c, gid) == "left")
+    assert b.epoch(gid) == d.epoch(gid) == epoch + 1
+    await d.wait(lambda: holder(d, gid) == b.me)
+    a.daemon.grant_floor(gid, c.me, origin="human")
+    await a.idle()
+    await b.wait(lambda: holder(b, gid) is None)
+    a.daemon.grant_floor(gid, a.me, origin="human")
+    await a.idle()
+    await b.wait(lambda: holder(b, gid) == a.me)
+    await release(a, held, holding)
+    await a.wait(lambda: a.epoch(gid) == epoch + 1)
+    await mark(b, [a, d], gid, "t3")
+    assert await agreed([a, b, d], gid) == a.me
+    await converged([a, b, d], gid)
+
+
+async def test_an_older_copy_never_replaces_a_newer_one(
+    cluster: Cluster, group: GroupFixture
+) -> None:
+    """Copies for d's join epoch, from the moderator's (modified) daemon:
+    seq 5 names a, then seq 3 names c with a greater key. d keeps the seq 5
+    copy. The members that were there before ignore both: they hold the
+    real writes."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me)
+    await AgentApi(b.daemon).grant_floor(gid, b.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == b.me)
+    d = await cluster.node("d")
+    await cluster.invite(a, d, gid)
+    await d.wait(lambda: holder(d, gid) == b.me)
+    join = d.epoch(gid)
+    inst = b.daemon.instance.instance_id_hex
+    newer = {"epoch": join, "sender": b.me, "instance": inst, "join": join, "seq": 5}
+    forge(b, gid, a.me, counter=9, copy=newer)
+    await d.wait(lambda: holder(d, gid) == a.me)
+    older = {**newer, "seq": 3}
+    forge(b, gid, c.me, counter=99, copy=older)
+    await mark(b, [a, c, d], gid, "seq")
+    assert holder(d, gid) == a.me
+    assert holder(a, gid) == holder(c, gid) == b.me

@@ -30,9 +30,11 @@ holder, whatever order the writes reached them in:
   commit loses to them however late it arrives.
 * **Copies.** After a commit that adds instances, one instance (the copier)
   sends the newcomers the current value with the key of the write that set
-  it (``copy``), and sends it again whenever a write from before their
-  epoch, which they can't decrypt, changes it, nobody included. Existing
-  members merge it by key: it wins only where it really is newer.
+  it (``copy``, numbered by ``seq`` for that join), and sends it again
+  whenever a write from before their epoch, which they can't decrypt,
+  changes it, nobody included. A copy is a snapshot: the instances that
+  joined in its epoch fold their own writes over the latest one, and
+  everyone else ignores it.
 
 Any other grant is dropped silently. Writes older than the decryptable
 epochs are folded into a base value, and of one epoch's grants only the
@@ -117,8 +119,11 @@ def fold(
     holder: str | None, source: Key | None, writes: Iterable[Write]
 ) -> tuple[str | None, Key | None]:
     """The register after ``writes`` (in key order) over a base value: the
-    holder and the key of the write that last set it."""
+    holder and the key of the write that last set it. A write at or below the
+    base's key is part of the base already."""
     for epoch, counter, sender, instance, kind, value in writes:
+        if source is not None and (epoch, counter, sender, instance) <= source:
+            continue
         if kind in {"grant", "reset"} or (kind == "drop" and holder == value):
             holder = value if kind == "grant" else None
             source = (epoch, counter, sender, instance)
@@ -331,7 +336,7 @@ class FloorService:
             return
         for epoch, join in sorted(state["joins"].items()):
             if key[0] < int(epoch) and join["copier"]:
-                self._send_copy(group_id, now, join["identities"])
+                self._send_copy(group_id, state, now, int(epoch))
 
     def _changed(
         self, group_id: str, state: dict[str, Any], holder: str | None, key: Key
@@ -351,9 +356,51 @@ class FloorService:
         if write is None:
             return
         key, value = write
+        copy = (normalize(FLOOR_KIND, inner["body"]) or {}).get("copy")
+        if copy is not None:
+            await self._snapshot(group_id, state, copy, (key, value), (sender, instance))
+            return
         settled = self._settled(group_id, state)
         holder = self._merge(group_id, state, key, "grant", value)
         self._recopy(group_id, state, settled, key)
+        data = self._changed(group_id, state, holder, key)
+        self._engine.store.set_floor(group_id, holder, state)
+        if data is not None:
+            LOG.info("floor_changed", group=log.hid(group_id), reason="grant")
+            await self._engine.emit(group_id, "floor_changed", **data)
+
+    def _join_epoch(self, group_id: str) -> int | None:
+        """The epoch this instance joined the group in (first seen, G8)."""
+        mailbox = self._engine.mailbox
+        for m in self._engine.store.members(group_id):
+            for i in m.instances:
+                if i.get("mailbox_id") == mailbox:
+                    return int(i.get("joined_epoch", 0))
+        return None
+
+    async def _snapshot(
+        self,
+        group_id: str,
+        state: dict[str, Any],
+        copy: dict[str, Any],
+        write: tuple[Key, str | None],
+        sender: tuple[str, str],
+    ) -> None:
+        """A copy (SPEC 9.3) is a snapshot for the instances that joined in
+        its ``join`` epoch, which can't decrypt what came before: the latest
+        one (by ``seq``, then sender) replaces the base the register folds
+        from. Everyone else holds the real writes and ignores it. Once this
+        instance has folded writes of its own away, its base is its own."""
+        if int(copy["join"]) != self._join_epoch(group_id) or state["bound"] is not None:
+            return
+        rank = [int(copy["seq"]), *sender]
+        last = state.get("snapshot")
+        if last is not None and rank <= last:
+            return
+        key, value = write
+        state["snapshot"] = rank
+        state["base"] = {"holder": value, "source": list(key)}
+        holder = self._fold(group_id, state)
         data = self._changed(group_id, state, holder, key)
         self._engine.store.set_floor(group_id, holder, state)
         if data is not None:
@@ -509,12 +556,12 @@ class FloorService:
             state["joins"][str(epoch)] = {"identities": sorted(set(joined)), "copier": copier}
         self._fold_old(group_id, state, epoch - PAST_EPOCHS)
         data = self._report(state, facts, holder, str(summary["committer"]["identity"]), reason)
+        settled = self._settled(group_id, state)
+        if joined and state["joins"][str(epoch)]["copier"] and settled[0] is not None:
+            self._send_copy(group_id, state, settled, epoch)
         e.store.set_floor(group_id, holder, state)
         if data is not None:
             await e.emit(group_id, "floor_changed", **data)
-        settled = self._settled(group_id, state)
-        if joined and state["joins"][str(epoch)]["copier"] and settled[0] is not None:
-            self._send_copy(group_id, settled, joined)
 
     @staticmethod
     def _floor_changed(
@@ -570,20 +617,33 @@ class FloorService:
         return lowest is not None and str(lowest["mailbox_id"]) == e.mailbox
 
     def _send_copy(
-        self, group_id: str, settled: tuple[str | None, Key | None], to: list[str]
+        self,
+        group_id: str,
+        state: dict[str, Any],
+        settled: tuple[str | None, Key | None],
+        join: int,
     ) -> None:
-        """Send ``to`` the settled value (:meth:`_settled`) with the key of the
-        write that set it: the daemon's own control, hop 0, replying to
-        nothing."""
+        """Send the instances that joined in ``join`` the settled value
+        (:meth:`_settled`) with the key of the write that set it, and the
+        next ``seq`` of this join's copies: the daemon's own control, hop 0,
+        replying to nothing."""
         holder, source = settled
         if source is None:
             return
+        record = state["joins"][str(join)]
+        record["seq"] = min(int(record.get("seq", 0)) + 1, MAX_FLOOR_COUNTER)
         epoch, counter, sender, instance = source
-        body = {
-            "holder": holder,
-            "counter": counter,
-            "copy": {"epoch": epoch, "sender": sender, "instance": instance},
+        copy = {
+            "epoch": epoch,
+            "sender": sender,
+            "instance": instance,
+            "join": join,
+            "seq": record["seq"],
         }
         self._engine.queue_message(
-            group_id, body, to=sorted(set(to)), kind=FLOOR_KIND, daemon_control=True
+            group_id,
+            {"holder": holder, "counter": counter, "copy": copy},
+            to=sorted(set(record["identities"])),
+            kind=FLOOR_KIND,
+            daemon_control=True,
         )

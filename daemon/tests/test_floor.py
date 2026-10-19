@@ -189,10 +189,19 @@ def test_a_floor_counter_starts_again_each_epoch_and_stays_below_2_to_the_32(ids
     }
     for counter in (MAX_FLOOR_COUNTER + 1, MAX_COUNTER, -1, True, "1", None):
         assert normalize("control.floor", {"holder": who, "counter": counter}) is None
-    copy = {"epoch": MAX_COUNTER, "sender": who, "instance": ids.instance()}
+    copy = {
+        "epoch": MAX_COUNTER,
+        "sender": who,
+        "instance": ids.instance(),
+        "join": MAX_COUNTER,
+        "seq": MAX_FLOOR_COUNTER,
+    }
     assert normalize("control.floor", {"holder": who, "counter": 1, "copy": copy}) is not None
     for bad in (
         {**copy, "epoch": MAX_COUNTER + 1},
+        {**copy, "join": -1},
+        {**copy, "seq": MAX_FLOOR_COUNTER + 1},
+        {k: v for k, v in copy.items() if k != "seq"},
         {**copy, "sender": "x"},
         {**copy, "instance": "XYZ"},
         "copy",
@@ -200,11 +209,11 @@ def test_a_floor_counter_starts_again_each_epoch_and_stays_below_2_to_the_32(ids
         assert normalize("control.floor", {"holder": who, "counter": 1, "copy": bad}) is None
     # The key of a commit's reset or drop: no sender, counter 0.
     for instance in ("", who):
-        reset = {"epoch": 3, "sender": "", "instance": instance}
+        reset = {"epoch": 3, "sender": "", "instance": instance, "join": 3, "seq": 1}
         body = {"holder": None, "counter": 0, "copy": reset}
         assert normalize("control.floor", body) == body
         assert normalize("control.floor", {**body, "counter": 1}) is None
-    bad_drop = {"epoch": 3, "sender": "", "instance": "x"}
+    bad_drop = {"epoch": 3, "sender": "", "instance": "x", "join": 3, "seq": 1}
     assert normalize("control.floor", {"holder": None, "counter": 0, "copy": bad_drop}) is None
 
 

@@ -34,8 +34,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   copy of the current value, with its key, from the lowest instance of the
   effective moderator (or the owner) that was in the group before, and a
   new copy when a grant from the epoch before its join, which it can't
-  decrypt, changes the value; copies leave out the copier's own grants the
-  relay hasn't taken yet, never move the floor for existing members, and
+  decrypt, changes the value. A copy is a snapshot for the instances that
+  joined in its epoch, numbered per join (`copy.join`, `copy.seq`): the
+  latest replaces the earlier ones, and every other member ignores copies.
+  Copies leave out the copier's own grants the relay hasn't taken yet, and
   go out at hop 0. A refused grant is taken back in the same transaction
   that marks its send failed, and at start any left pending by an earlier
   crash is reconciled with its outbox row. New event `floor_changed` (`mode`,

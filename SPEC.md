@@ -852,7 +852,7 @@ Inner = {
 |---|---|---|
 | `control.leave` | `{}` | Any member, about itself. Sent immediately before its leave proposal (§9.2); receivers MUST NOT change membership because of it. |
 | `control.close` | `{"reason": "..."}` | Owner. All members SHOULD leave. |
-| `control.floor` | `{"holder": "ac:v0:…" \| null, "counter": <0..2^32>, "copy"?: {"epoch", "sender", "instance"}}` | The effective moderator or the owner (§9.3) |
+| `control.floor` | `{"holder": "ac:v0:…" \| null, "counter": <0..2^32>, "copy"?: {"epoch", "sender", "instance", "join", "seq": <0..2^32>}}` | The effective moderator or the owner (§9.3) |
 | `control.pause` | `{"reason": "loop_guard" \| "human"}` | Any member |
 | `control.resume` | `{}` | Any member, with a human-originated message (`origin: "human"`) |
 | `control.capabilities` | `{"adapters": [...], "accepts": [...part kinds]}` | Any member |
@@ -1339,8 +1339,11 @@ writes in key order, starting from null:
   instances and starts epoch `e`, the **copier**, the lowest instance of the
   effective moderator that was in the group before the commit (if it has
   none, of the owner), SHOULD send the new instances
-  `control.floor{holder, counter, copy: {epoch, sender, instance}}`: the
-  current holder with the key of the write that set it. While it can still
+  `control.floor{holder, counter, copy: {epoch, sender, instance, join,
+  seq}}`: the current holder with the key `(epoch, counter, sender,
+  instance)` of the write that set it, the epoch `join` = `e` the new
+  instances joined in, and `seq`, one more than the copier's last copy for
+  that join. While it can still
   receive writes keyed before `e` (a grant from the epoch before, ordered
   by the relay after the commit), the copier SHOULD send the new instances
   a fresh copy each time such a write changes its holder, null included:
@@ -1348,12 +1351,17 @@ writes in key order, starting from null:
   grants that the relay hasn't taken yet, since a send that fails takes
   its grant back; when the relay takes one sealed before `e`, the copier
   copies again. A copy of null names the key of the
-  reset or drop that made it (`sender` `""`, `counter` 0). A copy is judged
-  as a grant from its own sender and epoch, and is written at the copied
-  key, which can't be from a later epoch than the copy's; a member that
-  has that write already changes nothing. A copy's key is not checked
-  against any write: a new member's holder, and the `by` it reports for
-  it, are only as trustworthy as the copier, which could grant anyway.
+  reset or drop that made it (`sender` `""`, `counter` 0).
+  A copy is a **snapshot**, not a write: it is judged like a grant from its
+  own sender and epoch (and its key can't be from a later epoch than the
+  copy's), and then only the instances that joined in its `join` epoch use
+  it; every other member ignores it, since it holds the real writes. Such
+  an instance keeps the valid copy with the greatest `(seq, sender,
+  sender instance)` as the base it folds its own writes over, and a later
+  one replaces it; writes at or below the base's key are part of it.
+  Copies are never merged by key. A copy's key is not checked against any
+  write: a new member's holder, and the `by` it reports for it, are only
+  as trustworthy as the copier, which could grant anyway.
 
 Writes from epochs that can no longer be decrypted MAY be folded into a
 base value, and of the grants of one epoch only the greatest MAY be kept:

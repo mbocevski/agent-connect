@@ -420,9 +420,11 @@ Nobody can send
 A member that joins starts with nobody. After the commit that adds it, the
 lowest instance of the effective moderator that was in the group before
 (or of the owner, when the moderator joined in that commit) sends the newcomers
-a copy of the grant that set the holder. The copy keeps that grant's
-place in the order, so existing members that have it already change
-nothing, and a join never moves the floor. A grant from the epoch before
+a copy of the grant that set the holder. A copy is a snapshot for the
+instances that joined in that commit: each keeps the copier's latest copy
+as the starting point it folds its own grants over, and a newer copy
+replaces an older one. Every other member ignores copies, since it holds
+the grants themselves, so a join never moves the floor. A grant from the epoch before
 the join that the relay orders after it (a member with a slow link) is one
 the newcomers can't decrypt: when it changes the holder, the same instance
 sends them a new copy, also when the result is nobody. A copy leaves out

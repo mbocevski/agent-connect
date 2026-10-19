@@ -177,13 +177,20 @@ def _copy_key(copy: Any, counter: int) -> dict[str, Any]:
         _identity(sender)
         if not (isinstance(instance, str) and INSTANCE_ID.fullmatch(instance)):
             raise MalformedError
-    return {"epoch": _counter(copy.get("epoch")), "sender": sender, "instance": instance}
+    return {
+        "epoch": _counter(copy.get("epoch")),
+        "sender": sender,
+        "instance": instance,
+        "join": _counter(copy.get("join")),
+        "seq": _counter(copy.get("seq"), MAX_FLOOR_COUNTER),
+    }
 
 
 def _floor(body: dict[str, Any]) -> dict[str, Any]:
     """``{holder, counter}``, and for the copy of the floor sent to members
-    that join, ``copy: {epoch, sender, instance}`` naming the write copied
-    (SPEC 9.3)."""
+    that join, ``copy: {epoch, sender, instance, join, seq}``: the key of the
+    write copied, the epoch its recipients joined in and the copy's place
+    among the copier's copies for that join (SPEC 9.3)."""
     holder = body.get("holder", ...)
     if holder is not None:
         holder = _identity(holder)
