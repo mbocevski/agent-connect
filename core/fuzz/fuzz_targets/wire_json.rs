@@ -44,11 +44,11 @@ fuzz_target!(|data: &[u8]| {
         );
     }
     let _ = identity_export_identity(data);
-    if data.len() >= 48 {
-        let mut id = [0u8; 16];
-        id.copy_from_slice(&data[..16]);
-        let mut secret = [0u8; 32];
-        secret.copy_from_slice(&data[16..48]);
+    // The invite id and secret come from the input, so the fuzzer can't
+    // learn one fixed key.
+    if let (Some(id), Some(secret)) = (data.get(..16), data.get(16..48)) {
+        let id: [u8; 16] = id.try_into().unwrap();
+        let secret: [u8; 32] = secret.try_into().unwrap();
         let invite = InviteSecret::from_parts(id, &secret);
         let _ = invite.unwrap_welcome(&data[48..]);
     }
