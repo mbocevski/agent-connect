@@ -217,23 +217,6 @@ impl MemoryStore {
         Self::default()
     }
 
-    /// A copy of the whole store: what an attacker who copies its state to
-    /// try commits offline holds (SR-01). **Tests only.**
-    #[cfg(test)]
-    pub(crate) fn fork_for_testing(&self) -> Self {
-        let copy = Self::default();
-        if let (Ok(src), Ok(mut dst)) = (self.mls.values.read(), copy.mls.values.write()) {
-            dst.clone_from(&src);
-        }
-        if let (Ok(src), Ok(mut dst)) = (self.records.lock(), copy.records.lock()) {
-            dst.clone_from(&src);
-        }
-        if let (Ok(src), Ok(mut dst)) = (self.journal.lock(), copy.journal.lock()) {
-            dst.clone_from(&src);
-        }
-        copy
-    }
-
     /// How many MLS values the store holds (key packages, keys, groups).
     #[cfg(test)]
     pub(crate) fn mls_value_count(&self) -> usize {
