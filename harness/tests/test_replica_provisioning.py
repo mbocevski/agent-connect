@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -26,15 +25,10 @@ from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import DaemonError
 from agentconnect.shapes import conforms
 from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
+from agentconnect_harness.relay import on_free_port
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
 runner = CliRunner()
-
-
-def _free() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def config_for(data_dir: Path, relay_url: str, tcp_port: int = 0) -> Path:
@@ -74,11 +68,15 @@ async def serve() -> AsyncIterator[Callable[[Node], Awaitable[Path]]]:
     servers: list[ApiServer] = []
 
     async def start(node: Node) -> Path:
-        port = _free()
-        node.daemon.config = node.config.with_overrides(api_tcp_port=port)
-        server = ApiServer(node.daemon)
-        await server.start()
+        async def tcp_api(port: int) -> ApiServer:
+            node.daemon.config = node.config.with_overrides(api_tcp_port=port)
+            server = ApiServer(node.daemon)
+            await server.start()
+            return server
+
+        server = await on_free_port(tcp_api)
         servers.append(server)
+        port = node.daemon.config.api_tcp_port
         return config_for(node.config.data_dir, node.config.relay_url, port)
 
     yield start
