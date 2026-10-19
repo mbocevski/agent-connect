@@ -68,7 +68,7 @@ the protocol changes. Everything else is measured against
 |---|---|---|
 | High | 1 | Fixed in #67 |
 | Medium | 12 | 11 open, follow-up task; SR-61 fixed in #72 |
-| Low | 28 | Open, follow-up task |
+| Low | 28 | SR-14 fixed in #74 and #77; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
@@ -81,7 +81,7 @@ the protocol changes. Everything else is measured against
   leaked before use" rely on.
 - Nothing found lets the relay read plaintext or invite secrets. The relay
   parses no `ct`, stores no secret and logs no message body at its default
-  levels (SR-14 is the trace-level exception).
+  levels (SR-14 was the trace-level exception; fixed in #74 and #77).
 - No path was found that lets the agent token perform a human-only
   operation: SAS verification, approvals, knock approval, publishing, or
   sending with `origin: "human"`.
@@ -112,7 +112,7 @@ relay is offered to the public:
 4. SR-05, SR-06 and SR-13 (one connection stalls the relay; memory
    exhaustion; no connection caps or timeouts).
 5. SR-14 (trace logs carry `ct` and client addresses, against
-   `relay/README.md`).
+   `relay/README.md`). Fixed: the relay in #74, the directory in #77.
 
 ## Findings: High
 
@@ -470,7 +470,7 @@ store written the old way.
 | ID | Component | Finding | Evidence | Status |
 |---|---|---|---|---|
 | SR-13 | relay | No connection caps, no header-read timeout (axum sets no hyper timer), no WebSocket ping or idle timeout after authentication. Unauthenticated sockets are closed after 10 s, as they should be. | `main.rs:39-52`, `ws.rs:365-396`. Probe: unfinished headers held for 40 s; an idle authenticated socket held for 45 s. Confirmed. | Open (T-13) |
-| SR-14 | relay, directory | At `RUST_LOG=trace`, `tungstenite` logs whole frames (`ct`, every id) and `axum::serve` logs client addresses; `relay/README.md` says logs never contain `ct`. The directory's filter clamps only `rmcp`, so it logs client addresses at trace too. Debug and info are clean. | `relay/src/main.rs:15-17`, `directory/src/lib.rs:37-40`. Probe: `TRACE tungstenite::protocol: Received message {"t": "send", "env": {... "ct": ...}}`. Confirmed. | Open (T-14) |
+| SR-14 | relay, directory | At `RUST_LOG=trace`, `tungstenite` logs whole frames (`ct`, every id) and `axum::serve` logs client addresses; `relay/README.md` says logs never contain `ct`. The directory's filter clamps only `rmcp`, so it logs client addresses at trace too. Debug and info are clean. | `relay/src/main.rs:15-17`, `directory/src/lib.rs:37-40`. Probe: `TRACE tungstenite::protocol: Received message {"t": "send", "env": {... "ct": ...}}`. Confirmed. | Fixed in #74 (relay) and #77 (directory) |
 | SR-15 | relay | `connected` and `disconnected` lines log the mailbox tag next to the knock lines, and tags are an unkeyed 32-bit hash prefix, so anyone holding an id can find it. SPEC §8.3: knock paths log no identifier, hashed or not. `door_log_privacy.rs` doesn't go through `ws.rs`. | `ws.rs:125`, `ws.rs:174`, `proto.rs:43-50`. Confirmed in probe logs. | Open (T-15) |
 | SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Open (T-16) |
 | SR-17 | relay | Join requests have only the 2 MiB frame cap, and the per-invite budget of 10 a minute is shared by anyone who knows the public `invite_id`: junk joins fill the inviter's queue in about 3.5 minutes and use up the real joiner's budget. | `relay.rs:756-827`, `proto.rs:249`. Confirmed. | Open (T-17) |
@@ -588,7 +588,7 @@ there is a negative test (the attack fails).
 | | Rollback bounded by door expiry and closing | `card.rs`, relay `close_door` | `relay/tests/doors.rs::only_the_owner_can_close_a_door_and_it_closes_at_once`; `harness/tests/test_knocks.py::test_after_a_withdrawal_a_knock_gets_door_not_open` | Covered |
 | | Rollback bounded by token revocation | not on the knocker | none | Not implemented (SR-25) |
 | Relay and directory colluding | Sealed knocks | `core/src/knock.rs` | `core/src/knock.rs::owner_checks_1_to_3`; `harness/tests/test_knocks.py::test_a_malicious_relay_cant_get_a_knock_through` | Covered (test gap 7) |
-| | No identifiers in logs | `directory/src/http.rs`, `metrics.rs`; relay | `directory/tests/log_privacy.rs::logs_carry_route_templates_and_no_identifiers`; `relay/tests/door_log_privacy.rs::door_and_knock_logs_carry_no_identifiers` | Covered; SR-14, SR-15, SR-21 |
+| | No identifiers in logs | `directory/src/http.rs`, `metrics.rs`; relay | `directory/tests/log_privacy.rs::logs_carry_route_templates_and_no_identifiers`; `relay/tests/door_log_privacy.rs::door_and_knock_logs_carry_no_identifiers`; `directory/tests/trace_logs.rs` | Covered; SR-15, SR-21; SR-14 fixed in #74 and #77 |
 | Stale door | Door expiry checked by the knocker | `card.rs`, `knocks.py` | `core/src/listing/card.rs::publish_time_checks` | Covered |
 | | Relay answers `door_not_open` | `relay.rs` (`knock`) | `relay/tests/doors.rs::unknown_expired_and_closed_doors_are_not_open` | Covered |
 | | Owner drops knocks on doors expired over 1 h | `knock.rs` (`Door::open_knock`) | `core/src/knock.rs::owner_checks_1_to_3` | Covered |
@@ -756,7 +756,8 @@ What it stores, and for how long:
   and sender tags with the kind and recipient count on fan-out, the invite
   tag on a join. At warn: the group tag and overflow count. All tags are
   unkeyed 32-bit SHA-256 prefixes. The door and knock lines carry no
-  identifiers. There is no access log. Third-party trace logs: SR-14.
+  identifiers. There is no access log. Third-party trace logs: SR-14
+  (fixed in #74 and #77).
 - **Metrics.** Counters `agentconnect_relay_{connections, auth_failures,
   frames, accepted, duplicates, deliveries, queue_overflows, commits,
   joins_forwarded, invites_created, invites_consumed, doors_registered,
@@ -984,7 +985,7 @@ One line per open item, ready to file.
   limit, WebSocket ping and idle timeout.
 - **T-14 (Low, SR-14):** Relay and directory: clamp `tungstenite`,
   `axum::serve`, `hyper` and `hyper_util` logs whatever `RUST_LOG` says;
-  correct `relay/README.md`.
+  correct `relay/README.md`. Done: the relay in #74, the directory in #77.
 - **T-15 (Low, SR-15):** Relay: keyed log tags (per-process HMAC key), no
   mailbox tag on connect lines, and a log-privacy test through `ws.rs`.
 - **T-16 (Low, SR-16):** Relay: answer `accepted` for a knock before the
