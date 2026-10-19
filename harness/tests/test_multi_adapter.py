@@ -439,6 +439,14 @@ async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
     monkeypatch.setattr("agentconnect.runtime.engine.PENDING_MAX_BYTES", 4096)
     stuck = Stuck()
     a, b, gid = await pair(cluster, stuck)
+    acked: set[str] = set()
+
+    def count(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        if frame.get("t") == "ack":
+            acked.add(str(frame.get("msg_id")))
+        return [frame]
+
+    a.proxy.client_filters.append(count)
     sent = [f"secret-{i}-" + "x" * 900 for i in range(8)]
     for text in sent:
         b.daemon.send_message(gid, {"text": text})
@@ -458,6 +466,10 @@ async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
     await advance(300)
     await a.wait(lambda: not a.daemon.store.pending_deliveries())
     await a.wait(lambda: bool(recorded(a, "delivery_resumed")))
+    # What the relay kept is acked now (once the acks reached it, a
+    # reconnect brings nothing back).
+    ids = {d.msg_id for d in a.adapter.deliveries if d.group_id == gid}
+    await until(lambda: ids <= acked)
     seen = application_frames(a)
     await partition(a)
     await heal(a)
