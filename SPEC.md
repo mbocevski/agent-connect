@@ -1939,8 +1939,8 @@ sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6)
   characters of X's own `instance_id` and of `i`'s. They aren't part of
   the code. An attacker in the middle chooses its own `instance_id`s: with
   them, the labels of the two views don't mirror; with copies of the real
-  ones, they mirror and the codes differ. Either way the humans see it,
-  since labels that don't mirror count as codes that differ (§11.5).
+  ones, they mirror and the codes differ. Either way the humans see it
+  (§11.5).
 - **Length.** The codes keep these lengths. An attacker in the middle wins
   one run with probability 2^-42 (about 2.3 × 10^-13) when the humans
   compare emoji, and 2^-39 (about 1.8 × 10^-12) when they compare the
@@ -1994,13 +1994,25 @@ sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6)
 - **Both questions, always.** The implementation asks whether the other
   human reads the same code and whether they read the same two labels the
   other way round. Neither question ends the comparison without a result.
-- **Labels that don't mirror** count as a warning (§11.3). The
-  implementation asks for the two labels the other human reads. They are
-  treated as codes that differ, unless both name instances in X's view:
-  the other human's own label one of Y's instances, and their peer label
-  one of X's own identity's instances. Only then are they two runs of
-  replicas paired crosswise: no answer is recorded, and the humans start
-  again, naming the instance to compare with.
+- **Codes that differ are a mismatch, whatever the labels.** The labels
+  never explain a code that differs. An attacker in the middle chooses her
+  own `instance_id`s, and an `instance_id` is unique only within an
+  identity (§9.2): she can give her instances the ids of the real ones,
+  Y's in X's view and X's in Y's, so that the labels look like replicas
+  paired crosswise.
+- **Labels that don't mirror**, with the same code, count as a warning
+  (§11.3). The implementation asks for the two labels the other human
+  reads. They are treated as codes that differ, unless both name instances
+  in X's view: the other human's own label one of Y's instances, and their
+  peer label one of X's own identity's instances. Only then are they two
+  runs of replicas paired crosswise: no answer is recorded, and the humans
+  start again, naming the instance to compare with.
+- **Why the replicas path is safe.** It needs the same code in both views.
+  An attacker in the middle gets that only by winning the run, with the
+  probability of §11.4, the same chance with which a "same code" with
+  labels that mirror would mark her verified. The replicas path gives her
+  less than that win: no verification, a warning, and a restart that she
+  has to win again.
 - **"Codes differ" is always acted on.** For any run whose code was shown,
   an implementation MUST accept the answer "the codes differ" and act on
   it, whatever has happened since: an epoch change, an abort, or a timeout.
@@ -2094,9 +2106,10 @@ run pairs only with M in view 1 and B's only with M in view 2.
    identity key.
 5. **A lost run is seen.** M knows both codes before it reveals, so it
    knows which runs it loses. Every way out is visible:
-   - letting both runs finish shows two different codes, or, with M's own
-     instance ids, labels that don't mirror; both are acted on as codes
-     that differ, even if M then commits (§11.5);
+   - letting both runs finish shows two different codes, acted on as a
+     mismatch whatever the labels say (M's own instance ids or copies of
+     the real ones), even if M then commits (§11.5). The same code with
+     labels that don't mirror needs a won run, as any same code does;
    - aborting after the honest instance's reveal (withholding, committing,
      restarting) is a warning, and two of them with one peer stop further
      runs and offer the mismatch action (§11.3);
@@ -2195,8 +2208,10 @@ Implementations in this repository MUST have:
     CLI on both hosts: it ends with codes that differ or labels that don't
     mirror, so with the mismatch, never with a silent retry; and a fork of
     one group by the relay: the runs never pair;
-  - labels that don't mirror: a warning, and the mismatch unless both
-    labels name instances in the local view (replicas paired crosswise);
+  - labels that don't mirror with the same code: a warning, and the
+    mismatch unless both labels name instances in the local view (replicas
+    paired crosswise); codes that differ: the mismatch whatever the labels,
+    also when the attacker's instances carry the real instances' ids;
   - cancels: a held commitment dropped, a paired run before its reveal
     aborted with no warning, a cancel after the reveal or from another
     instance ignored (the run still ends as a warning), and the cancels
