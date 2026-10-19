@@ -29,6 +29,8 @@ from typing import Any, Literal
 
 import agentconnect_core as ac
 from agentconnect.keystore import private_file
+from agentconnect.limits import TASK_UPDATE_KINDS
+from agentconnect.schemas import NON_CONTENT_KINDS
 
 SqlParam = None | int | float | str | bytes
 HANDLED_KEEP = 50_000  # ids an in-process agent finished with (Runtime.handled, the MCP host)
@@ -74,6 +76,24 @@ class _Connection:
 
     def close(self) -> None:
         self._db.close()
+
+
+# Delivered kinds a member may send at volume: task updates (their own,
+# higher rate) and controls and cards (no content). Their audit rows are
+# ``routine``, kept apart from the decisions they could otherwise push out.
+ROUTINE_KINDS = TASK_UPDATE_KINDS | NON_CONTENT_KINDS
+DELIVERED = frozenset({"deliver", "deliver_as_context"})
+
+
+def audit_class(decision: str, kind: str) -> str:
+    """The audit row class (:meth:`Store.audit_add`): ``drop``, ``routine``
+    (a delivered task update, control or card) or ``decision`` (everything
+    else: a delivered message or cancel, a hold, the human's decision)."""
+    if decision == "drop":
+        return "drop"
+    if decision in DELIVERED and kind in ROUTINE_KINDS:
+        return "routine"
+    return "decision"
 
 
 def _scrubbed(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1106,30 +1126,61 @@ class Store:
         keep_group: int | None = None,
         keep_sender: int | None = None,
     ) -> None:
-        """One audit row, in one of two classes that never evict each other:
-        ``drop`` rows (what the policy refused) and ``decision`` rows (what
-        it delivered, held, approved, rejected or expired). A drop row keeps
-        only the newest ``keep_sender`` drops of its sender in the group, and
-        ``keep_group`` and ``keep`` drops in the group and in all; a decision
-        row is trimmed only by the group and daemon caps, across senders. So a
-        sender flooding the log with drops can't erase what it got through,
-        its own record included."""
-        row_class = "drop" if decision == "drop" else "decision"
+        """One audit row, in one of three classes that never evict each other
+        (:func:`audit_class`): ``drop`` rows (what the policy refused),
+        ``routine`` rows (delivered task updates, controls and cards, which
+        a member may send at a far higher rate than messages) and
+        ``decision`` rows (delivered messages and cancels, holds and the
+        human's decisions). A drop or routine row keeps only the newest
+        ``keep_sender`` rows of its class from its sender in the group. Each
+        class keeps ``keep_group`` rows in a group, the sender holding the
+        most giving way first (its oldest first), and ``keep`` in all. A
+        decision row has no per-sender cap. So a flood of drops or routine
+        rows can't erase what a sender got through, its own record included,
+        and a flood of messages pushes out the flooder's own rows before
+        anyone else's."""
+        row_class = audit_class(decision, kind)
         self._db.execute(
             "INSERT INTO audit (group_id, at, direction, sender, msg_id, kind, size, decision, "
             "reason, class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (group_id, at, direction, sender, msg_id, kind, size, decision, reason, row_class),
         )
-        if keep_sender is not None and row_class == "drop":
+        if keep_sender is not None and row_class != "decision":
             self._trim_audit(
                 "group_id = ? AND sender = ? AND class = ?",
                 (group_id, sender, row_class),
                 keep_sender,
             )
         if keep_group is not None:
-            self._trim_audit("group_id = ? AND class = ?", (group_id, row_class), keep_group)
+            self._trim_audit_fairly(group_id, row_class, keep_group)
         if keep is not None:
             self._trim_audit("class = ?", (row_class,), keep)
+
+    def _trim_audit_fairly(self, group_id: str, row_class: str, keep: int) -> None:
+        """Keep a group's newest ``keep`` rows of a class: past that, the
+        sender holding the most rows of it gives way, oldest first."""
+        while True:
+            row = self._one(
+                "SELECT COUNT(*) FROM audit WHERE group_id = ? AND class = ?", group_id, row_class
+            )
+            over = int(row[0]) - keep if row is not None else 0
+            if over <= 0:
+                return
+            heavy = self._all(
+                "SELECT sender, COUNT(*) AS n FROM audit WHERE group_id = ? AND class = ? "
+                "GROUP BY sender ORDER BY n DESC, MIN(seq) LIMIT 2",
+                group_id,
+                row_class,
+            )
+            sender, most = heavy[0]
+            second = int(heavy[1][1]) if len(heavy) > 1 else 0
+            # Down to the next heaviest sender at most, then look again.
+            n = max(1, min(over, int(most) - second))
+            self._db.execute(
+                "DELETE FROM audit WHERE seq IN (SELECT seq FROM audit WHERE group_id = ? "
+                "AND sender = ? AND class = ? ORDER BY seq LIMIT ?)",
+                (group_id, sender, row_class, n),
+            )
 
     def _trim_audit(self, where: str, args: tuple[str, ...], keep: int) -> None:
         """Delete the audit rows matching ``where`` beyond the newest ``keep``
@@ -1169,11 +1220,11 @@ class Store:
         return [dict(zip(self._AUDIT_COLUMNS, r, strict=True)) for r in rows]
 
     def audit_purge(self, before: int, keep: int) -> None:
-        """Delete audit rows older than ``before`` and all but the newest ``keep``."""
+        """Delete audit rows older than ``before`` and, in each class, all but
+        the newest ``keep`` (one class never pushes out another)."""
         self._db.execute("DELETE FROM audit WHERE at < ?", (before,))
-        row = self._one("SELECT MAX(seq) FROM audit")
-        if row is not None and row[0] is not None:
-            self._db.execute("DELETE FROM audit WHERE seq <= ?", (int(row[0]) - keep,))
+        for (row_class,) in self._all("SELECT DISTINCT class FROM audit"):
+            self._trim_audit("class = ?", (str(row_class),), keep)
 
     def transcript_add(  # noqa: PLR0913
         self,

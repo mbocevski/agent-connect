@@ -939,3 +939,117 @@ def test_a_flood_of_drops_keeps_the_injections_deliver_row(
     assert {"inject", "held"} <= kept, "the decisions stay"
     drops = [r for r in store.audit(G, limit=10_000) if r["decision"] == "drop"]
     assert len(drops) == 2000, "the drops have their own cap"
+
+
+# -- R3-3: volume can't evict a security-relevant decision ----------------------------
+
+HONEST = "ac:v0:honest"
+
+
+def decisions_before(policy: SafetyPolicy) -> None:
+    """Another member's injection that got through and the human's decision
+    on its held message, and Mallory's own injection and held message."""
+    meta: dict[str, Any] = {"kind": "a2a.message", "size": 10}
+    policy.audit(G, "in", sender=HONEST, msg_id="honest-deliver", decision="deliver", **meta)
+    policy.audit(G, "in", sender=HONEST, msg_id="honest-held", decision="approved", **meta)
+    policy.audit(G, "in", sender=MALLORY, msg_id="inject", decision="deliver", **meta)
+    policy.audit(
+        G,
+        "in",
+        sender=MALLORY,
+        msg_id="held",
+        decision="hold_for_approval",
+        reason="require_approval",
+        **meta,
+    )
+
+
+def test_a_flood_of_task_updates_and_controls_keeps_every_decision(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    """Delivered task updates, controls and cards (allowed at a far higher
+    rate than messages) are routine rows: a flood of them pushes out only
+    the flooder's own routine rows, never a delivery of a message, a hold or
+    a human decision, the flooder's own included."""
+    policy.audit_group_rows, policy.audit_sender_rows = 50, 10
+    decisions_before(policy)
+    policy.audit(
+        G,
+        "in",
+        sender=HONEST,
+        msg_id="honest-update",
+        kind="a2a.task_status",
+        size=10,
+        decision="deliver",
+    )
+    flood = [
+        ("a2a.task_status", "deliver", ""),
+        ("a2a.task_artifact", "deliver_as_context", "not_addressed"),
+        ("control.floor", "deliver_as_context", "not_content"),
+        ("a2a.agent_card", "deliver_as_context", "not_content"),
+    ]
+    for i in range(300):
+        kind, decision, reason = flood[i % len(flood)]
+        policy.audit(
+            G,
+            "in",
+            sender=MALLORY,
+            msg_id=f"u{i}",
+            kind=kind,
+            size=10,
+            decision=decision,
+            reason=reason,
+        )
+    kept = [r["msg_id"] for r in store.audit(G, limit=10_000)]
+    assert kept[:5] == ["honest-deliver", "honest-held", "inject", "held", "honest-update"]
+    assert kept[5:] == [f"u{i}" for i in range(290, 300)], "the flooder keeps its newest"
+
+
+def test_a_flood_of_messages_gives_way_before_anyone_else(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    """Delivered messages are kept per group only, and when the group is
+    full the sender holding the most gives way first, oldest first: a member
+    flooding with messages can't push out another member's decisions."""
+    policy.audit_group_rows, policy.audit_sender_rows = 50, 10
+    decisions_before(policy)
+    for i in range(300):
+        policy.audit(
+            G, "in", sender=MALLORY, msg_id=f"m{i}", kind="a2a.message", size=10, decision="deliver"
+        )
+    kept = [r["msg_id"] for r in store.audit(G, limit=10_000)]
+    assert len(kept) == 50
+    assert kept[:2] == ["honest-deliver", "honest-held"]
+    assert kept[2:] == [f"m{i}" for i in range(252, 300)]
+    # Lacking a per-sender cap, its own record outlasts a whole group's worth.
+    policy.audit_group_rows = 400
+    decisions_before(policy)
+    for i in range(300):
+        policy.audit(
+            G, "in", sender=MALLORY, msg_id=f"n{i}", kind="a2a.message", size=10, decision="deliver"
+        )
+    assert {"inject", "held"} <= {r["msg_id"] for r in store.audit(G, limit=10_000)}
+
+
+def test_the_retention_purge_keeps_each_class_apart(store: Store) -> None:
+    """The daemon-wide cap of the periodic purge is per class too: drops
+    and routine rows from many groups can't push out decisions."""
+    meta: dict[str, Any] = {"at": 0, "direction": "in", "size": 1, "reason": ""}
+    store.audit_add(
+        G, sender=HONEST, msg_id="deliver", kind="a2a.message", decision="deliver", **meta
+    )
+    for i in range(20):
+        store.audit_add(
+            f"g{i}", sender=MALLORY, msg_id=f"d{i}", kind="a2a.message", decision="drop", **meta
+        )
+        store.audit_add(
+            f"g{i}",
+            sender=MALLORY,
+            msg_id=f"r{i}",
+            kind="a2a.task_status",
+            decision="deliver",
+            **meta,
+        )
+    store.audit_purge(-1, 5)
+    kept = [r["msg_id"] for r in store.audit(limit=10_000)]
+    assert kept == ["deliver", *[x for i in range(15, 20) for x in (f"d{i}", f"r{i}")]]

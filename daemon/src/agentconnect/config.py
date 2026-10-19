@@ -331,14 +331,17 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         "policy.audit_max_rows_per_group",
         "policy_audit_max_rows_per_group",
         shown_default(DEFAULT_AUDIT_GROUP_ROWS),
-        "Audit rows one group keeps at most (1000 to 20000); the oldest go first.",
+        "Audit rows one group keeps at most in each class (drops, routine rows, decisions; "
+        "1000 to 20000). Past that, the sender holding the most rows of the class gives "
+        "way, oldest first.",
     ),
     ConfigKey(
         "policy.audit_max_rows_per_sender",
         "policy_audit_max_rows_per_sender",
         shown_default(DEFAULT_AUDIT_SENDER_ROWS),
-        "Audit rows one sender keeps in a group at most (100 to 2000), so a sender "
-        "flooding the log pushes out only its own rows.",
+        "Drops, and routine rows (delivered task updates, controls and cards), one sender "
+        "keeps in a group at most, each (100 to 2000), so a sender flooding the log with "
+        "them pushes out only its own. Decisions have no per-sender cap.",
     ),
     ConfigKey(
         "policy.max_pending_joins_per_invite",

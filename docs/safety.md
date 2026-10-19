@@ -448,15 +448,27 @@ approval decision:
 
 The log never holds a message body. It lives in the daemon's encrypted
 database ([ADR-003](adr/003-daemon-storage-encryption.md)). Rows older than
-`policy.audit_retention_days` (30 days) are deleted. Rows come in two
-classes that never push each other out: drops, and decisions (deliver,
-hold, approve, reject, expire). A new drop keeps one sender's drops in a
-group to their newest `policy.audit_max_rows_per_sender` (2000); drops and
-decisions are each kept to their newest `policy.audit_max_rows_per_group`
-(20000) in a group and 100000 in all, oldest first, across senders. A
-sender flooding the log with drops pushes out only its own older drops,
-never a delivered or held message, its own included: the record of what an
-injection got through survives the flood that follows it. Read it with the human token:
+`policy.audit_retention_days` (30 days) are deleted. Rows come in three
+classes that never push each other out:
+
+| Class | Rows |
+|---|---|
+| drops | everything the policy refused |
+| routine | delivered task updates (`a2a.task_status`, `a2a.task_artifact`), controls and Agent Cards: a member may send task updates at 10 times the message rate, and controls and cards carry no content |
+| decisions | delivered messages and task cancels, holds, and the human's approvals and rejections, expiries and cancellations |
+
+A new drop or routine row keeps one sender's rows of its class in a group
+to their newest `policy.audit_max_rows_per_sender` (2000). Decisions have
+no per-sender cap. Each class keeps at most
+`policy.audit_max_rows_per_group` (20000) rows in a group. Past that, the
+sender holding the most rows of the class gives way, oldest first. Each
+class also keeps at most 100000 rows in all. So a sender flooding the log
+with drops, task updates or controls pushes out only its own older rows of
+that class, never a delivered or held message, its own included: the
+record of what an injection got through survives the flood that follows
+it. A flood of messages, which the message rate limits, pushes out the
+flooder's own oldest decisions before anyone else's. Read it with the human
+token:
 
 ```sh
 agentconnect audit --group <group>
