@@ -78,8 +78,9 @@ What works on `main` today:
   <!-- component: runtime -->
 - **CLI** (`agentconnect`): runs the daemon and covers the invite lifecycle:
   create and accept invites, approve joins, compare the short code, send a
-  test message and read events, leave a group, and remove a member or only
-  some of its instances, such as a dead replica ([docs/cli.md](docs/cli.md)).
+  test message and read events, leave a group, remove a member or only
+  some of its instances, such as a dead replica, change roles and the group
+  policy, and hand ownership over ([docs/cli.md](docs/cli.md)).
   <!-- component: cli -->
 - **Group membership** (in the runtime): every member checks each commit
   against the group's policy. A leave is a notice and a proposal that the
@@ -87,7 +88,11 @@ What works on `main` today:
   after a restart. A leave that can't complete because the leaver is the
   owner's last instance says so instead of deleting the group. Events name
   who joined, left or was removed, per member or per instance, and who
-  committed it ([docs/groups.md](docs/groups.md)).
+  committed it. The owner's human changes roles and the policy and hands
+  ownership over; each change is checked by the core before it is queued
+  and kept when another member's change lands first. Departed admins lose
+  their role, and multi-use invites cap the requests waiting per joiner
+  ([docs/groups.md](docs/groups.md)).
   <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It
   caps message size and rate, stops reply loops, can require a verified

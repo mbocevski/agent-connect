@@ -215,6 +215,15 @@ pub enum ErrorKind {
     /// A knock Welcome that isn't the group the knock asked for (SPEC
     /// §6.6.5).
     WelcomeMismatch,
+    /// A commit or proposal the group policy forbids (SPEC §9.2): one
+    /// received from a member, or one this instance would build.
+    Unauthorized,
+    /// A local operation the group's state doesn't allow this instance,
+    /// such as committing while its own leave is pending.
+    NotPermitted,
+    /// A commit of this instance's is already waiting for the relay's
+    /// answer (SPEC §8.3).
+    CommitPending,
     /// Anything else (storage, MLS, randomness, internal).
     Other,
 }
@@ -244,6 +253,9 @@ impl ErrorKind {
             Self::KeyLength => "key_length",
             Self::Authentication => "authentication",
             Self::WelcomeMismatch => "welcome_mismatch",
+            Self::Unauthorized => "unauthorized",
+            Self::NotPermitted => "not_permitted",
+            Self::CommitPending => "commit_pending",
             Self::Other => "other",
         }
     }
@@ -302,6 +314,9 @@ impl Error {
             Self::KnockWelcome(_) => K::WelcomeMismatch,
             Self::Replayed => K::Replay,
             Self::LedgerFull => K::Busy,
+            Self::Unauthorized(_) => K::Unauthorized,
+            Self::NotPermitted(_) => K::NotPermitted,
+            Self::CommitPending => K::CommitPending,
             _ => K::Other,
         }
     }
@@ -374,6 +389,10 @@ mod tests {
             (Error::WelcomeAuth, K::Authentication),
             (Error::InviteExpired, K::Expired),
             (Error::Malformed("x"), K::Malformed),
+            (Error::Unauthorized("x"), K::Unauthorized),
+            (Error::NotPermitted("x"), K::NotPermitted),
+            (Error::CommitPending, K::CommitPending),
+            (Error::NotMember, K::Other),
             (Error::Storage("x".into()), K::Other),
         ] {
             assert_eq!(e.kind(), k, "{e}");
@@ -399,11 +418,14 @@ mod tests {
             K::KeyLength,
             K::Authentication,
             K::WelcomeMismatch,
+            K::Unauthorized,
+            K::NotPermitted,
+            K::CommitPending,
             K::Other,
         ]
         .into_iter()
         .map(ErrorKind::as_str)
         .collect();
-        assert_eq!(names.len(), 21, "kind names are distinct");
+        assert_eq!(names.len(), 24, "kind names are distinct");
     }
 }

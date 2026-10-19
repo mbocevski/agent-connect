@@ -7,9 +7,11 @@ shape (docs/cli.md); errors are then ``{"error": {"code", "message"}}`` on
 stdout with a non-zero exit code.
 
 ``approve`` and ``reject`` (joins, knocks and held messages), ``verify`` (and
-the mismatch path inside it), ``remove``, ``safety set``, ``audit``,
-``transcript`` and ``listing publish`` use the **human token**. They are
-decisions (or records) only a person may make or read (SPEC 6.2, 6.6.4, 11):
+the mismatch path inside it), ``remove``, ``group role``, ``group transfer``,
+``group policy`` (except turning ``--require-verified`` on) and ``group
+create`` with a policy option, ``safety set``, ``audit``, ``transcript`` and
+``listing publish`` use the **human token**. They are decisions (or
+records) only a person may make or read (SPEC 6.2, 6.6.4, 9.2, 11):
 never give an agent the human token or let it run them for the human.
 """
 
@@ -73,7 +75,10 @@ daemon_app = typer.Typer(
     pretty_exceptions_show_locals=False,
 )
 group_app = typer.Typer(
-    no_args_is_help=True, help="Create groups.", pretty_exceptions_show_locals=False
+    no_args_is_help=True,
+    help="Create groups, and change their policy, roles and owner (`policy` beyond "
+    "turning --require-verified on, `role` and `transfer` are HUMAN ONLY: human token).",
+    pretty_exceptions_show_locals=False,
 )
 invite_app = typer.Typer(
     no_args_is_help=True, help="Create and revoke invites.", pretty_exceptions_show_locals=False
@@ -260,32 +265,227 @@ def mcp_run(  # noqa: PLR0913, PLR0917
 # -- groups and invites ------------------------------------------------------------
 
 
-def _new_group(api: ApiClient, purpose: str, name: str | None) -> str:
+def _new_group(
+    api: ApiClient, purpose: str, name: str | None, policy: dict[str, Any] | None = None
+) -> str:
     name = (name or purpose or "AgentConnect chat")[:MAX_NAME]
-    return str(api.request("POST", "/v0/groups", {"name": name, "purpose": purpose})["group_id"])
+    body: dict[str, Any] = {"name": name, "purpose": purpose}
+    if policy is not None and len(policy) > 0:
+        body["policy"] = policy
+    return str(api.request("POST", "/v0/groups", body)["group_id"])
+
+
+InviteOpt = Annotated[
+    str | None,
+    typer.Option("--invite", help="Who may add members: owner, admins or members."),
+]
+RemoveOpt = Annotated[
+    str | None, typer.Option("--remove", help="Who may remove members: owner or admins.")
+]
+MaxMembersOpt = Annotated[
+    int | None,
+    typer.Option("--max-members", min=1, max=50, help="Most instances the group may have."),
+]
+FloorOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--floor",
+        help="Who is triggered: free, mention or moderated (SPEC 9.3). Pins the floor: it "
+        "doesn't switch to mention when a third member joins.",
+    ),
+]
+ModeratorOpt = Annotated[
+    str | None,
+    typer.Option("--moderator", help="The floor moderator's identity, or `none`."),
+]
+
+
+def _policy_fields(  # noqa: PLR0913, PLR0917
+    invite: str | None,
+    remove: str | None,
+    max_members: int | None,
+    floor: str | None,
+    moderator: str | None,
+    max_agent_turns: int | None = None,
+) -> dict[str, Any]:
+    """The given policy options as the fields of a policy change."""
+    fields: dict[str, Any] = {}
+    for key, value in (
+        ("invite", invite),
+        ("remove", remove),
+        ("max_members", max_members),
+        ("floor", floor),
+        ("max_agent_turns", max_agent_turns),
+    ):
+        if value is not None:
+            fields[key] = value
+    if moderator is not None:
+        fields["floor_moderator"] = None if moderator.lower() == "none" else moderator
+    return fields
 
 
 @group_app.command("create")
-def group_create(
+def group_create(  # noqa: PLR0913, PLR0917
     purpose: Annotated[
         str, typer.Option("--purpose", help="What the group is for (shown to joiners).")
     ],
     name: Annotated[
         str | None, typer.Option("--name", help="Group name (default: the purpose).")
     ] = None,
+    invite: InviteOpt = None,
+    remove: RemoveOpt = None,
+    max_members: MaxMembersOpt = None,
+    floor: FloorOpt = None,
+    moderator: ModeratorOpt = None,
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
-    """Create a group you own."""
+    """Create a group you own. Any policy option (--invite, --remove,
+    --max-members, --floor, --moderator) uses the HUMAN token: a non-default
+    policy is the human's decision."""
     with guard(as_json):
-        api = connect(config)
-        gid = _new_group(api, purpose, name)
+        policy = _policy_fields(invite, remove, max_members, floor, moderator)
+        api = connect(config, human=bool(policy))
+        gid = _new_group(api, purpose, name, policy)
         shown = (name or purpose or "AgentConnect chat")[:MAX_NAME]
         if as_json:
             emit_json({"group_id": gid, "name": shown, "purpose": purpose})
         else:
             typer.echo(f"Created group {clean(shown)} ({gid}).")
             typer.echo("Invite someone with: agentconnect invite create --group " + gid)
+
+
+def _queued(status: str, event: str) -> str:
+    if status == "unchanged":
+        return "Nothing to change: the group's policy already says so."
+    return (
+        f"Change queued. `agentconnect events` reports `{event}` once it lands, or "
+        "`commit_failed` if the group changed meanwhile."
+    )
+
+
+@group_app.command(
+    "policy",
+    cls=IdArgsCommand,
+    help="Change a group's policy (a commit; give only what changes): who may invite and "
+    "remove, the size limit, the floor and the loop guard. Turning --require-verified on "
+    f"alone uses the agent token instead, since it only tightens the gate. {HUMAN_ONLY_HELP}",
+)
+def group_policy(  # noqa: PLR0913, PLR0917
+    group: str,
+    invite: InviteOpt = None,
+    remove: RemoveOpt = None,
+    max_members: MaxMembersOpt = None,
+    floor: FloorOpt = None,
+    moderator: ModeratorOpt = None,
+    max_agent_turns: Annotated[
+        int | None,
+        typer.Option(
+            "--max-agent-turns", min=0, max=100, help="Agent replies before the loop guard."
+        ),
+    ] = None,
+    require_verified: Annotated[
+        bool | None,
+        typer.Option(
+            "--require-verified/--no-require-verified",
+            help="Hold deliveries until every member is verified (SPEC 10.4).",
+        ),
+    ] = None,
+    floor_pinned: Annotated[
+        bool | None,
+        typer.Option(
+            "--floor-pinned/--no-floor-pinned",
+            help="Keep the floor when a third member joins (default with --floor).",
+        ),
+    ] = None,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        fields = _policy_fields(invite, remove, max_members, floor, moderator, max_agent_turns)
+        if require_verified is not None:
+            fields["require_verified"] = require_verified
+        if floor_pinned is not None:
+            fields["floor_pinned"] = floor_pinned
+        if not fields:
+            raise CliError("bad_args", "nothing to change: give at least one option", EXIT_USAGE)
+        api = connect(config, human=fields != {"require_verified": True})
+        gid = resolve_group(api, group)
+        status = api.request("POST", f"/v0/groups/{gid}/policy", fields)["status"]
+        if as_json:
+            emit_json({"group_id": gid, "status": status, "changes": fields})
+        else:
+            typer.echo(_queued(status, "policy_changed"))
+
+
+@group_app.command(
+    "role",
+    cls=IdArgsCommand,
+    help="Make a member an admin or a plain member (owner only; a commit). The owner's "
+    f"role changes with `group transfer`. {HUMAN_ONLY_HELP}",
+)
+def group_role(
+    group: str,
+    identity: str,
+    role: Annotated[str, typer.Argument(help="admin or member.")],
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        if role not in ("admin", "member"):
+            raise CliError("bad_args", "the role is admin or member", EXIT_USAGE)
+        api = connect(config, human=True)
+        gid = resolve_group(api, group)
+        path = f"/v0/groups/{gid}/members/{identity}/role"
+        status = api.request("POST", path, {"role": role})["status"]
+        if as_json:
+            emit_json({"group_id": gid, "identity": identity, "role": role, "status": status})
+        else:
+            typer.echo(_queued(status, "role_changed"))
+
+
+@group_app.command(
+    "transfer",
+    cls=IdArgsCommand,
+    help="Hand ownership of a group over to another member (owner only; a commit). You "
+    "stay an admin unless --no-keep-admin. The owner's last instance must do this before "
+    f"it can leave. {HUMAN_ONLY_HELP}",
+)
+def group_transfer(  # noqa: PLR0913, PLR0917
+    group: str,
+    identity: str,
+    keep_admin: Annotated[
+        bool, typer.Option("--keep-admin/--no-keep-admin", help="Stay an admin afterwards.")
+    ] = True,
+    yes: YesOpt = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        _require_yes(as_json, yes, "transfer ownership")
+        api = connect(config, human=True)
+        gid = resolve_group(api, group)
+        info = api.request("GET", f"/v0/groups/{gid}")
+        member = next((m for m in info["members"] if m["identity"] == identity), None)
+        if member is None:
+            raise CliError("not_found", f"{identity!r} is not a member", EXIT_FAILED)
+        name = clean(member["display_name"] or identity)
+        _say(f"Hand {clean(info['name'])} over to {name} ({identity})?", as_json=as_json)
+        _say(
+            "The new owner decides roles and the policy from then on; only it can hand the "
+            "group back.",
+            as_json=as_json,
+        )
+        if not _confirm("Transfer ownership?", yes=yes, as_json=as_json):
+            raise CliError("declined", "ownership not transferred", EXIT_REFUSED)
+        body = {"identity": identity, "keep_admin": keep_admin}
+        status = api.request("POST", f"/v0/groups/{gid}/owner", body)["status"]
+        if as_json:
+            emit_json(
+                {"group_id": gid, "identity": identity, "keep_admin": keep_admin, "status": status}
+            )
+        else:
+            typer.echo(_queued(status, "role_changed"))
 
 
 @invite_app.command("create")
@@ -491,12 +691,22 @@ def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) 
             typer.echo(f"  {view['sas']['emoji']}")
             typer.echo(f"  ({', '.join(view['sas']['emoji_names'])})")
             typer.echo(f"  {view['sas']['decimal']}")
+        p, floor = view["policy_summary"], view["floor"]
+        typer.echo(
+            f"Policy    invite {p['invite']}, remove {p['remove']}, "
+            f"at most {p['max_members']} instances, {p['max_agent_turns']} agent turns"
+        )
+        moderator = floor["moderator"] or "none"
+        pinned = ", pinned" if floor["pinned"] else ""
+        typer.echo(f"Floor     {floor['mode']}{pinned}, moderator {moderator}")
         if view["leaving"] is not None:
             typer.echo(f"Leaving   since {_when(view['leaving']['since'])}")
             if view["leaving"]["blocked"]:
                 typer.echo("  This is the owner's last instance: hand ownership over to another")
-                typer.echo("  member first, and the leave goes on.")
+                typer.echo("  member first (`agentconnect group transfer`), and the leave goes on.")
         typer.echo(f"Pending approvals  {view['pending_approvals']}")
+        for leave in view["pending_leaves"]:
+            typer.echo(f"Leaving   {leave['identity']} instance {leave['instance_id']}")
         typer.echo("Members (names are claimed by each member, not verified):")
         for m in view["members"]:
             mark = "verified" if m["verified"] else ("you" if m["self"] else "not verified")
@@ -505,8 +715,12 @@ def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) 
                 f"{len(m['instances'])} instance(s)  {mark}  {m['fingerprint']}"
             )
             for i in m["instances"]:
+                notes = "  (this one)" if i["self"] else ""
+                if i["new_since_verified"]:
+                    notes += "  NEW since you verified this member: check it is theirs"
                 typer.echo(
-                    f"    instance {i['instance_id']}" + ("  (this one)" if i["self"] else "")
+                    f"    instance {i['instance_id']}  leaf {i['leaf_index']}  "
+                    f"since epoch {i['joined_epoch']}{notes}"
                 )
 
 

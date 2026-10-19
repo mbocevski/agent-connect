@@ -64,6 +64,7 @@ Example file::
     domain_check = true             # fetch the owner's domain file before a knock
     [groups]                        # membership (docs/groups.md)
     leave_timeout_secs = 604800     # a leave nobody commits ends locally after this
+    cleanup_departed_roles = true   # the owner drops departed admins and moderators
 """
 
 from __future__ import annotations
@@ -194,6 +195,7 @@ class Config:
     knock_failures_per_sender_per_hour: int = DEFAULT_KNOCK_FAILURES_PER_HOUR
     knock_ledger_capacity: int = ac.DEFAULT_LEDGER_CAPACITY
     groups_leave_timeout_secs: int = MAX_LEAVE_TIMEOUT_SECS
+    groups_cleanup_departed_roles: bool = True
 
     def directory(self, host: str) -> DirectoryConfig | None:
         """The pinned directory ``host`` names (in any host form), if any."""
@@ -662,6 +664,15 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "instance is the owner's: it keeps the group and reports `leave_blocked` "
         "([groups.md](groups.md#a-leave-nobody-commits)).",
     ),
+    ConfigKey(
+        "groups.cleanup_departed_roles",
+        "groups_cleanup_departed_roles",
+        "`true`",
+        "Whether the owner's instance drops an identity that left the group from `admins` and "
+        "`floor_moderator`, with a policy change that only narrows roles (SPEC 9.2). `false` "
+        "leaves the roles in place, and the identity gets them back if it rejoins "
+        "([groups.md](groups.md#departed-roles)).",
+    ),
 )
 
 # Environment variables that don't override a single key.
@@ -988,7 +999,7 @@ def _knock(data: Mapping[str, Any]) -> dict[str, Any]:
 def _groups(data: Mapping[str, Any]) -> dict[str, Any]:
     """``[groups]``: membership (docs/groups.md). Every key can only tighten."""
     table = _section(data, "groups")
-    unknown = sorted(set(table) - {"leave_timeout_secs"})
+    unknown = sorted(set(table) - {"leave_timeout_secs", "cleanup_departed_roles"})
     if unknown:
         msg = f"unknown key(s) in [groups]: {', '.join(unknown)}"
         raise ConfigError(msg)
@@ -998,7 +1009,10 @@ def _groups(data: Mapping[str, Any]) -> dict[str, Any]:
             f"groups.leave_timeout_secs must be {MIN_LEAVE_TIMEOUT_SECS}..{MAX_LEAVE_TIMEOUT_SECS}"
         )
         raise ConfigError(msg)
-    return {"groups_leave_timeout_secs": timeout}
+    return {
+        "groups_leave_timeout_secs": timeout,
+        "groups_cleanup_departed_roles": _typed(table, "cleanup_departed_roles", bool, True),
+    }
 
 
 def _sdk(data: Mapping[str, Any]) -> dict[str, Any]:

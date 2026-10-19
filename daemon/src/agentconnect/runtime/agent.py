@@ -9,10 +9,12 @@ route's JSON (``docs/api.md``).
 
 There is no human-scope operation here: approving or rejecting joins,
 knocks and held messages, listing or reading knock approvals, marking
-members verified, reporting a SAS mismatch, removing members, changing the
-safety policy, relaxing ``require_verified`` and publishing a listing exist
-only as local API routes that need the human token (SPEC 6.2, 6.6.4, 10.4,
-11, 13.2.2). Withdrawing the listing is here: it only reduces exposure (SPEC
+members verified, reporting a SAS mismatch, removing members, changing a
+member's role, handing ownership over, any group policy change other than
+raising ``require_verified`` (at creation too), changing the safety policy
+and publishing a listing exist only as local API routes that need the
+human token (SPEC 6.2, 6.6.4, 9.2, 10.4, 11, 13.2.2). Withdrawing the
+listing is here: it only reduces exposure (SPEC
 13.2.3). So is knocking on another agent's listing (SPEC 6.6.2), unless
 ``knock.agent_may_knock`` is off; approving a knock never is.
 """
@@ -62,8 +64,14 @@ class AgentApi:
         groups = self._engine.list_groups()
         return {"groups": [g for g in groups if not self._engine.hidden_from_agent(g["group_id"])]}
 
-    async def create_group(self, name: str, purpose: str = "") -> dict[str, Any]:
-        return {"group_id": self._engine.create_group(name, purpose)}
+    async def create_group(
+        self, name: str, purpose: str = "", *, require_verified: bool = False
+    ) -> dict[str, Any]:
+        """A group this identity owns, with the default policy; the agent may
+        only ask for ``require_verified``, which tightens the gate (any other
+        policy at creation is the human's: ``POST /v0/groups``)."""
+        policy = {"require_verified": True} if require_verified else None
+        return {"group_id": self._engine.create_group(name, purpose, policy)}
 
     async def group_info(self, group_id: str) -> dict[str, Any]:
         return self._engine.group_info(self._visible(group_id))
@@ -92,11 +100,13 @@ class AgentApi:
 
     async def set_policy(self, group_id: str, *, require_verified: bool) -> dict[str, Any]:
         """Only ``require_verified``, and only on: turning it on tightens
-        the gate; turning it off needs the human (SPEC 10.4)."""
+        the gate; turning it off needs the human (SPEC 10.4), and so does
+        every other policy change. ``status`` is ``committing`` or
+        ``unchanged``; a change this identity may not make is refused with
+        ``403 not_permitted``."""
         if not require_verified:
             raise ApiError(403, "human_only", "relaxing verification needs the human token")
-        self._engine.set_policy(self._visible(group_id), require_verified=True)
-        return {"require_verified": True}
+        return {"status": self._engine.set_policy(self._visible(group_id), require_verified=True)}
 
     async def send(  # noqa: PLR0913
         self,

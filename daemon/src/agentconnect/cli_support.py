@@ -172,8 +172,9 @@ def map_api_error(e: ApiClientError) -> CliError:  # noqa: PLR0911
             "this operation needs the human token; it is for a person, not an agent",
             EXIT_REFUSED,
         )
-    if e.code == "forbidden":
-        return CliError("forbidden", e.message or "not allowed", EXIT_REFUSED)
+    if e.code in ("forbidden", "not_permitted"):
+        # not_permitted: the group policy doesn't let this identity (SPEC 9.2).
+        return CliError(e.code, e.message or "not allowed", EXIT_REFUSED)
     if e.code == "peer_refused":
         return CliError(
             "peer_refused",
@@ -394,6 +395,9 @@ def group_view(api: ApiClient, group_id: str) -> dict[str, Any]:
         "verified_summary": f"{trust['verified_members']} of {others} verified",
         "sas": sas,
         "leaving": info.get("leaving"),
+        "policy_summary": info["policy_summary"],
+        "floor": info["floor"],
+        "pending_leaves": info["pending_leaves"],
         "members": [
             {
                 "identity": m["identity"],
@@ -404,7 +408,13 @@ def group_view(api: ApiClient, group_id: str) -> dict[str, Any]:
                 "verified": m["verified"],
                 "self": m["self"],
                 "instances": [
-                    {"instance_id": i["instance_id"], "self": bool(i.get("self"))}
+                    {
+                        "instance_id": i["instance_id"],
+                        "leaf_index": i["leaf_index"],
+                        "joined_epoch": i["joined_epoch"],
+                        "self": bool(i.get("self")),
+                        "new_since_verified": i["instance_id"] in m["instances_since_verified"],
+                    }
                     for i in m["instances"]
                 ],
             }

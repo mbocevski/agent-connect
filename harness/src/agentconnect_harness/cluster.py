@@ -44,6 +44,7 @@ from agentconnect.clock import Clock, FakeClock
 from agentconnect.config import Config
 from agentconnect.identity import Seeded
 from agentconnect.keystore import FileKeystore
+from agentconnect.relay import b64, unb64
 from agentconnect.runtime import Runtime
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import Engine, Options
@@ -274,6 +275,38 @@ class Node:
     def epoch(self, group_id: str) -> int:
         return int(self.daemon.group_info(group_id)["epoch"])
 
+    def unchecked_commit(
+        self,
+        group_id: str,
+        *,
+        adds: list[bytes] | None = None,
+        remove_leaves: list[int] | None = None,
+        policy: bytes | None = None,
+        meta: bytes | None = None,
+    ) -> dict[str, Any]:
+        """Build a commit with none of the core's checks
+        (``Client._commit_unchecked_for_testing``: what a malicious member
+        could send) and send it through this node's outbox to the real
+        relay. The node's own core merges it; honest members must not."""
+        gid = unb64(group_id)
+        out = self.daemon.client._commit_unchecked_for_testing(
+            gid, adds or [], remove_leaves or [], policy, meta
+        )
+        env = {
+            "v": 0,
+            "kind": "commit",
+            "group_id": group_id,
+            "epoch": out["epoch"],
+            "msg_id": out["msg_id"],
+            "sender": self.daemon.mailbox,
+            "routing": out["routing"],
+            "ct": b64(out["commit"]),
+        }
+        self.daemon._enqueue(
+            "frame", None, {"frame": {"t": "send", "env": env}, "msg_id": out["msg_id"]}
+        )
+        return out
+
 
 async def serve_api(node: Node, sockdir: Path) -> ApiServer:
     """Serve ``node``'s runtime on a Unix socket in ``sockdir``. Its tokens
@@ -461,19 +494,31 @@ class Cluster:
             )
             await n.idle()
 
-    async def group(self, n: int, mode: str = "distinct") -> tuple[list[Node], str]:
+    async def group(
+        self, n: int, mode: str = "distinct", invite: str = "single"
+    ) -> tuple[list[Node], str]:
         """``n`` members, fully joined. ``mode="replicas"``: every member is an
-        instance of one identity."""
-        if mode not in ("distinct", "replicas"):
-            msg = f"unknown mode {mode}"
+        instance of one identity. ``invite="multi"``: they all redeem one
+        invite with ``max_uses = n - 1``, one after the other."""
+        if mode not in ("distinct", "replicas") or invite not in ("single", "multi"):
+            msg = f"unknown mode {mode} or invite {invite}"
             raise ValueError(msg)
         first = await self.node()
         gid = first.daemon.create_group("Harness", "Exercise the daemon")
         await first.idle()
         nodes = [first]
+        url = None
+        if invite == "multi" and n > 1:
+            url = (await first.daemon.create_invite(gid, max_uses=n - 1))["url"]
         for _ in range(n - 1):
             joiner = await self.node(identity_of=first if mode == "replicas" else None)
-            await self.invite(first, joiner, gid)
+            if url is None:
+                await self.invite(first, joiner, gid)
+            else:
+                before = first.epoch(gid)
+                await joiner.daemon.accept_invite(url)
+                await joiner.wait(lambda j=joiner: j.daemon.store.group(gid) is not None)
+                await self.settle(gid, before + 1)
             nodes.append(joiner)
         return nodes, gid
 

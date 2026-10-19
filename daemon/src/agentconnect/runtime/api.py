@@ -230,6 +230,14 @@ _GROUP_INFO: dict[str, Any] = {
     "adapter": "str",
     "trust_state": {"self": "str", "verified_members": "int", "members": "int"},
     "leaving": Opt({"since": "int", "blocked": "bool"}),
+    "policy_summary": {
+        "invite": Opt("str"),
+        "remove": Opt("str"),
+        "max_members": Opt("int"),
+        "max_agent_turns": Opt("int"),
+    },
+    "floor": {"mode": Opt("str"), "pinned": "bool", "moderator": Opt("str")},
+    "pending_leaves": [{"identity": "str", "instance_id": "str"}],
     "members": [
         {
             "identity": "str",
@@ -239,8 +247,15 @@ _GROUP_INFO: dict[str, Any] = {
             "role": "str",
             "verified": "bool",
             "instances": [
-                {"instance_id": "str", "mailbox_id": "str", "leaf_index": "int", "self": "bool"}
+                {
+                    "instance_id": "str",
+                    "mailbox_id": "str",
+                    "leaf_index": "int",
+                    "joined_epoch": "int",
+                    "self": "bool",
+                }
             ],
+            "instances_since_verified": ["str"],
             "self": "bool",
             "listed_as?": {
                 "directory": "str",
@@ -311,8 +326,11 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/groups",
         "_create_group",
-        "Create a group you own.",
-        request={"name": "str", "purpose?": "str"},
+        "Create a group you own. `policy` takes the fields of `POST /v0/groups/{gid}/policy` "
+        "over the default policy, set in the group's first epoch; a `floor` set here is "
+        "pinned. With the agent token `policy` may hold only `require_verified`; anything "
+        "else needs the human token (`403 human_only`).",
+        request={"name": "str", "purpose?": "str", "policy?": "object"},
         response={"group_id": "str"},
     ),
     RouteSpec(
@@ -321,9 +339,12 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "_group_info",
         "One group: members, roles, verified flags, short code, `out_of_sync` and "
         "the peers' Agent Cards (each wrapped as `untrusted`). Each member lists its "
-        "instances, `self` marking this one. `leaving` is set while this instance leaves "
-        "the group; `blocked` says the leave waits for an ownership transfer "
-        "([groups.md](groups.md#leaving)).",
+        "instances, `self` marking this one and `joined_epoch` the epoch this runtime first "
+        "saw it in; `instances_since_verified` are those that joined after you verified the "
+        "member. `policy_summary` and `floor` repeat the policy's permissions and floor, and "
+        "`pending_leaves` the instances whose leave waits for a commit. `leaving` is set "
+        "while this instance leaves the group; `blocked` says the leave waits for an "
+        "ownership transfer ([groups.md](groups.md#leaving)).",
         response=_GROUP_INFO,
     ),
     RouteSpec(
@@ -368,10 +389,48 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/groups/{gid}/policy",
         "_policy",
-        "Set the group policy. Turning `require_verified` on is allowed with "
-        "either token; turning it off needs the human token (SPEC 10.4).",
-        request={"require_verified": "bool"},
-        response={"require_verified": "bool"},
+        "Change the group policy (a commit, SPEC 9.2): give only the fields that change. "
+        "Setting `floor` also pins it (`floor_pinned`, SPEC 9.1) unless you give "
+        "`floor_pinned`; `floor_moderator` takes an identity or `null`. The agent token may "
+        "only turn `require_verified` on (SPEC 10.4); every other change needs the human "
+        "token. `status` is `committing` (then `policy_changed` or `commit_failed`) or "
+        "`unchanged`. A change your role doesn't allow is refused at once with "
+        "`403 not_permitted` ([groups.md](groups.md#changing-roles-and-the-policy)).",
+        request={
+            "require_verified?": "bool",
+            "invite?": "str",
+            "remove?": "str",
+            "max_members?": "int",
+            "floor?": "str",
+            "floor_pinned?": "bool",
+            "floor_moderator?": Opt("str"),
+            "max_agent_turns?": "int",
+        },
+        response={"status": "str"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/members/{identity}/role",
+        "_role",
+        "Make a member an admin or a plain member (`role`: `admin` or `member`; a commit "
+        "only the owner may make). `status` is `committing` (then `role_changed`) or "
+        "`unchanged`. The owner's role changes only with a transfer (`POST "
+        "/v0/groups/{gid}/owner`).",
+        request={"role": "str"},
+        response={"status": "str"},
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/owner",
+        "_owner",
+        "Hand ownership over to another member (a commit only the owner may make, SPEC "
+        "9.2). `keep_admin` (default `true`) keeps you an admin. `status` is `committing`, "
+        "then `role_changed` for both. A leave of yours that waits for a transfer goes on "
+        "once it lands ([groups.md](groups.md#the-owner-leaves-last)).",
+        request={"identity": "str", "keep_admin?": "bool"},
+        response={"status": "str"},
+        human=True,
     ),
     RouteSpec(
         "POST",
@@ -864,6 +923,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "The daemon refused: the owner must hand over first, or a browser request "
         "reached the TCP listener.",
     ),
+    (
+        403,
+        "not_permitted",
+        "Policy, role or ownership change: the group policy doesn't let this identity make "
+        "it now (the core's check, SPEC 9.2). Nothing was queued.",
+    ),
     (404, "not_found", "No such endpoint, group, invite or request."),
     (405, "method_not_allowed", "The path exists but not for this method."),
     (408, "timeout", "The request was not received within 10 seconds."),
@@ -879,6 +944,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
         "The invite or request has expired (a knock lapses an hour after it was sent).",
     ),
     (409, "invite_not_open", "The invite was used up, revoked or never open."),
+    (
+        409,
+        "group_full",
+        "Approve: the Add would take the group past its policy's `max_members`. The "
+        "request stays pending; remove a member first.",
+    ),
     (
         409,
         "too_many_invites",
@@ -1080,8 +1151,22 @@ class ApiServer:
         rows = self.daemon.transcript(p["gid"], _query_int(p, "after"))
         return {"transcript": rows, "untrusted": True}
 
-    async def _create_group(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
-        return await self.agent.create_group(_str(b, "name"), _str(b, "purpose", ""))
+    async def _create_group(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        name, purpose = _str(b, "name"), _str(b, "purpose", "")
+        raw = b.get("policy", {})
+        if not isinstance(raw, dict):
+            raise ApiError(400, "bad_request", "policy must be an object")
+        policy: dict[str, Any] = raw
+        if p.get(SCOPE) == "human" and len(policy) > 0:
+            return {"group_id": self.daemon.create_group(name, purpose, policy)}
+        if set(policy) - {"require_verified"}:
+            raise ApiError(
+                403, "human_only", "a group policy beyond require_verified needs the human token"
+            )
+        verified = policy.get("require_verified", False)
+        if not isinstance(verified, bool):
+            raise ApiError(400, "bad_request", "require_verified must be a boolean")
+        return await self.agent.create_group(name, purpose, require_verified=verified)
 
     async def _create_invite(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         name = b.get("inviter_name")
@@ -1095,15 +1180,31 @@ class ApiServer:
         )
 
     async def _policy(self, p: dict[str, str], b: dict[str, Any]) -> Any:
-        """Only ``require_verified``. Turning it on tightens the gate, so the
-        agent token may; turning it off needs the human (SPEC 10.4)."""
-        value = b.get("require_verified")
+        """The human token changes any field. The agent token only turns
+        ``require_verified`` on, which tightens the gate (SPEC 10.4)."""
+        if p.get(SCOPE) == "human":
+            return {"status": self.daemon.change_policy(p["gid"], b)}
+        if set(b) != {"require_verified"}:
+            raise ApiError(
+                403,
+                "human_only",
+                "changing the group policy needs the human token, "
+                "except turning require_verified on",
+            )
+        value = b["require_verified"]
         if not isinstance(value, bool):
             raise ApiError(400, "bad_request", "require_verified must be a boolean")
-        if p.get(SCOPE) != "human":
-            return await self.agent.set_policy(p["gid"], require_verified=value)
-        self.daemon.set_policy(p["gid"], require_verified=value)
-        return {"require_verified": value}
+        return await self.agent.set_policy(p["gid"], require_verified=value)
+
+    async def _role(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        return {"status": self.daemon.set_role(p["gid"], p["identity"], _str(b, "role"))}
+
+    async def _owner(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        keep = b.get("keep_admin", True)
+        if not isinstance(keep, bool):
+            raise ApiError(400, "bad_request", "keep_admin must be a boolean")
+        status = self.daemon.transfer_ownership(p["gid"], _str(b, "identity"), keep_admin=keep)
+        return {"status": status}
 
     async def _revoke(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return await self.agent.revoke_invite(p["invite_id"])

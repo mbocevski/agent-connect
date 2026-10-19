@@ -400,3 +400,79 @@ async def test_a_failed_registration_leaves_nothing(group: GroupFixture) -> None
         await a.daemon.create_invite(gid)
     assert a.daemon.store.invites("registering") == []
     assert a.daemon.store.invites("open") == []
+
+
+# -- roles and the policy (docs/groups.md) ---------------------------------------------------
+
+
+def owner_of(node: Node, gid: str) -> str:
+    return str(json.loads(node.daemon.client.policy(raw(gid)))["owner"])
+
+
+def hold_own_commits(proxy: RelayProxy, node: Node) -> None:
+    """Only the relay's `accepted` confirms the node's commits: their fan-out
+    copies to it are dropped."""
+    mailbox = node.daemon.mailbox
+    proxy.drop_deliveries(lambda env: env.get("kind") == "commit" and env.get("sender") == mailbox)
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("step", ["before_core", "after_core", "in_tx", "after_tx"])
+async def test_an_owner_transfer_survives_a_crash_around_its_confirmation(
+    group: GroupFixture, advance: Advance, malicious_relay: Proxy, step: str
+) -> None:
+    (a, b, c), gid = await group(3)
+    hold_own_commits(malicious_relay(a), a)
+    fired = daemon_point(a, f"confirm.{step}", "crash")
+    assert a.daemon.transfer_ownership(gid, b.me) == "committing"
+    await recover(a, advance, "crash", fired)
+    await settled([a, b, c], gid)
+    assert {owner_of(n, gid) for n in (a, b, c)} == {b.me}
+    expected = sorted([(b.me, "member", "owner"), (a.me, "owner", "admin")])
+    for n in (a, b, c):
+        assert sorted((e["identity"], e["from"], e["to"]) for e in events(n, "role_changed")) == (
+            expected
+        )
+    assert not a.adapter.of_type("commit_failed")
+    # The old owner's last instance may leave now.
+    assert await a.daemon.leave(gid) == "leaving"
+    await until(lambda: status(a, gid) == "left")
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("step", ["after_core", "in_tx", "after_tx", "after_consume"])
+async def test_a_role_change_is_reported_once_after_a_crash(
+    group: GroupFixture, advance: Advance, step: str
+) -> None:
+    (a, b, c), gid = await group(3)
+    fired = daemon_point(b, f"receive.{step}", "crash")
+    assert a.daemon.set_role(gid, c.me, "admin") == "committing"
+    await recover(b, advance, "crash", fired)
+    await settled([a, b, c], gid)
+    expected = [{"identity": c.me, "from": "member", "to": "admin", "by": a.me}]
+    assert events(b, "role_changed") == expected
+    await until(lambda: b.daemon.store.unnotified_events() == [])
+    assert [e.data for e in b.adapter.unique_events() if e.type == "role_changed"] == expected
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("step", ["after_core", "in_tx", "after_tx"])
+async def test_departed_roles_are_dropped_once_after_a_crash(
+    group: GroupFixture, advance: Advance, malicious_relay: Proxy, step: str
+) -> None:
+    """The owner commits an admin's leave and crashes around confirming it:
+    the cleanup is queued with the commit's effects, so after the restart
+    it is committed, once."""
+    (a, b, c), gid = await group(3)
+    assert a.daemon.set_role(gid, b.me, "admin") == "committing"
+    await settled([a, b, c], gid)
+    hold_own_commits(malicious_relay(a), a)
+    fired = daemon_point(a, f"confirm.{step}", "crash")
+    assert await b.daemon.leave(gid) == "leaving"
+    await recover(a, advance, "crash", fired)
+    await until(lambda: status(b, gid) == "left")
+    await until(lambda: json.loads(c.daemon.client.policy(raw(gid)))["admins"] == [])
+    await settled([a, c], gid)
+    dropped = [e for e in events(c, "role_changed") if e["to"] == "member"]
+    assert dropped == [{"identity": b.me, "from": "admin", "to": "member", "by": a.me}]
+    assert [e["by"] for e in events(c, "policy_changed")] == [a.me, a.me]

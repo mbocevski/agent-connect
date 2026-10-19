@@ -32,7 +32,16 @@ def member(identity: str, *, me: bool = False, verified: bool = False) -> dict[s
         "display_name_verified": False,
         "role": "owner" if me else "member",
         "verified": verified,
-        "instances": [{"instance_id": ("0" if me else "1") * 16, "self": me}],
+        "instances": [
+            {
+                "instance_id": ("0" if me else "1") * 16,
+                "mailbox_id": "m",
+                "leaf_index": 0 if me else 1,
+                "joined_epoch": 0 if me else 1,
+                "self": me,
+            }
+        ],
+        "instances_since_verified": [],
         "self": me,
     }
 
@@ -55,6 +64,14 @@ def group_info(*, verified: bool = False, members: int = 2, epoch: int = 1) -> d
         },
         "members": ms,
         "sas": SAS,
+        "policy_summary": {
+            "invite": "owner",
+            "remove": "owner",
+            "max_members": 50,
+            "max_agent_turns": 20,
+        },
+        "floor": {"mode": "free", "pinned": False, "moderator": None},
+        "pending_leaves": [],
     }
 
 
@@ -365,8 +382,10 @@ def test_groups_show_json_hint_only_while_unverified(fake: Fake) -> None:
 
 def test_groups_show_lists_instances_and_a_blocked_leave(fake: Fake) -> None:
     out = fake.run("groups", "show", GID).stdout
-    assert f"instance {'0' * 16}  (this one)" in out
-    assert f"instance {'1' * 16}" in out
+    assert f"instance {'0' * 16}  leaf 0  since epoch 0  (this one)" in out
+    assert f"instance {'1' * 16}  leaf 1  since epoch 1" in out
+    assert "Policy    invite owner, remove owner, at most 50 instances, 20 agent turns" in out
+    assert "Floor     free, moderator none" in out
     assert "Leaving" not in out
     info = group_info()
     info["leaving"] = {"since": 1_700_000_000, "blocked": True}
@@ -377,7 +396,34 @@ def test_groups_show_lists_instances_and_a_blocked_leave(fake: Fake) -> None:
     _, view = fake.json("groups", "show", GID)
     assert conforms(view, SCHEMAS["groups show"])
     assert view["leaving"] == {"since": 1_700_000_000, "blocked": True}
-    assert view["members"][0]["instances"] == [{"instance_id": "0" * 16, "self": True}]
+    assert view["members"][0]["instances"] == [
+        {
+            "instance_id": "0" * 16,
+            "leaf_index": 0,
+            "joined_epoch": 0,
+            "self": True,
+            "new_since_verified": False,
+        }
+    ]
+
+
+def test_groups_show_flags_new_instances_pending_leaves_and_the_floor(fake: Fake) -> None:
+    info = group_info(verified=True)
+    bob = info["members"][1]
+    bob["instances"].append({**bob["instances"][0], "instance_id": "2" * 16, "joined_epoch": 3})
+    bob["instances_since_verified"] = ["2" * 16]
+    info["pending_leaves"] = [{"identity": BOB, "instance_id": "1" * 16}]
+    info["floor"] = {"mode": "moderated", "pinned": True, "moderator": BOB}
+    fake.routes[f"GET /v0/groups/{GID}"] = info
+    out = fake.run("groups", "show", GID).stdout
+    assert f"instance {'2' * 16}  leaf 1  since epoch 3  NEW since you verified" in out
+    assert "NEW since you verified" not in out.split(f"instance {'1' * 16}")[1].split("\n")[0]
+    assert f"Leaving   {BOB} instance {'1' * 16}" in out
+    assert f"Floor     moderated, pinned, moderator {BOB}" in out
+    _, view = fake.json("groups", "show", GID)
+    assert conforms(view, SCHEMAS["groups show"])
+    assert [i["new_since_verified"] for i in view["members"][1]["instances"]] == [False, True]
+    assert view["pending_leaves"] == info["pending_leaves"]
 
 
 def test_unknown_and_ambiguous_group(fake: Fake) -> None:
@@ -673,6 +719,121 @@ def test_every_id_argument_may_start_with_a_dash(fake: Fake, gid: str) -> None:
     # An explicit "--" still works, and real options are still options.
     assert fake.run("leave", "--json", "--", gid).exit_code == 0
     assert "Show a group" in fake.run("groups", "show", "--help").stdout
+
+
+@pytest.mark.parametrize("gid", DASH_IDS)
+def test_the_group_commands_take_ids_that_start_with_a_dash(fake: Fake, gid: str) -> None:
+    dashed(fake, gid)
+    fake.routes[f"POST /v0/groups/{gid}/policy"] = {"status": "committing"}
+    fake.routes[f"POST /v0/groups/{gid}/members/{BOB}/role"] = {"status": "committing"}
+    fake.routes[f"POST /v0/groups/{gid}/owner"] = {"status": "committing"}
+    assert fake.json("group", "policy", gid, "--invite", "members")[1]["group_id"] == gid
+    assert fake.json("group", "role", gid, BOB, "admin")[1]["group_id"] == gid
+    assert fake.json("group", "transfer", "--yes", gid, BOB)[1]["group_id"] == gid
+
+
+# -- roles and the policy ------------------------------------------------------------------
+
+
+def test_group_policy_sends_what_changes_with_the_human_token(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/policy"] = {"status": "committing"}
+    code, out = fake.json(
+        "group",
+        "policy",
+        GID,
+        "--invite",
+        "members",
+        "--remove",
+        "admins",
+        "--max-members",
+        "5",
+        "--floor",
+        "mention",
+        "--moderator",
+        "none",
+        "--max-agent-turns",
+        "4",
+    )
+    assert code == 0
+    assert conforms(out, SCHEMAS["group policy"])
+    changes = {
+        "invite": "members",
+        "remove": "admins",
+        "max_members": 5,
+        "floor": "mention",
+        "floor_moderator": None,
+        "max_agent_turns": 4,
+    }
+    assert out == {"group_id": GID, "status": "committing", "changes": changes}
+    assert fake.posts("/policy")[-1] == (True, changes)
+    fake.json("group", "policy", GID, "--moderator", BOB, "--floor-pinned")
+    assert fake.posts("/policy")[-1] == (True, {"floor_moderator": BOB, "floor_pinned": True})
+    assert "policy_changed" in fake.run("group", "policy", GID, "--remove", "owner").stdout
+
+
+def test_turning_require_verified_on_alone_uses_the_agent_token(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/policy"] = {"status": "unchanged"}
+    assert "Nothing to change" in fake.run("group", "policy", GID, "--require-verified").stdout
+    assert fake.posts("/policy")[-1] == (False, {"require_verified": True})
+    fake.run("group", "policy", GID, "--no-require-verified")
+    assert fake.posts("/policy")[-1] == (True, {"require_verified": False})
+    code, out = fake.json("group", "policy", GID)
+    assert (code, out["error"]["code"]) == (2, "bad_args")
+
+
+def test_a_refused_policy_change_is_refused_not_failed(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/policy"] = ApiClientError(
+        403, "not_permitted", "not permitted: committer may not change this policy"
+    )
+    code, out = fake.json("group", "policy", GID, "--invite", "members")
+    assert (code, out["error"]["code"]) == (3, "not_permitted")
+    assert "may not change" in out["error"]["message"]
+
+
+def test_group_role_and_transfer_use_the_human_token(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/members/{BOB}/role"] = {"status": "committing"}
+    fake.routes[f"POST /v0/groups/{GID}/owner"] = {"status": "committing"}
+    code, out = fake.json("group", "role", GID, BOB, "admin")
+    assert code == 0
+    assert conforms(out, SCHEMAS["group role"])
+    assert fake.posts("/role")[-1] == (True, {"role": "admin"})
+    assert "role_changed" in fake.run("group", "role", GID, BOB, "member").stdout
+    assert fake.json("group", "role", GID, BOB, "owner")[1]["error"]["code"] == "bad_args"
+
+    assert fake.json("group", "transfer", GID, BOB)[1]["error"]["code"] == "needs_yes"
+    result = fake.run("group", "transfer", GID, BOB, input="n\n")
+    assert result.exit_code == 3
+    assert fake.posts("/owner") == []
+    assert f"over to bob ({BOB})" in fake.run("group", "transfer", GID, BOB, input="y\n").stdout
+    assert fake.posts("/owner")[-1] == (True, {"identity": BOB, "keep_admin": True})
+    code, out = fake.json("group", "transfer", GID, BOB, "--yes", "--no-keep-admin")
+    assert code == 0
+    assert conforms(out, SCHEMAS["group transfer"])
+    assert fake.posts("/owner")[-1] == (True, {"identity": BOB, "keep_admin": False})
+    code, out = fake.json("group", "transfer", GID, "ac:v0:nobody", "--yes")
+    assert (code, out["error"]["code"]) == (1, "not_found")
+
+
+def test_group_create_with_a_policy_uses_the_human_token(fake: Fake) -> None:
+    fake.routes["POST /v0/groups"] = {"group_id": GID}
+    fake.json("group", "create", "--purpose", "Ops")
+    assert fake.posts("/v0/groups")[-1] == (False, {"name": "Ops", "purpose": "Ops"})
+    code, out = fake.json(
+        "group", "create", "--purpose", "Ops", "--floor", "moderated", "--moderator", BOB
+    )
+    assert code == 0
+    assert conforms(out, SCHEMAS["group create"])
+    policy = {"floor": "moderated", "floor_moderator": BOB}
+    assert fake.posts("/v0/groups")[-1] == (
+        True,
+        {"name": "Ops", "purpose": "Ops", "policy": policy},
+    )
+
+
+def test_the_group_commands_say_who_they_are_for() -> None:
+    for command in ("role", "transfer", "policy"):
+        shown = runner.invoke(cli.app, ["group", command, "--help"], env={"COLUMNS": "400"})
+        assert "HUMAN ONLY" in shown.stdout
 
 
 def test_a_positional_id_parse_keeps_usage_errors(fake: Fake) -> None:

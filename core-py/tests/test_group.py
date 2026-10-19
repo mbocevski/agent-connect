@@ -479,6 +479,53 @@ def test_check_policy_change_is_a_dry_run(rng: random.Random) -> None:
     assert (s["policy_changed"], s["previous_policy"], s["policy"]) == (False, None, None)
 
 
+def test_a_refused_policy_change_says_why_in_its_kind(rng: random.Random) -> None:
+    """Callers tell "not permitted" from a bad policy or a commit under way by
+    the error's kind, never by its message."""
+    a, b, c = (make_client(rng) for _ in range(3))
+    gid = a.create_group(NAME, PURPOSE)
+    join(a, gid, b)
+    out = join(a, gid, c)
+    b.process(gid, out["commit"])
+    policy = json.loads(a.policy(gid))
+    verified = canonical({**policy, "require_verified": True})
+    kinds: dict[str, str] = {}
+
+    def kind_of(client: ac.Client, new: bytes) -> str:
+        with pytest.raises(ac.AgentConnectError) as e:
+            client.check_policy_change(gid, new)
+        return e.value.kind
+
+    kinds["member"] = kind_of(b, verified)
+    kinds["bad policy"] = kind_of(a, canonical({**policy, "max_members": 0}))
+    kinds["not canonical"] = kind_of(a, b"{}")
+    leave = c.propose_leave(gid)
+    kinds["own leave pending"] = kind_of(c, verified)
+    a.process(gid, leave)
+    a.update(gid)
+    kinds["commit pending"] = kind_of(a, verified)
+    assert kinds == {
+        "member": "unauthorized",
+        "bad policy": "malformed",
+        "not canonical": "malformed",
+        "own leave pending": "not_permitted",
+        "commit pending": "commit_pending",
+    }
+    # A policy that fails validation is refused before a pending commit is.
+    assert kind_of(a, canonical({**policy, "max_members": 0})) == "malformed"
+
+
+def test_the_default_policy_is_the_cores(rng: random.Random) -> None:
+    a = make_client(rng)
+    defaults = ac.default_group_policy(a.identity)
+    assert defaults == a.policy(a.create_group(NAME, PURPOSE))
+    gid = a.create_group(NAME, PURPOSE, policy=defaults)
+    assert a.policy(gid) == defaults
+    with pytest.raises(ac.AgentConnectError) as e:
+        ac.default_group_policy("not an identity")
+    assert e.value.kind == "malformed"
+
+
 def test_pending_leaves_left_and_removing_one_instance(rng: random.Random) -> None:
     a = make_client(rng)
     b1, b2 = replicas(rng, 2)

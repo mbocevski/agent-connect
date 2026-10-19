@@ -271,9 +271,15 @@ scenarios are in `harness/tests/`.
     starts a node; `identity_of` makes a replica of another node's
     identity, `host=` picks a host for one node, and `serve_api=True`
     serves its local API as the hosts do.
-  - `group(n, mode)`: `n` members fully joined and settled; `mode` is
-    `"distinct"` (one identity each) or `"replicas"` (instances of one
-    identity).
+  - `group(n, mode, invite)`: `n` members fully joined and settled; `mode`
+    is `"distinct"` (one identity each) or `"replicas"` (instances of one
+    identity); `invite="multi"` has every joiner redeem one invite with
+    `max_uses = n - 1` instead of one invite each.
+  - `node.unchecked_commit(group_id, adds=, remove_leaves=, policy=, meta=)`:
+    a commit built without the core's checks
+    (`Client._commit_unchecked_for_testing`) and sent through the node's
+    outbox to the real relay, as a member with a modified daemon would;
+    the honest members must reject it.
   - `invite(inviter, joiner, group_id)`: create, redeem and approve an
     invite, waiting until every member is on the new epoch.
   - `converged(nodes, group_id)` (a function in `cluster.py`): wait until
