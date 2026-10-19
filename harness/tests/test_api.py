@@ -25,7 +25,7 @@ from agentconnect.config import Config
 from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 from agentconnect_harness.cluster import Cluster, Node, api_token
-from agentconnect_harness.relay import reserved_port
+from agentconnect_harness.relay import on_free_port
 
 
 class Api:
@@ -237,12 +237,16 @@ async def test_api_rejects_malformed_http(cluster: Cluster, sockdir: Path) -> No
     await api.server.stop()
 
 
+async def _tcp_api(node: Node, port: int) -> ApiServer:
+    node.daemon.config = node.config.with_overrides(api_tcp_port=port)
+    server = ApiServer(node.daemon)
+    await server.start()
+    return server
+
+
 async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
     node = await cluster.node("t")
-    with reserved_port() as port:
-        node.daemon.config = node.config.with_overrides(api_tcp_port=port)
-        server = ApiServer(node.daemon)
-        await server.start()
+    server = await on_free_port(lambda port: _tcp_api(node, port))
     assert str(server.address).startswith("http://127.0.0.1:")
     client = ApiClient(node.daemon.config)
     info = await asyncio.to_thread(client.request, "GET", "/v0/status")
@@ -327,15 +331,20 @@ async def test_daemon_run_starts_the_a2a_adapter(cluster: Cluster, sockdir: Path
     agent = AgentServer(HelloWorldExecutor(), "local")
     await agent.start()
     try:
-        with reserved_port() as port:
-            cfg = (await cluster.node("seed")).config.with_overrides(
+        seed = (await cluster.node("seed")).config
+
+        async def run(port: int) -> tuple[Config, asyncio.Task[None]]:
+            cfg = seed.with_overrides(
                 data_dir=cluster.tmp / "run-a2a",
                 api_socket=sockdir / "a2a.sock",
                 keystore="file",
                 a2a_local_agent_url=agent.url,
                 a2a_facade_port=port,
             )
-            task = await _started(cfg)
+            return cfg, await _started(cfg)
+
+        cfg, task = await on_free_port(run)
+        port = cfg.a2a_facade_port
         try:
             token_file = cfg.data_dir / "a2a-facade-token"
             assert token_file.stat().st_mode & 0o077 == 0
@@ -384,10 +393,7 @@ async def test_api_hardening(
 
 async def test_tcp_api_refuses_browser_requests(cluster: Cluster) -> None:
     node = await cluster.node("tcp")
-    with reserved_port() as port:
-        node.daemon.config = node.config.with_overrides(api_tcp_port=port)
-        server = ApiServer(node.daemon)
-        await server.start()
+    server = await on_free_port(lambda port: _tcp_api(node, port))
     auth = {"authorization": f"Bearer {api_token(server, 'agent')}"}
     async with httpx.AsyncClient(base_url=str(server.address)) as c:
         assert (await c.get("/v0/status", headers=auth)).status_code == 200

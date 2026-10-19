@@ -19,7 +19,7 @@ from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
-from agentconnect_harness.relay import reserved_port
+from agentconnect_harness.relay import on_free_port
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
 runner = CliRunner()
@@ -63,10 +63,13 @@ async def serve() -> AsyncIterator[Callable[[Node], Awaitable[Cli]]]:
     servers: list[ApiServer] = []
 
     async def start(node: Node) -> Cli:
-        with reserved_port() as port:
+        async def tcp_api(port: int) -> ApiServer:
             node.daemon.config = node.config.with_overrides(api_tcp_port=port)
             server = ApiServer(node.daemon)
             await server.start()
+            return server
+
+        server = await on_free_port(tcp_api)
         servers.append(server)
         cfg = node.config.data_dir / "config.toml"
         cfg.write_text(
