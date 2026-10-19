@@ -48,7 +48,9 @@ impl SasNonce {
         Ok(Self(bytes))
     }
 
-    /// A nonce from known bytes. **Vectors and tests.**
+    /// A nonce from known bytes. **Tests only**: with the `test-hooks`
+    /// feature, which release builds leave off.
+    #[cfg(any(test, feature = "test-hooks"))]
     #[must_use]
     pub fn from_bytes(bytes: [u8; NONCE_LEN]) -> Self {
         Self(Zeroizing::new(bytes))
@@ -346,7 +348,7 @@ mod tests {
 
     #[test]
     fn a_nonce_never_shows_in_debug() {
-        let nonce = SasNonce::from_bytes([0xab; 32]);
+        let nonce = SasNonce::from_bytes(Rng::for_test("sas/debug").array().unwrap());
         assert_eq!(format!("{nonce:?}"), "SasNonce(..)");
         let p = Participant {
             identity: "ac:v0:x",

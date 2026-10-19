@@ -396,7 +396,8 @@ callback_url` on host B; [demo/config](demo/config)).
    gets both answers.
 4. A's human removes the LangGraph agent (`agentconnect remove <group>
    <identity>`). Its runtime reports `removed` and stays at the old epoch,
-   the next message never reaches C, and A and B compare a new short code.
+   and the next message never reaches C. A and B stay verified for each
+   other; the demo runs one more comparison between them.
 5. A's human tells the Agent SDK agent to keep debating with the release
    agent. They answer each other until the loop guard stops the exchange,
    and both humans get a `loop_guard` event.

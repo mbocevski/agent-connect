@@ -101,19 +101,23 @@ def test_one_to_one_round_trip(rng: random.Random) -> None:
     assert code_a == code_b
     assert len(code_a.emoji_indices) == 7
     assert repr(a.sas_nonce()) == "SasNonce(..)"
-    nonce = a.sas_nonce()
+    nonce, peer = a.sas_nonce(), rng.randbytes(32)
     with pytest.raises(ac.AgentConnectError, match="different epoch"):
-        a.sas_code(gid, 0, nonce, b.identity, int(b.instance_id_hex, 16), nonce.reveal())
+        a.sas_code(gid, 0, nonce, b.identity, int(b.instance_id_hex, 16), peer)
     with pytest.raises(ac.AgentConnectError, match="oneself"):
-        a.sas_code(gid, 1, nonce, a.identity, int(a.instance_id_hex, 16), nonce.reveal())
+        a.sas_code(gid, 1, nonce, a.identity, int(a.instance_id_hex, 16), peer)
     with pytest.raises(ac.AgentConnectError, match="unknown member"):
-        a.sas_code(gid, 1, nonce, b.identity, 7, nonce.reveal())
+        a.sas_code(gid, 1, nonce, b.identity, 7, peer)
     with pytest.raises(ac.AgentConnectError, match="32 bytes"):
         a.sas_code(gid, 1, nonce, b.identity, int(b.instance_id_hex, 16), b"short")
     own = a.sas_commitment(gid, b.identity, nonce)
     assert own == ac.sas_commitment(
         gid, 1, a.identity, int(a.instance_id_hex, 16), b.identity, nonce.reveal()
     )
+    # The bytes leave once; the code is still derived from them in Rust.
+    with pytest.raises(ac.AgentConnectError, match="already revealed"):
+        nonce.reveal()
+    a.sas_code(gid, 1, nonce, b.identity, int(b.instance_id_hex, 16), peer)
     assert json.loads(b.meta(gid))["purpose"] == PURPOSE
     assert json.loads(a.policy(gid))["owner"] == a.identity
 

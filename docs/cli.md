@@ -50,6 +50,8 @@ The two daemons run a SAS run (SPEC
 [§11](../SPEC.md#11-short-authentication-string-sas)): each commits to a
 random value, then reveals it, and both derive the code from it. Each human
 reads the same code and the same two instance labels the other way round.
+`verify` asks about both; labels that don't mirror are treated as codes that
+differ unless they name replicas of the two of you.
 [groups.md](groups.md#comparing-short-codes) covers what `verify` says while
 it waits, after an abort, and after two warnings.
 

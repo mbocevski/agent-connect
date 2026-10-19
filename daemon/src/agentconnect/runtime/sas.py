@@ -44,7 +44,8 @@ LOG = log.get("agentconnect.sas")
 
 SAS_COMMIT = "control.sas_commit"
 SAS_REVEAL = "control.sas_reveal"
-SAS_KINDS = frozenset({SAS_COMMIT, SAS_REVEAL})
+SAS_CANCEL = "control.sas_cancel"
+SAS_KINDS = frozenset({SAS_COMMIT, SAS_REVEAL, SAS_CANCEL})
 
 RUN_TIMEOUT_SECS = 600  # SPEC 11.3, as Matrix SAS verification
 HELD_TTL_SECS = 600
@@ -55,7 +56,7 @@ MAX_RESTARTS = 3
 WARNING_STOP = 2
 BUDGET = 12  # ceremony messages a minute from one sending instance
 BUDGET_WINDOW_SECS = 60
-UPDATE_DEFER_SECS = 600  # SPEC 3.1: all deferrals of one due Update
+UPDATE_DEFER_SECS = 600  # SPEC 3.1, 11.3: all deferrals of commits that can wait
 MAX_EPOCH = (1 << 53) - 1
 NONCE_LEN = 32
 
@@ -75,6 +76,8 @@ SAS_EVENTS = frozenset(
 # Aborts after this instance's reveal are warnings whatever the reason; these
 # are warnings at any time (SPEC 11.3, "Warnings and the abort count").
 ALWAYS_WARNING = frozenset({"bad_reveal", "out_of_order"})
+# Ends the human asked for: never warnings.
+OWN_ENDS = frozenset({"mismatch", "cancelled", "group_gone"})
 
 STOP_TEXT = (
     "Comparisons with {name} ended twice without a code. This is what an attacker in the "
@@ -89,6 +92,11 @@ UNPAIRED_TEXT = (
 WARNING_TEXT = (
     "The comparison ended the way an attacker in the middle ends a run it can't win. "
     "It can also be a relay that drops messages, or another member's commit."
+)
+REPLICAS_TEXT = (
+    "The labels name other instances of you and of {name}: two comparisons paired "
+    "crosswise. This counts as a warning. Start again, both naming the instance: "
+    "`agentconnect verify <group> <member> --instance <id>`."
 )
 
 
@@ -188,8 +196,11 @@ class SasService:
         # (group, peer identity) -> when another instance of this identity
         # last committed to that peer, and in which epoch (step 1).
         self._siblings: dict[tuple[str, str], tuple[int, int]] = {}
-        self._budgets: dict[tuple[str, str], _Budget] = {}
-        self._update_due_since: dict[str, int] = {}
+        # (group, sender identity, sender instance): an instance id is unique
+        # only within its identity (SPEC 9.2), so every key carries both.
+        self._budgets: dict[tuple[str, str, str], _Budget] = {}
+        # group -> since when this instance defers commits that can wait.
+        self._defer_since: dict[str, int] = {}
         self._wake = asyncio.Event()
 
     # -- helpers ----------------------------------------------------------------
@@ -205,6 +216,15 @@ class SasService:
 
     def _under_way(self, group_id: str) -> list[Run]:
         return [r for r in self._runs.values() if r.group_id == group_id and r.under_way]
+
+    def _taking_part(self, group_id: str) -> bool:
+        """A run under way, or one whose code waits for its human's answer
+        (SPEC 11.3: from step 1 until the human answers)."""
+        now = self._now()
+        return any(
+            r.group_id == group_id and (r.under_way or self._answerable(r, now))
+            for r in self._runs.values()
+        )
 
     # -- the human's side (human API only) -----------------------------------------
 
@@ -290,6 +310,8 @@ class SasService:
         run.state = "waiting"
         body = {"commitment": b64(run.commitment), "epoch": run.epoch, "peer": run.peer}
         with e.store.tx():
+            # Kept until the reveal or the end, so that a restart can cancel it.
+            e.store.add_sas_sent(run.group_id, run.epoch, run.peer, run.commitment, self._now())
             self._send(run, SAS_COMMIT, body, [run.peer])
         # A commitment held from before the run (the peer's human started first).
         held = sorted(
@@ -394,6 +416,40 @@ class SasService:
             e.store.set_sas_warnings(group_id, run.peer, 0, [])
         run.answered = True
 
+    def labels(self, group_id: str, run_id: str, theirs: tuple[str, str]) -> dict[str, Any]:
+        """**Human-only.** The other human reads labels that don't mirror
+        ours (SPEC 11.5). ``theirs`` is (their own label, their peer's).
+
+        It counts as a warning either way. Only when both name instances in
+        this instance's view, the peer's for theirs and ours for their peer,
+        are they replicas paired crosswise: the humans start again with
+        ``--instance``. Otherwise it is treated as codes that differ: the
+        caller leaves the group."""
+        e = self._e
+        e._group_or_raise(group_id)
+        run = self._runs.get(run_id)
+        if run is None or run.group_id != group_id:
+            raise SasError("not_found", "no such comparison")
+        if run.state != "done" or run.paired is None:
+            raise SasError("not_done", "this comparison has no code")
+        their_self, their_peer = theirs
+        members = {m.identity: m for m in e.store.members(group_id)}
+        peer_ids = [str(i["instance_id"]) for i in members[run.peer].instances]
+        own = members.get(e.me)
+        own_ids = [str(i["instance_id"]) for i in (own.instances if own else [])]
+        mirrored = (label(run.paired[0]), label(e.instance.instance_id_hex))
+        run.answered = True
+        self._warn(run)
+        replica = next((i for i in peer_ids if label(i) == their_self), None)
+        if (
+            (their_self, their_peer) != mirrored
+            and replica is not None
+            and any(label(i) == their_peer for i in own_ids)
+        ):
+            text = REPLICAS_TEXT.format(name=self._name(group_id, run.peer))
+            return {"outcome": "replicas", "instance": replica, "text": text}
+        return {"outcome": "mismatch"}
+
     def peer_started(self, group_id: str, run_id: str) -> dict[str, Any]:
         """**Human-only.** The human says the peer started its side: if the
         run then times out unpaired, that is a warning (SPEC 11.3)."""
@@ -402,6 +458,31 @@ class SasService:
             raise SasError("not_found", "no such comparison")
         run.peer_started = True
         return self.view(group_id, run_id)
+
+    def cancel(self, group_id: str, run_id: str) -> dict[str, Any]:
+        """**Human-only.** The human gives a run up. Before this instance's
+        reveal, the peer is told (``control.sas_cancel``); after it, the
+        peer's run ends as a warning, as any withheld reveal does."""
+        run = self._runs.get(run_id)
+        if run is None or run.group_id != group_id:
+            raise SasError("not_found", "no such comparison")
+        if run.under_way:
+            self._send_cancel(run)
+            self._abort(run, "cancelled")
+        return self.view(group_id, run_id)
+
+    def _send_cancel(self, run: Run) -> None:
+        """``control.sas_cancel`` for this instance's commitment, only while
+        its nonce is unrevealed and its epoch is current (SPEC 11.3)."""
+        e = self._e
+        if run.revealed or run.commitment is None or run.epoch is None:
+            return
+        if run.epoch != e._core_epoch(unb64(run.group_id)):
+            return  # the epoch's end dropped it everywhere already
+        body = {"commitment": b64(run.commitment), "epoch": run.epoch}
+        with e.store.tx():
+            e.store.forget_sas_sent(run.group_id, run.commitment)
+            self._send(run, SAS_CANCEL, body, [run.peer])
 
     def mismatch(self, group_id: str, run_id: str | None) -> None:
         """The human answered "differ" (or took the mismatch action): the run
@@ -449,6 +530,7 @@ class SasService:
         body = {"answers": b64(commitment), "epoch": run.epoch, "nonce": b64(run.nonce.reveal())}
         with e.store.tx():
             e.store.add_sas_answered(run.group_id, int(run.epoch or 0), commitment)
+            e.store.forget_sas_sent(run.group_id, run.commitment or b"")
             self._send(run, SAS_REVEAL, body, [run.peer])
         run.revealed = True
         self._maybe_done(run)
@@ -475,6 +557,7 @@ class SasService:
             return
         run.code = {"decimal": sas.decimal, "emoji_indices": sas.emoji_indices}
         run.shown_at = self._now()
+        e.store.forget_sas_sent(run.group_id, run.commitment or b"")
         run.state = "done"
         run.nonce = None
         self._active.pop((run.group_id, run.peer), None)
@@ -507,14 +590,18 @@ class SasService:
             return  # from an earlier epoch (the grace window): never pairs
         if inner["kind"] == SAS_COMMIT:
             self._on_commit(group.group_id, (identity, instance), epoch, inner, body)
+        elif inner["kind"] == SAS_CANCEL:
+            self._on_cancel(group.group_id, (identity, instance), epoch, inner, body)
         else:
             self._on_reveal(group.group_id, identity, instance, inner, body)
 
-    def _within_budget(self, group_id: str, instance: str) -> bool:
+    def _within_budget(self, group_id: str, sender: tuple[str, str]) -> bool:
         """12 a minute from one sending instance, counting only messages
-        addressed to this instance's identity (SPEC 11.3, "Limits")."""
+        addressed to this instance's identity (SPEC 11.3, "Limits"). The
+        instance is named with its identity: another member may certify an
+        instance under the same id."""
         now = self._now()
-        budget = self._budgets.setdefault((group_id, instance), _Budget())
+        budget = self._budgets.setdefault((group_id, *sender), _Budget())
         while budget.times and now - budget.times[0] >= BUDGET_WINDOW_SECS:
             budget.times.popleft()
         if len(budget.times) >= BUDGET:
@@ -531,7 +618,7 @@ class SasService:
         body: dict[str, Any],
     ) -> None:
         e = self._e
-        identity, instance = sender
+        identity = sender[0]
         commitment = _canonical_b64(body.get("commitment"), NONCE_LEN)
         peer = body.get("peer")
         if commitment is None or not canonical_identity(peer) or inner.get("to") != [peer]:
@@ -541,10 +628,43 @@ class SasService:
             self._siblings[(group_id, str(peer))] = (epoch, self._now())
         elif peer != e.me:
             pass  # addressed to another member: ignored entirely
-        elif not self._within_budget(group_id, instance):
+        elif not self._within_budget(group_id, sender):
             LOG.info("sas_budget_exceeded", group=log.hid(group_id))
         else:
             self._addressed_commit(group_id, sender, epoch, commitment)
+
+    def _on_cancel(
+        self,
+        group_id: str,
+        sender: tuple[str, str],
+        epoch: int,
+        inner: dict[str, Any],
+        body: dict[str, Any],
+    ) -> None:
+        """A peer gives its unrevealed commitment up (SPEC 11.3): honoured
+        for a held commitment, or a run paired with it that hasn't revealed,
+        from that same sender instance. After this instance's reveal it is
+        ignored: the run ends as a warning, as a withheld reveal does."""
+        e = self._e
+        identity, instance = sender
+        commitment = _canonical_b64(body.get("commitment"), NONCE_LEN)
+        if commitment is None or inner.get("to") != [e.me] or identity == e.me:
+            return
+        if not self._within_budget(group_id, sender):
+            LOG.info("sas_budget_exceeded", group=log.hid(group_id))
+            return
+        key = (group_id, identity, instance)
+        held = self._held.get(key)
+        if held is not None and held.commitment == commitment and held.epoch == epoch:
+            del self._held[key]
+        run = self._runs.get(self._active.get((group_id, identity), ""))
+        if (
+            run is not None
+            and run.paired == (instance, commitment)
+            and run.epoch == epoch
+            and not run.revealed
+        ):
+            self._abort(run, "peer_cancelled")
 
     def _addressed_commit(
         self, group_id: str, sender: tuple[str, str], epoch: int, commitment: bytes
@@ -569,7 +689,7 @@ class SasService:
         key = (group_id, identity, instance)
         known = self._held.get(key)
         self._held[key] = _Held(commitment, epoch, self._now())
-        if known is None or known.commitment != commitment:
+        if known is None:  # one prompt per sending instance while it holds
             self._e._defer(
                 lambda: self._emit(
                     group_id,
@@ -597,7 +717,7 @@ class SasService:
         run = self._runs.get(self._active.get((group_id, identity), ""))
         if run is None or run.commitment is None or answers != run.commitment:
             return  # addressed to another run, or none
-        if not self._within_budget(group_id, instance):
+        if not self._within_budget(group_id, (identity, instance)):
             LOG.info("sas_budget_exceeded", group=log.hid(group_id))
             return
         if run.paired is None:
@@ -643,9 +763,12 @@ class SasService:
         runs of the earlier epoch end, held commitments with them."""
         e = self._e
         epoch = e._core_epoch(unb64(group_id))
+        if committer == e.me:
+            self._defer_since.pop(group_id, None)  # what waited went out
         for key in [k for k, h in self._held.items() if k[0] == group_id and h.epoch != epoch]:
             del self._held[key]
         e.store.forget_sas_answered(group_id, epoch)
+        e.store.forget_sas_sent_before(group_id, epoch)
         for run in self._under_way(group_id):
             if run.state == "starting":
                 continue  # begins in the new epoch
@@ -681,30 +804,36 @@ class SasService:
         new.started_at = run.started_at  # the command's timeout carries over
 
     def _abort(self, run: Run, reason: str, *, committer: str | None = None) -> None:
-        warning = reason in ALWAYS_WARNING or (
-            run.revealed and reason not in ("mismatch", "restarted", "group_gone")
-        )
+        warning = reason in ALWAYS_WARNING or (run.revealed and reason not in OWN_ENDS)
         if reason == "timed_out" and run.paired is None and run.peer_started:
             warning = True
         run.committer = committer if reason == "epoch_changed" else None
         run.warning = warning
         self._end(run, reason)
         if warning:
-            self._close_same(run.group_id, run.peer)
-            count, committers = self._e.store.sas_warnings(run.group_id, run.peer)
-            if committer is not None:
-                committers = [*committers, committer]
-            self._e.store.set_sas_warnings(run.group_id, run.peer, count + 1, committers)
-            if count + 1 >= WARNING_STOP:
-                self._event(
-                    run, "sas_stopped", text=self._stop_text(run.group_id, run.peer, committers)
-                )
+            self._warn(run, committer)
         self._event(run, "sas_aborted", reason=reason, warning=warning, committer=run.committer)
+
+    def _warn(self, run: Run, committer: str | None = None) -> None:
+        """Count a warning with the run's peer (SPEC 11.3), persisted; at 2
+        the runs with it stop."""
+        run.warning = True
+        self._close_same(run.group_id, run.peer)
+        count, committers = self._e.store.sas_warnings(run.group_id, run.peer)
+        if committer is not None:
+            committers = [*committers, committer]
+        self._e.store.set_sas_warnings(run.group_id, run.peer, count + 1, committers)
+        if count + 1 >= WARNING_STOP:
+            self._event(
+                run, "sas_stopped", text=self._stop_text(run.group_id, run.peer, committers)
+            )
 
     def _end(self, run: Run, reason: str) -> None:
         run.state = "aborted"
         run.reason = reason
         run.nonce = None
+        if run.commitment is not None:
+            self._e.store.forget_sas_sent(run.group_id, run.commitment)
         if self._active.get((run.group_id, run.peer)) == run.run_id:
             del self._active[(run.group_id, run.peer)]
 
@@ -736,6 +865,14 @@ class SasService:
                 del self._held[key]
             else:
                 due.append(h.at + HELD_TTL_SECS)
+        for key, budget in list(self._budgets.items()):
+            while budget.times and now - budget.times[0] >= BUDGET_WINDOW_SECS:
+                budget.times.popleft()
+            if not budget.times:
+                del self._budgets[key]
+        for key, (_epoch, at) in list(self._siblings.items()):
+            if now - at >= SIBLING_WINDOW_SECS:
+                del self._siblings[key]
         # Ended runs are kept for their answers, then forgotten.
         for run_id, run in list(self._runs.items()):
             if not run.under_way and now - run.started_at >= 2 * RUN_TIMEOUT_SECS + (
@@ -750,6 +887,7 @@ class SasService:
             self._begin(run)
         deadline = run.started_at + RUN_TIMEOUT_SECS
         if now >= deadline:
+            self._send_cancel(run)
             self._abort(run, "timed_out")
             return []
         due = [deadline]
@@ -791,23 +929,40 @@ class SasService:
 
     # -- the cadence Update (SPEC 3.1, 11.3) ------------------------------------------------
 
-    def defer_update(self, group_id: str) -> bool:
-        """Called when the cadence Update is due before a send: whether to
-        defer it. Only while this instance takes part in a run, and for at
-        most 600 s in total for one due Update. A held commitment doesn't
-        defer it."""
-        now = self._now()
-        since = self._update_due_since.setdefault(group_id, now)
-        if not self._under_way(group_id):
+    def defer(self, group_id: str) -> bool:
+        """Whether to defer the cadence Update (SPEC 3.1, 11.3). Only while
+        this instance takes part in a run, its code waiting for an answer
+        included, and for at most 600 s in total until this instance's next
+        commit. A held commitment doesn't defer it. (A commit of pending
+        proposals can't wait: while a proposal is pending, no application
+        message goes out, the ceremony messages included.)"""
+        if not self._taking_part(group_id):
+            self._defer_since.pop(group_id, None)
             return False
+        now = self._now()
+        since = self._defer_since.setdefault(group_id, now)
         return now - since < UPDATE_DEFER_SECS
-
-    def update_not_due(self, group_id: str) -> None:
-        self._update_due_since.pop(group_id, None)
 
     # -- recovery ------------------------------------------------------------------------
 
     def recover(self) -> None:
         """On start: runs don't survive a restart, so their queued messages
-        are dropped (a commitment nobody would follow with a reveal)."""
-        self._e.store.drop_queued_sas()
+        are dropped, and every commitment sent in the last 600 s and not yet
+        revealed is cancelled (SPEC 11.3), so its peer doesn't pair with it."""
+        e = self._e
+        e.store.drop_queued_sas()
+        now = self._now()
+        for row in e.store.sas_sent():
+            group = e.store.group(row["group_id"])
+            if (
+                group is not None
+                and group.status == "active"
+                and now - int(row["at"]) < HELD_TTL_SECS
+                and int(row["epoch"]) == e._core_epoch(unb64(row["group_id"]))
+            ):
+                body = {"commitment": b64(row["commitment"]), "epoch": int(row["epoch"])}
+                inner = e.inner(SAS_CANCEL, body, [row["peer"]], origin="human", hop=0)
+                meta = {"run": "", "kind": SAS_CANCEL, "epoch": int(row["epoch"])}
+                payload = {"inner": inner, "msg_id": b64(secrets.token_bytes(16)), "sas": meta}
+                e.store.enqueue("app", row["group_id"], payload, now)
+        e.store.forget_all_sas_sent()

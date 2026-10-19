@@ -444,16 +444,35 @@ impl Sas {
 
 /// This instance's nonce for one SAS run (SPEC §11.2). The bytes stay in
 /// Rust, are wiped when the object is dropped and never show in `repr`;
-/// `reveal()` hands them out once, for the reveal message.
+/// `reveal()` hands them out once, for the reveal message. The code is
+/// derived from the bytes in Rust (`Client.sas_code`), not from `reveal()`.
 #[pyclass(frozen, module = "agentconnect_core._native")]
-struct SasNonce(core::SasNonce);
+struct SasNonce {
+    nonce: core::SasNonce,
+    revealed: std::sync::atomic::AtomicBool,
+}
+
+impl SasNonce {
+    fn new(nonce: core::SasNonce) -> Self {
+        Self {
+            nonce,
+            revealed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
 
 #[pymethods]
 impl SasNonce {
-    /// The nonce bytes, for the reveal (SPEC §11.3 step 3). After the
-    /// reveal the nonce is spent.
+    /// The nonce bytes, for the reveal (SPEC §11.3 step 3), once: a second
+    /// call raises. After the reveal the nonce is spent.
     fn reveal<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        guarded(|| Ok(PyBytes::new(py, self.0.expose())))
+        if self
+            .revealed
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(bad_arg("this SAS nonce was already revealed"));
+        }
+        guarded(|| Ok(PyBytes::new(py, self.nonce.expose())))
     }
 
     fn __repr__(&self) -> &'static str {
@@ -1296,7 +1315,7 @@ impl Client {
 
     /// A fresh nonce for a SAS run, from this client's RNG (SPEC §11.2).
     fn sas_nonce(&self) -> PyResult<SasNonce> {
-        with_client!(self, |c, _g| core::SasNonce::generate(c.rng())).map(SasNonce)
+        with_client!(self, |c, _g| core::SasNonce::generate(c.rng())).map(SasNonce::new)
     }
 
     /// This instance's commitment for a run with `peer` in the group's
@@ -1309,7 +1328,7 @@ impl Client {
         nonce: &SasNonce,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let c = with_client!(self, |c, groups| group(c, groups, group_id)
-            .map(|g| g.sas_commitment(c, peer, &nonce.0)))?;
+            .map(|g| g.sas_commitment(c, peer, &nonce.nonce)))?;
         Ok(PyBytes::new(py, &c))
     }
 
@@ -1328,7 +1347,7 @@ impl Client {
         with_client!(self, |c, groups| group(c, groups, group_id)?.sas_code(
             c,
             epoch,
-            &own.0,
+            &own.nonce,
             peer_identity,
             peer_instance,
             &peer_nonce

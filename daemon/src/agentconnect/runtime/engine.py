@@ -2824,7 +2824,7 @@ class Engine:
                     self._forget_invite_requests(str(invite["invite_id"]))
         return "done"
 
-    async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:  # noqa: PLR0912
+    async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:
         if group.out_of_sync:
             self._fail_codes[row.seq] = "out_of_sync"
             return "failed"
@@ -2833,14 +2833,15 @@ class Engine:
         for _ in range(MAX_COMMIT_ATTEMPTS):
             if "env" not in payload:
                 sas = payload.get("sas")
-                if not self.groups.update_due(group):
-                    self.sas.update_not_due(group.group_id)
-                elif sas is None and not self.sas.defer_update(group.group_id):
+                if (
+                    sas is None
+                    and self.groups.update_due(group)
+                    and not self.sas.defer(group.group_id)
+                ):
                     # SPEC §3.1: renew keys just before the next send. Not for
                     # a ceremony message, and deferred (at most 600 s) while
                     # a SAS run is under way (SPEC 11.3).
                     group = await self._cadence_update(row, payload, group)
-                    self.sas.update_not_due(group.group_id)
                 epoch = self.client.epoch(gid)
                 if sas is not None and self.sas.stale(sas, epoch):
                     # Dropped across an epoch change, never sealed in a new one.
@@ -3831,6 +3832,29 @@ class Engine:
             return self.sas.view(group_id, run)
         except SasError as e:
             raise DaemonError(e.code, str(e)) from e
+
+    def sas_cancel(self, group_id: str, run: str) -> dict[str, Any]:
+        """**Human-only.** The human gives a run up (SPEC 11.3)."""
+        try:
+            return self.sas.cancel(group_id, run)
+        except SasError as e:
+            raise DaemonError(e.code, str(e)) from e
+
+    async def sas_labels(
+        self, group_id: str, run: str, self_label: str, peer_label: str
+    ) -> dict[str, Any]:
+        """**Human-only.** The other human reads labels that don't mirror
+        ours (SPEC 11.5): a warning, and codes that differ unless replicas
+        paired crosswise explain the labels."""
+        if not all(re.fullmatch(r"[0-9a-f]{8}", x) for x in (self_label, peer_label)):
+            raise DaemonError("bad_request", "labels are 8 lowercase hex characters")
+        try:
+            out = self.sas.labels(group_id, run, (self_label, peer_label))
+        except SasError as e:
+            raise DaemonError(e.code, str(e)) from e
+        if out["outcome"] == "mismatch":
+            out["status"] = await self.sas_mismatch(group_id, run)
+        return out
 
     def sas_peer_started(self, group_id: str, run: str) -> dict[str, Any]:
         """**Human-only.** The human says the peer started its side."""

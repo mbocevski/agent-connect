@@ -626,8 +626,8 @@ def test_verify_runs_a_comparison_and_marks_the_member(fake: Fake) -> None:
     assert SAS_EMOJI[0][0] in out
     assert "1234-5678-9012" in out
     assert "yours 00000000, theirs 11111111" in out
-    assert "Does bob's human read the same two instance labels? [y/N]" in out
     assert "Does bob's human read exactly this code? [y/N]" in out
+    assert "And the same two instance labels, the other way round? [y/N]" in out
     assert fake.posts(f"/members/{BOB}/sas")[0] == (True, {})  # the human token
     # The answer names the run whose code was shown (SPEC 11.5).
     assert fake.posts("/verify")[0] == (True, {"verified": True, "run": RUN})
@@ -657,7 +657,7 @@ def test_verify_names_a_member_and_an_instance(fake: Fake) -> None:
 
 def test_verify_default_answer_is_no(fake: Fake) -> None:
     sas_routes(fake)
-    result = fake.run("verify", GID, input="y\n\n")
+    result = fake.run("verify", GID, input="\ny\n")  # the code: no; the labels: yes
     assert result.exit_code == 6
     assert not fake.posts("/verify")
     assert fake.posts("/mismatch")[0] == (True, {"run": RUN})
@@ -671,11 +671,31 @@ def test_verify_without_a_person_never_verifies(fake: Fake) -> None:
     assert not fake.posts("/mismatch")
 
 
-def test_verify_labels_that_differ_answer_nothing(fake: Fake) -> None:
+def test_verify_labels_that_dont_mirror_are_a_mismatch(fake: Fake) -> None:
+    """Review 67 finding 1: in the SPEC 14.4 attack the labels don't mirror.
+    That is never a silent retry: the other human's labels go to the daemon,
+    which counts a warning and leaves as for codes that differ."""
     sas_routes(fake)
-    result = fake.run("verify", GID, input="n\n")
-    assert result.exit_code == 3
-    assert "different comparisons" in result.output
+    labels = f"POST /v0/groups/{GID}/sas/runs/{RUN}/labels"
+    fake.routes[labels] = {"outcome": "mismatch", "status": "left"}
+    # Even a "same code" answer: the labels decide it.
+    result = fake.run("verify", GID, input="y\nn\nnope\n2222aaaa 3333bbbb\n")
+    assert result.exit_code == 6, result.output
+    assert "You have left" in result.stdout
+    assert "8 hex characters" in result.output  # asked again for a bad answer
+    assert fake.posts("/labels")[0] == (True, {"self": "2222aaaa", "peer": "3333bbbb"})
+    assert not fake.posts("/verify")
+
+
+def test_verify_labels_of_crossed_replicas_count_and_restart(fake: Fake) -> None:
+    sas_routes(fake)
+    labels = f"POST /v0/groups/{GID}/sas/runs/{RUN}/labels"
+    text = "The labels name other instances of you and of bob."
+    fake.routes[labels] = {"outcome": "replicas", "instance": "2" * 16, "text": text}
+    result = fake.run("verify", GID, input="n\nn\n22222222 00000000\n")
+    assert result.exit_code == 3, result.output
+    assert text in result.output
+    assert f"--instance {'2' * 16}" in result.output
     assert not fake.posts("/verify")
     assert not fake.posts("/mismatch")
 
@@ -772,7 +792,7 @@ def test_verify_no_reports_the_mismatch_and_handover(fake: Fake) -> None:
     sas_routes(fake)
     fake.routes["GET /v0/events?after=0"] = mismatch_event({"new_owner": BOB, "confirmed": True})
     fake.routes["GET /v0/events?after=9"] = {"events": []}
-    code, out = fake.json("verify", GID, input="y\nn\n")
+    code, out = fake.json("verify", GID, input="n\ny\n")
     assert code == 6
     assert out == {
         "outcome": "mismatch",
@@ -782,7 +802,7 @@ def test_verify_no_reports_the_mismatch_and_handover(fake: Fake) -> None:
     }
     assert conforms(out, SCHEMAS["verify (mismatch)"])
     assert fake.posts("/mismatch")[0] == (True, {"run": RUN})
-    text = fake.run("verify", GID, input="y\nn\n").stdout
+    text = fake.run("verify", GID, input="n\ny\n").stdout
     assert "handed to bob" in text
     assert "You have left" in text
 
@@ -791,11 +811,11 @@ def test_verify_no_unconfirmed_handover_and_non_owner(fake: Fake) -> None:
     sas_routes(fake)
     fake.routes["GET /v0/events?after=9"] = {"events": []}
     fake.routes["GET /v0/events?after=0"] = mismatch_event({"new_owner": BOB, "confirmed": False})
-    assert "NOT confirmed" in fake.run("verify", GID, input="y\nn\n").stdout
+    assert "NOT confirmed" in fake.run("verify", GID, input="n\ny\n").stdout
     fake.routes["GET /v0/events?after=0"] = mismatch_event(None)
-    out = fake.run("verify", GID, input="y\nn\n").stdout
+    out = fake.run("verify", GID, input="n\ny\n").stdout
     assert "don't rejoin" in out
-    out = fake.json("verify", GID, input="y\nn\n")[1]
+    out = fake.json("verify", GID, input="n\ny\n")[1]
     assert out["ownership_transfer"] is None
     assert conforms(out, SCHEMAS["verify (mismatch)"])
 

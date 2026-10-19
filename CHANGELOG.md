@@ -1247,6 +1247,21 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   action), and a run unpaired for 60 s is reported as a possible fork.
   Codes and run events are human-only by type. Verifications recorded
   under the earlier code are reset once.
+- Runtime and CLI: instance labels that don't mirror are no longer a
+  silent retry. In the forked-view attack the attacker's own instance ids
+  make them differ, so `verify` asks about the code and the labels always,
+  asks for the other human's labels when they don't mirror, and the
+  daemon counts a warning and treats it as codes that differ, unless both
+  labels name instances in its view (replicas paired crosswise, which
+  restart with `--instance`; `POST .../sas/runs/{run}/labels`). The
+  ceremony budget is keyed by the sending instance's identity as well as
+  its id, so another member can't use up a peer's budget by certifying an
+  instance under the same id, and a held commitment prompts once. A new
+  `control.sas_cancel` gives up an unrevealed commitment on a restart, a
+  timeout or the human's cancel (`POST .../sas/runs/{run}/cancel`, or
+  Ctrl-C in `verify`); a cancel after the receiver's reveal is ignored. A
+  run that another member's leave ends names that member in its warning.
+  The cadence Update is also deferred while a code waits for its answer.
 - Core, bindings, runtime and CLI: the SAS run of SPEC §11 is implemented.
   The core derives the commitment and the code (`Group::sas_commitment`,
   `Group::sas_code`, which refuses any epoch but the group's current one)

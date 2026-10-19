@@ -33,6 +33,8 @@ HUMAN = {
     "POST /v0/groups/{gid}/members/{identity}/sas",
     "GET /v0/groups/{gid}/sas/runs/{run}",
     "POST /v0/groups/{gid}/sas/runs/{run}/peer-started",
+    "POST /v0/groups/{gid}/sas/runs/{run}/cancel",
+    "POST /v0/groups/{gid}/sas/runs/{run}/labels",
     "POST /v0/groups/{gid}/members/{identity}/remove",
     "POST /v0/groups/{gid}/safety",
     "GET /v0/audit",

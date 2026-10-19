@@ -739,8 +739,11 @@ class GroupService:
             epoch=summary["epoch"],
             verified=f"{trust['verified_members']} of {trust['members'] - 1} verified",
         )
-        # SPEC 11.3: runs of the earlier epoch end.
-        e.sas.on_epoch_changed(group_id, str(summary["committer"]["identity"]))
+        # SPEC 11.3: runs of the earlier epoch end. A commit of ours that
+        # carried another member's leave is that member's doing.
+        committer = str(summary["committer"]["identity"])
+        others = [str(m["identity"]) for m in summary.get("left") or [] if m["identity"] != e.me]
+        e.sas.on_epoch_changed(group_id, others[0] if committer == e.me and others else committer)
         if self.leaving(group_id):
             await self._propose_again(group_id)
         e._defer(self.wake)

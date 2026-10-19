@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 from agentconnect import cli_support
 from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
-from agentconnect_harness.cluster import Cluster, Node, status
+from agentconnect_harness.cluster import Cluster, Node, compare, status
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import on_free_port
 
@@ -153,8 +153,8 @@ async def test_two_daemons_create_accept_approve_verify_send_leave(  # noqa: PLR
     run_b = bob.node.daemon.sas_start(gid, alice.node.me)["run"]
     code, out = await verifying
     assert code == 0, out
-    assert "read the same two instance labels? [y/N]" in out
     assert "read exactly this code? [y/N]" in out
+    assert "the same two instance labels, the other way round? [y/N]" in out
     seen_b = bob.node.daemon.sas_run(gid, run_b)
     assert seen_b["sas"]["decimal"] in out  # the same code on both screens
     assert f"yours {seen_b['labels']['peer']}, theirs {seen_b['labels']['self']}" in out
@@ -261,7 +261,7 @@ async def test_verify_no_leaves_and_reports_the_owner_handover(
 ) -> None:
     (a, b, _c), gid = await group(3)
     alice = await serve(a)
-    verifying = asyncio.ensure_future(alice.json("verify", gid, b.me, input="y\nn\n"))
+    verifying = asyncio.ensure_future(alice.json("verify", gid, b.me, input="n\ny\n"))
     await a.wait(lambda: bool(a.daemon.sas._active))
     b.daemon.sas_start(gid, a.me)  # b's human starts the other side
     code, out = await verifying
@@ -333,3 +333,40 @@ async def test_invite_create_require_verified_sets_the_policy(
     await alice.node.idle()
     code, shown = await alice.json("groups", "show", made["group_id"])
     assert shown["require_verified"] is True
+
+
+@pytest.mark.parametrize("code_answer", ["n", "y"])
+async def test_one_attacker_in_two_forked_groups_ends_in_a_mismatch(
+    cluster: Cluster, serve: Callable[[Node], Awaitable[Cli]], code_answer: str
+) -> None:
+    """SPEC 11.7, review 67 finding 1: Mallory has Alice's link and the relay
+    (SPEC 14.4). View 1 is Alice's group with Mallory's instance m1; view 2
+    is Mallory's group, posing as Alice, with Bob. Mallory runs both sides as
+    an ordinary daemon. Alice's human runs `verify` and hears Bob's code and
+    labels on the call. Whether or not the human takes the codes for the same,
+    the labels don't mirror, and the comparison ends in the mismatch: the
+    group is left. Never a silent retry."""
+    alice = await serve(await cluster.node("alice"))
+    m1 = await cluster.node("m1")
+    m2 = await cluster.node("m2", identity_of=m1)
+    bob = await cluster.node("bob")
+    g1 = alice.node.daemon.create_group("Plans", "p")
+    await alice.node.idle()
+    await cluster.invite(alice.node, m1, g1)
+    g2 = m2.daemon.create_group("Plans", "p")
+    await m2.idle()
+    await cluster.invite(m2, bob, g2)
+    seen_b, _ = await compare(bob, m2, g2)  # what Bob's human reads out
+    assert seen_b["state"] == "done"
+    verifying = asyncio.ensure_future(
+        alice.json(
+            "verify",
+            g1,
+            input=f"{code_answer}\nn\n{seen_b['labels']['self']} {seen_b['labels']['peer']}\n",
+        )
+    )
+    await alice.node.wait(lambda: bool(alice.node.daemon.sas._active))
+    m1.daemon.sas_start(g1, alice.node.me)  # Mallory answers as any daemon would
+    code, out = await verifying
+    assert (code, out["outcome"], out["status"]) == (6, "mismatch", "left")
+    assert status(alice.node, g1) == "left"

@@ -20,6 +20,7 @@ from agentconnect.runtime.sas import (
     BUDGET,
     RUN_TIMEOUT_SECS,
     SAME_WINDOW_SECS,
+    SAS_CANCEL,
     SAS_COMMIT,
     SAS_EVENTS,
     SAS_KINDS,
@@ -65,6 +66,10 @@ class Crafted:
         c = bytes(ac.sas_commitment(unb64(gid), e, self.me, self.instance, peer, nonce))
         self.send(gid, SAS_COMMIT, {"commitment": b64(c), "epoch": e, "peer": peer}, [peer])
         return c
+
+    def cancel(self, gid: str, peer: str, commitment: bytes) -> None:
+        body = {"commitment": b64(commitment), "epoch": self.node.epoch(gid)}
+        self.send(gid, SAS_CANCEL, body, [peer])
 
     def reveal(self, gid: str, peer: str, answers: bytes, nonce: bytes) -> None:
         body = {"answers": b64(answers), "epoch": self.node.epoch(gid), "nonce": b64(nonce)}
@@ -457,11 +462,12 @@ async def test_the_ceremony_budget_counts_only_what_is_addressed_here(
     for _ in range(BUDGET + 1):
         last = m.commit(gid, a.me, m.nonce())
     await m.node.idle()
-    await a.wait(lambda: len(events(a, "sas_requested")) == BUDGET)
     await a.wait(lambda: not a.daemon.status()["inbox_pending"])
     (held,) = a.daemon.sas._held.values()
     assert held.commitment != last  # the 13th of the minute was dropped
-    assert len(events(a, "sas_requested")) == BUDGET
+    # One prompt per sending instance while it holds, not one per commitment.
+    await a.wait(lambda: bool(events(a, "sas_requested")))
+    assert len(events(a, "sas_requested")) == 1
 
 
 async def test_the_answered_commitment_is_stored_before_the_reveal(
@@ -570,3 +576,280 @@ def test_a_crash_in_the_reset_leaves_it_to_do(
     assert not next(m for m in store.members("g")).verified
     assert store.kv_get(SAS_RUN_MARKER[0]) == SAS_RUN_MARKER[1]
     store.close()
+
+
+# -- review 67 regressions -----------------------------------------------------------------
+
+
+def inject_commit(node: Node, gid: str, sender: tuple[str, str], commitment: bytes) -> None:
+    """A commitment as the engine hands it over for an authenticated leaf of
+    ``sender`` (identity, instance hex): what a member that certified an
+    instance under any id it likes can send."""
+    row = node.daemon.store.group(gid)
+    assert row is not None
+    epoch = node.epoch(gid)
+    inner = {
+        "v": 0,
+        "sender": sender[0],
+        "instance_id": sender[1],
+        "to": [node.me],
+        "hop": 0,
+        "origin": "human",
+        "kind": SAS_COMMIT,
+        "body": {"commitment": b64(commitment), "epoch": epoch, "peer": node.me},
+    }
+    event = {"sender": {"identity": sender[0], "instance_id_hex": sender[1]}, "epoch": epoch}
+    with node.daemon.store.tx():
+        node.daemon.sas.on_message(row, event, inner)
+
+
+async def test_another_member_cant_use_up_a_peers_budget(
+    group: GroupFixture, rng: random.Random
+) -> None:
+    """Finding 2: Mallory certifies an instance under Bob's instance id and
+    floods Alice. The budget is Mallory's own: Bob's run with Alice pairs."""
+    (a, b, m), gid = await group(3)
+    for _ in range(2 * BUDGET):
+        inject_commit(a, gid, (m.me, b.daemon.instance.instance_id_hex), rng.randbytes(32))
+    run_a, run_b = await compare(a, b, gid)
+    assert run_a["state"] == run_b["state"] == "done"
+    assert run_a["sas"] == run_b["sas"]
+    assert a.daemon.store.sas_warnings(gid, b.me) == (0, [])
+    # Only Mallory's own prompt came, once.
+    await a.wait(lambda: bool(events(a, "sas_requested")))
+    assert [e["peer"] for e in events(a, "sas_requested")] == [m.me]
+
+
+async def test_a_leave_that_ends_a_run_names_the_leaver(
+    group: GroupFixture, rng: random.Random
+) -> None:
+    """Finding 3: a pending leave stops every application message, the
+    ceremony messages included, so its commit can't wait; when this
+    instance commits it, the warning names the member that left, not this
+    instance."""
+    (a, m_node, c), gid = await group(3)
+    m = Crafted(m_node, rng)
+    run_id = await started(a, gid, m.me)
+    m.commit(gid, a.me, m.nonce())
+    await a.wait(lambda: run(a, run_id).revealed)
+    await c.daemon.leave(gid)
+    seen = await ended(a, gid, run_id)
+    assert (seen["reason"], seen["warning"], seen["committer"]) == ("epoch_changed", True, c.me)
+    assert a.daemon.store.sas_warnings(gid, m.me) == (1, [c.me])
+
+
+async def test_a_restart_cancels_the_commitment_it_left(
+    group: GroupFixture, advance: Advance
+) -> None:
+    """Finding 4: a restart cancels its unrevealed commitment, so the peer
+    doesn't pair with it and ends with no warning."""
+    (a, b), gid = await group(2)
+    await started(b, gid, a.me)
+    await a.wait(lambda: bool(a.daemon.sas._held))
+    await b.restart()
+    await a.wait(lambda: not a.daemon.sas._held)
+    run_a = a.daemon.sas_start(gid, b.me)["run"]
+    await a.idle()
+    assert view(a, gid, run_a)["state"] == "waiting"
+    await advance(RUN_TIMEOUT_SECS + 1)
+    seen = await ended(a, gid, run_a)
+    assert (seen["reason"], seen["warning"]) == ("timed_out", False)
+    assert a.daemon.store.sas_warnings(gid, b.me) == (0, [])
+
+
+async def test_a_timeout_and_the_human_cancel_before_the_reveal(
+    group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    (a, b), gid = await group(2)
+    sent: list[str] = []
+
+    def record(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "send" and env.get("kind") == "application":
+            sent.append(str(env["msg_id"]))
+        return [frame]
+
+    malicious_relay(a).client_filters.append(record)
+    # The human gives the run up: b no longer holds the commitment.
+    run_a = await started(a, gid, b.me)
+    await b.wait(lambda: bool(b.daemon.sas._held))
+    seen = a.daemon.sas_cancel(gid, run_a)
+    assert (seen["reason"], seen["warning"]) == ("cancelled", False)
+    await b.wait(lambda: not b.daemon.sas._held)
+    # A timeout before the reveal cancels too.
+    run_a = await started(a, gid, b.me)
+    before = len(sent)
+    await advance(RUN_TIMEOUT_SECS + 1)
+    await ended(a, gid, run_a)
+    await a.idle()
+    assert len(sent) == before + 1  # the cancel
+    assert not a.daemon.store.sas_sent()
+
+
+async def test_cancels_honoured_only_before_the_reveal_and_from_the_sender(
+    cluster: Cluster, rng: random.Random, advance: Advance
+) -> None:
+    (a, m_node), gid = await cluster.group(2)
+    m = Crafted(m_node, rng)
+    m2_node = await cluster.node(identity_of=m_node)
+    await cluster.invite(a, m2_node, gid)
+    m2 = Crafted(m2_node, rng)
+    # A held commitment: dropped by its sender's cancel, not by another
+    # instance's of the same identity.
+    c1 = m.commit(gid, a.me, m.nonce())
+    await a.wait(lambda: bool(a.daemon.sas._held))
+    m2.cancel(gid, a.me, c1)
+    await m2_node.idle()
+    await a.wait(lambda: not a.daemon.status()["inbox_pending"])
+    assert a.daemon.sas._held
+    m.cancel(gid, a.me, c1)
+    await a.wait(lambda: not a.daemon.sas._held)
+    # After the reveal: ignored, and the run still ends as a warning.
+    run_id = await started(a, gid, m.me)
+    c2 = m.commit(gid, a.me, m.nonce())
+    await a.wait(lambda: run(a, run_id).revealed)
+    m.cancel(gid, a.me, c2)
+    await m_node.idle()
+    await a.wait(lambda: not a.daemon.status()["inbox_pending"])
+    assert view(a, gid, run_id)["state"] == "exchanging"
+    await advance(RUN_TIMEOUT_SECS + 1)
+    seen = await ended(a, gid, run_id)
+    assert (seen["reason"], seen["warning"]) == ("timed_out", True)
+
+
+async def test_a_cancel_of_a_paired_run_before_its_reveal_counts_nothing(
+    group: GroupFixture, rng: random.Random
+) -> None:
+    (a, m_node), gid = await group(2)
+    m = Crafted(m_node, rng)
+    proxy = a.proxy
+    state: dict[str, Any] = {"msg_id": None}
+
+    def client(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if (
+            state["msg_id"] is None
+            and frame.get("t") == "send"
+            and env.get("kind") == "application"
+        ):
+            state["msg_id"] = env["msg_id"]
+        return [frame]
+
+    def server(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        # Hold `accepted` for a's commitment: a pairs but can't reveal yet.
+        held = frame.get("t") == "accepted" and frame.get("msg_id") == state["msg_id"]
+        return [] if held else [frame]
+
+    proxy.client_filters.append(client)
+    proxy.server_filters.append(server)
+    run_id = a.daemon.sas_start(gid, m.me)["run"]
+    await a.wait(lambda: state["msg_id"] is not None)
+    c1 = m.commit(gid, a.me, m.nonce())
+    await a.wait(lambda: run(a, run_id).paired is not None)
+    assert not run(a, run_id).revealed
+    m.cancel(gid, a.me, c1)
+    seen = await ended(a, gid, run_id)
+    assert (seen["reason"], seen["warning"]) == ("peer_cancelled", False)
+    assert a.daemon.store.sas_warnings(gid, m.me) == (0, [])
+
+
+async def test_labels_of_crossed_replicas_or_of_a_fork(cluster: Cluster) -> None:
+    """Finding 1, the daemon's half: labels that don't mirror count a
+    warning. Replicas paired crosswise (both labels name instances in the
+    local view) restart; anything else leaves as codes that differ."""
+    (a, b), gid = await cluster.group(2)
+    a2 = await cluster.node(identity_of=a)
+    await cluster.invite(a, a2, gid)
+    b2 = await cluster.node(identity_of=b)
+    await cluster.invite(a, b2, gid)
+    run_a, run_b = await compare(a, b, gid)
+    hexes = (b2.daemon.instance.instance_id_hex, a2.daemon.instance.instance_id_hex)
+    out = await a.daemon.sas_labels(gid, run_a["run"], hexes[0][:8], hexes[1][:8])
+    assert (out["outcome"], out["instance"]) == ("replicas", hexes[0])
+    assert a.daemon.store.sas_warnings(gid, b.me)[0] == 1
+    with pytest.raises(DaemonError):
+        a.daemon.mark_verified(gid, b.me, True, run_a["run"])  # nothing recorded
+    # Labels the local view can't explain: a fork, the mismatch.
+    out = await b.daemon.sas_labels(gid, run_b["run"], "0" * 8, "f" * 8)
+    assert (out["outcome"], out["status"]) == ("mismatch", "left")
+    row = b.daemon.store.group(gid)
+    assert row is not None
+    assert row.status == "left"
+
+
+async def test_a_finished_run_waiting_for_its_answer_defers_the_update(
+    group: GroupFixture,
+) -> None:
+    """Info: from step 1 until the human answers (SPEC 11.3)."""
+    (a, b), gid = await group(2)
+    run_a, _ = await compare(a, b, gid)
+    make_update_due(a, gid)
+    epoch = a.epoch(gid)
+    a.daemon.send_message(gid, {"text": "while the code waits"})
+    await a.idle()
+    assert a.epoch(gid) == epoch
+    a.daemon.mark_verified(gid, b.me, True, run_a["run"])
+    a.daemon.send_message(gid, {"text": "answered"})
+    await a.wait(lambda: a.epoch(gid) == epoch + 1)
+
+
+# -- the edges of the human API and of the message checks ----------------------------------
+
+
+async def test_the_human_api_refuses_what_it_should(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    d = a.daemon
+    for call, code in (
+        (lambda: d.sas_start(gid, "ac:v0:nobody"), "not_found"),
+        (lambda: d.sas_start(gid, b.me, instance="0" * 16), "not_found"),
+        (lambda: d.sas_start(gid, b.me, instance="XYZ"), "bad_request"),
+        (lambda: d.sas_start(gid, a.me), "bad_request"),
+        (lambda: d.sas_run(gid, "nope"), "not_found"),
+        (lambda: d.sas_peer_started(gid, "nope"), "not_found"),
+        (lambda: d.sas_cancel(gid, "nope"), "not_found"),
+    ):
+        with pytest.raises(DaemonError) as refused:
+            call()
+        assert refused.value.code == code
+    for labels, code in (((("nope", "x" * 8)), "bad_request"), (("0" * 8, "1" * 8), "not_found")):
+        with pytest.raises(DaemonError) as refused:
+            await d.sas_labels(gid, "nope", *labels)
+        assert refused.value.code == code
+    run_id = await started(a, gid, b.me)
+    with pytest.raises(DaemonError) as early:
+        await d.sas_labels(gid, run_id, "0" * 8, "1" * 8)
+    assert early.value.code == "not_done"
+    with pytest.raises(DaemonError) as early:
+        d.mark_verified(gid, b.me, True, run_id)
+    assert early.value.code == "not_done"
+    with pytest.raises(DaemonError) as missing:
+        d.mark_verified(gid, b.me, True, "nope")
+    assert missing.value.code == "not_found"
+    # Cancelling an ended run changes nothing.
+    assert d.sas_cancel(gid, run_id)["reason"] == "cancelled"
+    assert d.sas_cancel(gid, run_id)["reason"] == "cancelled"
+
+
+async def test_malformed_ceremony_messages_are_ignored(
+    group: GroupFixture, rng: random.Random
+) -> None:
+    (a, m_node), gid = await group(2)
+    m = Crafted(m_node, rng)
+    run_id = await started(a, gid, m.me)
+    epoch = a.epoch(gid)
+    for body in (
+        {"commitment": "é" * 43, "epoch": epoch, "peer": a.me},  # not ASCII
+        {"commitment": "!!" * 21, "epoch": epoch, "peer": a.me},  # not base64url
+        {"commitment": b64(rng.randbytes(31)), "epoch": epoch, "peer": a.me},  # 31 bytes
+        {"commitment": b64(rng.randbytes(32)), "epoch": epoch, "peer": "ac:v0:x"},
+        {"commitment": b64(rng.randbytes(32)), "epoch": epoch + 1, "peer": a.me},
+        {"commitment": b64(rng.randbytes(32)), "epoch": True, "peer": a.me},
+    ):
+        m.send(gid, SAS_COMMIT, body, [a.me])
+    m.send(gid, SAS_COMMIT, {"commitment": b64(rng.randbytes(32)), "epoch": epoch}, [a.me])
+    m.send(gid, SAS_CANCEL, {"commitment": b64(rng.randbytes(32)), "epoch": epoch}, [m.me])
+    m.send(gid, SAS_REVEAL, {"answers": "x", "epoch": epoch, "nonce": "y"}, [a.me])
+    await m_node.idle()
+    await a.wait(lambda: not a.daemon.status()["inbox_pending"])
+    assert view(a, gid, run_id)["state"] == "waiting"
+    assert not a.daemon.sas._held

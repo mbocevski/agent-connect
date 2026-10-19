@@ -480,6 +480,14 @@ CREATE TABLE IF NOT EXISTS sas_answered (
     commitment BLOB NOT NULL,
     PRIMARY KEY (group_id, epoch, commitment)
 );
+CREATE TABLE IF NOT EXISTS sas_sent (
+    group_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    commitment BLOB NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, commitment)
+);
 CREATE TABLE IF NOT EXISTS sas_warnings (
     group_id TEXT NOT NULL,
     peer TEXT NOT NULL,
@@ -980,6 +988,35 @@ class Store:
             "DELETE FROM sas_answered WHERE group_id = ? AND epoch < ?", (group_id, epoch)
         )
 
+    def add_sas_sent(
+        self, group_id: str, epoch: int, peer: str, commitment: bytes, at: int
+    ) -> None:
+        """This instance's commitment, unrevealed so far: a restart cancels
+        it (SPEC 11.3)."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO sas_sent (group_id, epoch, peer, commitment, at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_id, epoch, peer, commitment, at),
+        )
+
+    def forget_sas_sent(self, group_id: str, commitment: bytes) -> None:
+        self._db.execute(
+            "DELETE FROM sas_sent WHERE group_id = ? AND commitment = ?", (group_id, commitment)
+        )
+
+    def forget_sas_sent_before(self, group_id: str, epoch: int) -> None:
+        self._db.execute("DELETE FROM sas_sent WHERE group_id = ? AND epoch < ?", (group_id, epoch))
+
+    def forget_all_sas_sent(self) -> None:
+        self._db.execute("DELETE FROM sas_sent")
+
+    def sas_sent(self) -> list[dict[str, Any]]:
+        rows = self._all("SELECT group_id, epoch, peer, commitment, at FROM sas_sent")
+        return [
+            {"group_id": r[0], "epoch": r[1], "peer": r[2], "commitment": bytes(r[3]), "at": r[4]}
+            for r in rows
+        ]
+
     def sas_warnings(self, group_id: str, peer: str) -> tuple[int, list[str]]:
         """The warning count with ``peer`` and the members whose commits
         ended those runs (SPEC 11.3)."""
@@ -1091,6 +1128,7 @@ class Store:
                 "floor_state",
                 "floor_writes",
                 "sas_answered",
+                "sas_sent",
                 "sas_warnings",
             ):
                 db.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))  # noqa: S608

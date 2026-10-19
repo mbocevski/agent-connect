@@ -23,8 +23,10 @@ directory (:mod:`agentconnect.provision`), and nothing else offers them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
+import re
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -1406,7 +1408,12 @@ def verify(
             "over a call or in person, not over the channel that carried the invite.",
             as_json=as_json,
         )
-        view = _follow_run(api, gid, info, run, as_json)
+        try:
+            view = _follow_run(api, gid, info, run, as_json)
+        except (KeyboardInterrupt, typer.Abort):
+            with contextlib.suppress(ApiClientError):
+                api.request("POST", f"/v0/groups/{gid}/sas/runs/{run['run']}/cancel")
+            raise
         sas, labels = Sas.of(view["sas"]), view["labels"]
         _say("Your short code:", as_json=as_json)
         for line in sas.lines():
@@ -1416,14 +1423,17 @@ def verify(
             "(they read the same two, the other way round)",
             as_json=as_json,
         )
-        if not typer.confirm(
-            f"Does {name}'s human read the same two instance labels?", default=False, err=as_json
-        ):
-            msg = "you were comparing different comparisons: run `agentconnect verify` again"
-            raise CliError("labels_differ", msg, EXIT_REFUSED)
-        if not typer.confirm(
+        # Both questions, always (SPEC 11.5): labels that don't mirror are
+        # how a fork shows when the attacker's instance ids are its own.
+        same_code = typer.confirm(
             f"Does {name}'s human read exactly this code?", default=False, err=as_json
-        ):
+        )
+        same_labels = typer.confirm(
+            "And the same two instance labels, the other way round?", default=False, err=as_json
+        )
+        if not same_labels:
+            _labels_differ(api, gid, info, view, as_json)
+        if not same_code:
             _mismatch(api, gid, info, as_json, run=view["run"])
             return
         body = {"verified": True, "run": view["run"]}
@@ -1443,10 +1453,40 @@ def verify(
             typer.echo(f"Marked {name} as verified.")
 
 
+LABEL = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _labels_differ(
+    api: ApiClient, gid: str, info: dict[str, Any], view: dict[str, Any], as_json: bool
+) -> None:
+    """The labels don't mirror (SPEC 11.5): the other human's two labels go
+    to the daemon, which counts a warning and treats it as codes that differ,
+    unless both name instances in this view (replicas paired crosswise)."""
+    while True:
+        raw = typer.prompt(
+            "The two labels they read, theirs first (e.g. 1a2b3c4d 5e6f7a8b)", err=as_json
+        )
+        parts = raw.split()
+        if len(parts) == 2 and all(LABEL.match(x) for x in parts):  # noqa: PLR2004
+            break
+        _say("Two labels of 8 hex characters each, separated by a space.", as_json=as_json)
+    path = f"/v0/groups/{gid}/sas/runs/{view['run']}/labels"
+    out = api.request("POST", path, {"self": parts[0], "peer": parts[1]})
+    if out["outcome"] == "mismatch":
+        _report_mismatch(api, gid, info, as_json)
+    _say(clean(out.get("text", "")), as_json=as_json)
+    msg = f"no answer recorded: start again with --instance {out.get('instance', '')}".rstrip()
+    raise CliError("labels_differ", msg, EXIT_REFUSED)
+
+
 def _mismatch(
     api: ApiClient, gid: str, info: dict[str, Any], as_json: bool, run: str | None = None
 ) -> None:
     api.request("POST", f"/v0/groups/{gid}/sas/mismatch", {} if run is None else {"run": run})
+    _report_mismatch(api, gid, info, as_json)
+
+
+def _report_mismatch(api: ApiClient, gid: str, info: dict[str, Any], as_json: bool) -> None:
     transfer = None
     for ev in events_after(api):
         if ev["type"] == "sas_mismatch" and ev["group_id"] == gid:

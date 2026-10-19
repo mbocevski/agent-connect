@@ -673,6 +673,36 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
     ),
     RouteSpec(
         "POST",
+        "/v0/groups/{gid}/sas/runs/{run}/cancel",
+        "_sas_cancel",
+        "Give a SAS run up. Before this daemon revealed its nonce, the peer is told "
+        "(`control.sas_cancel`) and nothing is counted; after it, the run ends and the "
+        "peer's run ends as a warning (SPEC 11.3).",
+        response=_SAS_RUN,
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/sas/runs/{run}/labels",
+        "_sas_labels",
+        "The instance labels the other human reads don't mirror yours: `self` is the label "
+        "they read as theirs, `peer` the one they read as yours. It counts as a warning. If "
+        "both name instances in your view (theirs one of the member's, `peer` one of your "
+        "identity's), two comparisons of replicas paired crosswise: `outcome` is "
+        "`replicas` and `instance` the member's instance to name with `--instance`. "
+        "Otherwise it is treated as codes that differ: the daemon leaves the group "
+        "(`outcome` `mismatch`, SPEC 11.5).",
+        request={"self": "str", "peer": "str"},
+        response={
+            "outcome": "str",
+            "instance?": "str",
+            "text?": "str",
+            "status?": "str",
+        },
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
         "/v0/groups/{gid}/members/{identity}/verify",
         "_verify",
         'Record the human\'s answer "same code" for a SAS run (SPEC 11.5): `run` is the '
@@ -1516,6 +1546,15 @@ class ApiServer:
 
     async def _sas_run(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return self.daemon.sas_run(p["gid"], p["run"])
+
+    async def _sas_cancel(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.sas_cancel(p["gid"], p["run"])
+
+    async def _sas_labels(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        mine, yours = b.get("self"), b.get("peer")
+        if not isinstance(mine, str) or not isinstance(yours, str):
+            raise ApiError(400, "bad_request", "self and peer are the labels the other human reads")
+        return await self.daemon.sas_labels(p["gid"], p["run"], mine, yours)
 
     async def _sas_peer_started(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         return self.daemon.sas_peer_started(p["gid"], p["run"])

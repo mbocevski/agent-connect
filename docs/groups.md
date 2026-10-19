@@ -174,9 +174,14 @@ code: in a group of N members, each human compares codes with each of the
 N − 1 others.
 
 - `verify` shows the code with two instance labels, yours and theirs; the
-  other human reads the same two the other way round. Labels that differ
-  mean you are reading two different runs: start again. `--instance` picks
-  which of the other member's instances to compare with.
+  other human reads the same two the other way round. It asks about the
+  code and about the labels, always. Labels that don't mirror count as a
+  warning, and `verify` asks for the two labels the other human reads. If
+  both name instances in your view (theirs one of the member's, and their
+  "yours" one of your own identity's), two runs of replicas paired
+  crosswise: start again, naming the instance with `--instance`. Anything
+  else is treated as codes that differ: an attacker in the middle uses
+  instance ids of its own.
 - Answering that the codes differ leaves the group, whatever happened
   since the code appeared (`sas_mismatch`). Answering that they match marks
   the member verified, within 600 s of the code appearing, also when the
@@ -190,8 +195,13 @@ N − 1 others.
   leaves on its own, because a relay that drops messages causes the same.
 - One run per pair of identities at a time: a second one, also from
   another instance of your identity, answers `409 conflict`.
-- While a run is under way, the daemon defers its update cadence, for at
-  most 600 s in total.
+- `Ctrl-C` while `verify` waits gives the run up: before your daemon
+  revealed its nonce, the other daemon is told (`control.sas_cancel`) and
+  nothing is counted. A restart does the same for the commitments it left.
+- While a run is under way or its code waits for your answer, the daemon
+  defers its update cadence, for at most 600 s in total. Another member's
+  leave can't wait (no message goes out while a proposal is pending); a run
+  it ends is a warning that names the member who left.
 - The codes and the run events (`sas_requested`, `sas_paired`, `sas_code`,
   `sas_aborted`, `sas_unpaired`, `sas_stopped`, `verifications_reset`) are
   the human's. The agent never sees them, and no event it sees carries a
