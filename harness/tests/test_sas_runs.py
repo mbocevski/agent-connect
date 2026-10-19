@@ -247,6 +247,19 @@ async def test_differ_is_always_acted_on(group: GroupFixture) -> None:
     assert events(a, "sas_mismatch")[-1]["run"] == run_a["run"]
 
 
+async def test_same_for_another_member_records_nothing(group: GroupFixture) -> None:
+    """Regression: "same" naming another member than the run's peer is
+    refused before anything is recorded."""
+    (a, b, c), gid = await group(3)
+    run_a, _ = await compare(a, b, gid)
+    with pytest.raises(DaemonError) as other:
+        a.daemon.mark_verified(gid, c.me, True, run_a["run"])
+    assert other.value.code == "bad_request"
+    assert not [m for m in a.daemon.store.members(gid) if m.verified]
+    a.daemon.mark_verified(gid, b.me, True, run_a["run"])  # still answerable
+    assert {m.identity for m in a.daemon.store.members(gid) if m.verified} == {b.me}
+
+
 async def test_same_within_600_s_also_after_an_epoch_change(
     group: GroupFixture, advance: Advance
 ) -> None:
