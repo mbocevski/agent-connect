@@ -2743,26 +2743,35 @@ class Engine:
             if event is not None:
                 await self._notify(event)
             code = self._fail_codes.pop(row.seq, "failed")
-            if state == "failed" and row.kind == "app" and row.payload.get("sas"):
-                # A ceremony message: the run's, never the agent's to hear.
-                self.sas.on_send_failed(row.payload["sas"], code)
-            elif state == "failed" and row.group_id is not None:
-                # Tell the caller: it holds a msg_id (or an intent) that will
-                # never be delivered.
-                if row.kind == "app":
-                    await self.emit(row.group_id, "send_failed", msg_id=msg_id, code=code)
-                elif row.kind == "commit" and code != BENIGN and not self._knock_row(row):
-                    # (An approved knock's Add failing is the human's
-                    # knock_approval_failed, not the agent's to hear.)
-                    intent = row.payload.get("intent") or {}
-                    await self.emit(
-                        row.group_id,
-                        "commit_failed",
-                        cause=f"outbox/{row.seq}",
-                        intent=intent.get("type"),
-                        code=code,
-                    )
+            if state == "failed":
+                await self._row_failed(row, code)
             self._pulse()
+
+    async def _row_failed(self, row: OutboxRow, code: str) -> None:
+        """Tell whoever waits for a row that failed for good."""
+        if row.kind == "app" and row.payload.get("sas"):
+            # A ceremony message: the run's, never the agent's to hear.
+            self.sas.on_send_failed(row.payload["sas"], code)
+            return
+        if row.group_id is None:
+            return
+        # Tell the caller: it holds a msg_id (or an intent) that will never
+        # be delivered.
+        if row.kind == "app":
+            await self.emit(
+                row.group_id, "send_failed", msg_id=row.payload.get("msg_id"), code=code
+            )
+        elif row.kind == "commit" and code != BENIGN and not self._knock_row(row):
+            # (An approved knock's Add failing is the human's
+            # knock_approval_failed, not the agent's to hear.)
+            intent = row.payload.get("intent") or {}
+            await self.emit(
+                row.group_id,
+                "commit_failed",
+                cause=f"outbox/{row.seq}",
+                intent=intent.get("type"),
+                code=code,
+            )
 
     @staticmethod
     def _knock_row(row: OutboxRow) -> bool:
