@@ -2050,6 +2050,37 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_group_keeps_the_others() {
+        // Deleting one group's rows takes nothing of another group or of an
+        // unused KeyPackage, on either store.
+        fn check<T: Store>(b: &Client<T>, a: &Client<MemoryStore>, count: impl Fn(&T) -> usize) {
+            let mut live_a = a.create_group("live", "p").unwrap();
+            let mut live_b = join(a, &mut live_a, b, "live");
+            let gone = ended(a, b, End::RemovedByOther);
+            let inv =
+                Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
+            b.create_join_request(inv.secret(), "b").unwrap();
+            let before = count(b.store_for_testing());
+            gone.delete(b).unwrap();
+            let after = count(b.store_for_testing());
+            assert!(after > 0 && after < before, "{before} -> {after}");
+            epoch_moves(a, &mut live_a, b, &mut live_b);
+            assert_eq!(live_b.epoch(), live_a.epoch());
+        }
+        let clock = Arc::new(FakeClock::default());
+        let a = client(MemoryStore::new(), "keep-a", &clock);
+        let b = client(MemoryStore::new(), "keep-b", &clock);
+        check(&b, &a, MemoryStore::mls_value_count);
+        let a = client(MemoryStore::new(), "keep-sql-a", &clock);
+        let b = client(SqliteStore::open_in_memory().unwrap(), "keep-sql-b", &clock);
+        check(&b, &a, |s| {
+            usize::try_from(rows(s, "openmls_key_packages") + rows(s, "openmls_group_data"))
+                .unwrap()
+        });
+        assert_eq!(rows(b.store_for_testing(), "openmls_key_packages"), 1);
+    }
+
+    #[test]
     fn deleting_an_active_group_leaves_no_row_that_references_it() {
         deleted_on_sqlite(End::Active);
         deleted_in_memory(End::Active);
