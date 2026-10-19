@@ -2,16 +2,19 @@
 //!
 //! Server-rendered, no JavaScript. The page cannot read the URL fragment
 //! because it has no script at all, and the CSP forbids any. Every field comes
-//! from attacker-controlled invite metadata and is HTML-escaped.
+//! from attacker-controlled invite metadata and is HTML-escaped. The
+//! operator's terms and abuse links (`AC_RELAY_TERMS`, `AC_RELAY_ABUSE`),
+//! when set, are a footer of plain links; unset, the page has no footer.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use axum::Router;
+use agentconnect_core::operator::OperatorLinks;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Extension, Router};
 
 use crate::relay::Relay;
 use crate::store::{InviteRecord, InviteStatus, Store};
@@ -97,12 +100,31 @@ compare the short code with the other members over a call or in person.</p>\n\
 <ol>\n<li>Install the CLI: <code>uv tool install agentconnect</code></li>\n\
 <li>Accept the invite: <code>agentconnect accept '&lt;paste the full link&gt;'</code></li>\n</ol>\n\
 <p class=\"muted\">MCP and Claude Code support is coming later. Please don't open invite links \
-in a browser or paste them anywhere except into your agent.</p>\n\
-</main>\n</body>\n</html>\n";
+in a browser or paste them anywhere except into your agent.</p>\n";
 
-/// Render the page for an invite at `now_secs`.
+/// End a page: `</main>`, the operator's links if any is set, `</body>`.
+fn close(html: &mut String, links: &OperatorLinks) {
+    html.push_str("</main>\n");
+    if !links.is_empty() {
+        let links: Vec<String> = links
+            .labelled()
+            .map(|(label, url)| {
+                format!("<a href=\"{}\" rel=\"noreferrer\">{label}</a>", escape(url))
+            })
+            .collect();
+        let _ = write!(
+            html,
+            "<footer class=\"operator\">\n<p>{}</p>\n</footer>\n",
+            links.join(" · ")
+        );
+    }
+    html.push_str("</body>\n</html>\n");
+}
+
+/// Render the page for an invite at `now_secs`, with the operator's
+/// `links` in its footer.
 #[must_use]
-pub fn render_invite(invite: &InviteRecord, now_secs: u64) -> String {
+pub fn render_invite(invite: &InviteRecord, now_secs: u64, links: &OperatorLinks) -> String {
     let status = invite.status(now_secs);
     let mut html = String::from(HEAD);
     html.push_str("<h1>You have been invited to an agent conversation</h1>\n");
@@ -134,15 +156,17 @@ pub fn render_invite(invite: &InviteRecord, now_secs: u64) -> String {
     row("Status", status_label(status));
     html.push_str("</dl>\n</section>\n");
     html.push_str(HOW_TO);
+    close(&mut html, links);
     html
 }
 
-fn not_found_page() -> String {
+fn not_found_page(links: &OperatorLinks) -> String {
     let mut html = String::from(HEAD);
     html.push_str(
         "<h1>Invite not found</h1>\n<p>This invite does not exist or is no longer available. \
-         Ask the sender for a new link.</p>\n</main>\n</body>\n</html>\n",
+         Ask the sender for a new link.</p>\n",
     );
+    close(&mut html, links);
     html
 }
 
@@ -172,6 +196,7 @@ fn secure(status: StatusCode, content_type: &'static str, body: String) -> Respo
 
 async fn invite_page<S: Store>(
     State(relay): State<Arc<Relay<S>>>,
+    Extension(links): Extension<Arc<OperatorLinks>>,
     Path(invite_id): Path<String>,
 ) -> Response {
     const HTML: &str = "text/html; charset=utf-8";
@@ -179,12 +204,14 @@ async fn invite_page<S: Store>(
         Ok(invite) => secure(
             StatusCode::OK,
             HTML,
-            render_invite(&invite, relay.now_secs()),
+            render_invite(&invite, relay.now_secs(), &links),
         ),
-        Err(e) if e.code == crate::proto::ErrorCode::Internal => {
-            secure(StatusCode::INTERNAL_SERVER_ERROR, HTML, not_found_page())
-        }
-        Err(_) => secure(StatusCode::NOT_FOUND, HTML, not_found_page()),
+        Err(e) if e.code == crate::proto::ErrorCode::Internal => secure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            HTML,
+            not_found_page(&links),
+        ),
+        Err(_) => secure(StatusCode::NOT_FOUND, HTML, not_found_page(&links)),
     }
 }
 
@@ -197,11 +224,12 @@ async fn stylesheet() -> Response {
     r
 }
 
-/// Landing page routes.
-pub fn routes<S: Store>() -> Router<Arc<Relay<S>>> {
+/// Landing page routes, with the operator's `links` in the page footer.
+pub fn routes<S: Store>(links: OperatorLinks) -> Router<Arc<Relay<S>>> {
     Router::new()
         .route("/i/{invite_id}", get(invite_page::<S>))
         .route(CSS_PATH, get(stylesheet))
+        .layer(Extension(Arc::new(links)))
 }
 
 #[cfg(test)]
@@ -214,6 +242,59 @@ mod tests {
             escape(r#"<script>"a" & 'b'</script>"#),
             "&lt;script&gt;&quot;a&quot; &amp; &#39;b&#39;&lt;/script&gt;"
         );
+    }
+
+    fn invite() -> InviteRecord {
+        InviteRecord {
+            invite_id: "id".into(),
+            group_name: "Ops".into(),
+            inviter_name: "Alice".into(),
+            purpose: "Deploys".into(),
+            expires_at: 3600,
+            max_uses: 2,
+            uses_left: 2,
+            member_count: None,
+            inviter_mailbox: "mb".into(),
+            revoked: false,
+        }
+    }
+
+    #[test]
+    fn without_links_the_pages_end_as_before_and_with_them_only_gain_a_footer() {
+        let none = OperatorLinks::default();
+        let page = render_invite(&invite(), 0, &none);
+        assert!(
+            page.ends_with("anywhere except into your agent.</p>\n</main>\n</body>\n</html>\n")
+        );
+        assert!(!page.contains("<footer"));
+        let missing = not_found_page(&none);
+        assert!(
+            missing.ends_with("Ask the sender for a new link.</p>\n</main>\n</body>\n</html>\n")
+        );
+        assert!(!missing.contains("<footer"));
+
+        let links = OperatorLinks {
+            terms: Some("https://example.org/terms?a=1&b=2".into()),
+            abuse: Some("mailto:abuse@example.org".into()),
+        };
+        let footer = "<footer class=\"operator\">\n<p><a href=\"https://example.org/terms?a=1&amp;b=2\" \
+rel=\"noreferrer\">Terms</a> · <a href=\"mailto:abuse@example.org\" rel=\"noreferrer\">Report \
+abuse</a></p>\n</footer>\n";
+        let with = render_invite(&invite(), 0, &links);
+        assert!(with.contains(&format!("</main>\n{footer}</body>\n</html>\n")));
+        assert_eq!(with.replacen(footer, "", 1), page);
+        let with = not_found_page(&links);
+        assert!(with.contains(&format!("</main>\n{footer}</body>")));
+        assert_eq!(with.replacen(footer, "", 1), missing);
+
+        let abuse_only = OperatorLinks {
+            terms: None,
+            abuse: Some("https://example.org/abuse".into()),
+        };
+        assert!(render_invite(&invite(), 0, &abuse_only).contains(
+            "<footer class=\"operator\">\n<p><a href=\"https://example.org/abuse\" \
+rel=\"noreferrer\">Report abuse</a></p>\n</footer>\n"
+        ));
     }
 
     #[test]

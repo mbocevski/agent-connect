@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use agentconnect_core::clock::SystemClock;
 use agentconnect_relay::config::Config;
-use agentconnect_relay::{Limits, Relay, SqliteStore, app};
+use agentconnect_relay::{Limits, Relay, SqliteStore, app_with_links};
 use axum::serve::ListenerExt;
 use tracing_subscriber::EnvFilter;
 
@@ -45,7 +45,7 @@ async fn main() -> std::io::Result<()> {
             let _ = tcp.set_nodelay(true);
         });
     tracing::info!(addr = %config.addr, "relay listening");
-    axum::serve(listener, app(relay))
+    axum::serve(listener, app_with_links(relay, config.links.clone()))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

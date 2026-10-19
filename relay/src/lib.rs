@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use agentconnect_core::operator::OperatorLinks;
 use axum::Router;
 use axum::routing::get;
 
@@ -24,9 +25,15 @@ pub use store::{DEFAULT_FRAME_MAX, Limits, Store};
 
 /// Build the relay's HTTP router: REST, landing page and WebSocket.
 pub fn app<S: Store>(relay: Arc<Relay<S>>) -> Router {
+    app_with_links(relay, OperatorLinks::default())
+}
+
+/// [`app`], with the operator's terms and abuse links in the landing page's
+/// footer (`AC_RELAY_TERMS`, `AC_RELAY_ABUSE`).
+pub fn app_with_links<S: Store>(relay: Arc<Relay<S>>, links: OperatorLinks) -> Router {
     Router::new()
         .merge(rest::routes::<S>())
-        .merge(landing::routes::<S>())
+        .merge(landing::routes::<S>(links))
         .route("/v0/ws", get(ws::ws_handler::<S>))
         .with_state(relay)
 }

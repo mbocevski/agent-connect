@@ -4,9 +4,9 @@ mod common;
 
 use std::time::Duration;
 
-use agentconnect_relay::Store;
-use agentconnect_relay::app;
+use agentconnect_core::operator::OperatorLinks;
 use agentconnect_relay::relay::NewInviteRequest;
+use agentconnect_relay::{Store, app, app_with_links, landing};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use common::{Harness, fresh_id, invite_body, mailbox_of, signing_key};
@@ -219,6 +219,74 @@ async fn hostile_metadata_is_escaped() {
     assert!(!lower.contains("<b>"));
     assert!(!lower.contains("<h1>pwned"));
     assert_eq!(lower.matches("<h1>").count(), 1);
+}
+
+fn operator_links() -> OperatorLinks {
+    OperatorLinks {
+        terms: Some("https://relay.example.org/terms?a=1&b=2".into()),
+        abuse: Some("mailto:abuse@example.org".into()),
+    }
+}
+
+const FOOTER: &str = "<footer class=\"operator\">\n<p><a \
+href=\"https://relay.example.org/terms?a=1&amp;b=2\" rel=\"noreferrer\">Terms</a> · <a \
+href=\"mailto:abuse@example.org\" rel=\"noreferrer\">Report abuse</a></p>\n</footer>\n";
+
+async fn get_linked(h: &Harness, path: &str) -> (StatusCode, HeaderMap, String) {
+    let resp = app_with_links(h.relay.clone(), operator_links())
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = resp.into_parts();
+    let bytes = body.collect().await.unwrap().to_bytes();
+    (
+        parts.status,
+        parts.headers,
+        String::from_utf8(bytes.to_vec()).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn operator_links_add_a_footer_and_nothing_else() {
+    let h = Harness::start().await;
+    let id = register(&h, json!({"member_count": 4})).await;
+    for path in [format!("/i/{id}"), format!("/i/{}", fresh_id())] {
+        let (plain_status, plain_headers, plain) = get(&h, &path).await;
+        let (status, headers, html) = get_linked(&h, &path).await;
+        assert_eq!(status, plain_status, "{path}");
+        assert!(!plain.contains("<footer"), "{path}");
+        assert!(
+            html.ends_with(&format!("</main>\n{FOOTER}</body>\n</html>\n")),
+            "{path}: {html}"
+        );
+        assert_eq!(html.replacen(FOOTER, "", 1), plain, "{path}");
+        assert_secure(&headers);
+        assert_eq!(
+            headers["content-security-policy"], plain_headers["content-security-policy"],
+            "{path}"
+        );
+        assert_eq!(headers["content-security-policy"], landing::CSP);
+        let lower = html.to_lowercase();
+        for banned in [
+            "<script",
+            "javascript:",
+            "location",
+            "hash",
+            " onclick",
+            "<form",
+            "<iframe",
+        ] {
+            assert!(!lower.contains(banned), "{path} contains {banned:?}");
+        }
+        assert_eq!(lower.matches("<link").count(), 1);
+    }
+    assert_eq!(
+        landing::CSP,
+        "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; \
+form-action 'none'; frame-ancestors 'none'"
+    );
+    let (_, _, css) = get_linked(&h, "/static/invite.css").await;
+    assert!(css.contains("footer.operator"));
 }
 
 #[tokio::test]
