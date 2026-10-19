@@ -8,7 +8,7 @@ mod common;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use agentconnect_directory::log_filter;
+use agentconnect_directory::logging;
 use axum::body::Body;
 use axum::http::Request;
 use common::{HOST, Harness, identity};
@@ -46,11 +46,7 @@ async fn logs_carry_route_templates_and_no_identifiers() {
     let capture = Capture::default();
     let writer = capture.clone();
     // The binary's filter, at its most verbose.
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(log_filter(Some("trace")))
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
+    let subscriber = logging::subscriber(Some("trace"), move || writer.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
 
