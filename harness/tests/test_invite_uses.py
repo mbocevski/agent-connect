@@ -60,6 +60,7 @@ async def test_two_concurrent_redemptions_of_a_single_use_link(
     await loser.daemon.check_joins()
     assert loser.daemon.store.join_status(invite["invite_id"]) == ("failed", None)
     assert loser.daemon.keystore.get(f"join/{invite['invite_id']}") is None
+    await loser.wait(lambda: bool(loser.adapter.of_type("join_failed")))
     (failed,) = loser.adapter.of_type("join_failed")
     assert failed.data["warning"] == INVITE_WARNING
     assert failed.data["reason"] == "invite_used"

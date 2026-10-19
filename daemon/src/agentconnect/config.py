@@ -81,6 +81,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import agentconnect_core as ac
+from agentconnect import log
 from agentconnect.policy import (
     DEFAULT_AUDIT_GROUP_ROWS,
     DEFAULT_AUDIT_RETENTION_DAYS,
@@ -93,6 +94,7 @@ from agentconnect.policy import (
     Settings,
 )
 
+LOG = log.get("agentconnect.config")
 KEYSTORES = ("auto", "keyring", "file")
 # The adapters the separate daemon builds (agentconnect.adapters).
 ADAPTER_NAMES = ("webhook", "sse", "mcp", "a2a")
@@ -461,8 +463,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "webhook.callback_url",
         "webhook_url",
         "none",
-        "Where the webhook adapter POSTs. Required when `default_adapter = "
-        '"webhook"`. Loopback unless `webhook.allow_remote` is set.',
+        "Where the webhook adapter POSTs. Required when `daemon.adapters` lists "
+        '`webhook` (or `default_adapter = "webhook"`). Loopback unless '
+        "`webhook.allow_remote` is set.",
     ),
     ConfigKey(
         "webhook.allow_remote",
@@ -491,8 +494,8 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "`3600`",
         "How long the SSE adapter keeps messages and events for `Last-Event-ID` "
         "resume (60 to 604800). After that the payloads are deleted and a consumer "
-        "resuming from before the window gets an `sse_gap` event. Used only with "
-        '`default_adapter = "sse"`.',
+        "resuming from before the window gets an `sse_gap` event. Used only when "
+        "`daemon.adapters` lists `sse`.",
     ),
     ConfigKey(
         "a2a.local_agent_url",
@@ -1171,4 +1174,18 @@ def load_config(
     if not cfg.a2a_enabled and "a2a" in cfg.adapter_names:
         msg = 'adapter "a2a" needs a2a.local_agent_url or a2a.facade_port'
         raise ConfigError(msg)
+    for warning in config_warnings(cfg):
+        LOG.warning("config_warning", warning=warning)
     return cfg
+
+
+def config_warnings(cfg: Config) -> list[str]:
+    """What the config allows but probably doesn't mean."""
+    out = []
+    if cfg.a2a_enabled and cfg.adapter_names and "a2a" not in cfg.adapter_names:
+        out.append(
+            "[a2a] is set but daemon.adapters doesn't list a2a: the A2A adapter runs, "
+            "but groups deliver to it only where the human pins it "
+            "(agentconnect group adapters), so its facade gets no replies elsewhere"
+        )
+    return out

@@ -61,6 +61,14 @@ cleanup_departed_roles = true   # the owner drops departed admins and moderators
 The daemon runs the A2A adapter when `a2a.local_agent_url` or
 `a2a.facade_port` is set.
 
+There is no default `[[directory]]`: a directory's operator keys come from
+its operator, and the daemon never fetches them. The `[[directory]]` and
+`[listing]` tables refuse keys they don't know, and `auto_approve` in them
+with the reason: publishing a listing is always a person's decision
+([discovery.md](discovery.md)). `[groups]` refuses keys it doesn't know
+too; its keys can only shorten a limit or narrow roles
+([groups.md](groups.md)).
+
 ## Several adapters
 
 A group delivers its messages and events to every adapter in
@@ -78,33 +86,54 @@ agent or facade stop the start.
   took each one. An adapter that answers "retry" (an endpoint down, an SSE
   stream nobody reads) backs off on its own, for its own deliveries in
   that group: the others go on. A message is done, and its plaintext
-  deleted, once every adapter of the group has it. The relay copy is
-  acknowledged as soon as the message is recorded, so an adapter that is
-  down doesn't fill the relay mailbox.
-- **Events go to every adapter**, each told once. An adapter that fails
-  hears of it again on the next reconnect; the others aren't told twice.
+  deleted, once every adapter of the group has it.
+- **One adapter is triggered by a message.** A message that triggers this
+  agent triggers one adapter of the group's list; the others get it as
+  context (`addressed_to_me: false`). It is the adapter that sent the
+  message it replies to (`reply_to`), else the first one in the list whose
+  agent answers. The A2A facade without `a2a.local_agent_url` answers
+  nothing of its own: it is triggered only by replies to its own requests.
+  So two adapters whose agents both answer don't both reply, and
+  `adapters = ["a2a", "webhook"]` with only the facade gives the facade's
+  replies to its client and everything else to the webhook agent.
+- **The relay is acked once a message is recorded**, so an adapter that is
+  down doesn't fill the relay mailbox, up to a limit. When a group's
+  pending messages pass 64 MiB, or its oldest has waited 7 days (what the
+  relay keeps for this instance, SPEC section 8.3), the daemon stops acking
+  that group early: the relay keeps the copies, its mailbox fills as it
+  would without the early ack, and a `queue_overflow` puts the group out
+  of sync. The human hears of it (`delivery_stalled`, with the adapters
+  that are behind), and of the end (`delivery_resumed`), when what is pending
+  is back under both limits and what the relay kept is acked.
+- **Events go to every adapter**, each told once and in order, from a
+  worker of its own: an adapter that is slow, or never returns, holds up
+  only its own events. One that fails is told again after a backoff; the
+  others aren't told twice.
 - **The Agent Card** that goes to the group is the first one an adapter of
   the list has (the A2A adapter's, from the local agent).
-- **A removed adapter is skipped.** A name in the list that the runtime
-  doesn't run (taken out of the config) is skipped with a warning
-  (`adapter_not_registered`), and what waited only for it is done. With
-  no listed adapter running, the group delivers to the first adapter the
-  runtime has.
-- **Two adapters that both answer** (an A2A agent behind
-  `a2a.local_agent_url` and a webhook agent, say) both reply to the group.
-  The intended pairing is the A2A facade alone (no `local_agent_url`) next
-  to the adapter of the agent that answers.
+- **An adapter the runtime doesn't run is skipped.** A listed name the
+  runtime doesn't run (taken out of the config) is skipped with a warning
+  (`adapter_not_registered`). When none of the group's listed adapters
+  runs, the group is held: its messages and events wait for them, they go
+  nowhere else, `groups show` says `delivery_held`, and the human hears of
+  it once (`adapter_unavailable`) and once more when one is back
+  (`adapter_available`). Only a list that names no adapter at all
+  (`default_adapter = "none"`) delivers to the first adapter the runtime
+  has.
+- **The A2A adapter runs whenever `[a2a]` is set**, listed or not, so the
+  human can pin a group to it. When `daemon.adapters` names other adapters
+  but not `a2a`, the daemon warns at start (`config_warning`): its facade
+  gets replies only in the groups pinned to it.
 
-Groups from before `daemon.adapters` follow the config: the adapter a group
-was bound to when it was created is no longer read.
+The four delivery events (`adapter_unavailable`, `adapter_available`,
+`delivery_stalled`, `delivery_resumed`) are the human's: the agent token
+doesn't see them and no adapter is told.
 
-There is no default `[[directory]]`: a directory's operator keys come from
-its operator, and the daemon never fetches them. The `[[directory]]` and
-`[listing]` tables refuse keys they don't know, and `auto_approve` in them
-with the reason: publishing a listing is always a person's decision
-([discovery.md](discovery.md)). `[groups]` refuses keys it doesn't know
-too; its keys can only shorten a limit or narrow roles
-([groups.md](groups.md)).
+A database from before `daemon.adapters` is migrated once: a group bound
+to the adapter the config gives follows the config, and a group bound to
+another adapter (one daemon serving an A2A agent in some groups and a
+webhook agent in others) is pinned to that adapter, with a warning in
+the log for each (`group_adapter_pinned`).
 
 ## Keys
 
@@ -157,11 +186,11 @@ This section is generated by `just docs-gen`. Edit the code, not this text.
 | `policy.join_ledger_per_invite` | integer | `1024` | none | The most join requests the replay ledger remembers for one invite (64 to 1024). An invite's share is 4 times its `max_uses`, at least 64 and at most this. Past it, new requests for that invite are dropped and you get an `invite_flooded` event; other invites are unaffected. |
 | `api.socket` | string | `<data_dir>/agentconnectd.sock` | none | Unix socket for the local API. |
 | `api.tcp_port` | integer | `0` | none | When greater than 0, serve the local API on `127.0.0.1:<port>` instead of the socket (0 to 65535). |
-| `webhook.callback_url` | string | none | none | Where the webhook adapter POSTs. Required when `default_adapter = "webhook"`. Loopback unless `webhook.allow_remote` is set. |
+| `webhook.callback_url` | string | none | none | Where the webhook adapter POSTs. Required when `daemon.adapters` lists `webhook` (or `default_adapter = "webhook"`). Loopback unless `webhook.allow_remote` is set. |
 | `webhook.allow_remote` | boolean | `false` | none | Allow a `callback_url` that is not loopback. It must then use `https`. |
 | `webhook.timeout_secs` | integer | `120` | none | How long the daemon waits for each webhook response (1 to 3600). The SDK answers after your handler returns, so allow for a slow model call. |
 | `sdk.handler_timeout_secs` | integer | `120` | none | Embedded SDK only: how long a message or event handler may run (1 to 3600). A handler still running then is cancelled and the delivery retried with backoff, as for a webhook that timed out. Allow for a slow model call. |
-| `sse.retention_secs` | integer | `3600` | none | How long the SSE adapter keeps messages and events for `Last-Event-ID` resume (60 to 604800). After that the payloads are deleted and a consumer resuming from before the window gets an `sse_gap` event. Used only with `default_adapter = "sse"`. |
+| `sse.retention_secs` | integer | `3600` | none | How long the SSE adapter keeps messages and events for `Last-Event-ID` resume (60 to 604800). After that the payloads are deleted and a consumer resuming from before the window gets an `sse_gap` event. Used only when `daemon.adapters` lists `sse`. |
 | `a2a.local_agent_url` | string | none | none | Base URL of the local A2A agent (`http://` or `https://`) that the A2A adapter hands group messages to ([adapters/a2a.md](adapters/a2a.md)). |
 | `a2a.local_agent_token_file` | string | none | none | A file holding a bearer token the adapter sends to the local agent. |
 | `a2a.card_keys_file` | string | none | none | A JWKS file with the public keys you trust to sign Agent Cards. |

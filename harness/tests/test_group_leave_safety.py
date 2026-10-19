@@ -229,6 +229,7 @@ async def test_a_removal_journalled_by_an_older_daemon_falls_back_to_the_leave(
     b.daemon.store.kv_set(f"leaving/{gid}", "1")
     summary = {"committer": {"identity": a.me}, "removed": [], "left": []}
     await b.daemon.groups.on_removed(gid, summary, legacy=True)
+    await b.wait(lambda: bool(data(b, "left")))
     assert data(b, "left") == [{"confirmed": True, "by": a.me}]
 
 

@@ -172,7 +172,14 @@ class A2AAdapter:
     # -- Adapter protocol ----------------------------------------------------
 
     def capabilities(self) -> Capabilities:
-        return Capabilities(accepts=["text", "data"], originates=True, agent_card=self._card_json)
+        return Capabilities(
+            accepts=["text", "data"],
+            originates=True,
+            agent_card=self._card_json,
+            # The facade alone answers nothing: it is triggered only by
+            # replies to its own requests.
+            answers=self.options.local_agent_url is not None,
+        )
 
     async def on_outbound(self, send: OutboundSend) -> None:
         self._send = send

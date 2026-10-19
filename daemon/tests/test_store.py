@@ -2,6 +2,7 @@
 
 import random
 import stat
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -402,3 +403,32 @@ def test_events_are_notified_per_adapter(tmp_path: Path, opened: Opener) -> None
     s.mark_notified("ev-1")
     assert s.event_notified("ev-1")
     assert s.unnotified_events() == []
+
+
+@pytest.mark.timeout(120)
+def test_a_wake_costs_the_same_however_much_is_pending(tmp_path: Path, opened: Opener) -> None:
+    """With one adapter far behind, what a delivery wake reads (the next
+    rows the healthy adapter has not taken, after the last it took, and the
+    group's pending load) doesn't grow with what is pending."""
+    s = opened(tmp_path / "d.sqlite3")
+    s.add_group(group())
+    cost = {}
+    seq = 0
+    for n in (1000, 16000):
+        with s.tx():
+            while seq < n:
+                seq += 1
+                s.record_inbox("ac:v0:bob", f"m{seq}", "g1", "pending", 5, delivery={"x": seq})
+        last = 0
+        for row in s.pending_deliveries("g1"):
+            s.mark_delivered(row.seq, "a2a", ["a2a", "webhook"])
+            last = row.seq
+        best = float("inf")
+        for _ in range(5):
+            start = time.perf_counter()
+            assert s.pending_deliveries("g1", limit=100, adapter="a2a", after=last) == []
+            assert s.pending_load("g1") == (s.pending_load("g1")[0], 5)
+            best = min(best, time.perf_counter() - start)
+        cost[n] = best
+    assert s.pending_load("g1")[0] > 0
+    assert cost[16000] < 0.005, cost

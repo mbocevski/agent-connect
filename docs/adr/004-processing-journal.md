@@ -196,4 +196,21 @@ changes:
   written in one transaction. The contract stays at-least-once with stable
   ids, per adapter. A `RETRY` backs off only that group's deliveries to that
   adapter. An adapter taken out of a group's list no longer counts, so what
-  waited only for it is done.
+  waited only for it is done; a group none of whose listed adapters runs is
+  held instead, with nothing settled.
+- **The early ack is bounded.** The relay mailbox was the only bound on how
+  much plaintext a daemon took in for an adapter that is down. So the early
+  ack stops for a group whose pending plaintext passes 64 MiB, or whose
+  oldest pending message has waited 7 days (the relay's mailbox quota and
+  retention, SPEC section 8.3): the relay keeps those copies, its mailbox
+  fills, and `queue_overflow` puts the group out of sync as before. The
+  daemon records which rows it hasn't acked and acks each once it is
+  delivered, or all of them once what is pending is under both limits again.
+  The human hears of both (`delivery_stalled`, `delivery_resumed`). The
+  pending load is counted as rows change, so checking it costs the same however
+  long it is.
+- **Events go out from per-(group, adapter) workers**, as messages do, in
+  order per adapter, not from the inbound worker: an adapter whose
+  `on_event` is slow or never returns holds up neither the processing of
+  inbound frames nor another adapter's events. The event is still recorded
+  in the transaction of its cause, so a crash loses none.

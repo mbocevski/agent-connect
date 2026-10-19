@@ -315,7 +315,7 @@ class Member:
     def adapter(self, gid: str) -> list[Seen] | None:
         """What the node's adapter was told since the last step, if the
         group delivers to it (an A2A node's group delivers to its agent)."""
-        if self.node.daemon._adapter_for(gid) is not self.node.adapter:
+        if self.node.adapter.name not in self.node.daemon.adapter_names(gid):
             return None
         events = self.node.adapter.unique_events()
         new, self.recorded = events[self.recorded :], len(events)
@@ -575,7 +575,7 @@ async def lifecycle(  # noqa: PLR0915
     assert b.node.daemon.store.group(bait_group) is None  # mallory never let b in
     # b's group goes to its A2A agent; the others' to the recording adapter,
     # whose events `saw` checks too.
-    assert [m.node.daemon._adapter_for(gid) is m.node.adapter for m in founders] == [
+    assert [m.node.adapter.name in m.node.daemon.adapter_names(gid) for m in founders] == [
         True,
         False,
         True,

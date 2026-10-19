@@ -262,6 +262,7 @@ _GROUP_INFO: dict[str, Any] = {
     "out_of_sync_reason": Opt("str"),
     "adapters": Opt(["str"]),
     "delivers_to": ["str"],
+    "delivery_held": "bool",
     "trust_state": {"self": "str", "verified_members": "int", "members": "int"},
     "leaving": Opt({"since": "int", "blocked": "bool"}),
     "policy_summary": {
@@ -980,9 +981,11 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "`repeated_violations`): they would tell the agent, and so a peer, what the "
         "policy did. Nor does it see "
         "the knocks your listing received (`knock_received`, `knock_approved`, "
-        "`knock_rejected`, `knock_expired`, `knock_approval_failed`), or "
-        "`invite_flooded` (one of your invites gets more join requests than it can hold) "
-        "and `join_ledger_full` (the join ledger itself is full). "
+        "`knock_rejected`, `knock_expired`, `knock_approval_failed`), "
+        "`invite_flooded` (one of your invites gets more join requests than it can hold), "
+        "`join_ledger_full` (the join ledger itself is full) and where the group's "
+        "deliveries stand (`adapter_unavailable`, `adapter_available`, "
+        "`delivery_stalled`, `delivery_resumed`). "
         "With "
         "`Accept: text/event-stream` it is instead a Server-Sent Events stream "
         "of messages and events from a durable feed (needs "

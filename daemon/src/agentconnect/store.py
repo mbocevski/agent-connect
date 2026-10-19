@@ -236,7 +236,19 @@ CREATE TABLE IF NOT EXISTS inbox (
     state TEXT NOT NULL,
     received_at INTEGER NOT NULL,
     hop INTEGER,
+    unacked INTEGER NOT NULL DEFAULT 0,
     UNIQUE (sender, msg_id)
+);
+CREATE TABLE IF NOT EXISTS inbox_pending_bytes (
+    group_id TEXT PRIMARY KEY,
+    bytes INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sent_via (
+    group_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    adapter TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, msg_id)
 );
 CREATE TABLE IF NOT EXISTS inbox_acks (
     inbox_seq INTEGER NOT NULL,
@@ -512,6 +524,8 @@ CREATE TABLE IF NOT EXISTS sas_warnings (
 # group-wide code rest on a code an attacker in the middle could choose.
 SAS_RUN_MARKER = ("schema/sas_run", "1")
 SAS_RESET_NOTICE = "notice/sas_reset"
+# Set when the `adapters` column is added to an older database (Engine.start).
+GROUP_ADAPTERS_KEY = "schema/group_adapters"
 
 GROUP_COLUMNS = (
     "group_id",
@@ -726,17 +740,7 @@ class Store:
         ):
             if column not in columns:
                 self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {decl}")
-        group_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('groups')")}
-        # `adapters` (a pinned list, NULL: follow the config) replaced the one
-        # adapter a group was bound to when it was created: every group from
-        # before follows the config.
-        for column, decl in (
-            ("hidden", "INTEGER NOT NULL DEFAULT 0"),
-            ("origin", "TEXT"),
-            ("adapters", "TEXT"),
-        ):
-            if column not in group_columns:
-                self._db.execute(f"ALTER TABLE groups ADD COLUMN {column} {decl}")
+        self._migrate_delivery()
         member_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('members')")}
         if "verified_epoch" not in member_columns:
             self._db.execute("ALTER TABLE members ADD COLUMN verified_epoch INTEGER")
@@ -785,7 +789,9 @@ class Store:
         self._db.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events (event_id);"
             "CREATE UNIQUE INDEX IF NOT EXISTS events_agent_seq ON events (agent_seq);"
+            "CREATE INDEX IF NOT EXISTS events_unnotified ON events (notified, group_id, seq);"
             "CREATE INDEX IF NOT EXISTS inbox_pending ON inbox (state, group_id, seq);"
+            "CREATE INDEX IF NOT EXISTS inbox_unacked ON inbox (unacked, group_id);"
             "CREATE INDEX IF NOT EXISTS adapter_events_group "
             "ON adapter_events (adapter, group_id, seq);"
             "CREATE INDEX IF NOT EXISTS adapter_events_addressed "
@@ -798,6 +804,36 @@ class Store:
             "CREATE INDEX IF NOT EXISTS transcript_group ON transcript (group_id, seq);"
             "CREATE INDEX IF NOT EXISTS transcript_sender ON transcript (group_id, sender, seq);"
         )
+
+    def _migrate_delivery(self) -> None:
+        """Columns and totals group mode and per-adapter delivery added
+        (development files)."""
+        group_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('groups')")}
+        # `adapters` (a pinned list, NULL: follow the config) replaced the one
+        # adapter a group was bound to when it was created.
+        for column, decl in (
+            ("hidden", "INTEGER NOT NULL DEFAULT 0"),
+            ("origin", "TEXT"),
+            ("adapters", "TEXT"),
+        ):
+            if column not in group_columns:
+                self._db.execute(f"ALTER TABLE groups ADD COLUMN {column} {decl}")
+                if column == "adapters":
+                    # Engine.start pins the groups whose adapter the config
+                    # no longer gives them, once it knows the config.
+                    self.kv_set(GROUP_ADAPTERS_KEY, "pending")
+        inbox_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('inbox')")}
+        if "unacked" not in inbox_columns:
+            self._db.execute("ALTER TABLE inbox ADD COLUMN unacked INTEGER NOT NULL DEFAULT 0")
+        if self.kv_get("schema/inbox_pending_bytes") != "1":
+            with self.tx():
+                self._db.execute("DELETE FROM inbox_pending_bytes")
+                self._db.execute(
+                    "INSERT INTO inbox_pending_bytes (group_id, bytes) SELECT group_id, "
+                    "SUM(LENGTH(CAST(delivery AS BLOB))) FROM inbox WHERE state = 'pending' "
+                    "AND group_id IS NOT NULL AND delivery IS NOT NULL GROUP BY group_id"
+                )
+                self.kv_set("schema/inbox_pending_bytes", "1")
 
     def close(self) -> None:
         self._db.close()
@@ -2294,19 +2330,72 @@ class Store:
         delivery: dict[str, Any] | None = None,
         hop: int | None = None,
     ) -> None:
-        self._db.execute(
+        text = None if delivery is None else json.dumps(delivery)
+        cur = self._db.execute(
             "INSERT OR IGNORE INTO inbox (sender, msg_id, group_id, delivery, state, received_at, "
             "hop) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                sender,
-                msg_id,
-                group_id,
-                None if delivery is None else json.dumps(delivery),
-                state,
-                now,
-                hop,
-            ),
+            (sender, msg_id, group_id, text, state, now, hop),
         )
+        if cur.rowcount == 1 and state == "pending" and text is not None and group_id is not None:
+            self._pending_add(group_id, len(text.encode()))
+
+    def _pending_add(self, group_id: str, n: int) -> None:
+        self._db.execute(
+            "INSERT INTO inbox_pending_bytes (group_id, bytes) VALUES (?, ?) "
+            "ON CONFLICT (group_id) DO UPDATE SET bytes = MAX(bytes + excluded.bytes, 0)",
+            (group_id, n),
+        )
+
+    def pending_load(self, group_id: str) -> tuple[int, int | None]:
+        """The group's pending plaintext: its bytes, and when its oldest
+        pending message was received (``None``: nothing pending). Kept as rows
+        change, never summed over the table."""
+        row = self._one("SELECT bytes FROM inbox_pending_bytes WHERE group_id = ?", group_id)
+        oldest = self._one(
+            "SELECT received_at FROM inbox WHERE state = 'pending' AND group_id = ? "
+            "AND delivery IS NOT NULL ORDER BY seq LIMIT 1",
+            group_id,
+        )
+        return (0 if row is None else int(row[0]), None if oldest is None else int(oldest[0]))
+
+    def mark_unacked(self, sender: str, msg_id: str) -> None:
+        """The relay keeps this message's copy until it is acked later
+        (the group's pending messages are past their limits)."""
+        self._db.execute(
+            "UPDATE inbox SET unacked = 1 WHERE sender = ? AND msg_id = ?", (sender, msg_id)
+        )
+
+    def take_unacked(self, group_id: str, *, pending_too: bool = False) -> list[str]:
+        """The ``msg_id``s whose relay copy is to be acked now: the group's
+        rows that are no longer pending (with ``pending_too``, all of them);
+        they are no longer marked."""
+        with self.tx():
+            rows = self._all(
+                "SELECT seq, msg_id FROM inbox WHERE unacked = 1 AND group_id = ? "
+                "AND (? OR state != 'pending')",
+                group_id,
+                int(pending_too),
+            )
+            for seq, _ in rows:
+                self._db.execute("UPDATE inbox SET unacked = 0 WHERE seq = ?", (seq,))
+        return [str(r[1]) for r in rows]
+
+    def inbox_row_state(self, seq: int) -> str | None:
+        row = self._one("SELECT state FROM inbox WHERE seq = ?", seq)
+        return None if row is None else str(row[0])
+
+    def record_sent_via(self, group_id: str, msg_id: str, adapter: str, now: int) -> None:
+        """An adapter sent this message (so a reply to it triggers that adapter)."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO sent_via (group_id, msg_id, adapter, at) VALUES (?, ?, ?, ?)",
+            (group_id, msg_id, adapter, now),
+        )
+
+    def sent_via(self, group_id: str, msg_id: str) -> str | None:
+        row = self._one(
+            "SELECT adapter FROM sent_via WHERE group_id = ? AND msg_id = ?", group_id, msg_id
+        )
+        return None if row is None else str(row[0])
 
     def record_hop(self, group_id: str, msg_id: str, hop: int, now: int) -> None:
         """Remember the SPEC 10.3 ``hop`` of a message sent or received."""
@@ -2328,21 +2417,29 @@ class Store:
 
     def forget_hops(self, before: int) -> None:
         self._db.execute("DELETE FROM hops WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM sent_via WHERE at < ?", (before,))
 
     def pending_deliveries(
-        self, group_id: str | None = None, limit: int = -1, *, adapter: str | None = None
+        self,
+        group_id: str | None = None,
+        limit: int = -1,
+        *,
+        adapter: str | None = None,
+        after: int = 0,
     ) -> list[InboxRow]:
         """Pending inbox rows, oldest first; with ``group_id`` only that
         group's that can be handed over, at most ``limit`` of them (-1: all),
-        and with ``adapter`` only those that adapter hasn't taken yet."""
+        with ``adapter`` only those that adapter hasn't taken yet, and only
+        those after ``after`` (a ``seq``: where that adapter got to)."""
         rows = self._all(
             "SELECT seq, sender, msg_id, group_id, delivery, state FROM inbox "
             "WHERE state = 'pending' AND (? IS NULL OR (group_id = ? AND delivery IS NOT NULL)) "
-            "AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM inbox_acks a "
+            "AND seq > ? AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM inbox_acks a "
             "WHERE a.inbox_seq = inbox.seq AND a.adapter = ?)) "
             "ORDER BY seq LIMIT ?",
             group_id,
             group_id,
+            after,
             adapter,
             adapter,
             limit,
@@ -2373,6 +2470,10 @@ class Store:
             self.set_inbox_state(seq, "done")
             return True
 
+    def delivered_to(self, seq: int, adapter: str) -> bool:
+        """Whether ``adapter`` took inbox row ``seq``."""
+        return not self._missing_acks(seq, [adapter])
+
     def _missing_acks(self, seq: int, targets: Sequence[str]) -> bool:
         row = self._one(
             "SELECT COUNT(*) FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM inbox_acks a "
@@ -2400,6 +2501,14 @@ class Store:
         return done
 
     def set_inbox_state(self, seq: int, state: str) -> None:
+        old = self._one(
+            "SELECT state, group_id, LENGTH(CAST(delivery AS BLOB)) FROM inbox WHERE seq = ?", seq
+        )
+        if old is not None and old[1] is not None and old[2] is not None:
+            if old[0] == "pending" and state != "pending":
+                self._pending_add(str(old[1]), -int(old[2]))
+            elif old[0] != "pending" and state == "pending":
+                self._pending_add(str(old[1]), int(old[2]))
         # A delivered row no longer needs its plaintext, nor its adapters'
         # markers.
         if state in ("done", "dropped"):
@@ -2678,6 +2787,38 @@ class Store:
         with self.tx():
             self._db.execute("UPDATE events SET notified = 1 WHERE event_id = ?", (event_id,))
             self._db.execute("DELETE FROM event_acks WHERE event_id = ?", (event_id,))
+
+    def unnotified_groups(self) -> list[str | None]:
+        """The groups (``None``: events of no group) with events not every
+        adapter has yet."""
+        return [r[0] for r in self._all("SELECT DISTINCT group_id FROM events WHERE notified = 0")]
+
+    def unnotified_for(
+        self, group_id: str | None, adapter: str, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """The group's events ``adapter`` hasn't accepted yet, oldest first."""
+        rows = self._all(
+            "SELECT seq, group_id, type, data, at, event_id FROM events e WHERE notified = 0 "
+            "AND group_id IS ? AND NOT EXISTS (SELECT 1 FROM event_acks a "
+            "WHERE a.event_id = e.event_id AND a.adapter = ?) ORDER BY seq LIMIT ?",
+            group_id,
+            adapter,
+            limit,
+        )
+        return [self._event(r) for r in rows]
+
+    def settle_events(self, group_id: str | None, targets: Sequence[str]) -> int:
+        """Mark notified the group's events every one of ``targets`` has
+        (with no target: all of them, as there is nobody to tell)."""
+        n = 0
+        with self.tx():
+            for (event_id,) in self._all(
+                "SELECT event_id FROM events WHERE notified = 0 AND group_id IS ?", group_id
+            ):
+                if all(self.event_marked(str(event_id), t) for t in targets):
+                    self.mark_notified(str(event_id))
+                    n += 1
+        return n
 
     def event_marked(self, event_id: str, adapter: str) -> bool:
         """Whether ``adapter`` accepted this event already."""

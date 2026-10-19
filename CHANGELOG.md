@@ -19,16 +19,26 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   /v0/groups/{gid}/adapters` (`{"adapters": [...] | null}`, human token
   only: it decides which endpoints receive the group's plaintext) or
   `agentconnect group adapters <group> <name>... | --follow-config`. Group
-  info reports `adapters` (the pinned list, or `null`) and `delivers_to`.
-  Each adapter has its own delivery state: it gets every message in order
-  and is marked once it took it, a `RETRY` backs off only that group's
-  deliveries to that adapter, and a message is done (its plaintext
-  deleted) once every adapter of the group has it. Events go to every
-  adapter, each told once; one that fails hears of it again on the next
-  reconnect. The first adapter with an Agent Card sends it. A listed
-  adapter the runtime doesn't run is skipped with a warning
-  (`adapter_not_registered`), and what waited only for it is done. The
-  embedded SDK and the MCP-spawned runtime keep their one adapter.
+  info reports `adapters` (the pinned list, or `null`), `delivers_to` and
+  `delivery_held`. Each adapter has its own delivery state: it gets every
+  message in order and is marked once it took it (checked for each row,
+  so an adapter taken out of the list gets nothing more), a `RETRY` backs
+  off only that group's deliveries to that adapter, and a message is done
+  (its plaintext deleted) once every adapter of the group has it. One
+  adapter is triggered by a message and the others get it as context: the
+  one that sent the message it replies to, else the first whose agent
+  answers (the A2A facade alone answers only replies to its own
+  requests), so two answering adapters don't double the replies. Events
+  go to every adapter, in order, from a worker per group and adapter, so
+  one that is slow or never returns holds up neither inbound processing
+  nor the other adapters; one that fails is told again after a backoff.
+  The first adapter with an Agent Card sends it. A listed adapter the
+  runtime doesn't run is skipped with a warning (`adapter_not_registered`);
+  a group none of whose listed adapters runs is held instead, never sent
+  elsewhere, and the human hears of it (`adapter_unavailable`, then
+  `adapter_available`). The daemon warns at start when `[a2a]` is set but
+  `daemon.adapters` lists other adapters and not `a2a`. The embedded SDK
+  and the MCP-spawned runtime keep their one adapter.
 - Demos: `just demo` and `just demo-group` run whole deployments in docker
   compose (`demo/`), a relay and one host per agent on its own network,
   with stub models by default (`AC_EXAMPLE_MODEL=real` and
@@ -874,10 +884,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `verifications_reset`) are the human's only.
 - Runtime: the relay is acked once a message is recorded in the inbox,
   not once an adapter took it (ADR-004 amendment), so an adapter that is
-  down no longer keeps frames unacked at the relay until its mailbox
-  overflows. Groups created before `daemon.adapters` follow the config
-  (the adapter a group was bound to at creation is no longer read), and
-  group info's `adapter` is replaced by `adapters` and `delivers_to`.
+  down no longer keeps frames unacked at the relay. Up to a limit: past 64
+  MiB of a group's pending plaintext, or 7 days for its oldest, the group
+  is no longer acked early, so the relay mailbox fills and `queue_overflow`
+  puts it out of sync as before; the human hears which adapters are behind
+  (`delivery_stalled`, then `delivery_resumed`). An upgraded database pins
+  each group bound to an adapter the config doesn't give it to that
+  adapter, and the others follow the config (`group_adapter_pinned` in the
+  log). Group info's `adapter` is replaced by `adapters`, `delivers_to` and
+  `delivery_held`.
   `daemon.default_adapter` now refuses a name that isn't an adapter
   (`webhook`, `sse`, `mcp`, `a2a` or `none`), and `a2a` in the list needs
   `a2a.local_agent_url` or `a2a.facade_port`. ADR-005 is amended: a group

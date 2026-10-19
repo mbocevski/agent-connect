@@ -10,6 +10,7 @@ scenarios run on the daemon host."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Awaitable, Callable
 from typing import Any, override
 
@@ -23,10 +24,14 @@ from agentconnect.adapter import (
     GroupView,
     RecordingAdapter,
     Sender,
+    _text_of,
 )
 from agentconnect.clock import Clock
 from agentconnect.config import Config
+from agentconnect.identity import load_db_key
+from agentconnect.keystore import FileKeystore
 from agentconnect.runtime.engine import DaemonError
+from agentconnect.store import Store
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 
 pytestmark = pytest.mark.hosts("daemon")
@@ -275,3 +280,317 @@ async def test_an_adapter_taken_out_of_the_list_holds_up_nothing(cluster: Cluste
     assert (await c.wait_texts(gid, 1)) == ["four"]
     await c.wait(lambda: not c.daemon.store.pending_deliveries())
     assert c.daemon.adapter_names(gid) == ["recording"]
+
+
+# -- routing guarantees: upgrades, pins, back-pressure, triggering -----------------
+
+
+class Echo(RecordingAdapter):
+    """An answering agent: replies once to every a2a.message that triggers it."""
+
+    def __init__(self, name: str = "recording") -> None:
+        super().__init__(name)
+        self.sent = 0
+
+    @override
+    async def deliver(
+        self, group: GroupView, sender: Sender, to: list[str], inner: Delivery
+    ) -> DeliveryResult:
+        result = await super().deliver(group, sender, to, inner)
+        if inner.kind == "a2a.message" and inner.addressed_to_me and self.send is not None:
+            self.sent += 1
+            await self.send(inner.group_id, {"text": f"re:{self.name}"}, reply_to=[inner.msg_id])
+        return result
+
+
+class Gated(RecordingAdapter):
+    """Answers RETRY ``retry_next`` times, then takes a delivery only once
+    ``go`` is set."""
+
+    def __init__(self, name: str = "gated") -> None:
+        super().__init__(name)
+        self.go = asyncio.Event()
+        self.waiting = 0
+
+    @override
+    async def deliver(
+        self, group: GroupView, sender: Sender, to: list[str], inner: Delivery
+    ) -> DeliveryResult:
+        if self.retry_next > 0:
+            return await super().deliver(group, sender, to, inner)
+        self.waiting += 1
+        self._poke()
+        await self.go.wait()
+        return await super().deliver(group, sender, to, inner)
+
+
+class Blackhole(RecordingAdapter):
+    """Takes messages, but never returns from ``on_event``."""
+
+    @override
+    async def on_event(self, group: GroupView | None, event: Event) -> None:
+        await asyncio.Event().wait()
+
+
+def recorded(node: Node, kind: str) -> list[dict[str, Any]]:
+    return [e for e in node.daemon.store.events(0, limit=10_000) if e["type"] == kind]
+
+
+def pending_texts(node: Node) -> list[str]:
+    out = []
+    for row in node.daemon.store.pending_deliveries():
+        assert row.delivery is not None
+        out.append(_text_of(Delivery.from_json(row.delivery).body))
+    return out
+
+
+def open_store(node: Node) -> Store:
+    """The node's daemon database, opened as the runtime does (stopped)."""
+    data = node.config.data_dir
+    key = load_db_key(FileKeystore(data / "keys"), (data / "mls.sqlite3", data / "daemon.sqlite3"))
+    return Store(data / "daemon.sqlite3", key)
+
+
+async def test_an_upgrade_keeps_a_group_on_the_adapter_it_was_bound_to(
+    cluster: Cluster,
+) -> None:
+    """Before `daemon.adapters`, a group stayed on the adapter it was bound
+    to while that adapter ran (one daemon could serve an A2A agent in some
+    groups and a webhook agent in others, ADR-005). The upgrade pins such a
+    group to that adapter; one bound to what the config gives follows it."""
+    other = RecordingAdapter("second")
+    a = await cluster.node("a", adapters=("recording",), make_adapters=extra(other))
+    b = await cluster.node("b")
+    bound = a.daemon.create_group("Agent X", "X's group")
+    plain = a.daemon.create_group("Agent Y", "Y's group")
+    await a.idle()
+    await cluster.invite(a, b, bound)
+    await cluster.invite(a, b, plain)
+    await a.stop()
+    # The database as it was before: one adapter per group, no list.
+    s = open_store(a)
+    with s.tx() as raw:
+        raw.execute("UPDATE groups SET adapter = 'second' WHERE group_id = ?", (bound,))
+        raw.execute("UPDATE groups SET adapter = 'recording' WHERE group_id = ?", (plain,))
+        raw.execute("ALTER TABLE groups DROP COLUMN adapters")
+    s.close()
+    await a.start()
+    assert a.daemon.group_info(bound)["adapters"] == ["second"]
+    assert a.daemon.group_info(plain)["adapters"] is None
+    b.daemon.send_message(bound, {"text": "for agent X only"})
+    b.daemon.send_message(plain, {"text": "for agent Y"})
+    assert await a.wait_texts(plain, 1) == ["for agent Y"]
+    await other.wait_for(lambda: other.texts(bound) == ["for agent X only"], WAIT)
+    assert a.adapter.texts(bound) == []
+
+
+async def test_a_pinned_list_with_nothing_running_holds_the_group(cluster: Cluster) -> None:
+    """A pin is never overridden: with none of its adapters running, the
+    group's messages wait (nothing is settled or deleted), the human hears
+    of it once, and they go out once the adapter is back."""
+    second = RecordingAdapter("second")
+    a, b, gid = await pair(cluster, second)
+    a.daemon.set_adapters(gid, ["second"])
+    b.daemon.send_message(gid, {"text": "before"})
+    await second.wait_for(lambda: second.texts(gid) == ["before"], WAIT)
+    # The operator drops "second" from the runtime and restarts, twice.
+    for _ in range(2):
+        await a.stop()
+        a.config = dataclasses.replace(a.config, adapters=("recording",))
+        a.make_adapters = None
+        await a.start()
+    info = a.daemon.group_info(gid)
+    assert (info["adapters"], info["delivers_to"], info["delivery_held"]) == (
+        ["second"],
+        [],
+        True,
+    )
+    b.daemon.send_message(gid, {"text": "after"})
+    await a.wait(lambda: pending_texts(a) == ["after"])
+    assert a.adapter.texts(gid) == []
+    (held,) = recorded(a, "adapter_unavailable")
+    assert held["group_id"] == gid
+    assert held["data"]["adapters"] == ["second"]
+    assert not [e for e in a.adapter.events if e.type == "adapter_unavailable"]
+    # "second" is back: it gets what waited for it.
+    back = RecordingAdapter("second")
+    await a.stop()
+    a.config = dataclasses.replace(a.config, adapters=("recording", "second"))
+    a.make_adapters = extra(back)
+    await a.start()
+    await back.wait_for(lambda: back.texts(gid) == ["after"], WAIT)
+    await a.wait(lambda: not a.daemon.store.pending_deliveries())
+    assert len(recorded(a, "adapter_available")) == 1
+    assert a.daemon.group_info(gid)["delivery_held"] is False
+
+
+async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
+    cluster: Cluster,
+    partition: Cut,
+    heal: Cut,
+    advance: Advance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acking the relay once a message is recorded must not lift the bound
+    the relay mailbox gave: past a group's pending limits (bytes, or the
+    age of its oldest pending message) the daemon stops acking that group
+    early, so the relay mailbox fills as before, and the human hears which
+    adapter is behind. Early acks resume once the pending messages drain."""
+    monkeypatch.setattr("agentconnect.runtime.engine.PENDING_MAX_BYTES", 4096)
+    stuck = Stuck()
+    a, b, gid = await pair(cluster, stuck)
+    sent = [f"secret-{i}-" + "x" * 900 for i in range(8)]
+    for text in sent:
+        b.daemon.send_message(gid, {"text": text})
+    assert await a.wait_texts(gid, 8) == sent
+    await a.wait(lambda: bool(recorded(a, "delivery_stalled")))
+    (stalled,) = recorded(a, "delivery_stalled")
+    assert stalled["data"]["adapters"] == ["stuck"]
+    # Past the limit the relay keeps its copies: a reconnect brings them back.
+    seen = application_frames(a)
+    await partition(a)
+    await heal(a)
+    await a.wait(a.daemon.caught_up)
+    assert application_frames(a) > seen
+    assert len(recorded(a, "delivery_stalled")) == 1
+    # The adapter catches up: the pending messages drain, and the early ack is back.
+    stuck.working = True
+    await advance(300)
+    await a.wait(lambda: not a.daemon.store.pending_deliveries())
+    await a.wait(lambda: bool(recorded(a, "delivery_resumed")))
+    seen = application_frames(a)
+    await partition(a)
+    await heal(a)
+    await a.wait(a.daemon.caught_up)
+    assert application_frames(a) == seen
+    # Age alone stalls it too: one message older than the relay keeps one.
+    stuck.working = False
+    b.daemon.send_message(gid, {"text": "old"})
+    await a.wait(lambda: pending_texts(a) == ["old"])
+    await until(lambda: a.clock.sleepers > 0)
+    await advance(8 * 24 * 3600)
+    await a.wait(lambda: len(recorded(a, "delivery_stalled")) == 2)
+
+
+async def test_an_adapter_taken_out_gets_nothing_more_of_its_batch(
+    cluster: Cluster, advance: Advance
+) -> None:
+    gated = Gated()
+    gated.retry_next = 1  # one RETRY first, so its next batch holds all three
+    a, b, gid = await pair(cluster, gated)
+    for text in TEXTS:
+        b.daemon.send_message(gid, {"text": text})
+    assert await a.wait_texts(gid, 3) == TEXTS
+    await gated.wait_for(lambda: gated.retry_next == 0, WAIT)
+    await until(lambda: a.clock.sleepers > 0)
+    await advance(300)
+    await gated.wait_for(lambda: gated.waiting == 1, WAIT)
+    a.daemon.set_adapters(gid, ["recording"])
+    await a.wait(lambda: not a.daemon.store.pending_deliveries())
+    gated.go.set()
+    await gated.wait_for(lambda: len(gated.texts(gid)) >= 1, WAIT)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert gated.texts(gid) == ["one"], "only the one already in its hands"
+
+
+async def _replies(cluster: Cluster, names: tuple[str, ...], tag: str) -> int:
+    """How many agent replies one human message causes, with ``names``
+    answering on one side and one agent on the other."""
+    echoes = [Echo(n) for n in names]
+    a = await cluster.node(
+        f"a{tag}", adapters=names, default_adapter=names[0], make_adapters=extra(*echoes[1:])
+    )
+    a.adapter = echoes[0]
+    await a.restart()
+    b_echo = Echo()
+    b = await cluster.node(f"b{tag}")
+    b.adapter = b_echo
+    await b.restart()
+    gid = a.daemon.create_group("Team", "replies", {"max_agent_turns": 4})
+    await a.idle()
+    await cluster.invite(a, b, gid)
+    b.daemon.send_message(gid, {"text": "go"}, origin="human")
+
+    def quiet() -> bool:
+        return all(
+            not n.daemon.store.pending_deliveries() and not n.daemon.store.outbox() for n in (a, b)
+        )
+
+    await a.wait(
+        lambda: any(
+            e["type"] == "loop_guard"
+            for n in (a, b)
+            for e in n.daemon.store.events(0, limit=10_000)
+        )
+    )
+    await a.wait(quiet)
+    return sum(e.sent for e in echoes) + b_echo.sent
+
+
+async def test_two_answering_adapters_reply_no_more_than_one(cluster: Cluster) -> None:
+    """One adapter is triggered by a message, the others get it as context,
+    so a second answering adapter doesn't multiply the replies."""
+    assert await _replies(cluster, ("recording", "second"), "2") == await _replies(
+        cluster, ("recording",), "1"
+    )
+
+
+async def test_a_reply_triggers_the_adapter_that_sent_the_message_it_answers(
+    cluster: Cluster,
+) -> None:
+    facade = RecordingAdapter("second")  # sends through on_outbound, as the facade does
+    a, b, gid = await pair(cluster, facade)
+    assert facade.send is not None
+    receipt = await facade.send(gid, {"text": "question from the facade client"})
+    await b.wait_texts(gid, 1)
+    b.daemon.send_message(gid, {"text": "for the facade client"}, reply_to=[str(receipt)])
+    b.daemon.send_message(gid, {"text": "for anyone"}, origin="human")
+    await a.wait_texts(gid, 2)
+    await facade.wait_for(lambda: len(facade.texts(gid)) == 2, WAIT)
+    first = {_text_of(d.body): d.addressed_to_me for d in a.adapter.deliveries}
+    other = {_text_of(d.body): d.addressed_to_me for d in facade.deliveries}
+    first.pop("", None)
+    other.pop("", None)
+    assert first == {"for the facade client": False, "for anyone": True}
+    assert other == {"for the facade client": True, "for anyone": False}
+
+
+async def test_an_adapter_that_never_returns_from_an_event_holds_up_nothing_else(
+    cluster: Cluster,
+) -> None:
+    """Events go out from each adapter's own worker: one stuck in
+    ``on_event`` stalls neither the inbound worker nor the other adapters."""
+    hole = Blackhole("hole")
+    a = await cluster.node("a", adapters=("hole", "recording"), make_adapters=extra(hole))
+    b = await cluster.node("b")
+    gid = a.daemon.create_group("Team", "Plan the release")
+    await a.idle()
+    await cluster.invite(a, b, gid)
+    for text in TEXTS:
+        b.daemon.send_message(gid, {"text": text})
+    assert await a.wait_texts(gid, 3) == TEXTS
+    await a.adapter.wait_for(lambda: bool(a.adapter.of_type("member_joined")), WAIT)
+    await hole.wait_for(lambda: len(hole.texts(gid)) == 3, WAIT)
+
+
+async def test_settling_runs_when_a_groups_list_changes_not_on_every_wake(
+    cluster: Cluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stuck = Stuck()
+    a, b, gid = await pair(cluster, stuck)
+    calls: list[str] = []
+    real = a.daemon.store.settle_deliveries
+
+    def counted(group_id: str, targets: list[str]) -> int:
+        calls.append(group_id)
+        return real(group_id, targets)
+
+    monkeypatch.setattr(a.daemon.store, "settle_deliveries", counted)
+    for text in TEXTS:
+        b.daemon.send_message(gid, {"text": text})
+    assert await a.wait_texts(gid, 3) == TEXTS
+    assert len(calls) <= 1
+    a.daemon.set_adapters(gid, ["recording"])
+    await a.wait(lambda: not a.daemon.store.pending_deliveries())
+    assert len(calls) <= 2

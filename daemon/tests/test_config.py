@@ -6,6 +6,7 @@ import pytest
 from agentconnect.a2a_adapter import A2AOptions
 from agentconnect.config import (
     ConfigError,
+    config_warnings,
     default_config_path,
     default_data_dir,
     load_config,
@@ -207,3 +208,15 @@ def test_a_listed_webhook_needs_its_url(tmp_path: Path) -> None:
     path = write(tmp_path, '[daemon]\nadapters = ["webhook"]\n')
     with pytest.raises(ConfigError, match=r"needs webhook\.callback_url"):
         load_config(path, environ={"HOME": str(tmp_path)})
+
+
+def test_an_unlisted_a2a_adapter_is_warned_about(tmp_path: Path) -> None:
+    text = BASE + '[a2a]\nfacade_port = 8811\n[daemon]\nadapters = ["webhook"]\n'
+    cfg = load_config(write(tmp_path, text), environ={"HOME": str(tmp_path)})
+    (warning,) = config_warnings(cfg)
+    assert "a2a" in warning
+    listed = load_config(
+        write(tmp_path, BASE + '[a2a]\nfacade_port = 8811\n[daemon]\nadapters = ["a2a"]\n'),
+        environ={"HOME": str(tmp_path)},
+    )
+    assert config_warnings(listed) == []

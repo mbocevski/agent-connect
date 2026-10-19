@@ -681,6 +681,18 @@ only. So:
 - **The embedded SDK and the MCP-spawned runtime stay single-adapter**: they
   deliver to their in-process handlers or their sessions' queue, whatever
   the config lists.
-- Two adapters that both answer (an A2A agent and a webhook agent) both
-  reply to the group; the docs say so instead of refusing such a list,
-  since the daemon can't tell which adapters answer.
+- **One adapter is triggered by a message**, the others get it as
+  context: the adapter that sent the message it replies to, else the first
+  of the list whose agent answers (`Capabilities.answers`; the A2A facade
+  without a local agent answers nothing of its own). Two adapters whose
+  agents both answer would otherwise both reply at every hop, and the loop
+  guard bounds the depth of a conversation, not its width.
+- **A pin is never overridden.** A group none of whose listed adapters runs
+  (pinned, or following a config list) is held: its messages and events
+  wait, and the human hears of it (`adapter_unavailable`). Only a list that
+  names no adapter falls back to the first one registered, as `none` did.
+- **The upgrade keeps Decision 5's deployments.** "An A2A agent in some
+  groups and a webhook agent in others" was real: a group stayed on the
+  adapter it was bound to while that adapter ran. So the one-time
+  migration pins a group to its bound adapter unless that is what the
+  config now gives it, which it then follows.

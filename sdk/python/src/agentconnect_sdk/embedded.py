@@ -299,9 +299,17 @@ class EmbeddedHost:
             rng=self._options.backoff_rng,
         )
         registered = adapter if self._wrap is None else self._wrap(adapter)
+        # Single-adapter: its groups deliver to one adapter, in-process unless
+        # the config names one of the extra adapters, whatever it lists for a
+        # separate daemon (another extra adapter only where pinned).
+        names = {registered.name, *(a.name for a in self._extra)}
+        one = self.config.default_adapter
+        config = self.config.with_overrides(
+            default_adapter=one if one in names else registered.name, adapters=()
+        )
         try:
             runtime = Runtime(
-                self.config,
+                config,
                 adapters=[registered, *self._extra],
                 clock=self._clock,
                 keystore=self._keystore,

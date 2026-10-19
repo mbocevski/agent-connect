@@ -58,6 +58,22 @@ from agentconnect_sdk import Event as SdkEvent
 from agentconnect_sdk.embedded import EmbeddedHost
 
 WAIT = 8.0  # real-time guard for every wait; nothing sleeps
+# Loop turns a wait gives the adapters' event workers once its predicate
+# holds: enough for every healthy adapter, bounded for one that fails.
+HANDOVER_TURNS = 100
+
+
+async def handed_over(engines: list[Any]) -> None:
+    """Let the event workers hand over what was recorded: until no running
+    engine has an event an adapter hasn't accepted, or the turns run out
+    (an adapter that fails keeps its events)."""
+    for _ in range(HANDOVER_TURNS):
+        running = [e for e in engines if getattr(e, "running", False)]
+        if not any(e.store.unnotified_events() for e in running):
+            return
+        await asyncio.sleep(0)
+
+
 HOSTS = ("daemon", "embedded")
 
 
@@ -238,7 +254,9 @@ class Node:
 
     async def wait(self, predicate: Any, within: float = WAIT) -> None:
         """Wait until ``predicate`` holds. It may read any node's state, so
-        any node's change pulse wakes it, not only this node's."""
+        any node's change pulse wakes it, not only this node's. Then wait
+        until the adapters have the events recorded so far (each adapter's
+        own worker hands them over), as far as they take them."""
 
         async def loop() -> None:
             while True:
@@ -247,6 +265,7 @@ class Node:
                 for pulse in pulses:  # clear before checking: no pulse is lost
                     pulse.clear()
                 if predicate():
+                    await handed_over(engines)
                     return
                 waits = [asyncio.ensure_future(p.wait()) for p in pulses]
                 try:
