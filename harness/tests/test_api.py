@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import signal
@@ -20,9 +21,11 @@ from typer.testing import CliRunner
 from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import app
+from agentconnect.config import Config
 from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 from agentconnect_harness.cluster import Cluster, Node, api_token
+from agentconnect_harness.relay import on_free_port
 
 
 class Api:
@@ -234,11 +237,16 @@ async def test_api_rejects_malformed_http(cluster: Cluster, sockdir: Path) -> No
     await api.server.stop()
 
 
-async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
-    node = await cluster.node("t")
-    node.daemon.config = node.config.with_overrides(api_tcp_port=_free())
+async def _tcp_api(node: Node, port: int) -> ApiServer:
+    node.daemon.config = node.config.with_overrides(api_tcp_port=port)
     server = ApiServer(node.daemon)
     await server.start()
+    return server
+
+
+async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
+    node = await cluster.node("t")
+    server = await on_free_port(lambda port: _tcp_api(node, port))
     assert str(server.address).startswith("http://127.0.0.1:")
     client = ApiClient(node.daemon.config)
     info = await asyncio.to_thread(client.request, "GET", "/v0/status")
@@ -265,14 +273,6 @@ async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
     assert "cannot reach" in result.output
 
 
-def _free() -> int:
-    import socket  # noqa: PLC0415
-
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 async def test_cli_errors(tmp_path: Path) -> None:
     runner = CliRunner()
     bad = tmp_path / "bad.toml"
@@ -285,46 +285,77 @@ async def test_cli_errors(tmp_path: Path) -> None:
     assert "cannot reach the daemon" in result.output
 
 
+async def _started(cfg: Config) -> asyncio.Task[None]:
+    """`agentconnect daemon run` in this process, once it is up: its signal
+    handlers are installed when `ready` is set. A daemon that fails to
+    start, or isn't up in 10 s, fails the test here, so no SIGTERM goes out
+    under the default handler, which would end the process (the xdist
+    worker)."""
+    ready = asyncio.Event()
+    task = asyncio.create_task(daemon_host.serve(cfg, ready))
+    up = asyncio.create_task(ready.wait())
+    await asyncio.wait({task, up}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+    up.cancel()
+    if ready.is_set():
+        return task
+    if task.done():
+        task.result()  # why it didn't start
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    pytest.fail("the daemon was not up in 10 s")
+
+
+async def _signalled(task: asyncio.Task[None]) -> None:
+    """Stop the daemon as a user would: SIGTERM to the process."""
+    if not task.done():
+        os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(task, 10)
+
+
 async def test_daemon_run_serves_until_signalled(cluster: Cluster, sockdir: Path) -> None:
     cfg = (await cluster.node("seed")).config.with_overrides(
         data_dir=cluster.tmp / "run", api_socket=sockdir / "run.sock", keystore="file"
     )
-    ready = asyncio.Event()
-    task = asyncio.ensure_future(daemon_host.serve(cfg, ready))
     sock = sockdir / "run.sock"
-    await asyncio.wait_for(ready.wait(), 10)
-    info = await asyncio.to_thread(ApiClient(cfg).request, "GET", "/v0/status")
-    assert info["keystore"] == "file"
-    os.kill(os.getpid(), signal.SIGTERM)
-    await asyncio.wait_for(task, 10)
+    task = await _started(cfg)
+    try:
+        info = await asyncio.to_thread(ApiClient(cfg).request, "GET", "/v0/status")
+        assert info["keystore"] == "file"
+    finally:
+        await _signalled(task)
     assert not sock.exists()
 
 
 async def test_daemon_run_starts_the_a2a_adapter(cluster: Cluster, sockdir: Path) -> None:
     agent = AgentServer(HelloWorldExecutor(), "local")
     await agent.start()
-    port = _free()
-    cfg = (await cluster.node("seed")).config.with_overrides(
-        data_dir=cluster.tmp / "run-a2a",
-        api_socket=sockdir / "a2a.sock",
-        keystore="file",
-        a2a_local_agent_url=agent.url,
-        a2a_facade_port=port,
-    )
-    ready = asyncio.Event()
-    task = asyncio.ensure_future(daemon_host.serve(cfg, ready))
     try:
-        await asyncio.wait_for(ready.wait(), 10)
-        token_file = cfg.data_dir / "a2a-facade-token"
-        assert token_file.stat().st_mode & 0o077 == 0
-        token = token_file.read_text(encoding="ascii").strip()
-        url = f"http://127.0.0.1:{port}/g/abc/.well-known/agent-card.json"
-        async with httpx.AsyncClient() as http:
-            card = await http.get(url, headers={"Authorization": f"Bearer {token}"})
-        assert card.status_code == 200
+        seed = (await cluster.node("seed")).config
+
+        async def run(port: int) -> tuple[Config, asyncio.Task[None]]:
+            cfg = seed.with_overrides(
+                data_dir=cluster.tmp / "run-a2a",
+                api_socket=sockdir / "a2a.sock",
+                keystore="file",
+                a2a_local_agent_url=agent.url,
+                a2a_facade_port=port,
+            )
+            return cfg, await _started(cfg)
+
+        cfg, task = await on_free_port(run)
+        port = cfg.a2a_facade_port
+        try:
+            token_file = cfg.data_dir / "a2a-facade-token"
+            assert token_file.stat().st_mode & 0o077 == 0
+            token = token_file.read_text(encoding="ascii").strip()
+            url = f"http://127.0.0.1:{port}/g/abc/.well-known/agent-card.json"
+            async with httpx.AsyncClient() as http:
+                card = await http.get(url, headers={"Authorization": f"Bearer {token}"})
+            assert card.status_code == 200
+        finally:
+            await _signalled(task)
     finally:
-        os.kill(os.getpid(), signal.SIGTERM)
-        await asyncio.wait_for(task, 10)
         await agent.stop()
 
 
@@ -362,9 +393,7 @@ async def test_api_hardening(
 
 async def test_tcp_api_refuses_browser_requests(cluster: Cluster) -> None:
     node = await cluster.node("tcp")
-    node.daemon.config = node.config.with_overrides(api_tcp_port=_free())
-    server = ApiServer(node.daemon)
-    await server.start()
+    server = await on_free_port(lambda port: _tcp_api(node, port))
     auth = {"authorization": f"Bearer {api_token(server, 'agent')}"}
     async with httpx.AsyncClient(base_url=str(server.address)) as c:
         assert (await c.get("/v0/status", headers=auth)).status_code == 200
