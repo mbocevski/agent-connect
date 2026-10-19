@@ -749,3 +749,30 @@ async def test_a_revocation_the_relay_refuses_for_now_is_tried_again(
     await b.wait(revoked)
     assert len(calls) == 3
     assert (await b.daemon.rest.invite_meta(made["invite_id"]))["status"] == "revoked"
+
+
+async def test_a_grant_to_a_departed_admin_that_came_back_sticks(group: GroupFixture) -> None:
+    """Review 52 N4: an admin recorded as departed that came back still holds
+    the role until the owner's cleanup lands. The human granting it admin
+    then must not answer `unchanged` and leave the cleanup to drop it: the
+    grant is committed (after dropping the stale role), which every member
+    reads as a grant, so their departure records go and the role stays."""
+    (a, b, c), gid = await group(3)
+    assert a.daemon.set_role(gid, c.me, "admin") == "committing"
+    await converged([a, b, c], gid)
+    # As the owner's instance sees c after a removal and a re-add it hadn't
+    # cleaned up yet: departed at epoch 0, every instance newer.
+    for n in (a, b):
+        n.daemon.store.kv_set(f"departed_roles/{gid}", json.dumps({c.me: 0}))
+    assert a.daemon.set_role(gid, c.me, "admin") == "committing"
+    await converged([a, b, c], gid)
+    assert c.me in policy(b, gid)["admins"]
+    for n in (a, b):
+        assert n.daemon.groups._departed(gid) == {}
+    a.daemon.update(gid)  # any later commit: no cleanup follows
+    await converged([a, b, c], gid)
+    assert c.me in policy(b, gid)["admins"]
+    changes = [(d["from"], d["to"]) for d in data(b, "role_changed") if d["identity"] == c.me]
+    assert changes == [("member", "admin"), ("admin", "member"), ("member", "admin")]
+    # Without a departure record, the same grant is just unchanged.
+    assert a.daemon.set_role(gid, c.me, "admin") == "unchanged"

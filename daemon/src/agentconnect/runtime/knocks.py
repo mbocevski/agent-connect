@@ -1006,7 +1006,7 @@ class KnockService:
                     door["id"], door["key"], name_shown, note, ts=now
                 )
         except ac.AgentConnectError as e:
-            if "door key" in str(e) or e.kind == "key_length":
+            if e.kind in ("bad_door_key", "key_length"):
                 raise ApiError(
                     422, "listing_invalid", "the listing's door key is not usable"
                 ) from None

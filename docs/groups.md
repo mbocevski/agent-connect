@@ -88,7 +88,10 @@ those roles (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits),
 "Departed roles"). Every member reports `role_changed` from `admin` to
 `member` for it. An identity that came back before the owner built that
 change (every instance of it newer than the departure) loses the role all
-the same; only a role granted again after the departure stays. The change
+the same; only a role granted again after the departure stays. Granting
+admin to such an identity before the cleanup landed (`group role … admin`)
+commits two changes, the drop and the grant, so the grant is one every
+member sees and the role stays. The change
 can only narrow roles. `groups.cleanup_departed_roles = false`
 ([config.md](config.md)) turns it off on that daemon.
 
@@ -111,17 +114,22 @@ A leaked link can't flood the human with requests:
   silently, and the human gets `invite_flooded`;
 - at most 4 requests that claim one identity wait per invite; the next is
   dropped, and the human gets `invite_flooded` (`reason:
-  join_identity_full`). An exact copy of a waiting request (the same
+  join_identity_full`, with that `identity`, once per identity), whose
+  warning says the requests may be replayed and the identity's own may be
+  one of those dropped. An exact copy of a waiting request (the same
   KeyPackage) is dropped silently.
 
 Several requests can claim one identity because anyone who saw one of its
 KeyPackages, in a join request or a knock it sent them, can wrap it in a
 request of its own with a name of its choice. So none is dropped for that
-alone: each approval says in `identity_requests` (and `pending_approval`
-in its data) how many waiting requests claim its identity, and
-`agentconnect approvals` prints "N requests claim this identity". Ask the
-person which one is theirs, when they sent it and under which name, and
-reject the others.
+alone: each approval in `GET /v0/approvals` says in `identity_requests` how
+many waiting requests claim its identity now, and `agentconnect approvals`
+prints "N requests claim this identity". `pending_approval` carries the
+count when that request arrived; an earlier request's event isn't sent
+again when another arrives, so the approvals view is the one to go by. Ask
+the person which one is theirs, when they sent it and under which name,
+and reject the others. Rejecting one makes room for the identity's next
+request.
 
 An approval whose Add would take the group past its `max_members` is
 refused with `409 group_full` and stays pending, auto-approve or not.

@@ -218,6 +218,9 @@ pub enum ErrorKind {
     /// A knock Welcome that isn't the group the knock asked for (SPEC
     /// §6.6.5).
     WelcomeMismatch,
+    /// A door key that isn't a usable key of the suite: it doesn't seal, or
+    /// it doesn't belong with its private key (SPEC §6.6.1, §6.6.2).
+    BadDoorKey,
     /// A commit or proposal the group policy forbids (SPEC §9.2): one
     /// received from a member, or one this instance would build.
     Unauthorized,
@@ -265,6 +268,7 @@ impl ErrorKind {
             Self::KeyLength => "key_length",
             Self::Authentication => "authentication",
             Self::WelcomeMismatch => "welcome_mismatch",
+            Self::BadDoorKey => "bad_door_key",
             Self::Unauthorized => "unauthorized",
             Self::NotPermitted => "not_permitted",
             Self::CommitPending => "commit_pending",
@@ -300,6 +304,7 @@ fn reason_kind(reason: &str) -> ErrorKind {
         | "tombstoned"
         | "seq does not increase" => K::Superseded,
         "seal does not open" => K::Authentication,
+        "door key does not seal" | "door key pair mismatch" => K::BadDoorKey,
         _ => K::Malformed,
     }
 }
@@ -420,6 +425,8 @@ mod tests {
             (Error::InvalidKnock("lapsed"), K::Expired),
             (Error::KnockWelcome("name"), K::WelcomeMismatch),
             (Error::InvalidKnock("seal does not open"), K::Authentication),
+            (Error::InvalidKnock("door key does not seal"), K::BadDoorKey),
+            (Error::InvalidKnock("door key pair mismatch"), K::BadDoorKey),
             (Error::InvalidListing("not canonical JCS"), K::Malformed),
             (Error::InvalidOwnerFile("not I-JSON"), K::Malformed),
             (Error::UnsupportedVersion, K::UnsupportedVersion),
@@ -453,6 +460,7 @@ mod tests {
             K::KeyLength,
             K::Authentication,
             K::WelcomeMismatch,
+            K::BadDoorKey,
             K::Unauthorized,
             K::NotPermitted,
             K::CommitPending,
@@ -465,6 +473,6 @@ mod tests {
         .into_iter()
         .map(ErrorKind::as_str)
         .collect();
-        assert_eq!(names.len(), 28, "kind names are distinct");
+        assert_eq!(names.len(), 29, "kind names are distinct");
     }
 }

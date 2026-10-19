@@ -1415,3 +1415,144 @@ fn an_instance_added_again_after_its_leaf_went_is_accepted() {
     assert_eq!(x_ids.len(), 2);
     assert_ne!(x_ids[0], x_ids[1]);
 }
+
+/// Member `i` stages a self-update whose leaf carries `cert` (signed by its
+/// identity) instead of its own; returns the commit's bytes.
+fn self_update_with_cert(
+    m: &mut Members,
+    i: usize,
+    cert: &crate::identity::InstanceCert,
+) -> Vec<u8> {
+    use openmls::prelude::LeafNodeParameters;
+    let params = LeafNodeParameters::builder()
+        .with_extensions(crate::mls::leaf_extensions(cert).unwrap())
+        .build();
+    let (c, g) = (&m.cs[i], &mut m.gs[i]);
+    let signer = c.signer();
+    let bundle = g
+        .mls
+        .commit_builder()
+        .force_self_update(true)
+        .leaf_node_parameters(params)
+        .load_psks(c.provider.storage())
+        .unwrap()
+        .build(c.provider.rand(), c.provider.crypto(), &signer, |_| true)
+        .unwrap()
+        .stage_commit(&c.provider)
+        .unwrap();
+    wire(bundle.commit()).unwrap()
+}
+
+#[test]
+fn an_update_may_not_change_its_instance_certificate() {
+    let clock = Arc::new(FakeClock::default());
+    let x = identity("upd-x");
+    let mut m = Members::new(client("upd-a", &clock), None);
+    m.join(0, client("upd-b", &clock));
+    m.join(0, instance_of(&x, "upd-x1", &clock));
+    m.join(0, instance_of(&x, "upd-x2", &clock));
+    let (epoch, sas) = (m.gs[0].epoch(), m.gs[0].sas());
+
+    // X2 re-certifies its own key under X1's instance id (anyone holding
+    // X's IK can sign that) and commits it as a self-update.
+    let mut twin = m.cs[3].instance().cert().clone();
+    twin.instance_id = m.cs[2].instance().instance_id();
+    twin.sig = x.sign(&twin.signing_input().unwrap());
+    // A newer cert for the same instance id changes nothing that matters,
+    // and is refused all the same: a leaf's cert is fixed for its life.
+    let mut renewed = m.cs[3].instance().cert().clone();
+    renewed.created_at += 1;
+    renewed.sig = x.sign(&renewed.signing_input().unwrap());
+    for cert in [&twin, &renewed] {
+        let bytes = self_update_with_cert(&mut m, 3, cert);
+        // The committer's own check refuses it before it is sent...
+        let staged = m.gs[3].mls.pending_commit().unwrap();
+        assert_eq!(
+            m.gs[3]
+                .inspect_commit(&m.cs[3], staged, m.gs[3].mls.own_leaf_index())
+                .map(|_| ()),
+            Err(Error::Unauthorized(FIXED_CERT))
+        );
+        // ...and every honest member rejects it, at its epoch with its SAS.
+        for i in 0..3 {
+            assert_eq!(
+                m.gs[i].process(&m.cs[i], &bytes).map(|e| e.kind()),
+                Err(Error::Unauthorized(FIXED_CERT)),
+                "member {i}"
+            );
+            assert_eq!((m.gs[i].epoch(), m.gs[i].sas()), (epoch, sas), "member {i}");
+        }
+        m.gs[3].discard_pending_commit(&m.cs[3]).unwrap();
+    }
+
+    // A committer that merges it anyway is alone on its fork.
+    let _ = self_update_with_cert(&mut m, 3, &twin);
+    m.gs[3].mls.merge_pending_commit(&m.cs[3].provider).unwrap();
+    assert_ne!(m.gs[3].sas(), m.gs[0].sas());
+    let same = m.gs[3]
+        .members()
+        .unwrap()
+        .iter()
+        .filter(|mm| mm.instance_id == twin.instance_id)
+        .count();
+    assert_eq!(same, 2);
+    m.forked.insert(3);
+
+    // Honest updates (the cadence update included) keep the cert and pass.
+    for i in 0..3 {
+        let out = m.gs[i].update(&m.cs[i]).unwrap();
+        m.apply(i, &out);
+    }
+    m.converged();
+    assert_eq!(m.gs[0].epoch(), epoch + 3);
+}
+
+#[test]
+fn a_welcome_whose_tree_repeats_an_instance_id_is_refused() {
+    let clock = Arc::new(FakeClock::default());
+    let x = identity("wtwin-x");
+    let mut m = Members::new(client("wtwin-a", &clock), None);
+    m.join(0, instance_of(&x, "wtwin-x1", &clock));
+    let twin = twin_of(&x, &m.cs[1], "wtwin-x2", &clock);
+    // A modified inviter adds the twin without its checks: its view is a fork.
+    let out = m.gs[0]
+        .commit_unchecked(&m.cs[0], &[key_package(&twin)], &[], None, None)
+        .unwrap();
+    m.forked.insert(0);
+    assert_eq!(
+        m.gs[1].process(&m.cs[1], &out.commit),
+        Err(Error::Unauthorized(REPEATED_INSTANCE))
+    );
+    // It then invites a joiner into that view; the joiner refuses it.
+    let joiner = client("wtwin-c", &clock);
+    let inv = Invite::create(
+        m.cs[0].rng(),
+        m.cs[0].clock(),
+        "r.example",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = joiner.create_join_request(inv.secret(), "j").unwrap();
+    let v = m.cs[0].verify_join_request(&req, &inv).unwrap();
+    let (c, g) = (&m.cs[0], &mut m.gs[0]);
+    let signer = c.signer();
+    let bundle = g
+        .mls
+        .commit_builder()
+        .propose_adds([v.key_package.clone()])
+        .load_psks(c.provider.storage())
+        .unwrap()
+        .build(c.provider.rand(), c.provider.crypto(), &signer, |_| true)
+        .unwrap()
+        .stage_commit(&c.provider)
+        .unwrap();
+    let welcome = wire(&bundle.to_welcome_msg().unwrap()).unwrap();
+    let wrapped = WelcomeWrap::Invite(&inv).wrap(c.rng(), &welcome).unwrap();
+    let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
+    assert_eq!(
+        joiner
+            .join_from_wrapped_welcome(inv.secret(), &meta, &wrapped)
+            .map(|_| ()),
+        Err(Error::InvalidGroupContext(REPEATED_INSTANCE))
+    );
+}

@@ -511,10 +511,32 @@ class GroupService:
         gid = unb64(self._engine._group_or_raise(group_id).group_id)
         if identity not in self._identities(gid):
             raise DaemonError("not_found", "no such member")
-        if identity == self._policy(gid).get("owner"):
+        current = self._policy(gid)
+        if identity == current.get("owner"):
             msg = "that member is the owner: hand ownership over to change its role"
             raise DaemonError("bad_request", msg)
-        return self.change_policy(group_id, {"type": "role", "identity": identity, "role": role})
+        grant = {"type": "role", "identity": identity, "role": role}
+        if (
+            role == "admin"
+            and identity in self._departed(group_id)
+            and identity in _role_holders(current)
+        ):
+            # It departed and came back, and the cleanup that drops its role
+            # hasn't landed: answering "unchanged" would leave the role to
+            # that cleanup. Drop the stale role, then grant it: every member
+            # reads the second commit as a grant and forgets the departure.
+            without = {
+                **current,
+                "admins": [a for a in current.get("admins") or [] if a != identity],
+            }
+            self._dry_run(gid, without)
+            e = self._engine
+            e._enqueue(
+                "commit", group_id, {"intent": {"type": "drop_roles", "identities": [identity]}}
+            )
+            e._enqueue("commit", group_id, {"intent": grant})
+            return "committing"
+        return self.change_policy(group_id, grant)
 
     def transfer_to(self, group_id: str, identity: str, *, keep_admin: bool = True) -> str:
         """Hand ownership over to another member (SPEC 9.2); with

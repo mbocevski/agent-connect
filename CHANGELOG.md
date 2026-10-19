@@ -39,19 +39,23 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   First epochs and events tell instances apart by id and mailbox. A
   departed admin or moderator loses the role also if it came back before
   the owner's cleanup was built; a role change for a member gone before its
-  commit is built fails with `not_permitted`. Join requests: at most 4 that
-  claim one identity wait per invite (then `invite_flooded`, `reason:
-  join_identity_full`); each approval and `pending_approval` carries
-  `identity_requests`, and `agentconnect approvals` says when several
-  requests claim one identity, so a request built from a KeyPackage someone
-  saw elsewhere can't crowd out the identity's own. An approval whose Add
+  commit is built fails with `not_permitted`, and granting admin to one
+  that came back before the cleanup landed commits the grant, so it stays.
+  Join requests: at most 4 that claim one identity wait per invite (then
+  `invite_flooded` with `reason: join_identity_full`, the `identity` and a
+  warning that requests may be replayed); each approval carries the
+  current `identity_requests` (and `pending_approval` the count at its
+  arrival), and `agentconnect approvals` says when several requests claim
+  one identity, so a request built from a KeyPackage someone saw elsewhere
+  doesn't silently crowd out the identity's own. An approval whose Add
   would pass `max_members` (an Add whose Welcome is on its way counted
   once) is refused with `409 group_full` and stays pending. A closed
   invite's revocation that the relay refuses for now is tried again after a
   backoff.
 - Core: `ErrorKind` gains `unauthorized`, `not_permitted`,
   `commit_pending`, `nothing_to_commit` (a new `Error::NothingToCommit`,
-  which was `NotPermitted("no pending proposals")`), `duplicate`,
+  which was `NotPermitted("no pending proposals")`), `bad_door_key` (a door
+  key that doesn't seal or doesn't match its private key), `duplicate`,
   `own_commit_lost` and `transient` (storage, the database key,
   randomness, internal errors, which were `other`); Python:
   `AgentConnectError.kind`. The runtime classifies core failures by kind
@@ -1018,10 +1022,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 - Core and protocol: a commit after which two leaves of one identity have
   the same `instance_id` is refused by its committer and rejected by every
-  member (SPEC §9.2, "One leaf per instance"). Anyone holding an
-  identity's `IK` can certify a second key under an existing instance id;
-  the copy would have taken over that id's routing hints, its removal and
-  the "new since verified" flag.
+  member (SPEC §9.2, "One leaf per instance"), and so is a commit whose
+  update path changes the committer's instance certificate, which is fixed
+  for a leaf's life; a joiner refuses a Welcome whose tree repeats one.
+  Anyone holding an identity's `IK` can certify a second key under an
+  existing instance id; the copy would have taken over that id's routing
+  hints, its removal and the "new since verified" flag.
 - Core, daemon and SPEC: an invite JoinRequest that was rejected, lapsed
   or dropped could be delivered again by the relay (or anyone holding the
   envelope) and passed every check again, so a request the human rejected

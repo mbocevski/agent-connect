@@ -651,3 +651,41 @@ async def test_an_approval_for_a_group_already_left_is_not_held_back(
     owner.engine.store.update_group(gid, status="left")
     assert owner.engine.groups.room(gid) is None
     assert owner.engine.approve(first) == {"status": "approving"}
+
+
+async def test_replayed_key_packages_that_fill_an_identitys_share_are_named(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Review 52 N3: four requests built from the victim's stale KeyPackages
+    fill its share, and its own request is dropped. The human is told
+    which identity and why (not the generic "the link may have leaked"),
+    and the approvals view always has the current count, whatever each
+    request's event said when it arrived."""
+    url, elsewhere = await owner.invite(max_uses=5), await owner.invite()
+    victim, attacker = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    forged = [
+        await owner.deliver(_forge(victim.request(elsewhere), url), attacker.mailbox)
+        for _ in range(MAX_PENDING_PER_IDENTITY)
+    ]
+    real_id = await owner.deliver(victim.request(url), victim.mailbox)
+    assert owner.audit() == ["join_identity_full"]
+    (flood,) = [e["data"] for e in owner.flooded()]
+    assert (flood["reason"], flood["identity"]) == ("join_identity_full", victim.client.identity)
+    assert victim.client.identity in flood["warning"]
+    assert "replayed" in flood["warning"]
+    assert "leaked" not in flood["warning"]
+    events = [
+        e["data"]["identity_requests"]
+        for e in owner.engine.store.events(limit=100)
+        if e["type"] == "pending_approval"
+    ]
+    assert events == [1, 2, 3, 4]  # each at its arrival
+    waiting = owner.engine.join_approvals()
+    assert sorted(w["request_id"] for w in waiting) == sorted(forged)
+    assert real_id not in [w["request_id"] for w in waiting]
+    assert {w["identity_requests"] for w in waiting} == {4}  # the view is current
+    # Once the human rejects one, the victim's next request gets through.
+    owner.engine.reject(forged[0])
+    assert {w["identity_requests"] for w in owner.engine.join_approvals()} == {3}
+    again = await owner.deliver(victim.request(url), victim.mailbox)
+    assert again in [w["request_id"] for w in owner.engine.join_approvals()]

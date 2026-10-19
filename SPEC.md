@@ -1254,7 +1254,12 @@ Notes on the table:
   key under an existing `instance_id`; accepting it would let that leaf
   take over what the id means (§9.4 routing, removing one instance,
   showing a new instance as new, §11). An instance whose leaf the same
-  commit or an earlier one removed may be added again.
+  commit or an earlier one removed may be added again. A leaf's
+  `ac_instance_cert` is fixed for the life of the leaf: receivers MUST
+  reject a commit whose update path gives the committer's leaf a
+  certificate other than the one it has, and a joiner MUST refuse a
+  Welcome whose tree has two leaves with the same identity and
+  `instance_id`.
 - **Departed roles.** Roles name identities. When a commit leaves an
   identity listed in `admins` or as `floor_moderator` with no instance, the
   owner's instance SHOULD commit a policy change that only removes it from

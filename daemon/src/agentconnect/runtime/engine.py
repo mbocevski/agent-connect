@@ -146,6 +146,13 @@ INVITE_FLOOD_WARNING = (
     "dropped. If you didn't expect that many, the link may have leaked: revoke "
     "it with `agentconnect invite revoke <invite_id>`."
 )
+IDENTITY_FLOOD_WARNING = (
+    "More than {limit} requests claim identity {identity} on this invite, and new ones are "
+    "dropped. Some may be replayed: anyone who saw one of its KeyPackages (in a join "
+    "request or a knock it sent them) can send one in its name, so its own request may be "
+    "one of those dropped. Verify before approving: ask the person which request is "
+    "theirs, and compare the short code once they join."
+)
 JOIN_LEDGER_FULL_WARNING = (
     "The join ledger is full, so new join requests for every invite are "
     "dropped. Revoke the invites you no longer need: that frees their entries."
@@ -1657,7 +1664,13 @@ class Engine:
             return "dropped"
 
         async def flooded(reason: str) -> str:
-            await self._tell_join_flood(group_id, invite_id, reason)
+            # Too many requests claiming one identity: say which.
+            await self._tell_join_flood(
+                group_id,
+                invite_id,
+                reason,
+                verified.identity if reason == JOIN_IDENTITY_FULL else None,
+            )
             return drop_it(reason)
 
         async def body() -> str:
@@ -1770,19 +1783,38 @@ class Engine:
         )
 
     async def _tell_join_flood(
-        self, group_id: str | None, invite_id: str | None, reason: str
+        self,
+        group_id: str | None,
+        invite_id: str | None,
+        reason: str,
+        identity: str | None = None,
     ) -> None:
         """Tell the human (never the agent) that join requests are dropped
         by a limit: an invite's (``invite_flooded``, once per invite and
-        reason), or the whole ledger's (``join_ledger_full``, daemon-wide and
-        once a day: the invite whose request found it full is a bystander,
-        so it isn't named)."""
+        reason, and for too many requests claiming one identity once per
+        identity, naming it), or the whole ledger's (``join_ledger_full``,
+        daemon-wide and once a day: the invite whose request found it full is
+        a bystander, so it isn't named)."""
         if invite_id is None:
             await self.emit(
                 None,
                 "join_ledger_full",
                 cause=f"join_ledger_full/{self.now() // 86_400}",
                 warning=JOIN_LEDGER_FULL_WARNING,
+            )
+            return
+        if identity is not None:
+            warning = IDENTITY_FLOOD_WARNING.format(
+                limit=MAX_PENDING_PER_IDENTITY, identity=identity
+            )
+            await self.emit(
+                group_id,
+                "invite_flooded",
+                cause=f"invite_flooded/{invite_id}/{reason}/{identity}",
+                invite_id=invite_id,
+                reason=reason,
+                identity=identity,
+                warning=warning,
             )
             return
         await self.emit(

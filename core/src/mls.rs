@@ -273,6 +273,14 @@ pub(crate) struct LeafInfo {
     pub sig_key: Vec<u8>,
 }
 
+/// The leaf's `ac_instance_cert` extension, as the bytes it carries.
+pub(crate) fn instance_cert_bytes(leaf: &LeafNode) -> Option<&[u8]> {
+    leaf.extensions().iter().find_map(|ext| match ext {
+        Extension::Unknown(EXT_INSTANCE_CERT, UnknownExtension(b)) => Some(b.as_slice()),
+        _ => None,
+    })
+}
+
 /// Validates a leaf against SPEC §3.1/§3.3: key lengths, basic credential
 /// with an `ac:v0:` identity, capabilities, exactly one leaf extension
 /// (`ac_instance_cert`), and the certificate binding.
