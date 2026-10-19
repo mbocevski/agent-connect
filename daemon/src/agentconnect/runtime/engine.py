@@ -237,12 +237,12 @@ def _core_error(e: Exception) -> str:
     return "rejected"
 
 
-KNOCK_REQUEST_PREFIX = "kn-"  # knock request ids (agentconnect.runtime.knocks)
+KNOCK_REQUEST_PREFIX = "kn-"  # knock request ids, 19 characters (agentconnect.runtime.knocks)
 ENVELOPE_KINDS = frozenset(
     {"commit", "proposal", "application", "welcome_wrapped", "join_request", "knock"}
 )
 MAX_ID_LEN = 64
-DOOR_ID_CHARS = 22  # 16 bytes, base64url without padding
+ID16_CHARS = 22  # 16 bytes, base64url without padding: a door_id, a join's msg_id
 GROUP_FIELDS = ("group_id", "epoch", "to", "routing")  # never on a knock (SPEC 7.1)
 # The last signed relay request's ts (RelayRest), kept across restarts.
 REST_TS_KEY = "relay/rest_ts"
@@ -280,9 +280,9 @@ def journal_context(
     return canonical(ctx)
 
 
-def _door_id(value: Any) -> bool:
+def _id16(value: Any) -> bool:
     """SPEC 7.1: canonical base64url of 16 bytes."""
-    if not isinstance(value, str) or len(value) != DOOR_ID_CHARS:
+    if not isinstance(value, str) or len(value) != ID16_CHARS:
         return False
     try:
         return b64(unb64(value)) == value
@@ -318,7 +318,7 @@ def _envelope_problem(env: dict[str, Any]) -> str | None:  # noqa: PLR0911, PLR0
         return "ct"
     if kind == "knock":
         # SPEC 7.1: {v, kind, door_id, msg_id, sender, ct} and nothing of a group's.
-        if not _door_id(env.get("door_id")):
+        if not _id16(env.get("door_id")):
             return "door_id"
         return "knock_fields" if any(k in env for k in GROUP_FIELDS) else None
     if "door_id" in env:
@@ -1655,9 +1655,10 @@ class Engine:
             LOG.info(event, **fields)
             self.store.record_inbox(sender, msg_id, None, "done", self.now())
 
-        if msg_id.startswith(KNOCK_REQUEST_PREFIX):
+        if not _id16(msg_id):
             # A join's request id is its msg_id, which the joiner (or the
-            # relay) picks: it must never look like a knock's.
+            # relay) picks. SPEC 7.1 makes it 16 bytes (22 characters), and a
+            # knock's request id has 19, so the two can't collide.
             ignore("join_request_malformed")
             return
         raw = unb64(str(env.get("ct", "")))

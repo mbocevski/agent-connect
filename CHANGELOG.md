@@ -982,6 +982,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   whole policy cached when it was queued, which could undo a change another
   member committed meanwhile. Changes are queued as what they change and
   applied to the policy in force when the commit is built.
+- Runtime: an inviter dropped a JoinRequest whose `msg_id` started with
+  `kn-` (the prefix of knock request ids) as malformed, so about one join
+  in 262,144 timed out. A join's request id is now any canonical 16-byte
+  `msg_id` (SPEC §7.1), which can't equal a 19-character knock request id;
+  any other `msg_id` is dropped.
 - Runtime: a leave committed after the committing member restarted was
   reported as `member_removed`, and a member whose identity had another
   instance leaving wasn't considered to commit the leave: pending leaves

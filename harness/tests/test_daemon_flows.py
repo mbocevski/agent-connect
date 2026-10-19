@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
+import agentconnect.runtime.engine as engine_mod
+from agentconnect.relay import b64
 from agentconnect.runtime.engine import UPDATE_AFTER_MESSAGES, UPDATE_AFTER_SECS, DaemonError
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
@@ -126,6 +129,24 @@ async def test_join_approval_rules(cluster: Cluster, advance: Advance) -> None:
     assert a.daemon.approvals() == []
     assert a.daemon.store.group(gid) is not None
     assert b.daemon.store.group(gid) is None
+
+
+async def test_a_join_msg_id_that_starts_like_a_knock_id_still_joins(
+    cluster: Cluster, monkeypatch: pytest.MonkeyPatch, rng: random.Random
+) -> None:
+    # A join's msg_id is 16 random bytes in base64url: one in 64**3 starts
+    # with "kn-", the prefix of a knock's request id.
+    a = await cluster.node("a")
+    b = await cluster.node("b")
+    gid = a.daemon.create_group("Pair", "")
+    await a.idle()
+    url = (await a.daemon.create_invite(gid))["url"]
+    unlucky, real = "kn-" + b64(rng.randbytes(16))[3:], engine_mod.new_msg_id
+    monkeypatch.setattr(engine_mod, "new_msg_id", lambda: unlucky)
+    await b.daemon.accept_invite(url)
+    monkeypatch.setattr(engine_mod, "new_msg_id", real)
+    await b.wait(lambda: b.daemon.store.group(gid) is not None)
+    assert a.daemon.store.inbox_state(b.daemon.mailbox, unlucky) == "done"
 
 
 async def test_expired_approvals_disappear_from_the_list(

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -20,15 +19,10 @@ from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect_harness.cluster import Cluster, Node, status
 from agentconnect_harness.proxy import RelayProxy
+from agentconnect_harness.relay import on_free_port
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
 runner = CliRunner()
-
-
-def _free() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 @dataclass
@@ -69,9 +63,13 @@ async def serve() -> AsyncIterator[Callable[[Node], Awaitable[Cli]]]:
     servers: list[ApiServer] = []
 
     async def start(node: Node) -> Cli:
-        node.daemon.config = node.config.with_overrides(api_tcp_port=_free())
-        server = ApiServer(node.daemon)
-        await server.start()
+        async def tcp_api(port: int) -> ApiServer:
+            node.daemon.config = node.config.with_overrides(api_tcp_port=port)
+            server = ApiServer(node.daemon)
+            await server.start()
+            return server
+
+        server = await on_free_port(tcp_api)
         servers.append(server)
         cfg = node.config.data_dir / "config.toml"
         cfg.write_text(

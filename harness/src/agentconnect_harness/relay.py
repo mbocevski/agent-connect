@@ -8,11 +8,12 @@ relay TTL behaviour stays covered by the relay's own Rust tests.
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import subprocess
 import threading
-from collections.abc import Generator
+from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,19 @@ def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
+
+
+async def on_free_port[T](start: Callable[[int], Awaitable[T]], attempts: int = 5) -> T:
+    """`start(port)` on a free loopback port. The port is probed and released
+    first, so another process (another xdist worker) can bind it before
+    `start` does: on EADDRINUSE, try another port, as `run_relay` does."""
+    for _ in range(attempts - 1):
+        try:
+            return await start(free_port())
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+    return await start(free_port())
 
 
 @dataclass
