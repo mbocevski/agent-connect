@@ -106,11 +106,13 @@ code = [
     "daemon/src/agentconnect/daemon/*.py",
 ]
 # The local API's routes are documented in docs/api.md (rule local-api), the
-# listing in docs/discovery.md (rule discovery).
+# listing in docs/discovery.md (rule discovery), membership in docs/groups.md
+# (rule group-mode).
 exclude = [
     "daemon/src/agentconnect/runtime/api.py",
     "daemon/src/agentconnect/runtime/listing.py",
     "daemon/src/agentconnect/runtime/knocks.py",
+    "daemon/src/agentconnect/runtime/groups.py",
 ]
 docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
 
@@ -125,6 +127,12 @@ code = [
     "daemon/src/agentconnect/ownerfile.py",
 ]
 docs = ["docs/discovery.md"]
+
+[[rule]]
+name = "group-mode"
+# Membership: leaves, removals, the events they raise, the update cadence.
+code = ["daemon/src/agentconnect/runtime/groups.py"]
+docs = ["docs/groups.md"]
 
 [[rule]]
 name = "isolation"
@@ -230,6 +238,11 @@ paths = [
     "daemon/src/agentconnect/ownerfile.py",
 ]
 doc = "docs/adr/006-discovery.md"
+
+[[component]]
+name = "group-mode"
+paths = ["daemon/src/agentconnect/runtime/groups.py", "core/src/policy.rs"]
+doc = "docs/groups.md"
 
 [[component]]
 name = "runtime"

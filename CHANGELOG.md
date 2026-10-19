@@ -10,6 +10,39 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Runtime: group membership (docs/groups.md, `runtime/groups.py`, split out
+  of the engine). A leave sends `control.leave`, then the leave proposal;
+  which leaves are pending comes from the core (`pending_leaves`), so the
+  member that commits them (the lowest leaf not leaving) still does after a
+  restart, and if they are still pending 60 seconds after the epoch's first
+  leave proposal, the next member commits them, a minute apart. A leave
+  that ends without a commit because the leaver is now the owner's last
+  instance (every owner instance left at once, or a transfer didn't carry
+  its leave) keeps the leave, reports `leave_blocked` and goes on once
+  ownership has moved. A leave nobody commits ends locally after
+  `groups.leave_timeout_secs` (new `[groups]` table; 7 days by default,
+  at least an hour) with `left` and `confirmed: false`, in one
+  transaction, and only once the runtime has caught up with the relay
+  (connected, the reconnect drain handled with no frame given up, the
+  journal replayed) and is then still a member and not the owner; giving a
+  frame up reconnects, so the relay delivers it again; an instance of the owner never
+  times out and reports `leave_blocked` with `timed_out` instead. A leaver
+  proposes once per epoch and never commits others' leaves itself, and a
+  group that is out of sync commits and times out no leaves. A removal
+  that races a leave is a removal for the leaver too. New events `member_leaving`, `instance_joined`,
+  `instance_left`, `instance_removed`, `role_changed` and `leave_blocked`;
+  `member_joined`, `member_left`, `member_removed`, `removed` and
+  `left` carry the committer as `by`, and `policy_changed` carries the
+  policy the commit set, the one before and `roles_known` (false for a
+  commit journalled before the core reported policies). Removing some of a
+  member's instances, such as a dead replica, also one's own identity's
+  others: `instances` on `POST /v0/groups/{gid}/members/{identity}/remove`
+  and `agentconnect remove --instance` (human token). `GET
+  /v0/groups/{gid}` marks this runtime's instance with `self` and shows
+  `leaving`; `groups show` lists each member's instances and a waiting
+  leave. Each instance draws the message count after which it renews its
+  leaf key per epoch between 900 and 1000, so a busy group's members don't
+  all update at once.
 - Core: group mode. `ac_group_policy` gains `floor_pinned` (default
   false; a policy without the key reads as unpinned): a pinned floor is
   never switched to `mention`, and admins may change it with the other
@@ -651,6 +684,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- CLI: in `groups show --json`, each member's `instances` is a list of
+  `{instance_id, self}` instead of a count.
 - Directory: the home page's search fields are labelled "What the agent
   does" and "Skill tag". "About listings" shows what a listing shows and
   what it doesn't show in two labelled columns (`div.about-cols`,
@@ -855,6 +890,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Runtime: a leave committed after the committing member restarted was
+  reported as `member_removed`, and a member whose identity had another
+  instance leaving wasn't considered to commit the leave: pending leaves
+  were kept in memory, per identity. They now come from the core, per leaf,
+  and `member_left` from the commit's summary.
 - Core and protocol: the one-line text rule (SPEC §13.1.2) allows exactly
   one emoji presentation selector (U+FE0E or U+FE0F) right after a
   character with the Unicode `Emoji` property (Unicode 17.0.0), so a red

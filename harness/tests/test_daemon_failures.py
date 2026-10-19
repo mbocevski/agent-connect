@@ -289,7 +289,7 @@ async def test_restart_recovers_unsent_commits_and_leaving(
     await c.daemon.leave(gid)
     await c.idle()
     await c.restart()
-    assert gid in c.daemon._leaving
+    assert c.daemon.groups.leaving(gid)
     b.daemon.update(gid)
     await c.wait(
         lambda: len([r for r in c.daemon.store.outbox("done") if r.kind == "proposal"]) >= 1

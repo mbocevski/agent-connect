@@ -306,6 +306,29 @@ def status(node: Node, group_id: str) -> str | None:
     return None if g is None else g.status
 
 
+def group_state(node: Node, group_id: str) -> tuple[Any, ...]:
+    """What every member of a converged group agrees on: epoch, short code,
+    members with their roles and instances, and the policy."""
+    info = node.daemon.group_info(group_id)
+    members = sorted(
+        (m["identity"], m["role"], tuple(sorted(i["instance_id"] for i in m["instances"])))
+        for m in info["members"]
+    )
+    return (info["epoch"], info["sas"]["decimal"], tuple(members), sorted(info["policy"].items()))
+
+
+async def converged(nodes: list[Node], group_id: str) -> None:
+    """Wait until every node is active in the group with the same
+    :func:`group_state` and an idle outbox."""
+
+    def same() -> bool:
+        if any(status(n, group_id) != "active" or n.daemon.store.outbox() for n in nodes):
+            return False
+        return len({repr(group_state(n, group_id)) for n in nodes}) == 1
+
+    await nodes[0].wait(same)
+
+
 class Cluster:
     def __init__(
         self, relay: RelayProcess, tmp: Path, rng: random.Random, host: str = "daemon"

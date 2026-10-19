@@ -62,6 +62,8 @@ Example file::
     [knock]                         # knocking on listings (docs/discovery.md)
     agent_may_knock = true          # false: only the human token may knock
     domain_check = true             # fetch the owner's domain file before a knock
+    [groups]                        # membership (docs/groups.md)
+    leave_timeout_secs = 604800     # a leave nobody commits ends locally after this
 """
 
 from __future__ import annotations
@@ -111,6 +113,10 @@ MAX_JOIN_LEDGER_PER_INVITE = 1024
 # JoinRequests of one invite that may wait for the human at once (as knocks
 # per door, SPEC 6.6.3 step 7).
 MAX_PENDING_JOINS_PER_INVITE = 32
+# How long a leave waits for a member to commit it (docs/groups.md): at most
+# the relay's 7-day message lifetime, after which the proposal can't arrive.
+MIN_LEAVE_TIMEOUT_SECS = 3600
+MAX_LEAVE_TIMEOUT_SECS = 7 * 86_400
 
 
 class ConfigError(ValueError):
@@ -187,6 +193,7 @@ class Config:
     knock_opened_per_door_per_minute: int = MAX_KNOCKS_OPENED_PER_MINUTE
     knock_failures_per_sender_per_hour: int = DEFAULT_KNOCK_FAILURES_PER_HOUR
     knock_ledger_capacity: int = ac.DEFAULT_LEDGER_CAPACITY
+    groups_leave_timeout_secs: int = MAX_LEAVE_TIMEOUT_SECS
 
     def directory(self, host: str) -> DirectoryConfig | None:
         """The pinned directory ``host`` names (in any host form), if any."""
@@ -645,6 +652,16 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         f"{ac.DEFAULT_LEDGER_CAPACITY}). It forgets none early: when it is full, new "
         "knocks are dropped until old ones expire.",
     ),
+    ConfigKey(
+        "groups.leave_timeout_secs",
+        "groups_leave_timeout_secs",
+        shown_default(MAX_LEAVE_TIMEOUT_SECS),
+        f"How long a leave waits for another member to commit it ({MIN_LEAVE_TIMEOUT_SECS} "
+        f"to {MAX_LEAVE_TIMEOUT_SECS}). Then, once it has caught up with the relay, the runtime "
+        "deletes the group's state and reports `left` with `confirmed: false`, unless this "
+        "instance is the owner's: it keeps the group and reports `leave_blocked` "
+        "([groups.md](groups.md#a-leave-nobody-commits)).",
+    ),
 )
 
 # Environment variables that don't override a single key.
@@ -968,6 +985,22 @@ def _knock(data: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _groups(data: Mapping[str, Any]) -> dict[str, Any]:
+    """``[groups]``: membership (docs/groups.md). Every key can only tighten."""
+    table = _section(data, "groups")
+    unknown = sorted(set(table) - {"leave_timeout_secs"})
+    if unknown:
+        msg = f"unknown key(s) in [groups]: {', '.join(unknown)}"
+        raise ConfigError(msg)
+    timeout = _typed(table, "leave_timeout_secs", int, MAX_LEAVE_TIMEOUT_SECS)
+    if not MIN_LEAVE_TIMEOUT_SECS <= timeout <= MAX_LEAVE_TIMEOUT_SECS:
+        msg = (
+            f"groups.leave_timeout_secs must be {MIN_LEAVE_TIMEOUT_SECS}..{MAX_LEAVE_TIMEOUT_SECS}"
+        )
+        raise ConfigError(msg)
+    return {"groups_leave_timeout_secs": timeout}
+
+
 def _sdk(data: Mapping[str, Any]) -> dict[str, Any]:
     timeout = _typed(_section(data, "sdk"), "handler_timeout_secs", int, 120)
     if not 1 <= timeout <= 3600:  # noqa: PLR2004
@@ -1047,7 +1080,7 @@ def load_config(
     }
     values.update(_a2a(data) | _isolation(data) | _policy(policy) | _sdk(data))
     values.update(_listing(data, environ), directories=_directories(data))
-    values.update(_knock(data))
+    values.update(_knock(data) | _groups(data))
     values.update(overrides)
     if not 60 <= values["sse_retention"] <= 604_800:  # noqa: PLR2004
         msg = "sse retention_secs must be 60..604800"

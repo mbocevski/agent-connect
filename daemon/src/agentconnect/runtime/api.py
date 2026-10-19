@@ -229,6 +229,7 @@ _GROUP_INFO: dict[str, Any] = {
     "out_of_sync_reason": Opt("str"),
     "adapter": "str",
     "trust_state": {"self": "str", "verified_members": "int", "members": "int"},
+    "leaving": Opt({"since": "int", "blocked": "bool"}),
     "members": [
         {
             "identity": "str",
@@ -237,7 +238,9 @@ _GROUP_INFO: dict[str, Any] = {
             "display_name_verified": "bool",
             "role": "str",
             "verified": "bool",
-            "instances": ["object"],
+            "instances": [
+                {"instance_id": "str", "mailbox_id": "str", "leaf_index": "int", "self": "bool"}
+            ],
             "self": "bool",
             "listed_as?": {
                 "directory": "str",
@@ -317,7 +320,10 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/groups/{gid}",
         "_group_info",
         "One group: members, roles, verified flags, short code, `out_of_sync` and "
-        "the peers' Agent Cards (each wrapped as `untrusted`).",
+        "the peers' Agent Cards (each wrapped as `untrusted`). Each member lists its "
+        "instances, `self` marking this one. `leaving` is set while this instance leaves "
+        "the group; `blocked` says the leave waits for an ownership transfer "
+        "([groups.md](groups.md#leaving)).",
         response=_GROUP_INFO,
     ),
     RouteSpec(
@@ -395,7 +401,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/groups/{gid}/leave",
         "_leave",
-        "Leave a group. The owner's last instance must hand over ownership first.",
+        "Leave a group: the daemon sends `control.leave` and a leave proposal, and another "
+        "member commits it. `status` is `leaving`, or `left` for a sole member. The owner's "
+        "last instance must hand over ownership first (`403 forbidden`).",
         response={"status": "str"},
     ),
     RouteSpec(
@@ -481,7 +489,12 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "_remove",
         "Remove a member, every instance of it (an MLS commit; the group policy decides "
         "whether this instance may). For a member the safety policy reported with "
-        "`repeated_violations`; the daemon never removes anyone on its own.",
+        "`repeated_violations`; the daemon never removes anyone on its own. With "
+        "`instances` (instance ids, 16 hex characters), only those instances go, such as "
+        "a dead replica; this way you may also remove your own identity's other instances, "
+        "but never this one (leave instead). The result is a `member_removed` or "
+        "`instance_removed` event, or `commit_failed`.",
+        request={"instances?": ["str"]},
         response={"status": "str"},
         human=True,
     ),
@@ -1030,8 +1043,16 @@ class ApiServer:
         await self.daemon.expire_held()
         return await self.daemon.reject_message(p["hid"])
 
-    async def _remove(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+    async def _remove(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         members = {m.identity for m in self.daemon.store.members(p["gid"])}
+        instances = b.get("instances")
+        if instances is not None:
+            if not isinstance(instances, list) or not all(isinstance(i, str) for i in instances):
+                raise ApiError(400, "bad_request", "instances must be a list of instance ids")
+            if p["identity"] not in members:
+                raise ApiError(404, "not_found", "no such member")
+            self.daemon.remove_instances(p["gid"], p["identity"], instances)
+            return {"status": "removing"}
         if p["identity"] not in members or p["identity"] == self.daemon.me:
             raise ApiError(404, "not_found", "no such other member")
         self.daemon.remove_member(p["gid"], p["identity"])

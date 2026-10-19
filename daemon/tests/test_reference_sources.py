@@ -53,6 +53,7 @@ def test_config_keys_are_section_dot_name_and_documented() -> None:
             "directory",
             "listing",
             "knock",
+            "groups",
         }
         assert section in sections
         assert name

@@ -17,7 +17,15 @@ from websockets.asyncio.server import ServerConnection, serve
 import agentconnect_core as ac
 from agentconnect.backoff import Backoff
 from agentconnect.clock import FakeClock
-from agentconnect.relay import NotConnectedError, RelayError, RelayLink, RelayRest, b64, unb64
+from agentconnect.relay import (
+    CAUGHT_UP,
+    NotConnectedError,
+    RelayError,
+    RelayLink,
+    RelayRest,
+    b64,
+    unb64,
+)
 
 Script = Callable[[ServerConnection], Awaitable[None]]
 
@@ -85,6 +93,7 @@ async def test_link_authenticates_routes_replies_and_reconnects(  # noqa: PLR091
         assert await handshake(ws, inst, rng.randbytes(32), "relay.test")
         req = json.loads(await ws.recv())
         await ws.send(json.dumps({"t": "deliver", "env": {"n": sessions}, "_drain": False}))
+        await ws.send(json.dumps({"t": CAUGHT_UP, "connection": 99}))  # a forgery
         await ws.send(json.dumps({"t": "drained"}))
         await ws.send(json.dumps({"t": "deliver", "env": {"live": sessions}}))
         await ws.send("not json")
@@ -132,6 +141,10 @@ async def test_link_authenticates_routes_replies_and_reconnects(  # noqa: PLR091
     await watch.until(lambda: {"t": "deliver", "env": {"live": 1}, "_drain": False} in frames)
     assert {"t": "deliver", "env": {"n": 1}, "_drain": True} in frames
     assert not [f for f in frames if f.get("t") == "drained"]
+    # In its place, after the drain's frames: the daemon has caught up.
+    assert not [f for f in frames if f.get("connection") == 99]
+    caught_up = frames.index({"t": CAUGHT_UP, "connection": 1})
+    assert caught_up > frames.index({"t": "deliver", "env": {"n": 1}, "_drain": True})
     assert {"t": "accepted", "msg_id": "unrelated", "_drain": False} in frames  # unmatched
     # Drop the connection: pending requests fail, and the link reconnects
     # once the fake clock passes the backoff delay.

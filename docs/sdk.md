@@ -231,7 +231,7 @@ run a separate daemon under its own user and attach to it.
 | `await ac.status()` | The runtime's status. |
 | `@ac.on_message` | `async def(msg, group)` for A2A messages. |
 | `@ac.on_task` | `async def(msg, group)` for task status and artifact updates. |
-| `@ac.on_event` | `async def(event, group)` for runtime events such as `member_joined`, `loop_guard`, or `send_approved` and `send_failed` for a send the group held for approval. |
+| `@ac.on_event` | `async def(event, group)` for runtime events such as `member_joined`, `member_left` and the other membership events ([groups.md](groups.md#membership-events)), `loop_guard`, or `send_approved` and `send_failed` for a send the group held for approval. |
 | `await ac.serve(ready=None)` | Deliver to the handlers until cancelled. |
 
 A `Group` has `invite(max_uses, ttl_secs)`, `send(content, to=, reply_to=)`,
@@ -248,6 +248,8 @@ task state names.
 Errors are `AgentConnectError` with the local API's `code` and HTTP
 `status` in both modes, for example `not_found` (404) for an unknown group
 or `forbidden` (403) when the owner's last instance tries to leave.
+`leave()` answers `leaving`: the group goes once another member commits the
+leave, which the `left` event reports ([groups.md](groups.md#leaving)).
 
 `Message` has `text`, `raw_text`, `data`, `parts`, `a2a` (the raw A2A JSON),
 `sender`, `to`, `addressed_to_me`, `scope`, `trust_state`, `origin`, `hop`,
