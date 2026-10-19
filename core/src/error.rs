@@ -34,6 +34,11 @@ pub enum Error {
     /// The wrapped Welcome doesn't decrypt under `welcome_key` (SPEC §6.4).
     #[error("wrapped Welcome failed authentication")]
     WelcomeAuth,
+    /// An identity export that doesn't open under its code, or whose
+    /// secret isn't the identity the file names: a wrong code or a changed
+    /// file.
+    #[error("identity export failed authentication: wrong code, or the file was changed")]
+    ExportAuth,
     /// An HPKE public key whose length isn't 1216 bytes (SPEC §3.1).
     #[error("HPKE public key has the wrong length")]
     HpkeKeyLength,
@@ -330,7 +335,7 @@ impl Error {
             Self::KeyPackageReused => K::KeyPackageReused,
             Self::CredentialMismatch(_) => K::CredentialMismatch,
             Self::HpkeKeyLength | Self::KemOutputLength => K::KeyLength,
-            Self::WelcomeAuth | Self::BadMac => K::Authentication,
+            Self::WelcomeAuth | Self::BadMac | Self::ExportAuth => K::Authentication,
             Self::InviteExpired => K::Expired,
             Self::KnockWelcome(_) => K::WelcomeMismatch,
             Self::Replayed => K::Replay,
@@ -434,6 +439,7 @@ mod tests {
             (Error::CredentialMismatch("x"), K::CredentialMismatch),
             (Error::HpkeKeyLength, K::KeyLength),
             (Error::WelcomeAuth, K::Authentication),
+            (Error::ExportAuth, K::Authentication),
             (Error::InviteExpired, K::Expired),
             (Error::Malformed("x"), K::Malformed),
         ] {

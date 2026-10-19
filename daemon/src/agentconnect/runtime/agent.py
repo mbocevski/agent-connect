@@ -12,9 +12,12 @@ There is no human-scope operation here: approving or rejecting joins,
 knocks and held messages, listing or reading knock approvals, marking
 members verified, reporting a SAS mismatch, removing members, changing a
 member's role, handing ownership over, any group policy change other than
-raising ``require_verified`` (at creation too), changing the safety policy
-and publishing a listing exist only as local API routes that need the
-human token (SPEC 6.2, 6.6.4, 9.2, 10.4, 11, 13.2.2). Withdrawing the
+raising ``require_verified`` (at creation too), a replica invite,
+changing the safety policy and publishing a listing exist only as local
+API routes that need the human token (SPEC 6.2, 6.6.4, 9.2, 10.4, 11,
+13.2.2). Exporting and importing the identity key (provisioning a
+replica) is not an API operation at all: only the CLI does it, on a
+stopped runtime's data directory (ADR-005). Withdrawing the
 listing is here: it only reduces exposure (SPEC
 13.2.3). So is knocking on another agent's listing (SPEC 6.6.2), unless
 ``knock.agent_may_knock`` is off; approving a knock never is.

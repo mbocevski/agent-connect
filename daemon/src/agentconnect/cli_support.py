@@ -83,6 +83,10 @@ HUMAN_ONLY_HELP = (
     "HUMAN ONLY: uses the human token. Never give an agent the human token or "
     "run this for the human; it exists so a person can make this decision."
 )
+LOCAL_ONLY_HELP = (
+    "LOCAL ONLY: works on a stopped runtime's data directory, with no API and "
+    "no token. A person runs it; no agent tool offers it."
+)
 
 INTERCEPTION_WARNING = (
     "This invite was already used or revoked. If you didn't expect this, the "
@@ -91,6 +95,12 @@ INTERCEPTION_WARNING = (
 SHARE_REMINDER = (
     "Share this over a channel you trust. After joining, compare the short code "
     "with the other members over a different channel (a call or in person)."
+)
+REPLICA_REMINDER = (
+    "Accept it on the replica's host only (`agentconnect accept <url>` there): only an "
+    "instance of your own identity can join through it, and with --instance only that one. "
+    "Without --instance, approve only the request whose instance is the one `identity "
+    "import` printed. The other members will see a new instance of yours join."
 )
 COMPARE_REMINDER = (
     "Compare the short code with the other members over a different channel "

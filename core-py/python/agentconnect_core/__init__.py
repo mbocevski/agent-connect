@@ -25,6 +25,7 @@ from agentconnect_core._native import (
     KNOCK_LIFETIME_SECS,
     LEDGER_GRACE_SECS,
     MAX_DOOR_LIFETIME_SECS,
+    MAX_IDENTITY_EXPORT_LEN,
     MAX_LISTING_BYTES,
     MAX_OWNER_FILE_BYTES,
     PADDING_BUCKETS,
@@ -57,6 +58,7 @@ from agentconnect_core._native import (
     default_group_policy,
     derive_sas,
     fingerprint,
+    identity_export_identity,
     identity_id,
     is_listing_name,
     is_public_address,
@@ -74,6 +76,7 @@ from agentconnect_core._native import (
     sign_listing_content,
     sign_withdrawal,
     supports_protocol,
+    unwrap_identity_export,
     unwrap_knock_welcome,
     unwrap_welcome,
     verify_instance_cert,
@@ -82,6 +85,7 @@ from agentconnect_core._native import (
     verify_token_revocation,
     verify_withdrawal,
     withdrawal_applies,
+    wrap_identity_export,
 )
 
 __all__ = [
@@ -94,6 +98,7 @@ __all__ = [
     "KNOCK_LIFETIME_SECS",
     "LEDGER_GRACE_SECS",
     "MAX_DOOR_LIFETIME_SECS",
+    "MAX_IDENTITY_EXPORT_LEN",
     "MAX_LISTING_BYTES",
     "MAX_OWNER_FILE_BYTES",
     "PADDING_BUCKETS",
@@ -126,6 +131,7 @@ __all__ = [
     "default_group_policy",
     "derive_sas",
     "fingerprint",
+    "identity_export_identity",
     "identity_id",
     "is_listing_name",
     "is_public_address",
@@ -143,6 +149,7 @@ __all__ = [
     "sign_listing_content",
     "sign_withdrawal",
     "supports_protocol",
+    "unwrap_identity_export",
     "unwrap_knock_welcome",
     "unwrap_welcome",
     "verify_instance_cert",
@@ -151,4 +158,5 @@ __all__ = [
     "verify_token_revocation",
     "verify_withdrawal",
     "withdrawal_applies",
+    "wrap_identity_export",
 ]

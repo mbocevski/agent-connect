@@ -7,6 +7,7 @@ harness runs the routes against real daemons (``test_api_shapes.py``)."""
 from __future__ import annotations
 
 import inspect
+import json
 
 import agentconnect_sdk
 from agentconnect.mcp.tools import TOOLS
@@ -128,3 +129,31 @@ def test_the_agent_grants_the_floor_but_never_sets_its_mode_or_moderator() -> No
     for obj in (*public, agentconnect_sdk.Group, embedded.EmbeddedHost):
         names = [n for n, _ in inspect.getmembers(obj) if not n.startswith("_")]
         assert not [n for n in names if "moderat" in n or n.startswith("set_floor")], obj
+
+
+PROVISIONING = ("export", "import", "provision", "replica", "identity_key")
+
+
+def test_provisioning_a_replica_is_the_clis_alone() -> None:
+    """ADR-005: no route exports or imports the identity key, and no agent
+    method, SDK call or MCP tool does either or creates a replica invite. A
+    replica invite is `replica: true` on the invites route, which the human
+    token alone may set (harness/tests/test_replica_provisioning.py)."""
+    assert not [s.path for s in ROUTE_SPECS if any(w in s.path for w in PROVISIONING)]
+    names = [n for n, _ in inspect.getmembers(AgentApi) if not n.startswith("__")]
+    assert not [n for n in names if any(w in n for w in PROVISIONING)]
+    assert list(inspect.signature(AgentApi.create_invite).parameters) == [
+        "self",
+        "group_id",
+        "ttl_secs",
+        "max_uses",
+        "inviter_name",
+    ]
+    public = [getattr(agentconnect_sdk, n) for n in agentconnect_sdk.__all__]
+    sdk = (agentconnect_sdk.AgentConnect, agentconnect_sdk.Group, embedded, embedded.EmbeddedHost)
+    for obj in (*public, *sdk):
+        members = [n for n, _ in inspect.getmembers(obj) if not n.startswith("_")]
+        assert not [n for n in members if any(w in n for w in PROVISIONING)], obj
+    for tool in TOOLS:
+        assert not any(w in tool.name for w in PROVISIONING), tool.name
+        assert "replica" not in json.dumps(tool.schema), tool.name

@@ -1552,6 +1552,37 @@ fn unwrap_welcome<'py>(
     })
 }
 
+/// Wraps the identity for a replica's host (SPEC §9.4): `(file, code)`
+/// under a fresh random key. Show the code once and never store it: the
+/// file alone doesn't open.
+#[pyfunction]
+fn wrap_identity_export<'py>(
+    py: Python<'py>,
+    identity: &Identity,
+) -> PyResult<(Bound<'py, PyBytes>, String)> {
+    guarded(|| {
+        let rng = core::Rng::os().map_err(err)?;
+        let out = core::export::wrap_identity_export(&identity.0, &rng).map_err(err)?;
+        Ok((PyBytes::new(py, &out.file), out.code.as_str().to_owned()))
+    })
+}
+
+/// Opens an identity export with its code (SPEC §9.4).
+#[pyfunction]
+fn unwrap_identity_export(data: &[u8], code: &str) -> PyResult<Identity> {
+    guarded(|| {
+        core::export::unwrap_identity_export(data, code)
+            .map(Identity)
+            .map_err(err)
+    })
+}
+
+/// The identity an export file names, read without its code.
+#[pyfunction]
+fn identity_export_identity(data: &[u8]) -> PyResult<String> {
+    guarded(|| core::export::identity_export_identity(data).map_err(err))
+}
+
 /// The unprotected `PrivateMessage` header of an MLS message:
 /// `{"group_id": bytes, "epoch": int, "content_type": "application" |
 /// "proposal" | "commit"}` (SPEC §7.1). Validates the input as
@@ -1764,6 +1795,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CIPHERSUITE_V0", core::CIPHERSUITE_V0)?;
     m.add("PADDING_BUCKETS", core::padding::BUCKETS.to_vec())?;
     m.add("DB_KEY_LEN", core::provider::DB_KEY_LEN)?;
+    m.add("MAX_IDENTITY_EXPORT_LEN", core::export::MAX_EXPORT_LEN)?;
     m.add(
         "DEFAULT_LEDGER_CAPACITY",
         core::ledger::DEFAULT_LEDGER_CAPACITY,
@@ -1786,6 +1818,9 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(parse_invite_url, m)?,
         wrap_pyfunction!(join_request_mac, m)?,
         wrap_pyfunction!(unwrap_welcome, m)?,
+        wrap_pyfunction!(wrap_identity_export, m)?,
+        wrap_pyfunction!(unwrap_identity_export, m)?,
+        wrap_pyfunction!(identity_export_identity, m)?,
         wrap_pyfunction!(derive_sas, m)?,
         wrap_pyfunction!(peek_header, m)?,
         wrap_pyfunction!(padding_bucket, m)?,

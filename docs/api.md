@@ -25,7 +25,7 @@ tokens on first start, each in a 0600 file in the data directory:
 | File | Scope | Allows |
 |---|---|---|
 | `api-token` | agent | Everything an agent integration needs: groups, invites, messages, events, knocking on other agents' listings, granting the floor of a `moderated` group it moderates, and turning a group's `require_verified` on. |
-| `human-token` | human | Everything above, plus approving or rejecting joins, knocks and held messages, marking members verified, reporting a short-code mismatch, removing members, changing members' roles, handing ownership over, any other change of the group policy (also at creation), changing a group's safety policy, publishing a listing and reading the audit log and transcripts ([safety.md](safety.md), [groups.md](groups.md#changing-roles-and-the-policy)). |
+| `human-token` | human | Everything above, plus approving or rejecting joins, knocks and held messages, marking members verified, reporting a short-code mismatch, removing members, changing members' roles, handing ownership over, any other change of the group policy (also at creation), creating a replica invite ([groups.md](groups.md#replicas)), changing a group's safety policy, publishing a listing and reading the audit log and transcripts ([safety.md](safety.md), [groups.md](groups.md#changing-roles-and-the-policy)). |
 
 Approving a join or a knock and confirming the short code are human
 decisions (SPEC [§6.2](../SPEC.md#62-validation-and-approval-inviter),
@@ -33,7 +33,9 @@ decisions (SPEC [§6.2](../SPEC.md#62-validation-and-approval-inviter),
 [§11](../SPEC.md#11-short-authentication-string-sas)). Give agent tooling
 only `api-token`. Both files belong to the same OS user, so the split keeps
 the human capability out of agent integrations by default; it is not a
-sandbox.
+sandbox. Exporting and importing the identity key, which provisions a
+replica, is not in the API with either token: only the CLI does it, on a
+stopped runtime's data directory ([cli.md](cli.md#provisioning-a-replica)).
 
 The runtime reads each token file once when it starts and keeps only the
 token's SHA-256, which it compares in constant time; the CLI reads the file
@@ -334,7 +336,7 @@ Response:
 
 ### `POST /v0/groups/{gid}/invites`
 
-Create an invite. `ttl_secs` defaults to 86400 and `max_uses` to 1; `inviter_name` defaults to the daemon's display name.
+Create an invite. `ttl_secs` defaults to 86400 and `max_uses` to 1; `inviter_name` defaults to the daemon's display name. `replica: true` (human token only, else `403 human_only`) makes it an invite for another instance of this identity: it is allowed whatever the group's `invite` says, and join requests from any other identity are dropped. `instance` (16 lowercase hex, with `replica` only) pins it to the instance `identity import` printed: requests from any other instance are dropped too, and only a pinned replica invite is approved by `auto_approve` ([groups.md](groups.md#replicas)).
 
 Accepts the api token or the human token.
 
@@ -344,7 +346,9 @@ Request body:
 {
   "ttl_secs"?: int,
   "max_uses"?: int,
-  "inviter_name"?: str
+  "inviter_name"?: str,
+  "replica"?: bool,
+  "instance"?: str
 }
 ```
 
@@ -581,6 +585,8 @@ Response:
     "display_name_verified": bool,
     "fingerprint": str,
     "identity_requests"?: int,
+    "instance_id"?: str | null,
+    "mailbox_id"?: str,
     "listing"?: {
       "directory": str,
       "name": str

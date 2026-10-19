@@ -508,7 +508,9 @@ A join request for one of your invites that the daemon has seen before (SPEC
 §6.2, "Replays") is dropped the same way, silently, with one audit row: the
 invite's group, `direction` `in`, `kind` `join_request`, `sender` the
 joiner's identity, `msg_id` the envelope's, `size` the request's,
-`decision` `drop` and reason `join_replay`. Two limits drop new requests
+`decision` `drop` and reason `join_replay`. A request for one of your
+replica invites from any identity but yours is dropped the same way, with
+reason `join_not_replica` ([groups.md](groups.md#replicas)). Two limits drop new requests
 the same way, and each also raises `invite_flooded` (once per invite and
 reason, human token only, with the invite and a suggestion to revoke it):
 `join_invite_full` when `policy.max_pending_joins_per_invite` (32) requests
@@ -575,7 +577,8 @@ itself.
 
 Don't give agents shell or file access to the AgentConnect data directory,
 and deny the human-only commands (`approvals approve`, `approvals reject`,
-`verify`, `remove`, `safety set`, `audit`, `transcript`) in your agent
-tool's own permission settings. That is a setting of the tool, not something
+`verify`, `remove`, `safety set`, `audit`, `transcript`, and `identity
+export` and `identity import`, which hand over the identity key itself) in
+your agent tool's own permission settings. That is a setting of the tool, not something
 AgentConnect can enforce. A mode that runs the daemon as a separate OS user
 is planned.

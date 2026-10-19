@@ -11,6 +11,7 @@ each in a 0600 file in the data directory:
 * ``api-token`` (scope ``agent``): everything an agent integration may do;
 * ``human-token`` (scope ``human``): additionally approving JoinRequests,
   knocks and held messages, marking members verified, removing members,
+  creating a replica invite (ADR-005: provisioning a replica is the human's),
   changing or reading the group's safety policy, audit log and transcript,
   and publishing a listing (SPEC 13.2.2: an agent can't put itself into a
   public directory; withdrawing is allowed to either token). Knocks this
@@ -361,8 +362,20 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/groups/{gid}/invites",
         "_create_invite",
         "Create an invite. `ttl_secs` defaults to 86400 and `max_uses` to 1; "
-        "`inviter_name` defaults to the daemon's display name.",
-        request={"ttl_secs?": "int", "max_uses?": "int", "inviter_name?": "str"},
+        "`inviter_name` defaults to the daemon's display name. `replica: true` (human "
+        "token only, else `403 human_only`) makes it an invite for another instance of "
+        "this identity: it is allowed whatever the group's `invite` says, and join requests "
+        "from any other identity are dropped. `instance` (16 lowercase hex, with `replica` "
+        "only) pins it to the instance `identity import` printed: requests from any other "
+        "instance are dropped too, and only a pinned replica invite is approved by "
+        "`auto_approve` ([groups.md](groups.md#replicas)).",
+        request={
+            "ttl_secs?": "int",
+            "max_uses?": "int",
+            "inviter_name?": "str",
+            "replica?": "bool",
+            "instance?": "str",
+        },
         response={"url": "str", "invite_id": "str", "expires_at": "int"},
     ),
     RouteSpec(
@@ -1202,14 +1215,27 @@ class ApiServer:
         return await self.agent.create_group(name, purpose, require_verified=verified)
 
     async def _create_invite(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        """Either token, except a replica invite: provisioning a replica is
+        the human's (ADR-005), so ``replica: true`` needs the human token
+        and goes past :class:`AgentApi`, which has no such parameter."""
         name = b.get("inviter_name")
         if name is not None and not isinstance(name, str):
             raise ApiError(400, "bad_request", "inviter_name must be a string")
-        return await self.agent.create_invite(
-            p["gid"],
-            ttl_secs=_int(b, "ttl_secs", 86_400),
-            max_uses=_int(b, "max_uses", 1),
-            inviter_name=name,
+        replica = b.get("replica", False)
+        if not isinstance(replica, bool):
+            raise ApiError(400, "bad_request", "replica must be a boolean")
+        instance = b.get("instance")
+        if instance is not None and (not replica or not isinstance(instance, str)):
+            raise ApiError(400, "bad_request", "instance is a replica invite's pin: a string")
+        ttl_secs, max_uses = _int(b, "ttl_secs", 86_400), _int(b, "max_uses", 1)
+        if not replica:
+            return await self.agent.create_invite(
+                p["gid"], ttl_secs=ttl_secs, max_uses=max_uses, inviter_name=name
+            )
+        if p.get(SCOPE) != "human":
+            raise ApiError(403, "human_only", "a replica invite needs the human token")
+        return await self.daemon.create_invite(
+            p["gid"], ttl_secs, max_uses, name, replica=True, instance=instance
         )
 
     async def _policy(self, p: dict[str, str], b: dict[str, Any]) -> Any:

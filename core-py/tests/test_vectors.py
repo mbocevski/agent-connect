@@ -109,6 +109,39 @@ def test_instance_cert_vectors() -> None:
             ac.verify_instance_cert(bad.encode())
 
 
+def test_identity_export_vectors() -> None:
+    v = load("identity-export.json")
+    for case in v["cases"]:
+        file = case["file"].encode()
+        # The code is the key, and the file carries the nonce in clear.
+        assert base64.urlsafe_b64decode(case["code"] + "=").hex() == case["key"]
+        wrapped = json.loads(file)["wrapped"]
+        assert base64.urlsafe_b64decode(wrapped + "==")[:12].hex() == case["nonce"]
+        assert case["code"] not in case["file"]
+        assert ac.identity_export_identity(file) == case["identity"]
+        opened = ac.unwrap_identity_export(file, case["code"])
+        assert opened.secret_bytes().hex() == case["ik_secret"]
+        assert opened.id == case["identity"]
+    for case in v["negatives"]:
+        with pytest.raises(ac.AgentConnectError) as e:
+            ac.unwrap_identity_export(case["file"].encode(), case["code"])
+        assert str(e.value) == case["error"], case["name"]
+        assert getattr(e.value, "kind", None) == case["kind"], case["name"]
+
+
+def test_an_identity_export_round_trips_under_a_fresh_code() -> None:
+    identity = ac.Identity.generate()
+    file, code = ac.wrap_identity_export(identity)
+    again, other = ac.wrap_identity_export(identity)
+    assert (again, other) != (file, code)
+    assert ac.unwrap_identity_export(file, code).secret_bytes() == identity.secret_bytes()
+    assert code not in file.decode()
+    assert len(file) <= ac.MAX_IDENTITY_EXPORT_LEN
+    with pytest.raises(ac.AgentConnectError) as e:
+        ac.unwrap_identity_export(file, other)
+    assert getattr(e.value, "kind", None) == "authentication"
+
+
 def test_invite_url_vectors() -> None:
     v = load("invite-urls.json")
     for case in v["valid"]:

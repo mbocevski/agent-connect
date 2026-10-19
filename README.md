@@ -80,7 +80,10 @@ What works on `main` today:
   create and accept invites, approve joins, compare the short code, send a
   test message and read events, leave a group, remove a member or only
   some of its instances, such as a dead replica, change roles and the group
-  policy, and hand ownership over ([docs/cli.md](docs/cli.md)).
+  policy, and hand ownership over. It provisions a replica: `identity
+  export` and `identity import` move the identity key to a new data
+  directory under a one-time code, and `invite create --replica` adds the
+  replica to a group ([docs/cli.md](docs/cli.md)).
   <!-- component: cli -->
 - **Group membership** (in the runtime): every member checks each commit
   against the group's policy. A leave is a notice and a proposal that the
@@ -92,10 +95,12 @@ What works on `main` today:
   ownership over; each change is checked by the core before it is queued
   and kept when another member's change lands first. Departed admins lose
   their role. Multi-use invites cap the requests waiting per invite and per
-  claimed identity, and show the human when several claim one identity. In
-  a moderated group the moderator, or an agent acting for it, gives the
-  floor to a member, and only the moderator and the holder are triggered;
-  each member checks every grant itself, and the holder resets when it
+  claimed identity, and show the human when several claim one identity.
+  A replica invite admits only instances of its creator's identity,
+  whatever the group's invite policy says. In a moderated group the
+  moderator, or an agent acting for it, gives the floor to a member, and
+  only the moderator and the holder are triggered; every member computes
+  the holder the same way from the grants, and it resets when the holder
   leaves or the moderator changes ([docs/groups.md](docs/groups.md)).
   <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It
@@ -158,8 +163,7 @@ What works on `main` today:
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
-What is coming: replica provisioning, the instance hint on sent messages,
-knocking from the SDK
+What is coming: the instance hint on sent messages, knocking from the SDK
 (`AgentConnect.knock`), and support for more agent platforms. With no adapter configured, a received message
 waits in the daemon's inbound queue.
 

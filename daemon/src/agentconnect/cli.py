@@ -9,10 +9,15 @@ stdout with a non-zero exit code.
 ``approve`` and ``reject`` (joins, knocks and held messages), ``verify`` (and
 the mismatch path inside it), ``remove``, ``group role``, ``group transfer``,
 ``group policy`` (except turning ``--require-verified`` on) and ``group
-create`` with a policy option, ``safety set``, ``audit``, ``transcript`` and
-``listing publish`` use the **human token**. They are decisions (or
-records) only a person may make or read (SPEC 6.2, 6.6.4, 9.2, 11):
-never give an agent the human token or let it run them for the human.
+create`` with a policy option, ``invite create --replica``, ``safety set``,
+``audit``, ``transcript`` and ``listing publish`` use the **human token**.
+They are decisions (or records) only a person may make or read (SPEC 6.2,
+6.6.4, 9.2, 11): never give an agent the human token or let it run them for
+the human.
+
+``identity export`` and ``identity import`` (provisioning a replica, SPEC
+9.4) don't use the API at all: they work on a stopped runtime's data
+directory (:mod:`agentconnect.provision`), and nothing else offers them.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import asyncio
 import json
 import math
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -28,7 +34,7 @@ from typing import Annotated, Any
 import typer
 
 import agentconnect_core
-from agentconnect import __version__, cli_support, log
+from agentconnect import __version__, cli_support, log, provision
 from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli_support import (
@@ -41,6 +47,8 @@ from agentconnect.cli_support import (
     EXIT_USAGE,
     HUMAN_ONLY_HELP,
     INTERCEPTION_WARNING,
+    LOCAL_ONLY_HELP,
+    REPLICA_REMINDER,
     SHARE_REMINDER,
     CliError,
     IdArgsCommand,
@@ -58,6 +66,7 @@ from agentconnect.cli_support import (
 )
 from agentconnect.config import ConfigError
 from agentconnect.isolation import IsolationError
+from agentconnect.keystore import KeystoreError
 
 # Pretty tracebacks with locals would print envelopes, plaintext and secrets.
 app = typer.Typer(
@@ -106,7 +115,15 @@ listing_app = typer.Typer(
     "`status` work with the agent token.",
     pretty_exceptions_show_locals=False,
 )
+identity_app = typer.Typer(
+    no_args_is_help=True,
+    help="Provision a replica: export this agent's identity key, and import it into a new "
+    "data directory with a fresh instance. HUMAN ONLY, and local: no API route, SDK call "
+    "or MCP tool does this, and both refuse to run while a runtime uses the data directory.",
+    pretty_exceptions_show_locals=False,
+)
 app.add_typer(daemon_app, name="daemon")
+app.add_typer(identity_app, name="identity")
 app.add_typer(listing_app, name="listing")
 app.add_typer(group_app, name="group")
 app.add_typer(invite_app, name="invite")
@@ -260,6 +277,113 @@ def mcp_run(  # noqa: PLR0913, PLR0917
             asyncio.run(mcp_host.serve(cfg, fds))
         except mcp_host.ToolError as e:
             raise CliError(e.code, f"refusing to start: {e}", EXIT_USAGE) from None
+
+
+# -- identity: provisioning a replica ------------------------------------------------
+
+# Refusals about where the command runs (exit 2); the rest are about the file (exit 1).
+_PROVISION_USAGE = {"runtime_running", "exists", "not_empty", "no_identity", "data_dir_access"}
+_NEXT_STEPS = (
+    "Next: start the runtime on this data directory. Then, on a running instance of "
+    "this identity, create an invite pinned to the instance above with `agentconnect "
+    "invite create --group <group> --replica --instance <instance>` (human token) and "
+    "accept it here, once per group."
+)
+
+
+def _provision[T](call: Callable[[], T]) -> T:
+    try:
+        return call()
+    except provision.ProvisionError as e:
+        code = EXIT_USAGE if e.code in _PROVISION_USAGE else EXIT_FAILED
+        raise CliError(e.code, e.message, code) from None
+    except KeystoreError as e:
+        raise CliError("keystore", f"keystore: {e}", EXIT_FAILED) from None
+    except OSError as e:
+        where = f"{e.filename}: " if e.filename else ""
+        raise CliError("os_error", f"{where}{e.strerror or e}", EXIT_FAILED) from None
+
+
+@identity_app.command(
+    "export",
+    help="Export this agent's identity key for a replica, wrapped under a one-time code.\n\n"
+    "Stop the runtime on the data directory first. The file is encrypted under a fresh "
+    "random code that is printed once and stored nowhere: carry it to the new host apart "
+    "from the file. Whoever has both holds the identity, and every host you import it on "
+    f"can speak as this agent in every group. {LOCAL_ONLY_HELP}",
+)
+def identity_export(
+    out: Annotated[
+        Path,
+        typer.Option("--out", help="The file to write: created 0600, never over an existing one."),
+    ],
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        cfg = load(config)
+        made = _provision(lambda: provision.export_identity(cfg, out.expanduser()))
+        if as_json:
+            emit_json(made)
+            return
+        typer.echo(f"Wrote {made['file']} for {made['identity']}")
+        typer.echo(f"fingerprint  {made['fingerprint']}")
+        typer.echo("")
+        typer.echo("Export code (shown once, stored nowhere):")
+        typer.echo("")
+        typer.echo(f"    {made['code']}")
+        typer.echo("")
+        typer.echo(made["warning"])
+        typer.echo(
+            "On the new host, with a new data directory: agentconnect identity import <file>"
+        )
+
+
+@identity_app.command(
+    "import",
+    help="Import an exported identity into a new, empty data directory, as a replica.\n\n"
+    "It creates a fresh instance (its own key and instance id) and refuses a data directory "
+    "that already holds an identity, an instance or a database: a copied data directory is "
+    f"not a replica. Stop any runtime on it first. {LOCAL_ONLY_HELP}",
+)
+def identity_import(
+    file: Annotated[Path, typer.Argument(help="The file `identity export` wrote.")],
+    code: Annotated[
+        str | None,
+        typer.Option(
+            "--code",
+            help="The export code. Without it you are asked for it (with --json it is "
+            "read from one line on stdin), which keeps it out of your shell history and "
+            "the process list.",
+        ),
+    ] = None,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        cfg = load(config)
+        data = _provision(lambda: provision.read_export(file.expanduser()))
+        identity = _provision(lambda: provision.export_identity_id(data))
+        if code is None and as_json:
+            # One line on stdin, so a script needn't put the code in argv.
+            code = str(sys.stdin.readline()).strip()
+            if not code:
+                msg = "--json reads the code from stdin (one line), or pass --code"
+                raise CliError("needs_code", msg, EXIT_USAGE)
+        if code is None:
+            typer.echo(f"Importing {identity} into {cfg.data_dir}.")
+            code = str(typer.prompt("Export code", hide_input=True))
+        given = code
+        made = _provision(lambda: provision.import_identity(cfg, data, given))
+        if as_json:
+            emit_json({**made, "next": _NEXT_STEPS})
+            return
+        typer.echo(f"Imported {made['identity']} into {made['data_dir']}")
+        typer.echo(f"fingerprint  {made['fingerprint']}")
+        typer.echo(f"instance     {made['instance_id']} (new)")
+        typer.echo("")
+        typer.echo(_NEXT_STEPS)
+        typer.echo("Delete the export file now that it is imported.")
 
 
 # -- groups and invites ------------------------------------------------------------
@@ -535,6 +659,24 @@ def invite_create(  # noqa: PLR0913, PLR0917
             "--require-verified", help="Hold deliveries until every member is verified (SPEC 10.4)."
         ),
     ] = False,
+    instance: Annotated[
+        str | None,
+        typer.Option(
+            "--instance",
+            help="With --replica: the instance id `identity import` printed (16 hex "
+            "characters). Only that instance can join, and only a pinned replica invite is "
+            "approved automatically.",
+        ),
+    ] = None,
+    replica: Annotated[
+        bool,
+        typer.Option(
+            "--replica",
+            help="An invite for another instance of your own identity (a replica, after "
+            "`identity import`): only that identity may join through it, whatever the "
+            "group's invite policy says. Needs --group. HUMAN ONLY: uses the human token.",
+        ),
+    ] = False,
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
@@ -545,15 +687,26 @@ def invite_create(  # noqa: PLR0913, PLR0917
             raise CliError(
                 "bad_args", "--purpose only applies when creating a new group", EXIT_USAGE
             )
-        api = connect(config)
+        if replica and group is None:
+            msg = "--replica needs --group: the group to add the replica to"
+            raise CliError("bad_args", msg, EXIT_USAGE)
+        if instance is not None and not replica:
+            raise CliError(
+                "bad_args", "--instance pins a replica invite: add --replica", EXIT_USAGE
+            )
+        api = connect(config, human=replica)
         gid = (
             resolve_group(api, group) if group is not None else _new_group(api, purpose or "", None)
         )
         if require_verified:
             api.request("POST", f"/v0/groups/{gid}/policy", {"require_verified": True})
-        made = api.request(
-            "POST", f"/v0/groups/{gid}/invites", {"ttl_secs": secs, "max_uses": max_uses}
-        )
+        body: dict[str, Any] = {"ttl_secs": secs, "max_uses": max_uses}
+        if replica:
+            body["replica"] = True
+        if instance is not None:
+            body["instance"] = instance
+        made = api.request("POST", f"/v0/groups/{gid}/invites", body)
+        reminder = REPLICA_REMINDER if replica else SHARE_REMINDER
         if as_json:
             emit_json(
                 {
@@ -563,16 +716,21 @@ def invite_create(  # noqa: PLR0913, PLR0917
                     "expires_at": made["expires_at"],
                     "max_uses": max_uses,
                     "require_verified": require_verified,
-                    "reminder": SHARE_REMINDER,
+                    "replica": replica,
+                    "instance": instance,
+                    "reminder": reminder,
                 }
             )
             return
         uses = f"{max_uses} use" + ("" if max_uses == 1 else "s")
-        typer.echo(f"Invite for group {gid}, {uses}, expires {_when(made['expires_at'])}:")
+        kind = "Replica invite" if replica else "Invite"
+        if instance is not None:
+            kind += f" for instance {instance}"
+        typer.echo(f"{kind} for group {gid}, {uses}, expires {_when(made['expires_at'])}:")
         typer.echo("")
         typer.echo(made["url"])
         typer.echo("")
-        typer.echo(SHARE_REMINDER)
+        typer.echo(reminder)
 
 
 @invite_app.command("revoke", cls=IdArgsCommand)
@@ -798,6 +956,8 @@ def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
         "received_at": a["received_at"],
         "group_sas": Sas.of(info["sas"]).as_json() if "sas" in info else None,
         "identity_requests": int(a.get("identity_requests", 1)),
+        "instance_id": a.get("instance_id"),
+        "mailbox_id": a.get("mailbox_id", ""),
     }
 
 
@@ -840,6 +1000,8 @@ def _print_approval(v: dict[str, Any], *, as_json: bool = False) -> None:
         f"  who          {clean(v['display_name'])} (a claimed name, not verified)", as_json=as_json
     )
     _say(f"  fingerprint  {v['fingerprint']}", as_json=as_json)
+    instance = v.get("instance_id") or "unknown (a request from before this was recorded)"
+    _say(f"  instance     {instance}, mailbox {v.get('mailbox_id') or '?'}", as_json=as_json)
     if v["identity_requests"] > 1:
         _say(
             f"  NOTE         {v['identity_requests']} requests claim this identity. Anyone who "

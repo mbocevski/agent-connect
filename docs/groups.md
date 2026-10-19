@@ -125,8 +125,11 @@ KeyPackages, in a join request or a knock it sent them, can wrap it in a
 request of its own with a name of its choice. So none is dropped for that
 alone: each approval in `GET /v0/approvals` says in `identity_requests` how
 many waiting requests claim its identity now, and `agentconnect approvals`
-prints "N requests claim this identity". `pending_approval` carries the
-count when that request arrived; an earlier request's event isn't sent
+prints "N requests claim this identity". Each approval, and its
+`pending_approval` event, also carries the joiner's `instance_id` and
+`mailbox_id`, which tell two requests of one identity apart
+(`instance_id` is null for a request stored by an older daemon).
+`pending_approval` carries the count when that request arrived; an earlier request's event isn't sent
 again when another arrives, so the approvals view is the one to go by. Ask
 the person which one is theirs, when they sent it and under which name,
 and reject the others. Rejecting one makes room for the identity's next
@@ -174,6 +177,47 @@ keep the Welcome to itself. Nobody runs that instance, but it counts as one
 of yours: while it is in the group, your last real instance can leave even
 if it is the owner's, and the group is left with an owner nobody runs.
 Remove an instance you don't know with `remove --instance`.
+
+## Replicas
+
+A replica is an instance of your identity on another host. Making one takes
+two steps, both for the human:
+
+1. **Provision it.** `agentconnect identity export` on a stopped runtime
+   writes the identity key into a file encrypted under a one-time code, and
+   `agentconnect identity import` on the new host puts it into a new, empty
+   data directory with a fresh instance: its own signing key, `instance_id`
+   and mailbox. Only the CLI does this, with no API route, SDK call or MCP
+   tool (ADR-005), and the import refuses a data directory that already
+   holds an instance, so a copy of one can't pass as a replica
+   ([cli.md](cli.md#provisioning-a-replica)).
+2. **Add it to each group.** On a running instance of the identity,
+   `agentconnect invite create --group <group> --replica --instance <id>`
+   (human token; `replica: true` and `instance` on `POST
+   /v0/groups/{gid}/invites`) creates a replica invite pinned to the
+   instance id the import printed, and the new host accepts it. You may
+   create one whatever the group's `invite` says (SPEC
+   [§9.2](../SPEC.md#92-authorisation-of-commits): any instance may add
+   another instance of its own identity). It admits only your identity, and
+   only the pinned instance: any other request is dropped before it uses
+   any of the invite's share of the join ledger, without reaching you,
+   with an audit row with reason `join_not_replica`. A replica invite stays
+   open when the policy stops letting you invite; it closes, like every
+   other, when you leave or are removed.
+
+   Pin it. Anyone who holds the link and saw a KeyPackage of another of
+   your instances (in a request it sent to their invite, say) can send a
+   request that claims your identity too. Pinned, such a request is
+   dropped. Unpinned, every request of your identity waits for you, even
+   with `auto_approve` on, and you approve only the one whose `instance_id`
+   is the one `identity import` printed. A wrong pick uses the invite up
+   and adds a leaf that nobody runs.
+
+The members see `instance_joined` for the new instance. Every host that
+holds the key can add instances that every member accepts, so check each
+`instance_joined` for your own identity ([Members and
+instances](#members-and-instances)), and remove a replica you no longer run
+with `remove --instance`.
 
 ## Leaving
 
@@ -407,5 +451,4 @@ at once and conflict.
 
 ## Not covered yet
 
-Provisioning a replica and the `instance` hint on sent messages come in
-later releases.
+The `instance` hint on sent messages comes in a later release.

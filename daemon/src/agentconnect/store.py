@@ -128,7 +128,9 @@ CREATE TABLE IF NOT EXISTS invites (
     expires_at INTEGER NOT NULL,
     max_uses INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    replica INTEGER NOT NULL DEFAULT 0,
+    instance TEXT
 );
 CREATE TABLE IF NOT EXISTS approvals (
     request_id TEXT PRIMARY KEY,
@@ -140,7 +142,8 @@ CREATE TABLE IF NOT EXISTS approvals (
     mailbox_id TEXT NOT NULL,
     received_at INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    kp_ref TEXT
+    kp_ref TEXT,
+    instance_id TEXT
 );
 CREATE TABLE IF NOT EXISTS joins (
     invite_id TEXT PRIMARY KEY,
@@ -615,6 +618,16 @@ class Store:
         member_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('members')")}
         if "verified_epoch" not in member_columns:
             self._db.execute("ALTER TABLE members ADD COLUMN verified_epoch INTEGER")
+        invite_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('invites')")}
+        if "replica" not in invite_columns:
+            self._db.execute("ALTER TABLE invites ADD COLUMN replica INTEGER NOT NULL DEFAULT 0")
+        if "instance" not in invite_columns:
+            self._db.execute("ALTER TABLE invites ADD COLUMN instance TEXT")
+        approval_columns = {
+            r[0] for r in self._all("SELECT name FROM pragma_table_info('approvals')")
+        }
+        if "instance_id" not in approval_columns:
+            self._db.execute("ALTER TABLE approvals ADD COLUMN instance_id TEXT")
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
         if "at" not in feed_columns:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
@@ -1675,11 +1688,13 @@ class Store:
         now: int,
         *,
         status: str = "open",
+        replica: bool = False,
+        instance: str | None = None,
     ) -> None:
         self._db.execute(
-            "INSERT INTO invites (invite_id, group_id, expires_at, max_uses, created_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (invite_id, group_id, expires_at, max_uses, now, status),
+            "INSERT INTO invites (invite_id, group_id, expires_at, max_uses, created_at, status, "
+            "replica, instance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (invite_id, group_id, expires_at, max_uses, now, status, int(replica), instance),
         )
 
     def delete_invite(self, invite_id: str) -> None:
@@ -1687,23 +1702,27 @@ class Store:
 
     def invite(self, invite_id: str) -> dict[str, Any] | None:
         row = self._one(
-            "SELECT invite_id, group_id, expires_at, max_uses, status FROM invites "
-            "WHERE invite_id = ?",
+            "SELECT invite_id, group_id, expires_at, max_uses, status, replica, instance "
+            "FROM invites WHERE invite_id = ?",
             invite_id,
         )
-        if row is None:
-            return None
-        keys = ("invite_id", "group_id", "expires_at", "max_uses", "status")
-        return dict(zip(keys, row, strict=True))
+        return None if row is None else self._invite_row(row)
 
     def invites(self, status: str) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT invite_id, group_id, expires_at, max_uses, status FROM invites "
-            "WHERE status = ? ORDER BY created_at",
+            "SELECT invite_id, group_id, expires_at, max_uses, status, replica, instance "
+            "FROM invites WHERE status = ? ORDER BY created_at",
             status,
         )
+        return [self._invite_row(r) for r in rows]
+
+    @staticmethod
+    def _invite_row(row: tuple[Any, ...]) -> dict[str, Any]:
         keys = ("invite_id", "group_id", "expires_at", "max_uses", "status")
-        return [dict(zip(keys, r, strict=True)) for r in rows]
+        out = dict(zip(keys, row[:5], strict=True))
+        out["replica"] = bool(row[5])
+        out["instance"] = row[6]
+        return out
 
     def set_invite_status(self, invite_id: str, status: str) -> None:
         self._db.execute("UPDATE invites SET status = ? WHERE invite_id = ?", (status, invite_id))
@@ -1711,8 +1730,13 @@ class Store:
     def add_approval(self, row: dict[str, Any]) -> bool:
         cur = self._db.execute(
             "INSERT OR IGNORE INTO approvals (request_id, invite_id, group_id, request, identity, "
-            "display_name, mailbox_id, received_at, kp_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [*(row[k] for k in self._APPROVAL_KEYS[:-1]), row.get("kp_ref")],
+            "display_name, mailbox_id, received_at, kp_ref, instance_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                *(row[k] for k in self._APPROVAL_KEYS[:8]),
+                row.get("kp_ref"),
+                row.get("instance_id"),
+            ],
         )
         return cur.rowcount == 1
 
@@ -1726,6 +1750,7 @@ class Store:
         "mailbox_id",
         "received_at",
         "status",
+        "instance_id",
     )
 
     def approval(self, request_id: str) -> dict[str, Any] | None:

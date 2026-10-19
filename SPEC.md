@@ -236,6 +236,7 @@ Other labels:
 | `agentconnect/v0/listing-withdraw` | Prefix of a `Withdrawal` signature input, signed by `IK` (§13.2) |
 | `agentconnect/v0/listing-token` | Prefix of a `ListingToken` signature input, signed by the directory operator's `DK` (§13.2) |
 | `agentconnect/v0/listing-token-revoke` | Prefix of a `TokenRevocation` signature input, signed by `DK` (§13.2) |
+| `agentconnect/v0/identity-export` | AAD of an identity export, which provisions a replica (§9.4) |
 
 Every signature by an identity key `IK` is an instance certificate (§3.3),
 a listing JWS (§13.1) or a withdrawal (§13.2). The instance certificate and
@@ -1368,6 +1369,29 @@ context (`addressed_to_me: false`), or batched by the adapter (§10.6).
   all instances are triggered, and coordinating among them is the member's
   own responsibility. A task reply (§7.2) SHOULD name the requesting
   instance this way.
+
+**Provisioning a replica (informative).** A replica needs `IK` and an
+instance of its own: its own `SK`, `instance_id` and mailbox. Copying an
+instance's whole state makes a second runtime on one leaf, which breaks the
+group, and §9.2 ("One leaf per instance") refuses a second leaf with an
+`instance_id` the identity already has. The reference implementation moves
+only `IK`, as an identity export:
+
+```text
+IdentityExport = JCS({
+  "v": 0,
+  "identity": "ac:v0:…",
+  "wrapped": b64url(nonce(12) ‖ ChaCha20-Poly1305(key, nonce,
+                    aad = "agentconnect/v0/identity-export", IK.secret))
+})
+```
+
+`key` is 32 random bytes shown once to the human as the export code
+(base64url) and carried apart from the file. The importer checks that the
+secret gives `identity`, refuses any other `v`, and creates a fresh
+instance. Export and import are human operations: an agent that could run
+them could hand its identity to any host (§12). The vectors are in
+`testdata/identity-export.json`.
 
 ## 10. Endpoint policy (normative minimums)
 

@@ -35,6 +35,7 @@ import contextlib
 import hashlib
 import json
 import random
+import re
 import secrets
 from collections.abc import Awaitable, Callable, Generator, Iterable
 from dataclasses import dataclass, replace
@@ -101,6 +102,15 @@ APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
 # Join requests claiming one identity that wait per invite (docs/groups.md).
 MAX_PENDING_PER_IDENTITY = 4
 JOIN_IDENTITY_FULL = "join_identity_full"
+# An instance id as SPEC 3.3 writes it: the 64-bit id, 16 lowercase hex.
+INSTANCE_ID = re.compile(r"^[0-9a-f]{16}$")
+
+
+def instance_hex(instance_id: int) -> str:
+    """A 64-bit instance id as 16 lowercase hex characters (SPEC 3.3)."""
+    return f"{instance_id:016x}"
+
+
 JOIN_CLOSED_GRACE_SECS = 60
 MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
@@ -1737,8 +1747,8 @@ class Engine:
 
         async def body() -> str:
             key = replay.entry_key("join", request_id)
-            if self._over_join_quota(invite, key, verified.key_package_ref):
-                return await flooded("join_invite_quota")
+            if (early := self._early_drop(invite, key, verified)) is not None:
+                return drop_it(early) if early == "join_not_replica" else await flooded(early)
             refused = replay.remember(
                 self.store,
                 "join",
@@ -1774,6 +1784,7 @@ class Engine:
                     "mailbox_id": verified.mailbox_id,
                     "received_at": self.now(),
                     "kp_ref": kp_ref,
+                    "instance_id": instance_hex(verified.instance_id),
                 }
             )
             await self.emit(
@@ -1781,14 +1792,18 @@ class Engine:
                 "pending_approval",
                 request_id=request_id,
                 identity=verified.identity,
+                instance_id=instance_hex(verified.instance_id),
+                mailbox_id=verified.mailbox_id,
                 display_name=verified.display_name,
                 display_name_verified=False,
                 identity_requests=self._identity_requests(invite_id, verified.identity),
             )
-            if self.config.auto_approve:
+            if self.config.auto_approve and not (invite["replica"] and invite["instance"] is None):
                 # Joins only: nothing approves a knock but the human (SPEC
-                # 6.6.4). In this transaction, so a failure once it commits
-                # can't leave the approval pending until it lapses.
+                # 6.6.4), nor a request on an unpinned replica invite, where
+                # every request claims this identity and only the instance
+                # tells them apart. In this transaction, so a failure once it
+                # commits can't leave the approval pending until it lapses.
                 self._auto_approve(request_id, group_id)
             self.store.record_inbox(sender, msg_id, None, "done", self.now())
             return "held"
@@ -1799,6 +1814,23 @@ class Engine:
             # The in-memory ledger has no remove: rebuild it from the store.
             self._join_ledger = self._load_join_ledger()
             raise
+
+    def _early_drop(
+        self, invite: dict[str, Any], key: bytes, verified: ac.VerifiedJoinRequest
+    ) -> str | None:
+        """Why a join request is dropped before the ledger, or ``None``. A
+        replica invite refuses another identity, or another instance than the
+        one it is pinned to (SPEC 9.4), before the request takes any of the
+        invite's share of the ledger; then the invite's quota."""
+        pinned = invite["instance"]
+        if invite["replica"] and (
+            verified.identity != self.me
+            or (pinned is not None and instance_hex(verified.instance_id) != pinned)
+        ):
+            return "join_not_replica"
+        if self._over_join_quota(invite, key, verified.key_package_ref):
+            return "join_invite_quota"
+        return None
 
     def _join_taken(
         self, request_id: str, kp_ref: str, invite_id: str, identity: str
@@ -2929,20 +2961,40 @@ class Engine:
         LOG.info("group_created", group=log.hid(group_id))
         return group_id
 
-    async def create_invite(
+    async def create_invite(  # noqa: PLR0913
         self,
         group_id: str,
         ttl_secs: int = 86_400,
         max_uses: int = 1,
         inviter_name: str | None = None,
+        *,
+        replica: bool = False,
+        instance: str | None = None,
     ) -> dict[str, Any]:
+        """Create and register an invite. ``replica`` (**human-only**, the
+        API checks the token) makes it an invite for another instance of
+        this identity: it may be created whatever ``invite`` says, and a
+        join request from any other identity is dropped (SPEC 9.2, 9.4).
+        ``instance`` pins it to the one instance id that `identity import`
+        printed: a request from any other instance is dropped too, and only
+        a pinned replica invite is ever approved automatically."""
+        if instance is not None:
+            if not replica:
+                raise DaemonError(
+                    "bad_request", "an instance pin needs a replica invite (--replica)"
+                )
+            if not INSTANCE_ID.fullmatch(instance):
+                raise DaemonError("bad_request", "instance must be 16 lowercase hex characters")
+            if instance == self.instance.instance_id_hex:
+                msg = "that is this instance: pin the replica's, which `identity import` printed"
+                raise DaemonError("bad_request", msg)
         group = self._group_or_raise(group_id)
         policy = group.policy
         allowed = {
             "owner": {policy.get("owner")},
             "admins": {policy.get("owner"), *policy.get("admins", [])},
         }.get(str(policy.get("invite")))
-        if allowed is not None and self.me not in allowed:
+        if not replica and allowed is not None and self.me not in allowed:
             raise DaemonError("forbidden", "the group policy does not let this identity invite")
         reserved = sum(
             self._join_reserve(int(i["max_uses"]))
@@ -2973,7 +3025,14 @@ class Engine:
         # mid-registration the row says so, and the next connect revokes
         # the invite and drops its secret instead of orphaning them.
         self.store.add_invite(
-            invite_id, group_id, invite.expires_at, max_uses, self.now(), status="registering"
+            invite_id,
+            group_id,
+            invite.expires_at,
+            max_uses,
+            self.now(),
+            status="registering",
+            replica=replica,
+            instance=instance,
         )
         # The secret stays local; only public metadata goes to the relay.
         self.keystore.put(f"invite/{invite_id}", invite.secret_bytes())
@@ -3071,7 +3130,16 @@ class Engine:
             out.append(
                 {
                     k: a[k]
-                    for k in ("request_id", "group_id", "identity", "display_name", "received_at")
+                    for k in (
+                        "request_id",
+                        "group_id",
+                        "identity",
+                        "display_name",
+                        "received_at",
+                        "mailbox_id",
+                        # None for a request stored before it was recorded.
+                        "instance_id",
+                    )
                 }
                 | {
                     "kind": "join",
