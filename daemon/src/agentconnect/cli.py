@@ -1362,11 +1362,19 @@ def leave(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> Non
 
 
 @app.command(cls=IdArgsCommand)
-def send(
+def send(  # noqa: PLR0913, PLR0917
     group: str,
     text: str,
     to: Annotated[
         list[str] | None, typer.Option("--to", help="Recipient identity (repeatable; default all).")
+    ] = None,
+    instance: Annotated[
+        str | None,
+        typer.Option(
+            "--instance",
+            help="Trigger only this instance of the recipients (its id, 16 hex characters, "
+            "from `groups show`; SPEC 9.4). Every instance still receives the message.",
+        ),
     ] = None,
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
@@ -1378,7 +1386,10 @@ def send(
     with guard(as_json):
         api = connect(config)
         gid = resolve_group(api, group)
-        sent = api.request("POST", f"/v0/groups/{gid}/messages", {"text": text, "to": to or ["*"]})
+        message: dict[str, Any] = {"text": text, "to": to or ["*"]}
+        if instance is not None:
+            message["instance"] = instance
+        sent = api.request("POST", f"/v0/groups/{gid}/messages", message)
         hint = unverified_hint(api.request("GET", f"/v0/groups/{gid}"))
         if as_json:
             emit_json({"msg_id": sent["msg_id"], "group_id": gid, "hint": hint})

@@ -479,6 +479,13 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         '`["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the '
         "`msg_id`s answered (SPEC 10.3). `addressee` names exactly who is triggered "
         '(SPEC 9.3); task replies go to `["*"]` with the requester as `addressee`. '
+        "`instance` (an instance id, 16 lowercase hex) narrows that to one instance "
+        "(SPEC 9.4), such as the replica that asked: it becomes `body.metadata.instance`, "
+        "replacing any there, and goes on `a2a.message`, `a2a.task_status`, "
+        "`a2a.task_artifact` and `a2a.task_cancel` only (`400 bad_request` otherwise, "
+        "and for a malformed id, also one in `body.metadata.instance`). An id that isn't "
+        "in the group is sent anyway and triggers nobody; every instance still receives "
+        "the message ([groups.md](groups.md#addressing-one-instance)). "
         "The agent token sends as the agent and "
         "the human token as the human; kinds reserved to humans (such as "
         "`control.resume`) need the human token (SPEC 7.3). `status` is `queued`, or "
@@ -491,6 +498,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
             "kind?": "str",
             "reply_to?": ["str"],
             "addressee?": ["str"],
+            "instance?": "str",
         },
         response={"msg_id": "str", "status": "str"},
     ),
@@ -1308,11 +1316,18 @@ class ApiServer:
             not isinstance(addressee, list) or not all(isinstance(x, str) for x in addressee)
         ):
             raise ApiError(400, "bad_request", "addressee must be a list of identities")
+        instance = _opt_str(b, "instance")
         if not human:
             # SPEC 7.2/10.3: the agent token always sends as the agent, and
             # can't send the controls SPEC 7.3 reserves to humans.
             return await self.agent.send(
-                p["gid"], body, to=to, kind=kind, reply_to=reply_to, addressee=addressee
+                p["gid"],
+                body,
+                to=to,
+                kind=kind,
+                reply_to=reply_to,
+                addressee=addressee,
+                instance=instance,
             )
         msg_id, status = self.daemon.queue_message(
             p["gid"],
@@ -1322,6 +1337,7 @@ class ApiServer:
             origin="human",
             reply_to=reply_to,
             addressee=addressee,
+            instance=instance,
         )
         return {"msg_id": msg_id, "status": status}
 

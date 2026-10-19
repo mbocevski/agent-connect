@@ -525,7 +525,7 @@ Response:
 
 ### `POST /v0/groups/{gid}/messages`
 
-Send a message. Give `text` (sent as an A2A v1.0 `Message` with a `messageId`, `contextId`, `role` and one text part), or a full `body` object. `to` defaults to `["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the `msg_id`s answered (SPEC 10.3). `addressee` names exactly who is triggered (SPEC 9.3); task replies go to `["*"]` with the requester as `addressee`. The agent token sends as the agent and the human token as the human; kinds reserved to humans (such as `control.resume`) need the human token (SPEC 7.3). `status` is `queued`, or `held` when the group's `require_approval` holds the agent's message for the human (see [safety.md](safety.md#approvals)).
+Send a message. Give `text` (sent as an A2A v1.0 `Message` with a `messageId`, `contextId`, `role` and one text part), or a full `body` object. `to` defaults to `["*"]` (everyone) and `kind` to `a2a.message`. `reply_to` lists the `msg_id`s answered (SPEC 10.3). `addressee` names exactly who is triggered (SPEC 9.3); task replies go to `["*"]` with the requester as `addressee`. `instance` (an instance id, 16 lowercase hex) narrows that to one instance (SPEC 9.4), such as the replica that asked: it becomes `body.metadata.instance`, replacing any there, and goes on `a2a.message`, `a2a.task_status`, `a2a.task_artifact` and `a2a.task_cancel` only (`400 bad_request` otherwise, and for a malformed id, also one in `body.metadata.instance`). An id that isn't in the group is sent anyway and triggers nobody; every instance still receives the message ([groups.md](groups.md#addressing-one-instance)). The agent token sends as the agent and the human token as the human; kinds reserved to humans (such as `control.resume`) need the human token (SPEC 7.3). `status` is `queued`, or `held` when the group's `require_approval` holds the agent's message for the human (see [safety.md](safety.md#approvals)).
 
 Accepts the api token or the human token.
 
@@ -538,7 +538,8 @@ Request body:
   "to"?: [str],
   "kind"?: str,
   "reply_to"?: [str],
-  "addressee"?: [str]
+  "addressee"?: [str],
+  "instance"?: str
 }
 ```
 

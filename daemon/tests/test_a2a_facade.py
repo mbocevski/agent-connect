@@ -5,6 +5,7 @@ to the adapter as deliveries that name the facade's message in
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -64,18 +65,23 @@ class Group:
         return self.sent
 
 
-def reply(
-    reply_to: str | None, kind: str, body: dict[str, Any], sender: str = PEER, n: int = 0
+def reply(  # noqa: PLR0913, PLR0917
+    reply_to: str | None,
+    kind: str,
+    body: dict[str, Any],
+    sender: str = PEER,
+    n: int = 0,
+    instance: str = "00" * 8,
 ) -> Delivery:
     inner: dict[str, Any] = {"kind": kind, "body": body}
     if reply_to is not None:
         inner["reply_to"] = [reply_to]
     return Delivery(
         group_id=GID,
-        msg_id=f"r-{sender}-{kind}-{n}-{reply_to}",
+        msg_id=f"r-{sender}-{instance}-{kind}-{n}-{reply_to}",
         kind=kind,
         body=body,
-        sender=Sender(sender, "00" * 16, "peer", True),
+        sender=Sender(sender, instance, "peer", True),
         to=["*"],
         addressed_to_me=True,
         scope="Testing",
@@ -177,6 +183,81 @@ async def test_task_events_and_a_closing_message(setup: Any) -> None:
     assert final.status.state == TaskState.TASK_STATE_COMPLETED
     assert final.status.message.parts[0].text == "done"
     assert final.metadata["sender"] == PEER
+
+
+async def test_a_task_is_bound_to_the_instance_that_answered(
+    setup: Any, rng: random.Random
+) -> None:
+    """Replicas of one member each run their own task (SPEC 9.4): the
+    facade's task follows the instance that answered first, and its
+    follow-ups and cancel name that instance."""
+    adapter, group, client = setup
+    first, second = (f"{rng.getrandbits(64):016x}" for _ in range(2))
+    stream = aiter(client.send_message(user("ask", to=PEER)))
+    created = asyncio.ensure_future(anext(stream))
+    (sent,) = await group.wait_for(1)
+    assert (sent["to"], sent["instance"]) == ([PEER], None)  # both may answer
+    working = status("mine", TaskState.TASK_STATE_WORKING)
+    await answer(adapter, reply("sent-1", "a2a.task_status", working, instance=first))
+    task_id = (await asyncio.wait_for(created, 5)).task.id
+    assert (await asyncio.wait_for(anext(stream), 5)).status_update.metadata[
+        "remote_task_id"
+    ] == "mine"
+    # The other replica's task, and anything else from it, isn't this task.
+    await answer(
+        adapter,
+        reply(
+            "sent-1",
+            "a2a.task_status",
+            status("theirs", TaskState.TASK_STATE_COMPLETED),
+            instance=second,
+        ),
+        reply(
+            "sent-1", "a2a.message", convert.to_json(convert.agent_text("x", GID)), instance=second
+        ),
+        reply(
+            "sent-1",
+            "a2a.task_status",
+            status("mine", TaskState.TASK_STATE_INPUT_REQUIRED),
+            n=1,
+            instance=first,
+        ),
+    )
+    last = await asyncio.wait_for(anext(stream), 5)
+    assert last.status_update.status.state == TaskState.TASK_STATE_INPUT_REQUIRED
+    assert last.status_update.metadata["remote_task_id"] == "mine"
+
+    # The follow-up goes to the bound instance only.
+    follow = Message(role=Role.ROLE_USER, message_id="u-more", parts=[Part(text="more")])
+    follow.task_id = task_id
+    more = asyncio.ensure_future(collect(client.send_message(SendMessageRequest(message=follow))))
+    sent = (await group.wait_for(2))[1]
+    assert (sent["to"], sent["instance"], sent["body"]["taskId"]) == ([PEER], first, "mine")
+    done = status("mine", TaskState.TASK_STATE_COMPLETED)
+    await answer(adapter, reply("sent-2", "a2a.task_status", done, n=2, instance=first))
+    assert (await asyncio.wait_for(more, 5))[-1].status_update.status.state == (
+        TaskState.TASK_STATE_COMPLETED
+    )
+
+
+async def test_a_cancel_names_the_bound_instance(setup: Any, rng: random.Random) -> None:
+    adapter, group, client = setup
+    bound = f"{rng.getrandbits(64):016x}"
+    stream = aiter(client.send_message(user("long", to=PEER)))
+    first_event = asyncio.ensure_future(anext(stream))
+    await group.wait_for(1)
+    submitted = status("remote", TaskState.TASK_STATE_SUBMITTED)
+    await answer(adapter, reply("sent-1", "a2a.task_status", submitted, instance=bound))
+    task_id = (await asyncio.wait_for(first_event, 5)).task.id
+    await asyncio.wait_for(anext(stream), 5)
+    await client.cancel_task(CancelTaskRequest(id=task_id))
+    cancel = (await group.wait_for(2))[1]
+    assert (cancel["kind"], cancel["to"], cancel["instance"]) == (
+        "a2a.task_cancel",
+        [PEER],
+        bound,
+    )
+    assert cancel["body"] == {"id": "remote"}
 
 
 async def test_cancel_before_any_reply_and_when_the_cancel_cannot_be_sent(setup: Any) -> None:

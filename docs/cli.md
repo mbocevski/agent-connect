@@ -363,6 +363,7 @@ agentconnect send [OPTIONS] GROUP TEXT
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `--to` | text, repeatable | none | Recipient identity (repeatable; default all). |
+| `--instance` | text | none | Trigger only this instance of the recipients (its id, 16 hex characters, from `groups show`; SPEC 9.4). Every instance still receives the message. |
 | `--config` | path | none | Path of config.toml. |
 | `--json` | flag | off | Machine-readable output. |
 

@@ -85,10 +85,13 @@ GROUP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 @dataclass
 class Bound:
-    """A facade task's peer side: who answers it and under which task id."""
+    """A facade task's peer side: who answers it (the identity and the
+    instance, since replicas of one identity each run their own task) and
+    under which task id."""
 
     responder: str
     remote_task_id: str
+    instance: str
 
 
 class _GroupContext(SimpleRequestContextBuilder):
@@ -152,9 +155,13 @@ class BridgeExecutor(AgentExecutor):
         if bound is not None:
             body["taskId"] = bound.remote_task_id
         to = [bound.responder] if bound is not None else self._recipients(msg)
+        # A follow-up goes to the instance running the task (SPEC 9.4).
+        instance = None if bound is None else bound.instance
         replies: asyncio.Queue[Delivery] = asyncio.Queue()
         try:
-            msg_id = await self._facade.adapter.send_to_group(self._group_id, body, to)
+            msg_id = await self._facade.adapter.send_to_group(
+                self._group_id, body, to, instance=instance
+            )
         except Exception as e:
             code = getattr(e, "code", type(e).__name__)
             await self._start_task(context, event_queue)
@@ -174,7 +181,10 @@ class BridgeExecutor(AgentExecutor):
             async with asyncio.timeout(self._facade.adapter.options.reply_timeout):
                 while True:
                     d = await replies.get()
-                    if bound is not None and d.sender.identity != bound.responder:
+                    if bound is not None and (
+                        d.sender.identity != bound.responder
+                        or d.sender.instance_id != bound.instance
+                    ):
                         continue  # the task is bound to its first responder
                     if d.kind == "a2a.message" and not task_mode:
                         reply = convert.parse_message(d.body)
@@ -243,7 +253,7 @@ class BridgeExecutor(AgentExecutor):
             if event is None:
                 return False, bound
             if bound is None and event.task_id:
-                bound = Bound(d.sender.identity, event.task_id)
+                bound = Bound(d.sender.identity, event.task_id, d.sender.instance_id)
                 self._facade.bound[task_id] = bound
             remote = event.task_id
             event.task_id, event.context_id = task_id, self._group_id
@@ -310,7 +320,11 @@ class BridgeExecutor(AgentExecutor):
             body = convert.cancel_body(bound.remote_task_id)
             try:
                 await self._facade.adapter.send_to_group(
-                    self._group_id, body, [bound.responder], kind="a2a.task_cancel"
+                    self._group_id,
+                    body,
+                    [bound.responder],
+                    kind="a2a.task_cancel",
+                    instance=bound.instance,
                 )
             except Exception as e:
                 LOG.info("a2a_cancel_not_sent", error=type(e).__name__)

@@ -130,19 +130,23 @@ class Group:
         *,
         to: Sequence[str] = ("*",),
         reply_to: Sequence[str] = (),
+        instance: str | None = None,
     ) -> str:
         """Send an A2A message (text, or a list of ``text``/``data`` parts).
         Returns its ``msg_id``. In a ``mention`` group only the identities in
-        ``to`` are triggered."""
+        ``to`` are triggered. ``instance`` (an instance id, 16 lowercase hex)
+        narrows that to one instance of them (SPEC section 9.4); every
+        instance still receives the message."""
         body = _agent_message(self.id, content)
-        return await self._post("a2a.message", body, to, reply_to)
+        return await self._post("a2a.message", body, to, reply_to, instance=instance)
 
     async def reply(self, msg: Message, content: str | Sequence[Mapping[str, Any]]) -> str:
         """Answer ``msg``: to the whole group, with its sender as the only
-        ``addressee`` (SPEC section 9.3), so everyone sees the answer and only
-        the sender is triggered. ``reply_to`` carries ``msg.msg_id``, so the
-        runtime sets ``hop`` (SPEC section 10.3) and the loop guard can stop a
-        runaway exchange."""
+        ``addressee`` (SPEC section 9.3) and its sending instance as the
+        instance hint (SPEC section 9.4), so everyone sees the answer and only
+        the instance that asked is triggered. ``reply_to`` carries
+        ``msg.msg_id``, so the runtime sets ``hop`` (SPEC section 10.3) and
+        the loop guard can stop a runaway exchange."""
         body = _agent_message(self.id, content)
         return await self._answer(msg, "a2a.message", body)
 
@@ -199,9 +203,16 @@ class Group:
         return str(reply["status"])
 
     async def _answer(self, msg: Message, kind: str, body: dict[str, Any]) -> str:
-        return await self._post(kind, body, ["*"], [msg.msg_id], addressee=[msg.sender.identity])
+        return await self._post(
+            kind,
+            body,
+            ["*"],
+            [msg.msg_id],
+            addressee=[msg.sender.identity],
+            instance=msg.sender.instance_id,
+        )
 
-    async def _post(
+    async def _post(  # noqa: PLR0913
         self,
         kind: str,
         body: dict[str, Any],
@@ -209,12 +220,15 @@ class Group:
         reply_to: Sequence[str],
         *,
         addressee: Sequence[str] | None = None,
+        instance: str | None = None,
     ) -> str:
         message: dict[str, Any] = {"kind": kind, "body": body, "to": list(to)}
         if reply_to:
             message["reply_to"] = list(reply_to)
         if addressee is not None:
             message["addressee"] = list(addressee)
+        if instance is not None:
+            message["instance"] = instance
         reply = await self._client._ops.send(self.id, message)
         return str(reply["msg_id"])
 

@@ -96,6 +96,13 @@ async def test_responses_and_requests_match_the_declared_shapes(
         "human",
     )
     await alice.call("POST", f"/v0/groups/{gid}/messages", {"text": "hello", "to": ["*"]})
+    hint = {
+        "text": "you",
+        "to": [bob.node.me],
+        "instance": bob.node.daemon.instance.instance_id_hex,
+    }
+    await alice.call("POST", f"/v0/groups/{gid}/messages", hint)
+    await alice.call("POST", f"/v0/groups/{gid}/messages", hint, "human")
     await alice.call("GET", "/v0/events?after=0")
     other = await alice.call("POST", f"/v0/groups/{gid}/invites", {})
     await alice.call("DELETE", f"/v0/invites/{other['invite_id']}")

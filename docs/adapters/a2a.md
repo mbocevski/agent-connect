@@ -76,8 +76,10 @@ A group message reaches the agent when it **triggers** this member (SPEC
 | `moderated` | every message, while this member is the effective moderator or holds the floor, as every member computes it from the grants ([groups.md](../groups.md#floor-control)) |
 
 A message to an identity triggers all of its instances, unless the body sets
-`metadata.instance` (SPEC §9.4). Past `loop_guard.max_agent_turns`, nothing
-triggers the agent (SPEC §10.3).
+`metadata.instance` (SPEC §9.4): then only that instance is triggered, and
+the others get the message as context. The hint only narrows what the floor
+allows ([groups.md](../groups.md#addressing-one-instance)). Past
+`loop_guard.max_agent_turns`, nothing triggers the agent (SPEC §10.3).
 
 Only messages the daemon's safety policy let through reach the adapter
 ([safety.md](../safety.md)): a group with `require_approval` holds them,
@@ -144,8 +146,10 @@ Each event the agent streams becomes one message to the group:
 `contextId` is set to the group, `taskId` is the agent's, and `reply_to`
 names the triggering `msg_id`, so receivers compute `hop` from it (SPEC
 §10.3). Every reply goes to `to: ["*"]` with `addressee: [<requester>]`
-(SPEC §9.3): the whole group sees the task's progress as context, and only
-the requester is triggered.
+(SPEC §9.3) and `metadata.instance` set to the requesting instance (SPEC
+§7.2, §9.4): the whole group sees the task's progress as context, and only
+the instance that asked is triggered, not the requester's other replicas.
+The adapter replaces any `metadata.instance` the agent put on the event.
 
 **`input-required`.** When the agent asks for input, the requester answers
 with an `a2a.message` that carries the same `taskId` and `contextId`. The
@@ -223,7 +227,10 @@ exactly one other member and has that member's card.
 On the group path, `metadata.to` (one identity or a list) picks the
 recipients. Without it the message goes to `["*"]`, which in a `mention`
 group triggers nobody (SPEC §9.3); address a member in groups of three or
-more. On a member path, messages go to that member only.
+more. On a member path, messages go to that member only. `metadata.instance`
+(an instance id from the group view) picks one instance of the recipients;
+a malformed one fails the task with `not sent: bad_request`
+([groups.md](../groups.md#addressing-one-instance)).
 
 The facade sends agent-originated `a2a.message`s, so the daemon's loop guard
 and rate limits apply to them.
@@ -231,8 +238,11 @@ and rate limits apply to them.
 ### Tasks
 
 - A reply `Message` ends the request in message mode.
-- Status and artifact events from the first member that answers make up
-  the facade's task. Events from other members are dropped.
+- Status and artifact events from the first instance that answers make up
+  the facade's task. Events from other members, and from the other
+  instances of that member (replicas run tasks of their own), are dropped.
+  Follow-ups on the task and its cancel carry `metadata.instance`, so only
+  that instance is triggered.
 - The facade's task ids are its own. The peer's `taskId` is kept end to end
   behind them: follow-ups on an `input-required` task carry it, and each
   event's `metadata.remote_task_id` reports it.

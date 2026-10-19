@@ -104,6 +104,10 @@ MAX_PENDING_PER_IDENTITY = 4
 JOIN_IDENTITY_FULL = "join_identity_full"
 # An instance id as SPEC 3.3 writes it: the 64-bit id, 16 lowercase hex.
 INSTANCE_ID = re.compile(r"^[0-9a-f]{16}$")
+INSTANCE_ID_RULE = "must be an instance id: 16 lowercase hex characters"
+# The kinds an instance hint (SPEC 9.4) can narrow: the ones that trigger.
+# Controls and cards never trigger, and their bodies keep only their schema.
+HINTED_KINDS = frozenset({"a2a.message", "a2a.task_status", "a2a.task_artifact", "a2a.task_cancel"})
 
 
 def instance_hex(instance_id: int) -> str:
@@ -395,7 +399,12 @@ def addressed_to_me(  # noqa: PLR0913, PLR0917
     """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?
 
     ``moderator`` is the effective moderator and ``holder`` the floor
-    holder (``agentconnect.runtime.floor``); only ``moderated`` reads them."""
+    holder (``agentconnect.runtime.floor``); only ``moderated`` reads them.
+
+    ``body.metadata.instance`` is the sender's word: it is read only after
+    the floor has picked this member, so it can narrow who is triggered and
+    never widen it. A value that isn't this instance's id, malformed ones
+    included, leaves this instance untriggered."""
     to = inner.get("to") or ["*"]
     addressee = inner.get("addressee")
     if addressee is not None and floor in ("free", "mention"):
@@ -414,6 +423,37 @@ def addressed_to_me(  # noqa: PLR0913, PLR0917
     metadata = body.get("metadata") if isinstance(body, dict) else None
     target = metadata.get("instance") if isinstance(metadata, dict) else None
     return target in (None, my_instance)
+
+
+def with_instance(kind: str, body: dict[str, Any], instance: str | None) -> dict[str, Any]:
+    """``body`` with the instance hint ``instance`` (SPEC 9.4) as
+    ``metadata.instance``, which replaces any the body had; ``metadata`` is
+    created when absent. Without ``instance``, a hint the body already
+    carries must be well formed too. The body is not changed in place.
+
+    The hint names one instance of the identities the message triggers. It
+    is checked for shape only: the instance may have left, or not have
+    joined yet in this runtime's view, and the receivers decide."""
+    metadata = body.get("metadata")
+    if instance is None:
+        hint = metadata.get("instance") if isinstance(metadata, dict) else None
+        if kind in HINTED_KINDS and hint is not None and not _instance_id(hint):
+            raise DaemonError("bad_request", f"body.metadata.instance {INSTANCE_ID_RULE}")
+        return body
+    if not _instance_id(instance):
+        raise DaemonError("bad_request", f"instance {INSTANCE_ID_RULE}")
+    if kind not in HINTED_KINDS:
+        msg = f"an instance hint goes on {', '.join(sorted(HINTED_KINDS))} only"
+        raise DaemonError("bad_request", msg)
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        raise DaemonError("bad_request", "body.metadata must be an object")
+    return {**body, "metadata": {**metadata, "instance": instance}}
+
+
+def _instance_id(value: object) -> bool:
+    return isinstance(value, str) and INSTANCE_ID.fullmatch(value) is not None
 
 
 @dataclass(frozen=True)
@@ -3307,6 +3347,7 @@ class Engine:
         addressee: list[str] | None = None,
         floor_grant: bool = False,
         daemon_control: bool = False,
+        instance: str | None = None,
     ) -> tuple[str, str]:
         """Queue an application message; returns ``(msg_id, status)`` where
         ``status`` is ``queued``, or ``held`` when the group's
@@ -3327,7 +3368,11 @@ class Engine:
         ``floor_grant``: a ``control.floor`` that ``FloorService.grant``
         checked; the agent's count against its send rate. ``daemon_control``:
         a control the daemon sends on its own, not on anyone's behalf (the
-        floor copy for newcomers): internal, hop 0, replying to nothing."""
+        floor copy for newcomers): internal, hop 0, replying to nothing.
+
+        ``instance`` (SPEC 9.4): of the identities the message triggers,
+        only this instance is (:func:`with_instance`). Every instance still
+        receives and decrypts it."""
         group = self._group_or_raise(group_id)
         internal = internal or daemon_control
         if addressee is not None and not (
@@ -3343,6 +3388,7 @@ class Engine:
         if kind == "control.floor" and not (internal or floor_grant):
             # The grant checks the role first (FloorService.grant).
             raise DaemonError("bad_request", "grant the floor with POST /v0/groups/{gid}/floor")
+        body = with_instance(kind, body, instance)
         if daemon_control:
             hop, refs = 0, []
         elif origin == "human":
@@ -3421,11 +3467,13 @@ class Engine:
         reply_to: list[str] | None = None,
         *,
         addressee: list[str] | None = None,
+        instance: str | None = None,
     ) -> SendReceipt:
         """What adapters get through ``on_outbound``: agent-originated only.
         A group the agent can't see yet (``hidden_from_agent``) is not found.
         ``reply_to`` names the ``msg_id``s of the deliveries this answers;
-        ``addressee`` names who is triggered (SPEC 9.3). The answer is the
+        ``addressee`` names who is triggered (SPEC 9.3) and ``instance``
+        which of their instances (SPEC 9.4). The answer is the
         ``msg_id``, a :class:`SendReceipt` whose ``held`` says the group's
         ``require_approval`` holds the message for the human."""
         if self.hidden_from_agent(group_id):
@@ -3438,6 +3486,7 @@ class Engine:
             origin="agent",
             reply_to=reply_to,
             addressee=addressee,
+            instance=instance,
         )
         if status != "held":
             return SendReceipt(msg_id)

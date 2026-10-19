@@ -10,6 +10,21 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Runtime, SDK, A2A adapter and CLI: the instance hint on sent messages
+  (SPEC 9.4, docs/groups.md). `instance` on `POST
+  /v0/groups/{gid}/messages` (either token), `AgentApi.send`, the SDK's
+  `Group.send` and `agentconnect send --instance` names one instance (16
+  lowercase hex) of the members the message triggers; the daemon writes it
+  as `body.metadata.instance`. The SDK's `reply`, `reply_status` and
+  `reply_artifact` and the A2A adapter's task replies name the instance
+  that sent the message they answer, so the requester's other replicas get
+  the answer as context, and the A2A facade binds a task to the instance
+  that answered first and sends its follow-ups and cancel there. A
+  malformed id, or a hint on a control or an Agent Card, answers `400
+  bad_request`; an id the group doesn't have is sent and triggers nobody.
+  Receivers read the hint only after the floor has picked their member, so
+  it narrows who is triggered and never widens it, also in `moderated`
+  groups. Every instance still receives and decrypts the message.
 - Runtime and CLI: floor control in `moderated` groups (SPEC 9.3,
   docs/groups.md). The effective moderator (`floor_moderator` while it is a
   member, else the owner) or the owner gives the floor to a member, or
