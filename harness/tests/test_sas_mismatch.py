@@ -29,6 +29,7 @@ async def test_a_mismatch_leaves_and_alerts(group: GroupFixture, malicious_relay
     epoch = c.epoch(gid)
     # "Differ" is always accepted (SPEC 11.5), for an unknown run too.
     assert await c.daemon.sas_mismatch(gid, "no-such-run") == "left"
+    await c.wait(lambda: bool(c.adapter.of_type("sas_mismatch")))
     (alert,) = c.adapter.of_type("sas_mismatch")
     assert alert.data == {"epoch": epoch, "run": "no-such-run"}
     assert "sas" not in alert.data
@@ -55,6 +56,7 @@ async def test_the_owner_hands_over_then_deletes(group: GroupFixture) -> None:
     (a, b, c), gid = await group(3)
     assert await a.daemon.sas_mismatch(gid) == "left"
     assert status(a, gid) == "left"
+    await a.wait(lambda: bool(a.adapter.of_type("sas_mismatch")))
     (alert,) = a.adapter.of_type("sas_mismatch")
     # b has the lowest leaf after a (no admins): it is the new owner.
     assert alert.data["transfer"] == {"new_owner": b.me, "confirmed": True}
@@ -82,6 +84,7 @@ async def test_an_unconfirmed_transfer_still_deletes(
     await advance(TRANSFER_TIMEOUT_SECS)
     assert await asyncio.wait_for(task, 5) == "left"
     assert status(a, gid) == "left"
+    await a.wait(lambda: bool(a.adapter.of_type("sas_mismatch")))
     (alert,) = a.adapter.of_type("sas_mismatch")
     assert alert.data["transfer"] == {"new_owner": b.me, "confirmed": False}
     # Nothing reached b: the group stays as it was there.
@@ -94,6 +97,7 @@ async def test_a_sole_owner_just_deletes(cluster: Cluster) -> None:
     await a.idle()
     assert await a.daemon.sas_mismatch(gid) == "left"
     assert status(a, gid) == "left"
+    await a.wait(lambda: bool(a.adapter.of_type("sas_mismatch")))
     (alert,) = a.adapter.of_type("sas_mismatch")
     assert "transfer" not in alert.data
 

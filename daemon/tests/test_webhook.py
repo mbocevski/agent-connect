@@ -280,3 +280,17 @@ def test_payloads_carry_addressee_and_name_task_cancel() -> None:
     assert out["event"] == "task_cancel"
     assert out["addressee"] == ["ac:v0:me"]
     assert "addressee" not in message_payload(GROUP, delivery())
+
+
+def test_build_adapters_builds_every_listed_adapter_in_order(
+    tmp_path: Path, fake_clock: FakeClock
+) -> None:
+    base = Config(relay_url="ws://127.0.0.1:1", relay_host="127.0.0.1:1", data_dir=tmp_path)
+    cfg = base.with_overrides(
+        adapters=("sse", "a2a", "webhook"),
+        webhook_url="http://127.0.0.1:9/",
+        a2a_facade_port=1,
+    )
+    built = build_adapters(cfg, fake_clock)
+    assert [type(a) for a in built] == [SseAdapter, A2AAdapter, WebhookAdapter]
+    assert [a.name for a in built] == ["sse", "a2a", "webhook"]

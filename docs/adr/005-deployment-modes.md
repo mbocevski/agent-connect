@@ -316,7 +316,8 @@ class Runtime:
 - `AdapterRegistry` replaces today's `Daemon.adapters` dict and
   `daemon.default_adapter`: each group stays bound to one adapter by name
   (the `adapter` column of the groups table), and registration closes at
-  `start()`.
+  `start()`. (Amended: a group delivers to a list of adapters; see the
+  amendment at the end.)
 - Hosts may import only from `agentconnect.runtime` (the package root), never
   from `runtime.engine` or the other submodules. Ruff's banned-API rule
   (`TID251`) enforces it.
@@ -575,8 +576,8 @@ Supported:
 
 - A separate daemon with the A2A and webhook adapters, and SDK or MCP
   clients attached to it on the same data directory.
-- Several agents on one separate daemon, one adapter per group, under one
-  identity (Decision 5).
+- Several agents on one separate daemon, under one identity (Decision 5),
+  each group delivering to the adapters of its list (amendment below).
 - One embedded `Runtime` per agent process, each on its own data directory;
   attach to an existing owner when the caller asks for it.
 - MCP-spawned runtimes: the first session owns, later sessions attach, one
@@ -658,3 +659,40 @@ All five questions left open in the proposal are decided as recommended.
    several agents on one daemon share its identity, with one adapter per
    group (Decision 5). Per-agent tokens scoped to groups are deferred: they
    would need their own design and tests.
+
+## Amendment (2026-10-19): several adapters per group
+
+This replaces "each group stays bound to one adapter" (Implementation notes,
+Supported, Decision 5 and open question 5). With one adapter per group, a
+daemon running the A2A facade next to a webhook agent couldn't give the
+facade the group's replies: the facade's group delivered to the webhook
+only. So:
+
+- **A group delivers to a list of adapters**: `daemon.adapters` (with
+  `daemon.default_adapter` kept as the one-element form), unless the human
+  pinned the group's own list (`PUT /v0/groups/{gid}/adapters`, `agentconnect
+  group adapters`). Pinning is human-only, like the safety policy: it decides
+  which endpoints receive the group's plaintext. Groups created before this
+  follow the config.
+- **Each adapter has its own delivery state** ([ADR-004](004-processing-journal.md)
+  amendment): every adapter gets every message and event of the group, in
+  order, and one that is slow or down holds up only its own deliveries.
+- **The first adapter of the list with an Agent Card** sends the group's card.
+- **The embedded SDK and the MCP-spawned runtime stay single-adapter**: they
+  deliver to their in-process handlers or their sessions' queue, whatever
+  the config lists.
+- **One adapter is triggered by a message**, the others get it as
+  context: the adapter that sent the message it replies to, else the first
+  of the list whose agent answers (`Capabilities.answers`; the A2A facade
+  without a local agent answers nothing of its own). Two adapters whose
+  agents both answer would otherwise both reply at every hop, and the loop
+  guard bounds the depth of a conversation, not its width.
+- **A pin is never overridden.** A group none of whose listed adapters runs
+  (pinned, or following a config list) is held: its messages and events
+  wait, and the human hears of it (`adapter_unavailable`). Only a list that
+  names no adapter falls back to the first one registered, as `none` did.
+- **The upgrade keeps Decision 5's deployments.** "An A2A agent in some
+  groups and a webhook agent in others" was real: a group stayed on the
+  adapter it was bound to while that adapter ran. So the one-time
+  migration pins a group to its bound adapter unless that is what the
+  config now gives it, which it then follows.

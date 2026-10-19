@@ -6,6 +6,7 @@ import pytest
 from agentconnect.a2a_adapter import A2AOptions
 from agentconnect.config import (
     ConfigError,
+    config_warnings,
     default_config_path,
     default_data_dir,
     load_config,
@@ -161,3 +162,61 @@ def test_the_a2a_section(tmp_path: Path) -> None:
     assert A2AOptions.from_config(off).facade_port is None
     assert A2AOptions.from_config(off).local_agent_url is None
     assert A2AOptions.from_config(load_config(environ=env)).local_agent_url is None
+
+
+# -- several adapters (daemon.adapters) --------------------------------------------
+
+
+BASE = '[relay]\nurl = "ws://127.0.0.1:9000"\n[webhook]\ncallback_url = "http://127.0.0.1:8808/"\n'
+
+
+def test_adapters_lists_every_adapter_a_group_delivers_to(tmp_path: Path) -> None:
+    text = BASE + '[a2a]\nfacade_port = 8811\n[daemon]\nadapters = ["a2a", "webhook"]\n'
+    cfg = load_config(write(tmp_path, text), environ={"HOME": str(tmp_path)})
+    assert cfg.adapters == ("a2a", "webhook")
+    assert cfg.adapter_names == ("a2a", "webhook")
+
+
+def test_default_adapter_is_a_one_element_list(tmp_path: Path) -> None:
+    env = {"HOME": str(tmp_path)}
+    cfg = load_config(write(tmp_path, BASE + '[daemon]\ndefault_adapter = "sse"\n'), environ=env)
+    assert (cfg.adapters, cfg.adapter_names) == ((), ("sse",))
+    assert load_config(write(tmp_path, BASE), environ=env).adapter_names == ()
+    none = load_config(write(tmp_path, BASE + '[daemon]\ndefault_adapter = "none"\n'), environ=env)
+    assert none.adapter_names == ()
+
+
+@pytest.mark.parametrize(
+    ("daemon", "message"),
+    [
+        ('adapters = ["sse"]\ndefault_adapter = "sse"', "not both"),
+        ('adapters = ["carrier-pigeon"]', "unknown adapter"),
+        ('default_adapter = "carrier-pigeon"', "unknown adapter"),
+        ('adapters = ["sse", "sse"]', "more than once"),
+        ('adapters = "sse"', "list"),
+        ('adapters = ["none"]', "unknown adapter"),
+        ('adapters = ["a2a"]', "needs a2a"),
+    ],
+)
+def test_bad_adapter_lists_are_refused(tmp_path: Path, daemon: str, message: str) -> None:
+    path = write(tmp_path, BASE + "[daemon]\n" + daemon + "\n")
+    with pytest.raises(ConfigError, match=message):
+        load_config(path, environ={"HOME": str(tmp_path)})
+
+
+def test_a_listed_webhook_needs_its_url(tmp_path: Path) -> None:
+    path = write(tmp_path, '[daemon]\nadapters = ["webhook"]\n')
+    with pytest.raises(ConfigError, match=r"needs webhook\.callback_url"):
+        load_config(path, environ={"HOME": str(tmp_path)})
+
+
+def test_an_unlisted_a2a_adapter_is_warned_about(tmp_path: Path) -> None:
+    text = BASE + '[a2a]\nfacade_port = 8811\n[daemon]\nadapters = ["webhook"]\n'
+    cfg = load_config(write(tmp_path, text), environ={"HOME": str(tmp_path)})
+    (warning,) = config_warnings(cfg)
+    assert "a2a" in warning
+    listed = load_config(
+        write(tmp_path, BASE + '[a2a]\nfacade_port = 8811\n[daemon]\nadapters = ["a2a"]\n'),
+        environ={"HOME": str(tmp_path)},
+    )
+    assert config_warnings(listed) == []

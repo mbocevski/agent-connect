@@ -17,7 +17,7 @@ Example file::
     [daemon]
     data_dir = "~/.local/share/agentconnect"
     display_name = "build-bot"
-    default_adapter = "webhook"
+    adapters = ["webhook"]          # where groups deliver: webhook, sse, mcp, a2a
     keystore = "auto"               # auto | keyring | file
 
     [policy]
@@ -81,6 +81,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import agentconnect_core as ac
+from agentconnect import log
 from agentconnect.policy import (
     DEFAULT_AUDIT_GROUP_ROWS,
     DEFAULT_AUDIT_RETENTION_DAYS,
@@ -93,7 +94,10 @@ from agentconnect.policy import (
     Settings,
 )
 
+LOG = log.get("agentconnect.config")
 KEYSTORES = ("auto", "keyring", "file")
+# The adapters the separate daemon builds (agentconnect.adapters).
+ADAPTER_NAMES = ("webhook", "sse", "mcp", "a2a")
 # SPEC 6.6.1: a door lives at most 7 days, measured on the relay's clock, so
 # the default asks for an hour less.
 MIN_DOOR_LIFETIME_SECS = 7200
@@ -160,6 +164,9 @@ class Config:
     data_dir: Path
     display_name: str = "agent"
     default_adapter: str = "none"
+    # The adapters every group delivers to unless the human pinned its own
+    # list; empty: `default_adapter` alone (`none`: none).
+    adapters: tuple[str, ...] = ()
     keystore: str = "auto"
     auto_approve: bool = False
     api_socket: Path | None = None
@@ -204,6 +211,14 @@ class Config:
         except ac.AgentConnectError:
             return None
         return next((d for d in self.directories if d.host == canonical), None)
+
+    @property
+    def adapter_names(self) -> tuple[str, ...]:
+        """The adapters a group delivers to unless pinned: ``adapters``,
+        else ``default_adapter`` as a one-element list (none for `none`)."""
+        if self.adapters:
+            return self.adapters
+        return () if self.default_adapter == "none" else (self.default_adapter,)
 
     @property
     def a2a_enabled(self) -> bool:
@@ -393,16 +408,27 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ),
     ConfigKey("daemon.display_name", "display_name", "`agent`", "The name other members see."),
     ConfigKey(
-        "daemon.default_adapter",
-        "default_adapter",
-        "`none`",
-        "The adapter that new groups deliver to: `webhook` "
+        "daemon.adapters",
+        "adapters",
+        "`[]`",
+        "The adapters every group delivers its messages and events to, unless the human "
+        "pinned the group's own list (`agentconnect group adapters`): any of `webhook` "
         "([adapters/webhook.md](adapters/webhook.md)), `sse` (the event stream of "
         "`GET /v0/events`, see [api.md](api.md#event-stream)), `mcp` (the queue MCP "
         "sessions attached to this daemon pull from, [adapters/mcp.md](adapters/mcp.md)) "
-        "or `none`. With "
-        "`none`, received messages wait in the inbound queue. The A2A adapter is "
-        "not written yet.",
+        "and `a2a` ([adapters/a2a.md](adapters/a2a.md), needs `a2a.local_agent_url` or "
+        "`a2a.facade_port`), each at most once. Each adapter gets every message, in order, "
+        "and keeps its own delivery state. The first one with an Agent Card sends it. "
+        "Empty: `daemon.default_adapter`.",
+    ),
+    ConfigKey(
+        "daemon.default_adapter",
+        "default_adapter",
+        "`none`",
+        "One adapter, the same as `daemon.adapters` with one name; set one of the two, "
+        "not both. `none`: no adapter is named, so groups deliver to the A2A adapter when "
+        "`a2a.local_agent_url` or `a2a.facade_port` is set, and otherwise received "
+        "messages wait in the inbound queue.",
     ),
     ConfigKey(
         "daemon.keystore",
@@ -437,8 +463,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "webhook.callback_url",
         "webhook_url",
         "none",
-        "Where the webhook adapter POSTs. Required when `default_adapter = "
-        '"webhook"`. Loopback unless `webhook.allow_remote` is set.',
+        "Where the webhook adapter POSTs. Required when `daemon.adapters` lists "
+        '`webhook` (or `default_adapter = "webhook"`). Loopback unless '
+        "`webhook.allow_remote` is set.",
     ),
     ConfigKey(
         "webhook.allow_remote",
@@ -467,8 +494,8 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "`3600`",
         "How long the SSE adapter keeps messages and events for `Last-Event-ID` "
         "resume (60 to 604800). After that the payloads are deleted and a consumer "
-        "resuming from before the window gets an `sse_gap` event. Used only with "
-        '`default_adapter = "sse"`.',
+        "resuming from before the window gets an `sse_gap` event. Used only when "
+        "`daemon.adapters` lists `sse`.",
     ),
     ConfigKey(
         "a2a.local_agent_url",
@@ -754,6 +781,32 @@ MAX_CONTEXT_MESSAGES = 100
 def _path(table: Mapping[str, Any], key: str) -> Path | None:
     raw = _typed(table, key, str, "")
     return Path(raw).expanduser() if raw else None
+
+
+def _adapters(daemon: Mapping[str, Any]) -> tuple[str, ...]:
+    """``daemon.adapters``, checked: known names, each once, and not next to
+    ``daemon.default_adapter`` (its one-element alias)."""
+    one = daemon.get("default_adapter")
+    if one is not None and one not in (*ADAPTER_NAMES, "none"):
+        msg = f"daemon.default_adapter: unknown adapter {one!r} (one of {ADAPTER_NAMES} or none)"
+        raise ConfigError(msg)
+    if "adapters" not in daemon:
+        return ()
+    if one is not None:
+        msg = "set daemon.adapters or daemon.default_adapter, not both"
+        raise ConfigError(msg)
+    names = daemon["adapters"]
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        msg = "daemon.adapters must be a list of adapter names"
+        raise ConfigError(msg)
+    for name in names:
+        if name not in ADAPTER_NAMES:
+            msg = f"daemon.adapters: unknown adapter {name!r} (one of {ADAPTER_NAMES})"
+            raise ConfigError(msg)
+        if names.count(name) > 1:
+            msg = f"daemon.adapters names {name!r} more than once"
+            raise ConfigError(msg)
+    return tuple(str(n) for n in names)
 
 
 def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -1091,6 +1144,7 @@ def load_config(
         "data_dir": Path(data_dir_raw).expanduser() if data_dir_raw else default_data_dir(environ),
         "display_name": _typed(daemon, "display_name", str, "agent"),
         "default_adapter": _typed(daemon, "default_adapter", str, "none"),
+        "adapters": _adapters(daemon),
         "keystore": keystore,
         "auto_approve": _typed(policy, "auto_approve", bool, False),
         "api_socket": Path(socket_raw).expanduser() if socket_raw else None,
@@ -1112,8 +1166,26 @@ def load_config(
         raise ConfigError(msg)
     if values["webhook_url"] is not None:
         check_callback_url(values["webhook_url"], values["webhook_allow_remote"])
-    elif values["default_adapter"] == "webhook":
-        msg = 'default_adapter "webhook" needs webhook.callback_url'
-        raise ConfigError(msg)
     _resolve_relay(values)
-    return Config(**values)
+    cfg = Config(**values)
+    if cfg.webhook_url is None and "webhook" in cfg.adapter_names:
+        msg = 'adapter "webhook" needs webhook.callback_url'
+        raise ConfigError(msg)
+    if not cfg.a2a_enabled and "a2a" in cfg.adapter_names:
+        msg = 'adapter "a2a" needs a2a.local_agent_url or a2a.facade_port'
+        raise ConfigError(msg)
+    for warning in config_warnings(cfg):
+        LOG.warning("config_warning", warning=warning)
+    return cfg
+
+
+def config_warnings(cfg: Config) -> list[str]:
+    """What the config allows but probably doesn't mean."""
+    out = []
+    if cfg.a2a_enabled and cfg.adapter_names and "a2a" not in cfg.adapter_names:
+        out.append(
+            "[a2a] is set but daemon.adapters doesn't list a2a: the A2A adapter runs, "
+            "but groups deliver to it only where the human pins it "
+            "(agentconnect group adapters), so its facade gets no replies elsewhere"
+        )
+    return out

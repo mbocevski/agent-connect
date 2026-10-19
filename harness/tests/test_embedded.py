@@ -393,6 +393,8 @@ async def test_a_failing_handler_is_retried_like_a_failing_webhook(
 async def test_engine_crashes_propagate_out_of_the_embedded_host(cluster: Cluster) -> None:
     """A SimulatedCrash is a BaseException: the host never swallows one."""
     node = await cluster.node("n", host="embedded")
-    node.daemon.failpoints.arm("event.after_record", "crash")
+    gid = node.daemon.create_group("Crash", "")
+    await node.idle()
+    node.daemon.failpoints.arm("invite.after_register", "crash")
     with pytest.raises(SimulatedCrash):
-        await node.daemon.emit(None, "custom")
+        await node.daemon.create_invite(gid)

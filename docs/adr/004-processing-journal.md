@@ -144,7 +144,8 @@ check (daemon) per point.
   SPEC is unchanged.
 - Plaintext lives in the encrypted core store from processing until the
   daemon has recorded it (normally the same event-loop step), then only in
-  the daemon's inbox until the adapter takes it (ADR-003 retention).
+  the daemon's inbox until every adapter of the group has taken it
+  (ADR-003 retention).
 - Journal tombstones (ids and hashes) are kept for the relay's message TTL
   (7 days) and purged after.
 - **The adapter contract is at-least-once, with stable ids** (the
@@ -152,7 +153,8 @@ check (daemon) per point.
   adapters deduplicate by `msg_id` and `event_id`. Nothing is lost:
   - a delivery is acked to the relay only after `deliver` returned `ACK`;
     a crash between that and the daemon recording it repeats the delivery
-    with the same `msg_id`;
+    with the same `msg_id` (amended below: acked once recorded, with each
+    adapter's delivery tracked per adapter);
   - an event is recorded first (in the transaction that records its cause)
     and marked notified only after `on_event` returned. Unnotified events
     (a crash in between, or an adapter that raised) are sent again on start
@@ -167,3 +169,61 @@ check (daemon) per point.
     `event_id`.
 - The delegating storage provider has to follow `openmls_sqlite_storage`'s
   trait when OpenMLS is upgraded (the compiler enforces the signatures).
+
+## Amendment (2026-10-19): acked when recorded, delivered per adapter
+
+A group now delivers to several adapters (`daemon.adapters`, or the list the
+human pinned for the group; [ADR-005](005-deployment-modes.md) amendment), so
+"acked after `deliver` returned `ACK`" no longer names one moment. Two
+changes:
+
+- **The relay frame is acked once the message is recorded in the inbox**,
+  in the step that consumes its journal entry, whether the row is pending
+  delivery or not (held messages were already acked that way). Holding the
+  ack back added no safety: the journal entry is consumed before any
+  adapter sees the row, so a frame the relay delivers again is a duplicate
+  the core refuses, and the inbox row is what gets delivered. It did let one
+  adapter that stays down keep frames unacked at the relay, where they count
+  against the mailbox until a `queue_overflow` puts the whole group out of
+  sync.
+- **Delivery and notification are tracked per adapter.** An adapter that
+  returned `ACK` for an inbox row gets a marker (`inbox_acks`), and the row
+  is done, its plaintext deleted, once every adapter of its group has one.
+  An event is marked per adapter after its `on_event` returned
+  (`event_acks`) and notified once every adapter has it. A crash between an
+  adapter's `ACK` and its marker repeats the delivery to that adapter
+  alone, with the same `msg_id`; the marker and the row's state change are
+  written in one transaction. The contract stays at-least-once with stable
+  ids, per adapter. A `RETRY` backs off only that group's deliveries to that
+  adapter. An adapter taken out of a group's list no longer counts, so what
+  waited only for it is done; a group none of whose listed adapters runs is
+  held instead, with nothing settled.
+- **The early ack is bounded.** The relay mailbox was the only bound on how
+  much plaintext a daemon took in for an adapter that is down. So the early
+  ack stops for a group whose pending plaintext passes 64 MiB, or whose
+  oldest pending message has waited 7 days (the relay's mailbox quota and
+  retention, SPEC section 8.3): the relay keeps those copies, its mailbox
+  fills, and `queue_overflow` puts the group out of sync as before. The
+  daemon records which rows it hasn't acked and acks each once it is
+  delivered, or all of them once what is pending is under both limits again.
+  The human hears of both (`delivery_stalled`, `delivery_resumed`). The
+  pending load is counted as rows change, so checking it costs the same however
+  long it is.
+- **Events go out from per-(group, adapter) workers**, as messages do, in
+  order per adapter, not from the inbound worker: an adapter whose
+  `on_event` is slow or never returns holds up neither the processing of
+  inbound frames nor another adapter's events. The event is still recorded
+  in the transaction of its cause, so a crash loses none. An event the
+  agent may not see (the human's, or one of a group hidden from the agent)
+  is recorded as notified in that same transaction, so no worker, retry or
+  crash can hand it to an adapter (SPEC 10.2). What is not kept any more is
+  the order between a group's events and its messages, or between events
+  of no group and a group's: an adapter can get a new member's message
+  before its `member_joined`. Messages are in order per group and adapter,
+  and so are events.
+- **The bound is per group.** The relay mailbox is one per instance, so on
+  a daemon with several groups behind, the pending plaintext it keeps can
+  reach 64 MiB for each of them, each group stopping the early ack at its
+  own limit. A daemon-wide cap would let one group's undelivered
+  messages stall the others' early acks; the per-group bound and the
+  human events were preferred.

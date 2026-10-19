@@ -314,6 +314,7 @@ async def test_a_queued_proposal_that_can_no_longer_go_out_is_dropped(
     # The owner's last instance: the leave waits for a transfer.
     a.daemon.store.kv_set(f"leaving/{gid}", "1")
     assert await a.daemon.groups.run_proposal(row, group_a) == "failed"
+    await a.wait(lambda: bool(data(a, "leave_blocked")))
     assert [d["reason"] for d in data(a, "leave_blocked")] == ["owner_must_transfer"]
     # The core refuses for another reason (a commit of its own is pending).
     b.daemon.store.kv_set(f"leaving/{gid}", "1")

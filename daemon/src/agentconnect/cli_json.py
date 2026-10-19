@@ -184,6 +184,7 @@ SCHEMAS: dict[str, Any] = {
         "status": "str",
     },
     "group floor": {"group_id": "str", "holder": Opt("str"), "status": "str", "msg_id": "str"},
+    "group adapters": {"group_id": "str", "adapters": Opt(["str"]), "delivers_to": ["str"]},
     "invite create": {
         "url": "str",
         "invite_id": "str",

@@ -8,7 +8,9 @@ An agent that embeds the runtime through the SDK ([sdk.md](sdk.md)) reads
 no file unless it passes one (`AgentConnect.embedded(config=...)`), so it
 never picks up the separate daemon's settings by accident. The file has this
 format; the embedded runtime always delivers in-process, whatever
-`daemon.default_adapter` says, and refuses `isolation.enabled`.
+`daemon.adapters` or `daemon.default_adapter` say, and refuses
+`isolation.enabled`. So does the MCP-spawned runtime, which delivers to its
+sessions' queue.
 
 ```toml
 [relay]
@@ -18,6 +20,7 @@ host = "relay.example.org"      # optional; defaults to the URL's host[:port]
 [daemon]
 data_dir = "~/.local/share/agentconnect"
 display_name = "build-bot"
+adapters = ["a2a", "webhook"]   # where groups deliver; or default_adapter = "a2a"
 keystore = "auto"               # auto | keyring | file
 
 [policy]
@@ -66,6 +69,75 @@ with the reason: publishing a listing is always a person's decision
 too; its keys can only shorten a limit or narrow roles
 ([groups.md](groups.md)).
 
+## Several adapters
+
+A group delivers its messages and events to every adapter in
+`daemon.adapters`, in that order, unless the human pinned the group's own
+list with `agentconnect group adapters <group> <name>...` (`PUT
+/v0/groups/{gid}/adapters`, human token only, since it decides which
+endpoints receive the group's plaintext; `--follow-config` unpins). An
+older config's `daemon.default_adapter = "webhook"` means `adapters =
+["webhook"]`; set one key or the other. An unknown name, a name listed twice,
+`webhook` without `webhook.callback_url` and `a2a` without an `[a2a]`
+agent or facade stop the start.
+
+- **Each adapter has its own delivery state.** Every adapter gets every
+  message of the group, in order, and the daemon records which adapters
+  took each one. An adapter that answers "retry" (an endpoint down, an SSE
+  stream nobody reads) backs off on its own, for its own deliveries in
+  that group: the others go on. A message is done, and its plaintext
+  deleted, once every adapter of the group has it.
+- **One adapter is triggered by a message.** A message that triggers this
+  agent triggers one adapter of the group's list; the others get it as
+  context (`addressed_to_me: false`). It is the adapter that sent the
+  message it replies to (`reply_to`), else the first one in the list whose
+  agent answers. The A2A facade without `a2a.local_agent_url` answers
+  nothing of its own: it is triggered only by replies to its own requests.
+  So two adapters whose agents both answer don't both reply, and
+  `adapters = ["a2a", "webhook"]` with only the facade gives the facade's
+  replies to its client and everything else to the webhook agent.
+- **The relay is acked once a message is recorded**, so an adapter that is
+  down doesn't fill the relay mailbox, up to a limit. When a group's
+  pending messages pass 64 MiB, or its oldest has waited 7 days (what the
+  relay keeps for this instance, SPEC section 8.3), the daemon stops acking
+  that group early: the relay keeps the copies, its mailbox fills as it
+  would without the early ack, and a `queue_overflow` puts the group out
+  of sync. The human hears of it (`delivery_stalled`, with the adapters
+  that are behind), and of the end (`delivery_resumed`), when what is pending
+  is back under both limits and what the relay kept is acked. The limits
+  are per group, so with several groups behind the daemon can keep 64 MiB
+  of pending plaintext for each.
+- **Events go to every adapter**, each told once and in order, from a
+  worker of its own: an adapter that is slow, or never returns, holds up
+  only its own events. One that fails is told again after a backoff; the
+  others aren't told twice. Events and messages are separate streams: an
+  adapter can get a member's message before its `member_joined`.
+- **The Agent Card** that goes to the group is the first one an adapter of
+  the list has (the A2A adapter's, from the local agent).
+- **An adapter the runtime doesn't run is skipped.** A listed name the
+  runtime doesn't run (taken out of the config) is skipped with a warning
+  (`adapter_not_registered`). When none of the group's listed adapters
+  runs, the group is held: its messages and events wait for them, they go
+  nowhere else, `groups show` says `delivery_held`, and the human hears of
+  it once (`adapter_unavailable`) and once more when one is back
+  (`adapter_available`). Only a list that names no adapter at all
+  (`default_adapter = "none"`) delivers to the first adapter the runtime
+  has.
+- **The A2A adapter runs whenever `[a2a]` is set**, listed or not, so the
+  human can pin a group to it. When `daemon.adapters` names other adapters
+  but not `a2a`, the daemon warns at start (`config_warning`): its facade
+  gets replies only in the groups pinned to it.
+
+The four delivery events (`adapter_unavailable`, `adapter_available`,
+`delivery_stalled`, `delivery_resumed`) are the human's: the agent token
+doesn't see them and no adapter is told.
+
+A database from before `daemon.adapters` is migrated once: a group bound
+to the adapter the config gives follows the config, and a group bound to
+another adapter (one daemon serving an A2A agent in some groups and a
+webhook agent in others) is pinned to that adapter, with a warning in
+the log for each (`group_adapter_pinned`).
+
 ## Keys
 
 The `policy.*` keys other than `auto_approve` are the safety policy's
@@ -82,7 +154,8 @@ This section is generated by `just docs-gen`. Edit the code, not this text.
 | `relay.host` | string | the URL's `host[:port]` | `AC_RELAY_HOST` | The host string signed into relay authentication. It must match the relay's `AC_RELAY_HOST`. |
 | `daemon.data_dir` | string | `$XDG_DATA_HOME/agentconnect` | `AC_DATA_DIR` | Keys, databases, API tokens and the API socket. Created 0700. |
 | `daemon.display_name` | string | `agent` | none | The name other members see. |
-| `daemon.default_adapter` | string | `none` | none | The adapter that new groups deliver to: `webhook` ([adapters/webhook.md](adapters/webhook.md)), `sse` (the event stream of `GET /v0/events`, see [api.md](api.md#event-stream)), `mcp` (the queue MCP sessions attached to this daemon pull from, [adapters/mcp.md](adapters/mcp.md)) or `none`. With `none`, received messages wait in the inbound queue. The A2A adapter is not written yet. |
+| `daemon.adapters` | array | `[]` | none | The adapters every group delivers its messages and events to, unless the human pinned the group's own list (`agentconnect group adapters`): any of `webhook` ([adapters/webhook.md](adapters/webhook.md)), `sse` (the event stream of `GET /v0/events`, see [api.md](api.md#event-stream)), `mcp` (the queue MCP sessions attached to this daemon pull from, [adapters/mcp.md](adapters/mcp.md)) and `a2a` ([adapters/a2a.md](adapters/a2a.md), needs `a2a.local_agent_url` or `a2a.facade_port`), each at most once. Each adapter gets every message, in order, and keeps its own delivery state. The first one with an Agent Card sends it. Empty: `daemon.default_adapter`. |
+| `daemon.default_adapter` | string | `none` | none | One adapter, the same as `daemon.adapters` with one name; set one of the two, not both. `none`: no adapter is named, so groups deliver to the A2A adapter when `a2a.local_agent_url` or `a2a.facade_port` is set, and otherwise received messages wait in the inbound queue. |
 | `daemon.keystore` | string | `auto` | none | `keyring` (the OS keyring), `file` (0600 files in the data directory), or `auto` (the keyring when one is usable, files otherwise). |
 | `policy.auto_approve` | boolean | `false` | none | Approve JoinRequests without asking a human. Leave it off unless every holder of your invite links is trusted. It never applies to knocks: every knock needs a person (SPEC 6.6.4), and no setting changes that. |
 | `policy.max_message_bytes` | integer | `262144` | none | Largest inner message accepted, in bytes (1024 to 262144, the SPEC 10.2 default; never more). |
@@ -116,11 +189,11 @@ This section is generated by `just docs-gen`. Edit the code, not this text.
 | `policy.join_ledger_per_invite` | integer | `1024` | none | The most join requests the replay ledger remembers for one invite (64 to 1024). An invite's share is 4 times its `max_uses`, at least 64 and at most this. Past it, new requests for that invite are dropped and you get an `invite_flooded` event; other invites are unaffected. |
 | `api.socket` | string | `<data_dir>/agentconnectd.sock` | none | Unix socket for the local API. |
 | `api.tcp_port` | integer | `0` | none | When greater than 0, serve the local API on `127.0.0.1:<port>` instead of the socket (0 to 65535). |
-| `webhook.callback_url` | string | none | none | Where the webhook adapter POSTs. Required when `default_adapter = "webhook"`. Loopback unless `webhook.allow_remote` is set. |
+| `webhook.callback_url` | string | none | none | Where the webhook adapter POSTs. Required when `daemon.adapters` lists `webhook` (or `default_adapter = "webhook"`). Loopback unless `webhook.allow_remote` is set. |
 | `webhook.allow_remote` | boolean | `false` | none | Allow a `callback_url` that is not loopback. It must then use `https`. |
 | `webhook.timeout_secs` | integer | `120` | none | How long the daemon waits for each webhook response (1 to 3600). The SDK answers after your handler returns, so allow for a slow model call. |
 | `sdk.handler_timeout_secs` | integer | `120` | none | Embedded SDK only: how long a message or event handler may run (1 to 3600). A handler still running then is cancelled and the delivery retried with backoff, as for a webhook that timed out. Allow for a slow model call. |
-| `sse.retention_secs` | integer | `3600` | none | How long the SSE adapter keeps messages and events for `Last-Event-ID` resume (60 to 604800). After that the payloads are deleted and a consumer resuming from before the window gets an `sse_gap` event. Used only with `default_adapter = "sse"`. |
+| `sse.retention_secs` | integer | `3600` | none | How long the SSE adapter keeps messages and events for `Last-Event-ID` resume (60 to 604800). After that the payloads are deleted and a consumer resuming from before the window gets an `sse_gap` event. Used only when `daemon.adapters` lists `sse`. |
 | `a2a.local_agent_url` | string | none | none | Base URL of the local A2A agent (`http://` or `https://`) that the A2A adapter hands group messages to ([adapters/a2a.md](adapters/a2a.md)). |
 | `a2a.local_agent_token_file` | string | none | none | A file holding a bearer token the adapter sends to the local agent. |
 | `a2a.card_keys_file` | string | none | none | A JWKS file with the public keys you trust to sign Agent Cards. |

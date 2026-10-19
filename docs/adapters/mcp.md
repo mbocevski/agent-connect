@@ -241,7 +241,7 @@ human's CLI out.
 - **A daemon.** A session also attaches to a separate daemon on the same
   data directory: `--config` with the daemon's `config.toml` (its
   `daemon.data_dir`, `[api] socket` and `tcp_port` apply), or `--data-dir`
-  for a daemon on the default socket. The daemon needs `daemon.default_adapter = "mcp"`
+  for a daemon on the default socket. The daemon needs `"mcp"` in `daemon.adapters`
   ([config.md](../config.md)) to queue messages for sessions; otherwise
   `agentconnect_wait` answers `no_deliveries`. A session never takes over a
   directory whose last holder was a daemon or an embedded agent: their own

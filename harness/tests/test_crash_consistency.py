@@ -235,6 +235,7 @@ async def test_a_failing_adapter_hears_about_events_again(
     group: GroupFixture, partition: Cut, heal: Cut
 ) -> None:
     (a, b), gid = await group(2)
+    b.events_may_fail = True  # it fails until the reconnect
     b.daemon.failpoints.arm("event.after_record", "raise")
     a.daemon.update(gid)
     await until(lambda: "event.after_record" in b.daemon.failpoints.fired)

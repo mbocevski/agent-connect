@@ -42,6 +42,7 @@ async def test_expired_invites_and_joins_lose_their_secrets(
     await b.daemon.expire()
     assert b.daemon.store.join_status(iid) == ("expired", None)
     assert b.daemon.keystore.get(f"join/{iid}") is None
+    await b.wait(lambda: bool(b.adapter.of_type("join_failed")))
     assert b.adapter.of_type("join_failed")[0].data["reason"] == "expired"
 
 

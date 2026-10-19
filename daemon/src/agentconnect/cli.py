@@ -208,7 +208,7 @@ def daemon_run(
     """Run agentconnectd in the foreground (JSON logs on stderr).
 
     Needs relay.url (AC_RELAY_URL): there is no built-in relay. Starts the
-    adapter named by daemon.default_adapter (webhook or sse), and
+    adapters named by daemon.adapters (webhook, sse, mcp), and
     the A2A adapter when a2a.local_agent_url or a2a.facade_port is set. On
     SIGINT or SIGTERM, queued sends get up to 3 seconds to go out while the
     relay is connected; the rest stay in the encrypted outbox for the next
@@ -643,6 +643,44 @@ def group_floor(
             typer.echo("Floor released: only the moderator is triggered now.")
         else:
             typer.echo(f"Floor granted to {out['holder']}.")
+
+
+@group_app.command(
+    "adapters",
+    cls=IdArgsCommand,
+    help="Pin the adapters a group delivers its messages and events to, in order (each "
+    "gets every message and keeps its own delivery state), or follow daemon.adapters "
+    "again with --follow-config. Two adapters that both answer the group (an A2A agent "
+    f"and a webhook agent) reply twice. {HUMAN_ONLY_HELP}",
+)
+def group_adapters(
+    group: str,
+    names: Annotated[
+        list[str] | None, typer.Argument(help="Adapter names: webhook, sse, mcp, a2a.")
+    ] = None,
+    follow_config: Annotated[
+        bool,
+        typer.Option("--follow-config", help="Unpin: deliver to daemon.adapters again."),
+    ] = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        if bool(names) == follow_config:
+            raise CliError("bad_args", "give adapter names or --follow-config", EXIT_USAGE)
+        api = connect(config, human=True)
+        gid = resolve_group(api, group)
+        out = api.request("PUT", f"/v0/groups/{gid}/adapters", {"adapters": names or None})
+        if as_json:
+            emit_json(out)
+        elif out["adapters"] is None:
+            typer.echo(
+                "The group follows the config: it delivers to "
+                + (", ".join(out["delivers_to"]) or "no adapter")
+                + "."
+            )
+        else:
+            typer.echo("The group delivers to " + ", ".join(out["delivers_to"]) + ".")
 
 
 @invite_app.command("create")

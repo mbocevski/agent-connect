@@ -172,6 +172,11 @@ class Capabilities:
     accepts: list[str] = field(default_factory=lambda: ["text", "data"])
     originates: bool = False
     agent_card: dict[str, Any] | None = None
+    # Whether an agent behind it answers the messages that trigger it. Of a
+    # group's adapters, one is triggered by a message (the one that sent what
+    # it replies to, else the first that answers); the others get it as
+    # context.
+    answers: bool = True
 
 
 class SendReceipt(str):

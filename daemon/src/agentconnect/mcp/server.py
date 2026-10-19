@@ -115,7 +115,8 @@ def configure(  # noqa: PLR0913
         where = file_dir
     else:
         where = default_data_dir(name, environ)
-    overrides: dict[str, Any] = {"data_dir": where, "default_adapter": "mcp"}
+    # Its one adapter, whatever the file lists for the separate daemon.
+    overrides: dict[str, Any] = {"data_dir": where, "default_adapter": "mcp", "adapters": ()}
     if relay is not None:
         overrides |= {"relay_url": relay, "relay_host": ""}
     if display_name is not None or (agent is not None and config is None):

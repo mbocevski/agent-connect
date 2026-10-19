@@ -1125,8 +1125,28 @@ def test_group_floor_grants_and_releases_with_the_agent_token(fake: Fake) -> Non
     assert fake.json("group", "floor", GID, BOB, "--release")[0] == 2
 
 
+def test_group_adapters_pins_and_unpins_with_the_human_token(fake: Fake) -> None:
+    path = f"PUT /v0/groups/{GID}/adapters"
+    fake.routes[path] = lambda b: {
+        "group_id": GID,
+        "adapters": b["adapters"],
+        "delivers_to": b["adapters"] or ["webhook"],
+    }
+    code, out = fake.json("group", "adapters", GID, "a2a", "webhook")
+    assert code == 0
+    assert conforms(out, SCHEMAS["group adapters"])
+    assert fake.posts("/adapters")[-1] == (True, {"adapters": ["a2a", "webhook"]})
+    assert "a2a, webhook" in fake.run("group", "adapters", GID, "a2a", "webhook").stdout
+    shown = fake.run("group", "adapters", GID, "--follow-config").stdout
+    assert fake.posts("/adapters")[-1] == (True, {"adapters": None})
+    assert "follows the config" in shown
+    # Names, or --follow-config: one of the two.
+    assert fake.json("group", "adapters", GID)[0] == 2
+    assert fake.json("group", "adapters", GID, "a2a", "--follow-config")[0] == 2
+
+
 def test_the_group_commands_say_who_they_are_for() -> None:
-    for command in ("role", "transfer", "policy"):
+    for command in ("role", "transfer", "policy", "adapters"):
         shown = runner.invoke(cli.app, ["group", command, "--help"], env={"COLUMNS": "400"})
         assert "HUMAN ONLY" in shown.stdout
 

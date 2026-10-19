@@ -261,7 +261,11 @@ scenarios are in `harness/tests/`.
   that is about one host itself carries `@pytest.mark.hosts("daemon")`.
 - **Waits.** `node.wait(predicate)` wakes on a change pulse from any node of
   the cluster, since predicates often read another node's state, and it
-  clears the pulses before checking, so no change is missed. A handler's own
+  clears the pulses before checking, so no change is missed. Once the
+  predicate holds it gives the adapters' event workers a bounded number of
+  loop turns to hand over what was recorded; an event still waiting after
+  that fails the test as a stuck event worker, unless the scenario sets
+  `node.events_may_fail` (an adapter that is down, a failpoint). A handler's own
   state (a list an SDK handler appends to) has no pulse: poll it with a loop
   of `asyncio.sleep(0)` under `asyncio.wait_for`. `FakeClock.sleepers` counts
   pauses before a retry, not deadlines (`sleep(..., deadline=True)`, such as

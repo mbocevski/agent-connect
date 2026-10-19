@@ -265,6 +265,10 @@ async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
         ("POST", "/v0/groups/x/messages", {"text": "t"}, "agent", 404, "not_found"),
         ("POST", "/v0/groups/x/members/y/verify", {"verified": "yes"}, "human", 400, "bad_request"),
         ("POST", "/v0/approvals/nope/approve", None, "human", 404, "not_found"),
+        ("PUT", "/v0/groups/x/adapters", {"adapters": None}, "agent", 403, "human_only"),
+        ("PUT", "/v0/groups/x/adapters", {"adapters": None}, "human", 404, "not_found"),
+        ("PUT", "/v0/groups/x/adapters", {"adapters": "recording"}, "human", 400, "bad_request"),
+        ("PUT", "/v0/groups/x/adapters", {}, "human", 400, "bad_request"),
     ],
 )
 async def test_api_errors(  # noqa: PLR0913, PLR0917
@@ -280,6 +284,28 @@ async def test_api_errors(  # noqa: PLR0913, PLR0917
     api = await serve(cluster, "e", sockdir, auto_approve=False)
     got, err = await api.call(method, path, body, scope=token)
     assert (got, err["code"]) == (status, code)
+    await api.server.stop()
+
+
+async def test_the_human_pins_a_groups_adapters(cluster: Cluster, sockdir: Path) -> None:
+    api = await serve(cluster, "p", sockdir, auto_approve=False)
+    gid = api.node.daemon.create_group("Pins", "Adapters")
+    await api.node.idle()
+    path = f"/v0/groups/{gid}/adapters"
+    status, out = await api.call("PUT", path, {"adapters": ["recording"]}, "human")
+    assert (status, out) == (
+        200,
+        {"group_id": gid, "adapters": ["recording"], "delivers_to": ["recording"]},
+    )
+    status, info = await api.call("GET", f"/v0/groups/{gid}")
+    assert (info["adapters"], info["delivers_to"]) == (["recording"], ["recording"])
+    status, err = await api.call("PUT", path, {"adapters": ["webhook"]}, "human")
+    assert (status, err["code"]) == (400, "bad_request")
+    assert "webhook" in err["message"]
+    status, err = await api.call("PUT", path, {"adapters": []}, "human")
+    assert (status, err["code"]) == (400, "bad_request")
+    status, out = await api.call("PUT", path, {"adapters": None}, "human")
+    assert (status, out["adapters"], out["delivers_to"]) == (200, None, ["recording"])
     await api.server.stop()
 
 

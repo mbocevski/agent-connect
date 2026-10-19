@@ -27,6 +27,8 @@ async def pair(cluster: Cluster, sockdir: Path, **kw: Any) -> tuple[Node, Headle
     gid = alice.daemon.create_group("Ops", "Plan the offsite")
     await alice.idle()
     bob = await headless(cluster, "bob", sockdir, **kw)
+    # Bob's webhook may be down (started=False): its events wait.
+    bob.node.events_may_fail = not kw.get("started", True)
     await cluster.invite(alice, bob.node, gid)
     return alice, bob, gid
 

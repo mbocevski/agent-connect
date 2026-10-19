@@ -72,21 +72,21 @@ def runtime(
     )
 
 
-def test_the_registry_binds_groups_by_name_and_closes_at_start() -> None:
+def test_the_registry_holds_adapters_by_name_and_closes_at_start() -> None:
     a, b = RecordingAdapter("a"), RecordingAdapter("b")
     reg = AdapterRegistry([a])
     reg.register(b)
     with pytest.raises(ValueError, match="already registered"):
         reg.register(RecordingAdapter("a"))
-    assert reg.bound("b") is b
-    assert reg.bound("gone") is a  # unbound groups deliver to the first
+    assert reg.get("b") is b
+    assert reg.first() is a  # a group none of whose adapters is here delivers to it
     assert list(reg) == ["a", "b"]
     assert len(reg) == 2
     assert reg["a"] is a
     reg.close()
     with pytest.raises(RuntimeError, match="before the runtime starts"):
         reg.register(RecordingAdapter("c"))
-    assert AdapterRegistry().bound("x") is None
+    assert AdapterRegistry().first() is None
 
 
 def test_a_token_digest_matches_without_keeping_the_token(tmp_path: Path) -> None:

@@ -260,7 +260,9 @@ _GROUP_INFO: dict[str, Any] = {
     "policy": "object",
     "out_of_sync": "bool",
     "out_of_sync_reason": Opt("str"),
-    "adapter": "str",
+    "adapters": Opt(["str"]),
+    "delivers_to": ["str"],
+    "delivery_held": "bool",
     "trust_state": {"self": "str", "verified_members": "int", "members": "int"},
     "leaving": Opt({"since": "int", "blocked": "bool"}),
     "policy_summary": {
@@ -752,6 +754,20 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         human=True,
     ),
     RouteSpec(
+        "PUT",
+        "/v0/groups/{gid}/adapters",
+        "_set_adapters",
+        "Pin the adapters the group delivers its messages and events to, in order, or "
+        "`null` to follow `daemon.adapters` again (the default). Each must be an adapter "
+        "this runtime has, at most once; `400 bad_request` otherwise. Every adapter gets "
+        "every message and keeps its own delivery state; the first one with an Agent Card "
+        "sends it. This decides which endpoints receive the group's plaintext, so only "
+        "the human token may. See [config.md](config.md).",
+        request={"adapters": Opt(["str"])},
+        response={"group_id": "str", "adapters": Opt(["str"]), "delivers_to": ["str"]},
+        human=True,
+    ),
+    RouteSpec(
         "GET",
         "/v0/audit",
         "_audit",
@@ -965,13 +981,15 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "`repeated_violations`): they would tell the agent, and so a peer, what the "
         "policy did. Nor does it see "
         "the knocks your listing received (`knock_received`, `knock_approved`, "
-        "`knock_rejected`, `knock_expired`, `knock_approval_failed`), or "
-        "`invite_flooded` (one of your invites gets more join requests than it can hold) "
-        "and `join_ledger_full` (the join ledger itself is full). "
+        "`knock_rejected`, `knock_expired`, `knock_approval_failed`), "
+        "`invite_flooded` (one of your invites gets more join requests than it can hold), "
+        "`join_ledger_full` (the join ledger itself is full) and where the group's "
+        "deliveries stand (`adapter_unavailable`, `adapter_available`, "
+        "`delivery_stalled`, `delivery_resumed`). "
         "With "
         "`Accept: text/event-stream` it is instead a Server-Sent Events stream "
         "of messages and events from a durable feed (needs "
-        '`daemon.default_adapter = "sse"`, else `409 no_sse_adapter`): each '
+        '`"sse"` in `daemon.adapters`, else `409 no_sse_adapter`): each '
         "frame has `id` (the feed sequence number), `event` and one line of "
         "JSON `data`, in the payload shape of the webhook adapter. Send "
         "`Last-Event-ID` to resume after that id, also after a daemon restart; "
@@ -1005,7 +1023,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "and they are queued again unless acknowledged with `POST /v0/deliveries/ack`. "
         "`more` is true when more are queued. At most 4 polls per token wait at once; "
         "another answers `429 busy`. Needs "
-        '`daemon.default_adapter = "mcp"` (the MCP host sets it), else `409 no_deliveries`.',
+        '`"mcp"` in `daemon.adapters` (the MCP host sets it), else `409 no_deliveries`.',
         query="`group`: only that group. `addressed_only`: `1` or `0` (default 0). "
         "`timeout`: seconds to wait, 0 to 60 (default 0).",
         response={
@@ -1150,7 +1168,7 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (
         409,
         "no_deliveries",
-        "Deliveries: this runtime has no delivery queue (`daemon.default_adapter` isn't `mcp`).",
+        "Deliveries: this runtime has no delivery queue (`daemon.adapters` has no `mcp`).",
     ),
     (
         409,
@@ -1353,6 +1371,14 @@ class ApiServer:
         if p.get(SCOPE) == "human":
             return self.daemon.safety_settings(p["gid"])
         return await self.agent.safety(p["gid"])
+
+    async def _set_adapters(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        if "adapters" not in b:
+            raise ApiError(400, "bad_request", "adapters is required (a list of names, or null)")
+        names = b["adapters"]
+        if names is not None and not isinstance(names, list):
+            raise ApiError(400, "bad_request", "adapters must be a list of names, or null")
+        return self.daemon.set_adapters(p["gid"], names)
 
     async def _set_safety(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         changes = b.get("set")
@@ -1621,7 +1647,7 @@ class ApiServer:
             return {"events": self.daemon.store.events(after, group_id=group)}
         hub = self.daemon.adapters.get("sse")
         if not isinstance(hub, SseAdapter):
-            raise ApiError(409, "no_sse_adapter", 'set daemon.default_adapter = "sse"')
+            raise ApiError(409, "no_sse_adapter", 'add "sse" to daemon.adapters')
         if group is not None and self.daemon.store.group(group) is None:
             raise ApiError(404, "not_found", "no such group")
         peer = self.gate.peer_uid()
@@ -1634,7 +1660,7 @@ class ApiServer:
     def _queue(self) -> DeliveryQueue:
         queue = self.daemon.adapters.get("mcp")
         if not isinstance(queue, DeliveryQueue):
-            raise ApiError(409, "no_deliveries", 'set daemon.default_adapter = "mcp"')
+            raise ApiError(409, "no_deliveries", 'add "mcp" to daemon.adapters')
         return queue
 
     async def _deliveries(self, p: dict[str, str], _b: dict[str, Any]) -> Any:

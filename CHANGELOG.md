@@ -10,6 +10,38 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Runtime, daemon and CLI: a group delivers its messages and events to
+  several adapters (docs/config.md, "Several adapters"), such as the A2A
+  facade next to a webhook agent, whose replies the facade never saw
+  before. `daemon.adapters = ["a2a", "webhook"]` lists them, in order;
+  `daemon.default_adapter` stays as its one-element form (set one of the
+  two). The human pins a group's own list, or unpins it, with `PUT
+  /v0/groups/{gid}/adapters` (`{"adapters": [...] | null}`, human token
+  only: it decides which endpoints receive the group's plaintext) or
+  `agentconnect group adapters <group> <name>... | --follow-config`. Group
+  info reports `adapters` (the pinned list, or `null`), `delivers_to` and
+  `delivery_held`. Each adapter has its own delivery state: it gets every
+  message in order and is marked once it took it (checked for each row,
+  so an adapter taken out of the list gets nothing more), a `RETRY` backs
+  off only that group's deliveries to that adapter, and a message is done
+  (its plaintext deleted) once every adapter of the group has it. One
+  adapter is triggered by a message and the others get it as context: the
+  one that sent the message it replies to, else the first whose agent
+  answers (the A2A facade alone answers only replies to its own
+  requests), so two answering adapters don't double the replies. Events
+  go to every adapter, in order, from a worker per group and adapter, so
+  one that is slow or never returns holds up neither inbound processing
+  nor the other adapters; one that fails is told again after a backoff.
+  They are in order per adapter, not in order with the messages. Events
+  only the human sees (the safety policy's, the knocks, the delivery
+  events) are recorded as handed over, so none reaches an adapter, also
+  after a crash. The first adapter with an Agent Card sends it. A listed adapter the
+  runtime doesn't run is skipped with a warning (`adapter_not_registered`);
+  a group none of whose listed adapters runs is held instead, never sent
+  elsewhere, and the human hears of it (`adapter_unavailable`, then
+  `adapter_available`). The daemon warns at start when `[a2a]` is set but
+  `daemon.adapters` lists other adapters and not `a2a`. The embedded SDK
+  and the MCP-spawned runtime keep their one adapter.
 - Demos: `just demo` and `just demo-group` run whole deployments in docker
   compose (`demo/`), a relay and one host per agent on its own network,
   with stub models by default (`AC_EXAMPLE_MODEL=real` and
@@ -853,6 +885,21 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`sas`, `group_sas`); the run events (`sas_requested`, `sas_paired`,
   `sas_code`, `sas_aborted`, `sas_unpaired`, `sas_stopped`,
   `verifications_reset`) are the human's only.
+- Runtime: the relay is acked once a message is recorded in the inbox,
+  not once an adapter took it (ADR-004 amendment), so an adapter that is
+  down no longer keeps frames unacked at the relay. Up to a limit: past 64
+  MiB of a group's pending plaintext, or 7 days for its oldest, the group
+  is no longer acked early, so the relay mailbox fills and `queue_overflow`
+  puts it out of sync as before; the human hears which adapters are behind
+  (`delivery_stalled`, then `delivery_resumed`). An upgraded database pins
+  each group bound to an adapter the config doesn't give it to that
+  adapter, and the others follow the config (`group_adapter_pinned` in the
+  log). Group info's `adapter` is replaced by `adapters`, `delivers_to` and
+  `delivery_held`.
+  `daemon.default_adapter` now refuses a name that isn't an adapter
+  (`webhook`, `sse`, `mcp`, `a2a` or `none`), and `a2a` in the list needs
+  `a2a.local_agent_url` or `a2a.facade_port`. ADR-005 is amended: a group
+  no longer delivers to exactly one adapter.
 - Examples: the Claude Agent SDK and LangGraph examples use a stub model by
   default and the real one with `AC_EXAMPLE_MODEL=real`, answer only
   questions addressed to them (text that ends with `?`) so two agents

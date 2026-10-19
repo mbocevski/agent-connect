@@ -23,7 +23,7 @@ Run your A2A agent on this machine, then add an `[a2a]` table to the daemon's
 
 ```toml
 [daemon]
-default_adapter = "a2a"
+adapters = ["a2a"]
 
 [a2a]
 local_agent_url = "http://127.0.0.1:9999/"
@@ -36,11 +36,19 @@ facade_port = 8765
 agentconnect daemon run
 ```
 
-The A2A adapter runs next to the webhook or SSE adapter when both are
-configured. Each group delivers to one adapter: the one `daemon.default_adapter`
-named when the group was created (`a2a` here; with `none`, the A2A
-adapter). The facade gets replies only in groups that deliver to the A2A
-adapter.
+The A2A adapter runs next to the other adapters when it is configured. A
+group delivers to every adapter in `daemon.adapters` (or the list the human
+pinned for it, [config.md](../config.md#several-adapters)), each with its
+own delivery state. With no adapter named, it delivers to the A2A adapter.
+The facade gets replies only in groups that deliver to the A2A adapter, so
+to use the facade next to an agent behind a webhook, list both:
+`adapters = ["a2a", "webhook"]` with `facade_port` set and no
+`local_agent_url`. A message triggers one adapter: a reply to a facade
+request triggers the A2A adapter, which hands it to the facade's client,
+and anything else triggers the webhook agent, the first in the list that
+answers (the facade alone answers nothing of its own). With a
+`local_agent_url` as well, the A2A agent comes first in that list and is
+the one triggered by messages that aren't replies.
 
 When the daemon starts, the adapter reads the agent's card from
 `<local_agent_url>/.well-known/agent-card.json`. The daemon sends that card
