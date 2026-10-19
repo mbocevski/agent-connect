@@ -22,7 +22,7 @@ from agentconnect import provision
 from agentconnect.cli import app
 from agentconnect.cli_json import SCHEMAS
 from agentconnect.config import Config
-from agentconnect.keystore import DataDirLock, FileKeystore
+from agentconnect.keystore import DataDirLock, FileKeystore, KeystoreError
 from agentconnect.provision import ProvisionError
 from agentconnect.shapes import conforms
 
@@ -292,3 +292,37 @@ def test_the_cli_json_shapes_and_exit_codes(
     assert conforms(imported, SCHEMAS["identity import"])
     result = run(target, "identity", "import", str(out), "--code", made["code"], "--json")
     assert (result.exit_code, json.loads(result.stdout)["error"]["code"]) == (2, "not_empty")
+
+
+def test_a_failed_write_leaves_no_file(
+    source: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(_fd: int, _data: Any) -> int:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(provision.os, "write", full)
+    with pytest.raises(OSError, match="No space"):
+        provision.export_identity(source, tmp_path / "id.export")
+    assert not (tmp_path / "id.export").exists()
+
+
+def test_the_cli_refuses_a_file_that_is_no_export_before_asking(tmp_path: Path) -> None:
+    junk = tmp_path / "junk"
+    junk.write_bytes(b"not an export")
+    result = run(write_config(tmp_path / "replica"), "identity", "import", str(junk))
+    assert result.exit_code == 1
+    assert "not an identity export" in result.output
+    assert "Export code" not in result.output
+
+
+def test_the_cli_reports_a_keystore_failure(
+    source: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: Any) -> dict[str, Any]:
+        msg = "keyring read failed"
+        raise KeystoreError(msg)
+
+    monkeypatch.setattr(provision, "export_identity", broken)
+    result = run(write_config(source.data_dir), "identity", "export", "--out", "x", "--json")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]["code"] == "keystore"

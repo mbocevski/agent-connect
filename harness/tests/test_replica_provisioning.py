@@ -145,6 +145,9 @@ async def test_a_replica_provisioned_by_the_cli_joins_by_a_replica_invite_and_is
             agent.request, "POST", f"/v0/groups/{gid}/invites", {"replica": True}
         )
     assert (refused.value.status, refused.value.code) == (403, "human_only")
+    with pytest.raises(ApiClientError) as refused:
+        await asyncio.to_thread(agent.request, "POST", f"/v0/groups/{gid}/invites", {"replica": 1})
+    assert (refused.value.status, refused.value.code) == (400, "bad_request")
     code, invite = await asyncio.to_thread(
         cli, x_cli, "invite", "create", "--group", gid, "--replica"
     )
