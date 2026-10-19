@@ -504,6 +504,23 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_welcomes_shorter_than_nonce_and_tag_are_refused() {
+        let s = link();
+        let wrapped = s
+            .wrap_welcome(&Rng::for_test("short-welcome"), b"")
+            .unwrap();
+        assert_eq!(wrapped.len(), NONCE_LEN + 16);
+        assert_eq!(s.unwrap_welcome(&wrapped).unwrap(), b"");
+        for len in [0, 1, NONCE_LEN - 1, NONCE_LEN, NONCE_LEN + 15] {
+            assert_eq!(
+                s.unwrap_welcome(&wrapped[..len]),
+                Err(Error::WelcomeAuth),
+                "{len} bytes"
+            );
+        }
+    }
+
+    #[test]
     fn keys_are_label_separated() {
         let s = link();
         assert_ne!(*s.join_key(), *s.welcome_key());
@@ -537,6 +554,12 @@ mod tests {
         clock.advance(Duration::from_secs(60));
         assert!(inv.is_expired(&clock));
         assert!(Invite::create(&rng, &clock, "r", MAX_TTL + Duration::from_secs(1)).is_err());
+        // Seven days is the longest lifetime, and it is allowed.
+        let longest = Invite::create(&rng, &clock, "r", MAX_TTL).unwrap();
+        assert_eq!(
+            longest.expires_at(),
+            clock.unix_millis() / 1000 + 7 * 24 * 3600
+        );
         assert!(Invite::create(&rng, &clock, "r", Duration::ZERO).is_err());
         assert!(Invite::create(&rng, &clock, "bad host", DEFAULT_TTL).is_err());
         let restored = Invite::from_parts("r".into(), inv.secret().clone(), inv.expires_at());

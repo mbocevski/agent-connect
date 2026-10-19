@@ -336,6 +336,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn the_duplicate_key_check_says_what_it_expected() {
+        // serde puts this in a type error; no JSON input reaches one.
+        let expected: &dyn serde::de::Expected = &UniqueKeysVisitor;
+        assert_eq!(expected.to_string(), "a JSON value");
+    }
+
+    #[test]
     fn jcs_sorts_keys_and_escapes_like_rfc_8785() {
         let v = json!({"b": [1, true, null], "a": "x\u{1}\"\\\n", "\u{e9}": -3, "Z": {}});
         let out = String::from_utf8(jcs(&v).unwrap()).unwrap();

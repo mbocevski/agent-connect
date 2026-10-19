@@ -1,0 +1,28 @@
+# cargo-mutants configuration (`just nightly-mutants`, the nightly `mutants`
+# matrix). https://mutants.rs/
+
+# nextest runs each test in its own process, in parallel; the `mutants`
+# profile (.config/nextest.toml) stops at the first failing test.
+test_tool = "nextest"
+additional_cargo_test_args = ["--profile=mutants"]
+
+# The nightly job runs the mutants in shards (`--shard k/n`). Round-robin
+# spreads every file over all shards, so they take about as long.
+sharding = "round-robin"
+
+# Mutants that can't change behaviour, each with the reason. Never list one
+# that a test could catch.
+exclude_re = [
+    # Any seed is a valid one; a run can't tell which one it was given.
+    'core/src/rng\.rs:.*: replace test_seed -> u64 with ',
+    # `hi << 4` has a zero low nibble and `lo` is below 16: `|` and `^` agree.
+    'core/src/encoding\.rs:.*: replace \| with \^ in hex_decode$',
+    # A port with a `:` fails the all-digits check that follows.
+    'core/src/identity\.rs:.*: replace match guard !p\.contains\(.:.\) with true in canonical_relay_host$',
+    # A port never starts with `0`, so the number is never 0.
+    'core/src/identity\.rs:.*: replace > with >= in canonical_relay_host$',
+    # The own-commit echo check (column 48; the other `&&` is tested): only our
+    # confirmed commit, which has both properties, matches the stored hash, so
+    # any other message just costs a lookup.
+    'core/src/group\.rs:[0-9]+:48: replace && with \|\| in Group::process_inner$',
+]

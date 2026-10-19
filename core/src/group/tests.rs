@@ -938,3 +938,71 @@ fn welcome_policy_must_list_an_owner_who_need_not_be_a_member() {
         }
     }
 }
+
+/// A decrypted message prints its sender, epoch and length, never its body
+/// (AGENTS.md: no message bodies in logs).
+#[test]
+fn an_application_message_prints_no_body() {
+    let (cs, mut gs) = trio();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "v": 0,
+        "sender": cs[0].instance().identity(),
+        "instance_id": cs[0].instance().cert().instance_id_hex(),
+        "body": {"text": "BODY-MARKER-not-for-logs"},
+    }))
+    .unwrap();
+    let ct = gs[0].seal(&cs[0], &body).unwrap();
+    let m = gs[1].open(&cs[1], &ct).unwrap();
+    let dbg = format!("{m:?}");
+    assert!(dbg.starts_with("ApplicationMessage {"));
+    assert!(dbg.contains(cs[0].instance().identity()));
+    assert!(dbg.contains(&format!("epoch: {}", m.epoch)));
+    assert!(dbg.contains(&format!("len: {}", body.len())));
+    assert!(!dbg.contains("BODY-MARKER"));
+}
+
+/// SPEC §7.1: only application messages are padded to a bucket. A leave
+/// proposal sent after a large message is not padded to that message's
+/// bucket.
+#[test]
+fn a_leave_after_a_large_message_is_not_padded() {
+    let (cs, mut gs) = trio();
+    let fresh = gs[2].propose_leave(&cs[2]).unwrap();
+    let large = serde_json::to_vec(&serde_json::json!({
+        "v": 0,
+        "sender": cs[1].instance().identity(),
+        "instance_id": cs[1].instance().cert().instance_id_hex(),
+        "body": {"text": "x".repeat(5000)},
+    }))
+    .unwrap();
+    assert!(gs[1].seal(&cs[1], &large).unwrap().len() > crate::padding::BUCKETS[3]);
+    let after = gs[1].propose_leave(&cs[1]).unwrap();
+    assert!(fresh.len() < crate::padding::BUCKETS[1], "{}", fresh.len());
+    assert_eq!(after.len(), fresh.len());
+}
+
+/// Only a member's Remove of its own leaf is a leave (SPEC §9.2): a Remove
+/// of another leaf in the proposal store, here one built with raw OpenMLS,
+/// is not.
+#[test]
+fn a_stored_remove_of_another_leaf_is_not_a_leave() {
+    let (cs, mut gs) = trio();
+    let signer = cs[1].signer();
+    gs[1]
+        .mls
+        .propose_remove_member(&cs[1].provider, &signer, LeafNodeIndex::new(2))
+        .unwrap();
+    assert!(gs[1].has_pending_proposals());
+    assert_eq!(gs[1].pending_leaves().unwrap(), vec![]);
+}
+
+/// The relay fans a member's own messages back to it: its own application
+/// message and its own leave proposal are echoes, not commits to check.
+#[test]
+fn own_messages_come_back_as_echoes() {
+    let (cs, mut gs) = trio();
+    let ct = gs[1].seal(&cs[1], &inner(&cs[1])).unwrap();
+    assert_eq!(gs[1].process(&cs[1], &ct), Ok(Event::OwnEcho));
+    let leave = gs[1].propose_leave(&cs[1]).unwrap();
+    assert_eq!(gs[1].process(&cs[1], &leave), Ok(Event::OwnEcho));
+}

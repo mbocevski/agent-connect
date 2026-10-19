@@ -620,6 +620,9 @@ mod tests {
             ("Relay.TEST:8443", Some("relay.test:8443")),
             ("[::1]:8080", Some("[::1]:8080")),
             ("[FE80::1]", Some("[fe80::1]")),
+            ("[::]", Some("[::]")),
+            ("[::]:443", Some("[::]:443")),
+            ("[2001:DB8::1]:8443", Some("[2001:db8::1]:8443")),
             ("relay.test:443", Some("relay.test:443")),
             ("user@relay.test", None),
             ("relay.test/x", None),
@@ -694,10 +697,32 @@ mod tests {
     fn debug_output_has_no_secrets() {
         let (id, inst) = instance();
         let secret = b64(id.secret_bytes().as_slice());
-        let dbg = format!("{id:?} {inst:?} {:?}", inst.cert());
-        assert!(!dbg.contains(&secret));
-        assert!(dbg.contains(&id.id()));
-        assert!(!dbg.contains("sig:"));
+        let sk = b64(inst.to_secret_bytes().unwrap().as_slice());
+        let sig = b64(&inst.cert().sig);
+        let instance_id = inst.cert().instance_id_hex();
+        // Each type names itself and what identifies it, and nothing secret.
+        for (dbg, name, shown) in [
+            (format!("{id:?}"), "Identity", vec![id.id()]),
+            (
+                format!("{inst:?}"),
+                "Instance",
+                vec![id.id(), instance_id.clone()],
+            ),
+            (
+                format!("{:?}", inst.cert()),
+                "InstanceCert",
+                vec![id.id(), instance_id.clone()],
+            ),
+        ] {
+            assert!(dbg.starts_with(&format!("{name} {{")), "{name}");
+            for s in shown {
+                assert!(dbg.contains(&s), "{name}");
+            }
+            for secret in [&secret, &sk, &sig] {
+                assert!(!dbg.contains(secret.as_str()), "{name} prints a secret");
+            }
+            assert!(!dbg.contains("sig:"));
+        }
     }
 
     #[test]

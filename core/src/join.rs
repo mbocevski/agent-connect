@@ -211,6 +211,15 @@ mod tests {
     }
 
     #[test]
+    fn display_names_have_at_most_80_characters() {
+        assert_eq!(check_display_name(&"\u{e9}".repeat(80)), Ok(()));
+        assert_eq!(
+            check_display_name(&"b".repeat(81)),
+            Err(Error::Malformed("display_name"))
+        );
+    }
+
+    #[test]
     fn json_round_trips_and_validates() {
         let r = req();
         let json = r.to_json().unwrap();

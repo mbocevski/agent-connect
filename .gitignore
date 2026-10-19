@@ -28,3 +28,6 @@ lcov.info
 .idea/
 .vscode/
 .DS_Store
+
+# cargo-mutants output
+/mutants.out*/

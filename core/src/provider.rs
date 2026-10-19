@@ -1507,95 +1507,222 @@ mod tests {
         use sealed::Backend as _;
         let store = SqliteStore::open_in_memory().unwrap();
         let s = store.inner();
-        let t = T(b"value".to_vec());
+        let (k, v) = (T(b"key".to_vec()), T(b"value".to_vec()));
         store.begin().unwrap();
-        s.write_tree(&t, &t).unwrap();
+        s.write_tree(&k, &v).unwrap();
         store.rollback().unwrap();
-        assert_eq!(s.tree::<T, T>(&t).unwrap(), None);
-        s.write_tree(&t, &t).unwrap();
+        assert_eq!(s.tree::<T, T>(&k).unwrap(), None);
+        s.write_tree(&k, &v).unwrap();
         assert_eq!(
             SqliteStorageProvider::<JsonCodec, &Connection>::new(&store.mls.conn)
-                .tree::<T, T>(&t)
+                .tree::<T, T>(&k)
                 .unwrap(),
-            Some(t.clone())
+            Some(v.clone())
         );
-        s.write_mls_join_config::<T, T>(&t, &t).unwrap();
-        s.append_own_leaf_node::<T, T>(&t, &t).unwrap();
-        s.queue_proposal::<T, T, T>(&t, &t, &t).unwrap();
-        s.write_tree::<T, T>(&t, &t).unwrap();
-        s.write_interim_transcript_hash::<T, T>(&t, &t).unwrap();
-        s.write_context::<T, T>(&t, &t).unwrap();
-        s.write_confirmation_tag::<T, T>(&t, &t).unwrap();
-        s.write_group_state::<T, T>(&t, &t).unwrap();
-        s.write_message_secrets::<T, T>(&t, &t).unwrap();
-        s.write_resumption_psk_store::<T, T>(&t, &t).unwrap();
-        s.write_own_leaf_index::<T, T>(&t, &t).unwrap();
-        s.write_group_epoch_secrets::<T, T>(&t, &t).unwrap();
-        s.write_signature_key_pair::<T, T>(&t, &t).unwrap();
-        s.write_encryption_key_pair::<T, T>(&t, &t).unwrap();
-        s.write_encryption_epoch_key_pairs::<T, T, T>(&t, &t, 0, std::slice::from_ref(&t))
+    }
+
+    /// Writes one value through every setter of the delegating provider.
+    fn write_everything(s: &SqliteMls, k: &T, v: &T) {
+        s.write_mls_join_config::<T, T>(k, v).unwrap();
+        s.append_own_leaf_node::<T, T>(k, v).unwrap();
+        s.queue_proposal::<T, T, T>(k, k, v).unwrap();
+        s.write_tree::<T, T>(k, v).unwrap();
+        s.write_interim_transcript_hash::<T, T>(k, v).unwrap();
+        s.write_context::<T, T>(k, v).unwrap();
+        s.write_confirmation_tag::<T, T>(k, v).unwrap();
+        s.write_group_state::<T, T>(k, v).unwrap();
+        s.write_message_secrets::<T, T>(k, v).unwrap();
+        s.write_resumption_psk_store::<T, T>(k, v).unwrap();
+        s.write_own_leaf_index::<T, T>(k, v).unwrap();
+        s.write_group_epoch_secrets::<T, T>(k, v).unwrap();
+        s.write_signature_key_pair::<T, T>(k, v).unwrap();
+        s.write_encryption_key_pair::<T, T>(k, v).unwrap();
+        s.write_encryption_epoch_key_pairs::<T, T, T>(k, k, 0, std::slice::from_ref(v))
             .unwrap();
-        s.write_key_package::<T, T>(&t, &t).unwrap();
-        s.write_psk::<T, T>(&t, &t).unwrap();
-        s.queued_proposal_refs::<T, T>(&t).unwrap();
-        s.queued_proposals::<T, T, T>(&t).unwrap();
-        assert!(
-            s.mls_group_join_config::<T, T>(&t).is_ok(),
-            "mls_group_join_config"
-        );
-        assert!(s.own_leaf_nodes::<T, T>(&t).is_ok(), "own_leaf_nodes");
-        assert!(s.tree::<T, T>(&t).is_ok(), "tree");
-        assert!(s.group_context::<T, T>(&t).is_ok(), "group_context");
-        assert!(
-            s.interim_transcript_hash::<T, T>(&t).is_ok(),
-            "interim_transcript_hash"
-        );
-        assert!(s.confirmation_tag::<T, T>(&t).is_ok(), "confirmation_tag");
-        assert!(s.group_state::<T, T>(&t).is_ok(), "group_state");
-        assert!(s.message_secrets::<T, T>(&t).is_ok(), "message_secrets");
-        assert!(
-            s.resumption_psk_store::<T, T>(&t).is_ok(),
-            "resumption_psk_store"
-        );
-        assert!(s.own_leaf_index::<T, T>(&t).is_ok(), "own_leaf_index");
-        assert!(
-            s.group_epoch_secrets::<T, T>(&t).is_ok(),
-            "group_epoch_secrets"
-        );
-        assert!(
-            s.signature_key_pair::<T, T>(&t).is_ok(),
-            "signature_key_pair"
-        );
-        assert!(
-            s.encryption_key_pair::<T, T>(&t).is_ok(),
-            "encryption_key_pair"
-        );
-        assert!(
-            s.encryption_epoch_key_pairs::<T, T, T>(&t, &t, 0).is_ok(),
-            "encryption_epoch_key_pairs"
-        );
-        assert!(s.key_package::<T, T>(&t).is_ok(), "key_package");
-        assert!(s.psk::<T, T>(&t).is_ok(), "psk");
-        s.remove_proposal::<T, T>(&t, &t).unwrap();
-        s.delete_own_leaf_nodes::<T>(&t).unwrap();
-        s.delete_group_config::<T>(&t).unwrap();
-        s.delete_tree::<T>(&t).unwrap();
-        s.delete_confirmation_tag::<T>(&t).unwrap();
-        s.delete_group_state::<T>(&t).unwrap();
-        s.delete_context::<T>(&t).unwrap();
-        s.delete_interim_transcript_hash::<T>(&t).unwrap();
-        s.delete_message_secrets::<T>(&t).unwrap();
-        s.delete_all_resumption_psk_secrets::<T>(&t).unwrap();
-        s.delete_own_leaf_index::<T>(&t).unwrap();
-        s.delete_group_epoch_secrets::<T>(&t).unwrap();
-        s.clear_proposal_queue::<T, T>(&t).unwrap();
-        s.delete_signature_key_pair::<T>(&t).unwrap();
-        s.delete_encryption_key_pair::<T>(&t).unwrap();
-        s.delete_encryption_epoch_key_pairs::<T, T>(&t, &t, 0)
-            .unwrap();
-        s.delete_key_package::<T>(&t).unwrap();
-        s.delete_psk::<T>(&t).unwrap();
-        assert_eq!(s.tree::<T, T>(&t).unwrap(), None);
+        s.write_key_package::<T, T>(k, v).unwrap();
+        s.write_psk::<T, T>(k, v).unwrap();
+    }
+
+    /// What every getter of the delegating provider returns for `k`, by
+    /// getter name.
+    fn read_everything(s: &SqliteMls, k: &T) -> Vec<(&'static str, Vec<T>)> {
+        let one = |v: Option<T>| v.into_iter().collect::<Vec<_>>();
+        vec![
+            (
+                "mls_group_join_config",
+                one(s.mls_group_join_config::<T, T>(k).unwrap()),
+            ),
+            ("own_leaf_nodes", s.own_leaf_nodes::<T, T>(k).unwrap()),
+            (
+                "queued_proposal_refs",
+                s.queued_proposal_refs::<T, T>(k).unwrap(),
+            ),
+            (
+                "queued_proposals",
+                s.queued_proposals::<T, T, T>(k)
+                    .unwrap()
+                    .into_iter()
+                    .flat_map(|(r, p)| [r, p])
+                    .collect(),
+            ),
+            ("tree", one(s.tree::<T, T>(k).unwrap())),
+            ("group_context", one(s.group_context::<T, T>(k).unwrap())),
+            (
+                "interim_transcript_hash",
+                one(s.interim_transcript_hash::<T, T>(k).unwrap()),
+            ),
+            (
+                "confirmation_tag",
+                one(s.confirmation_tag::<T, T>(k).unwrap()),
+            ),
+            ("group_state", one(s.group_state::<T, T>(k).unwrap())),
+            (
+                "message_secrets",
+                one(s.message_secrets::<T, T>(k).unwrap()),
+            ),
+            (
+                "resumption_psk_store",
+                one(s.resumption_psk_store::<T, T>(k).unwrap()),
+            ),
+            ("own_leaf_index", one(s.own_leaf_index::<T, T>(k).unwrap())),
+            (
+                "group_epoch_secrets",
+                one(s.group_epoch_secrets::<T, T>(k).unwrap()),
+            ),
+            (
+                "signature_key_pair",
+                one(s.signature_key_pair::<T, T>(k).unwrap()),
+            ),
+            (
+                "encryption_key_pair",
+                one(s.encryption_key_pair::<T, T>(k).unwrap()),
+            ),
+            (
+                "encryption_epoch_key_pairs",
+                s.encryption_epoch_key_pairs::<T, T, T>(k, k, 0).unwrap(),
+            ),
+            ("key_package", one(s.key_package::<T, T>(k).unwrap())),
+            ("psk", one(s.psk::<T, T>(k).unwrap())),
+        ]
+    }
+
+    #[test]
+    fn every_value_written_reads_back() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let s = &store.mls;
+        let (k, v) = (T(b"key".to_vec()), T(b"value".to_vec()));
+        write_everything(s, &k, &v);
+        for (getter, got) in read_everything(s, &k) {
+            let want = if getter == "queued_proposal_refs" {
+                vec![k.clone()]
+            } else if getter == "queued_proposals" {
+                vec![k.clone(), v.clone()]
+            } else {
+                vec![v.clone()]
+            };
+            assert_eq!(got, want, "{getter}");
+        }
+        // Another key reads nothing.
+        let other = T(b"other".to_vec());
+        for (getter, got) in read_everything(s, &other) {
+            assert!(got.is_empty(), "{getter} for another key");
+        }
+    }
+
+    /// Every delete and remove of the delegating provider, with the getters
+    /// that must read nothing after it.
+    const REMOVALS: [(&str, &[&str]); 19] = [
+        (
+            "remove_proposal",
+            &["queued_proposal_refs", "queued_proposals"],
+        ),
+        (
+            "clear_proposal_queue",
+            &["queued_proposal_refs", "queued_proposals"],
+        ),
+        ("delete_own_leaf_nodes", &["own_leaf_nodes"]),
+        ("delete_group_config", &["mls_group_join_config"]),
+        ("delete_tree", &["tree"]),
+        ("delete_confirmation_tag", &["confirmation_tag"]),
+        ("delete_group_state", &["group_state"]),
+        ("delete_context", &["group_context"]),
+        (
+            "delete_interim_transcript_hash",
+            &["interim_transcript_hash"],
+        ),
+        ("delete_message_secrets", &["message_secrets"]),
+        (
+            "delete_all_resumption_psk_secrets",
+            &["resumption_psk_store"],
+        ),
+        ("delete_own_leaf_index", &["own_leaf_index"]),
+        ("delete_group_epoch_secrets", &["group_epoch_secrets"]),
+        ("delete_signature_key_pair", &["signature_key_pair"]),
+        ("delete_encryption_key_pair", &["encryption_key_pair"]),
+        (
+            "delete_encryption_epoch_key_pairs",
+            &["encryption_epoch_key_pairs"],
+        ),
+        ("delete_key_package", &["key_package"]),
+        ("delete_psk", &["psk"]),
+        // A delete for another key removes nothing.
+        ("delete_tree (other key)", &[]),
+    ];
+
+    /// Runs the removal `name` of [`REMOVALS`] for `k`.
+    fn remove(s: &SqliteMls, k: &T, name: &str) {
+        match name {
+            "remove_proposal" => s.remove_proposal::<T, T>(k, k),
+            "clear_proposal_queue" => s.clear_proposal_queue::<T, T>(k),
+            "delete_own_leaf_nodes" => s.delete_own_leaf_nodes::<T>(k),
+            "delete_group_config" => s.delete_group_config::<T>(k),
+            "delete_tree" => s.delete_tree::<T>(k),
+            "delete_confirmation_tag" => s.delete_confirmation_tag::<T>(k),
+            "delete_group_state" => s.delete_group_state::<T>(k),
+            "delete_context" => s.delete_context::<T>(k),
+            "delete_interim_transcript_hash" => s.delete_interim_transcript_hash::<T>(k),
+            "delete_message_secrets" => s.delete_message_secrets::<T>(k),
+            "delete_all_resumption_psk_secrets" => s.delete_all_resumption_psk_secrets::<T>(k),
+            "delete_own_leaf_index" => s.delete_own_leaf_index::<T>(k),
+            "delete_group_epoch_secrets" => s.delete_group_epoch_secrets::<T>(k),
+            "delete_signature_key_pair" => s.delete_signature_key_pair::<T>(k),
+            "delete_encryption_key_pair" => s.delete_encryption_key_pair::<T>(k),
+            "delete_encryption_epoch_key_pairs" => {
+                s.delete_encryption_epoch_key_pairs::<T, T>(k, k, 0)
+            }
+            "delete_key_package" => s.delete_key_package::<T>(k),
+            "delete_psk" => s.delete_psk::<T>(k),
+            "delete_tree (other key)" => s.delete_tree::<T>(&T(b"other".to_vec())),
+            _ => unreachable!("{name}"),
+        }
+        .unwrap();
+    }
+
+    #[test]
+    fn every_delete_and_remove_removes() {
+        // Forward secrecy depends on these: OpenMLS deletes the previous
+        // epoch's keys, used KeyPackages and a left group's secrets
+        // through them, so each must really remove its row.
+        let store = SqliteStore::open_in_memory().unwrap();
+        let s = &store.mls;
+        let (k, v) = (T(b"key".to_vec()), T(b"value".to_vec()));
+        for (name, gone) in REMOVALS {
+            write_everything(s, &k, &v);
+            remove(s, &k, name);
+            for (getter, got) in read_everything(s, &k) {
+                assert_eq!(
+                    got.is_empty(),
+                    gone.contains(&getter),
+                    "{name}: {getter} = {got:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_sqlite_store_prints_as_its_name() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert_eq!(format!("{store:?}"), "SqliteStore");
     }
 
     #[test]
@@ -1920,6 +2047,37 @@ mod tests {
         assert!(memory_references(b.store_for_testing(), &gid) > 0);
         gb.delete(&b).unwrap();
         assert_eq!(memory_references(b.store_for_testing(), &gid), 0);
+    }
+
+    #[test]
+    fn deleting_a_group_keeps_the_others() {
+        // Deleting one group's rows takes nothing of another group or of an
+        // unused KeyPackage, on either store.
+        fn check<T: Store>(b: &Client<T>, a: &Client<MemoryStore>, count: impl Fn(&T) -> usize) {
+            let mut live_a = a.create_group("live", "p").unwrap();
+            let mut live_b = join(a, &mut live_a, b, "live");
+            let gone = ended(a, b, End::RemovedByOther);
+            let inv =
+                Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
+            b.create_join_request(inv.secret(), "b").unwrap();
+            let before = count(b.store_for_testing());
+            gone.delete(b).unwrap();
+            let after = count(b.store_for_testing());
+            assert!(after > 0 && after < before, "{before} -> {after}");
+            epoch_moves(a, &mut live_a, b, &mut live_b);
+            assert_eq!(live_b.epoch(), live_a.epoch());
+        }
+        let clock = Arc::new(FakeClock::default());
+        let a = client(MemoryStore::new(), "keep-a", &clock);
+        let b = client(MemoryStore::new(), "keep-b", &clock);
+        check(&b, &a, MemoryStore::mls_value_count);
+        let a = client(MemoryStore::new(), "keep-sql-a", &clock);
+        let b = client(SqliteStore::open_in_memory().unwrap(), "keep-sql-b", &clock);
+        check(&b, &a, |s| {
+            usize::try_from(rows(s, "openmls_key_packages") + rows(s, "openmls_group_data"))
+                .unwrap()
+        });
+        assert_eq!(rows(b.store_for_testing(), "openmls_key_packages"), 1);
     }
 
     #[test]

@@ -5,3 +5,13 @@ retries = 0
 
 [profile.ci]
 failure-output = "immediate-final"
+
+# cargo-mutants (.cargo/mutants.toml): stop a mutant's test run at the first
+# failure, since one failing test is enough to catch it.
+[profile.mutants]
+fail-fast = true
+# The nightly runners have four cores, where the heaviest core test (the SAS
+# grinding test) can pass 30 s, and a test the limit ends fails the whole
+# shard's baseline. cargo-mutants times each mutant out on its own
+# (five times the baseline), so a hang still ends.
+slow-timeout = { period = "60s", terminate-after = 3 }
