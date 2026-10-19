@@ -319,8 +319,9 @@ most `knock.max_outgoing` (8) knocks wait at once, one per listing, one per
 door in 10 minutes and `knock.per_hour` (20) an hour.
 
 **Waiting.** `agentconnect knock` waits up to `--wait` seconds (by default
-3900, the knock's whole life) and prints the new group's short code when
-the owner's human approves. Only a Welcome is an answer. With no answer by
+3900, the knock's whole life) and prints the new group when the owner's
+human approves; compare the short code with the owner with `agentconnect
+verify <group>`, both of you at once. Only a Welcome is an answer. With no answer by
 `ts + 3900` the knock **lapses** ("no answer", exit 1): its
 `welcome_secret` and its KeyPackage's private keys are deleted. A lapse
 says nothing about why: the owner may have been offline or busy, the knock
@@ -429,7 +430,7 @@ revoked, expires or is used up ([sdk.md](sdk.md#the-humans-part)).
 | `knock_sent` | knocker | `knock_id`, `directory`, `name`, `identity`, `fingerprint`, `owner_state`, `gives_up_at` | both tokens |
 | `knock_failed` | knocker | `knock_id`, `code` (`door_not_open`, `rate_limited`, `stale`, `welcome_invalid`, ...) | both tokens |
 | `knock_lapsed` | knocker | `knock_id`, `directory`, `name` | both tokens |
-| `joined` | knocker | `knock_id`, `listing` (`directory`, `name`, `identity`), `owner_state`, `sas` | both tokens |
+| `joined` | knocker | `knock_id`, `listing` (`directory`, `name`, `identity`), `owner_state` | both tokens |
 | `knock_received` | owner | `request_id`, `directory`, `name`, `identity`, `fingerprint`, `lapses_at` | human |
 | `knock_approved` | owner | `request_id`, `group_id` | human |
 | `knock_rejected` | owner | `request_id` | human |

@@ -23,8 +23,10 @@ directory (:mod:`agentconnect.provision`), and nothing else offers them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
+import re
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -814,11 +816,7 @@ def accept(  # noqa: PLR0913, PLR0917
         if as_json:
             emit_json({**base, **view, "status": "joined"})
             return
-        typer.echo(f"Joined {clean(view['name'])} ({view['group_id']}). The short code now is:")
-        sas = view["sas"]
-        typer.echo(f"  {' '.join(sas['emoji'].split())}")
-        typer.echo(f"  ({', '.join(sas['emoji_names'])})")
-        typer.echo(f"  {sas['decimal']}")
+        typer.echo(f"Joined {clean(view['name'])} ({view['group_id']}).")
         typer.echo(COMPARE_REMINDER.replace("<group>", view["group_id"]))
 
 
@@ -860,7 +858,7 @@ def groups_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
 
 @groups_app.command("show", cls=IdArgsCommand)
 def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
-    """Show a group: members, roles, verified flags, short code, pending approvals."""
+    """Show a group: members, roles, verified flags, pending approvals."""
     with guard(as_json):
         api = connect(config)
         view = group_view(api, resolve_group(api, group))
@@ -875,11 +873,8 @@ def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) 
             f"Verified  {view['verified_summary']}"
             + ("  (required)" if view["require_verified"] else "")
         )
-        if view["sas"]:
-            typer.echo("Short code (compare it with the others over a call or in person):")
-            typer.echo(f"  {view['sas']['emoji']}")
-            typer.echo(f"  ({', '.join(view['sas']['emoji_names'])})")
-            typer.echo(f"  {view['sas']['decimal']}")
+        if view["status"] == "active" and view["trust_state"]["self"] != "verified":
+            typer.echo(COMPARE_REMINDER.replace("<group>", view["group_id"]))
         p, floor = view["policy_summary"], view["floor"]
         typer.echo(
             f"Policy    invite {p['invite']}, remove {p['remove']}, "
@@ -936,7 +931,6 @@ def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
             "identity": a["identity"],
             "fingerprint": a["fingerprint"],
             "received_at": a["received_at"],
-            "group_sas": None,
             "listing": a["listing"],
             "note": a["note"],
             "note_verified": a["note_verified"],
@@ -954,7 +948,6 @@ def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
         "identity": a["identity"],
         "fingerprint": a["fingerprint"],
         "received_at": a["received_at"],
-        "group_sas": Sas.of(info["sas"]).as_json() if "sas" in info else None,
         "identity_requests": int(a.get("identity_requests", 1)),
         "instance_id": a.get("instance_id"),
         "mailbox_id": a.get("mailbox_id", ""),
@@ -1010,10 +1003,6 @@ def _print_approval(v: dict[str, Any], *, as_json: bool = False) -> None:
             as_json=as_json,
         )
     _say(f"  group        {clean(v['group_name'])} ({v['group_id']})", as_json=as_json)
-    if v["group_sas"]:
-        _say(
-            f"  short code   {v['group_sas']['decimal']} (changes once they join)", as_json=as_json
-        )
 
 
 @approvals_app.callback()
@@ -1191,8 +1180,8 @@ def _approve_knock(
             }
         )
         return
-    typer.echo("Approved. Once the agent has joined, compare the short code with its owner")
-    typer.echo(f"over a call or in person, then run `agentconnect verify {out['group_id']}`.")
+    typer.echo("Approved. Once the agent has joined, compare the short code with its owner:")
+    typer.echo(f"both of you run `agentconnect verify {out['group_id']}` on a call or in person.")
 
 
 @approvals_app.command(
@@ -1233,8 +1222,8 @@ def approvals_approve(  # noqa: PLR0913, PLR0917
         if as_json:
             emit_json({"request_id": request_id, "status": "approving", "group_id": v["group_id"]})
         else:
-            typer.echo("Approved. Once they have joined, compare the short code with them over")
-            typer.echo(f"a call or in person, then run `agentconnect verify {v['group_id']}`.")
+            typer.echo("Approved. Once they have joined, compare the short code with them:")
+            typer.echo(f"both of you run `agentconnect verify {v['group_id']}` on a call.")
 
 
 @approvals_app.command(
@@ -1264,53 +1253,244 @@ def approvals_reject(request_id: str, config: ConfigOpt = None, as_json: JsonOpt
 # -- verification (human) -------------------------------------------------------------
 
 
+POLL_SECS = 0.5
+ABORT_TEXT = {
+    "timed_out": "The comparison timed out.",
+    "epoch_changed": "The group changed during the comparison.",
+    "bad_reveal": "The other daemon's reveal didn't match its commitment.",
+    "out_of_order": "The other daemon revealed before it committed.",
+    "peer_restarted": "The other daemon started its side again.",
+    "send_failed": "The relay refused a comparison message.",
+    "proposal_pending": "A member's leave waits for its commit; nothing can be sent until then.",
+    "group_gone": "The group is no longer active.",
+    "failed": "The comparison couldn't start.",
+}
+InstanceOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--instance",
+        help="Compare with this instance of the member only (its id, 16 hex characters, "
+        "from `groups show`).",
+    ),
+]
+
+
+def _pick_member(others: list[dict[str, Any]], ref: str | None) -> dict[str, Any]:
+    """The member to compare with: its identity, fingerprint or display name."""
+    if ref is None:
+        if len(others) == 1:
+            return others[0]
+        names = ", ".join(clean(m["display_name"] or m["identity"]) for m in others)
+        msg = f"name the member to compare codes with, one at a time: {names}"
+        raise CliError("needs_member", msg, EXIT_USAGE)
+    squeezed = ref.replace(" ", "")
+    found = [
+        m
+        for m in others
+        if ref == m["identity"]
+        or squeezed == m["fingerprint"].replace(" ", "")
+        or ref == m["display_name"]
+    ]
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise CliError("not_found", f"{ref!r} is not another member of this group", EXIT_FAILED)
+    msg = f"{ref!r} names {len(found)} members; use the identity or the fingerprint"
+    raise CliError("ambiguous", msg, EXIT_USAGE)
+
+
+def _start_run(
+    api: ApiClient, gid: str, peer: dict[str, Any], instance: str | None, as_json: bool
+) -> dict[str, Any]:
+    path = f"/v0/groups/{gid}/members/{peer['identity']}/sas"
+    body: dict[str, Any] = {} if instance is None else {"instance": instance}
+    try:
+        return dict(api.request("POST", path, body))
+    except ApiClientError as e:
+        if e.code != "sas_stopped":
+            raise
+        _say(clean(e.message), as_json=as_json)
+    if not typer.confirm("Start another comparison anyway?", default=False, err=as_json):
+        raise CliError("sas_stopped", "no comparison started", EXIT_REFUSED)
+    return dict(api.request("POST", path, {**body, "acknowledge": True}))
+
+
+def _offer_mismatch(
+    api: ApiClient, gid: str, info: dict[str, Any], run: str, as_json: bool
+) -> None:
+    if typer.confirm(
+        "Treat this as different codes and leave the group?", default=False, err=as_json
+    ):
+        _mismatch(api, gid, info, as_json, run=run)
+
+
+def _follow_run(
+    api: ApiClient, gid: str, info: dict[str, Any], view: dict[str, Any], as_json: bool
+) -> dict[str, Any]:
+    """Poll the run until it has a code, following restarts in a new epoch."""
+    told = False
+    while True:
+        if view["state"] == "done":
+            return view
+        if view["state"] == "aborted":
+            if view.get("next"):
+                view = api.request("GET", f"/v0/groups/{gid}/sas/runs/{view['next']}")
+                continue
+            _aborted(api, gid, info, view, as_json)
+        if view["unpaired"] and not told:
+            told = True
+            _say(clean(view["unpaired_text"]), as_json=as_json)
+            choice = typer.prompt(
+                "[w]ait, [s]tarted (they say they have started), [d]ifferent codes",
+                default="w",
+                err=as_json,
+            )
+            if choice.strip().lower().startswith("d"):
+                _mismatch(api, gid, info, as_json, run=view["run"])
+            if choice.strip().lower().startswith("s"):
+                path = f"/v0/groups/{gid}/sas/runs/{view['run']}/peer-started"
+                view = api.request("POST", path)
+        cli_support.pause(POLL_SECS)
+        view = api.request("GET", f"/v0/groups/{gid}/sas/runs/{view['run']}")
+
+
+def _aborted(
+    api: ApiClient, gid: str, info: dict[str, Any], view: dict[str, Any], as_json: bool
+) -> None:
+    reason = str(view.get("reason") or "failed")
+    _say(ABORT_TEXT.get(reason, "The comparison ended without a code."), as_json=as_json)
+    if view["warning"]:
+        _say(f"WARNING: {clean(view['warning_text'])}", as_json=as_json)
+        if view.get("committer"):
+            names = {m["identity"]: m["display_name"] for m in info["members"]}
+            who = clean(names.get(view["committer"]) or view["committer"])
+            _say(f"The commit that ended it came from {who}.", as_json=as_json)
+    if view["stopped"]:
+        _say(clean(view["stop_text"]), as_json=as_json)
+        _offer_mismatch(api, gid, info, view["run"], as_json)
+    elif "peer_instance" not in view and view.get("unpaired_text"):
+        # It never paired: one way a fork shows (SPEC 12).
+        _say(clean(view["unpaired_text"]), as_json=as_json)
+        _offer_mismatch(api, gid, info, view["run"], as_json)
+    raise CliError(f"sas_{reason}", "no code: run `agentconnect verify` again", EXIT_FAILED)
+
+
 @app.command(
-    cls=IdArgsCommand, help=f"Compare the short code with the other members. {HUMAN_ONLY_HELP}"
+    cls=IdArgsCommand,
+    help="Compare the short code with one other member: both humans run this at the same "
+    f"time, each for the other. {HUMAN_ONLY_HELP}",
 )
-def verify(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+def verify(
+    group: str,
+    member: Annotated[
+        str | None,
+        typer.Argument(help="The member: identity, fingerprint or display name."),
+    ] = None,
+    instance: InstanceOpt = None,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
     # Interactive on purpose: there is no --yes, so a script can't answer for the human.
     with guard(as_json):
         api = connect(config, human=True)
         gid = resolve_group(api, group)
         info = api.request("GET", f"/v0/groups/{gid}")
         others = [m for m in info["members"] if not m["self"]]
-        if info["status"] != "active" or "sas" not in info:
+        if info["status"] != "active":
             raise CliError("not_active", "this group is no longer active", EXIT_FAILED)
         if not others:
             raise CliError("no_members", "no other members yet; nothing to verify", EXIT_FAILED)
-        sas = Sas.of(info["sas"])
+        peer = _pick_member(others, member)
+        name = clean(peer["display_name"] or peer["identity"])
+        run = _start_run(api, gid, peer, instance, as_json)
+        _say(f"Comparing short codes with {name} in {clean(info['name'])}.", as_json=as_json)
         _say(
-            f"Group {clean(info['name'])}, epoch {info['epoch']}. Your short code:", as_json=as_json
+            f"Ask {name}'s human to run `agentconnect verify` for you on their side now, "
+            "over a call or in person, not over the channel that carried the invite.",
+            as_json=as_json,
         )
+        try:
+            view = _follow_run(api, gid, info, run, as_json)
+        except (KeyboardInterrupt, typer.Abort):
+            with contextlib.suppress(ApiClientError):
+                api.request("POST", f"/v0/groups/{gid}/sas/runs/{run['run']}/cancel")
+            raise
+        sas, labels = Sas.of(view["sas"]), view["labels"]
+        _say("Your short code:", as_json=as_json)
         for line in sas.lines():
             _say(line, as_json=as_json)
-        _say("Ask the other members to read theirs out over a call or in person,", as_json=as_json)
-        _say("not over the channel that carried the invite.", as_json=as_json)
-        same = typer.confirm(
-            "Do the other members see exactly this code?", default=False, err=as_json
+        _say(
+            f"  instances: yours {labels['self']}, theirs {labels['peer']} "
+            "(they read the same two, the other way round)",
+            as_json=as_json,
         )
-        if not same:
-            _mismatch(api, gid, info, as_json)
+        # Both questions, always (SPEC 11.5): labels that don't mirror are
+        # how a fork shows when the attacker's instance ids are its own.
+        same_code = typer.confirm(
+            f"Does {name}'s human read exactly this code?", default=False, err=as_json
+        )
+        same_labels = typer.confirm(
+            "And the same two instance labels, the other way round?", default=False, err=as_json
+        )
+        if not same_code:
+            # Whatever the labels say: an attacker in the middle chooses her
+            # instance ids, so labels can't explain codes that differ.
+            _mismatch(api, gid, info, as_json, run=view["run"])
             return
-        fresh = api.request("GET", f"/v0/groups/{gid}")
-        if fresh["epoch"] != info["epoch"] or fresh["sas"] != info["sas"]:
-            raise CliError(
-                "stale_epoch",
-                "the group changed while you compared; run `agentconnect verify` again",
-                EXIT_REFUSED,
-            )
-        done = [m["identity"] for m in fresh["members"] if not m["self"]]
-        for identity in done:
-            body = {"verified": True, "epoch": info["epoch"]}
-            api.request("POST", f"/v0/groups/{gid}/members/{identity}/verify", body)
+        if not same_labels:
+            _labels_differ(api, gid, info, view, as_json)
+        body = {"verified": True, "run": view["run"]}
+        api.request("POST", f"/v0/groups/{gid}/members/{peer['identity']}/verify", body)
         if as_json:
-            emit_json({"outcome": "verified", "group_id": gid, "verified": done})
+            emit_json(
+                {
+                    "outcome": "verified",
+                    "group_id": gid,
+                    "verified": [peer["identity"]],
+                    "run": view["run"],
+                    "sas": sas.as_json(),
+                    "labels": labels,
+                }
+            )
         else:
-            typer.echo(f"Marked {len(done)} member(s) as verified.")
+            typer.echo(f"Marked {name} as verified.")
 
 
-def _mismatch(api: ApiClient, gid: str, info: dict[str, Any], as_json: bool) -> None:
-    api.request("POST", f"/v0/groups/{gid}/sas/mismatch", {"epoch": info["epoch"]})
+LABEL = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _labels_differ(
+    api: ApiClient, gid: str, info: dict[str, Any], view: dict[str, Any], as_json: bool
+) -> None:
+    """The same code, but labels that don't mirror (SPEC 11.5): the other
+    human's two labels go to the daemon, which counts a warning and treats it
+    as codes that differ, unless both name instances in this view (replicas
+    paired crosswise)."""
+    while True:
+        raw = typer.prompt(
+            "The two labels they read, theirs first (e.g. 1a2b3c4d 5e6f7a8b)", err=as_json
+        )
+        parts = raw.split()
+        if len(parts) == 2 and all(LABEL.match(x) for x in parts):  # noqa: PLR2004
+            break
+        _say("Two labels of 8 hex characters each, separated by a space.", as_json=as_json)
+    path = f"/v0/groups/{gid}/sas/runs/{view['run']}/labels"
+    out = api.request("POST", path, {"self": parts[0], "peer": parts[1]})
+    if out["outcome"] == "mismatch":
+        _report_mismatch(api, gid, info, as_json)
+    _say(clean(out.get("text", "")), as_json=as_json)
+    msg = f"no answer recorded: start again with --instance {out.get('instance', '')}".rstrip()
+    raise CliError("labels_differ", msg, EXIT_REFUSED)
+
+
+def _mismatch(
+    api: ApiClient, gid: str, info: dict[str, Any], as_json: bool, run: str | None = None
+) -> None:
+    api.request("POST", f"/v0/groups/{gid}/sas/mismatch", {} if run is None else {"run": run})
+    _report_mismatch(api, gid, info, as_json)
+
+
+def _report_mismatch(api: ApiClient, gid: str, info: dict[str, Any], as_json: bool) -> None:
     transfer = None
     for ev in events_after(api):
         if ev["type"] == "sas_mismatch" and ev["group_id"] == gid:
@@ -2044,16 +2224,11 @@ def knock(  # noqa: PLR0913, PLR0917
                     "status": "joined",
                     **base,
                     "group_id": view["group_id"],
-                    "sas": view["sas"],
                     "hint": hint,
                 }
             )
             return
-        typer.echo(f"Joined {clean(view['name'])} ({view['group_id']}). The short code now is:")
-        sas = view["sas"]
-        typer.echo(f"  {' '.join(sas['emoji'].split())}")
-        typer.echo(f"  ({', '.join(sas['emoji_names'])})")
-        typer.echo(f"  {sas['decimal']}")
+        typer.echo(f"Joined {clean(view['name'])} ({view['group_id']}).")
         typer.echo(hint)
 
 

@@ -107,9 +107,11 @@ JSON is `{"error": {"code", "message"}}`, with the local API's `code`.
 
 `agentconnect_knock` is refused with `human_only` when `knock.agent_may_knock`
 is off; a server that runs the runtime with that setting doesn't list it.
-No result carries a short code (the `sas` of a group, or of a `joined` or
-`epoch_changed` event): the humans compare it on their own screens with
-`agentconnect verify`, not as a model reads it out.
+No result carries a short code: codes come from SAS runs, which only the
+humans start, with `agentconnect verify` on their own screens, and every
+event and result about a run is the human's by its type (SPEC
+[§11.5](../../SPEC.md#115-verification-is-a-human-action)). The tools also
+drop any `sas` or `group_sas` field, as a second line.
 
 ### Waiting for messages
 

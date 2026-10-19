@@ -839,6 +839,20 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- CLI and local API: `agentconnect verify <group> [<member>] [--instance]`
+  compares codes with one member at a time, both humans at once, and shows
+  the code with both instance labels; after 60 s without the other side it
+  says the daemons may not see the same group, and after two warnings it
+  offers the mismatch action. New human routes start a run, read it and
+  record that the peer started (`POST .../members/{identity}/sas`,
+  `GET .../sas/runs/{run}`, `POST .../sas/runs/{run}/peer-started`); `verify`
+  takes the `run` compared and refuses a body with `epoch`, and
+  `sas/mismatch` is always accepted and takes an optional `run`. The group
+  view, `groups show`, `approvals list`, `accept`, `knock` and the `joined`,
+  `epoch_changed` and knock events no longer carry a group-wide code
+  (`sas`, `group_sas`); the run events (`sas_requested`, `sas_paired`,
+  `sas_code`, `sas_aborted`, `sas_unpaired`, `sas_stopped`,
+  `verifications_reset`) are the human's only.
 - Examples: the Claude Agent SDK and LangGraph examples use a stub model by
   default and the real one with `AC_EXAMPLE_MODEL=real`, answer only
   questions addressed to them (text that ends with `?`) so two agents
@@ -1219,6 +1233,61 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   capabilities) and drops keep the group's cap each, the senders holding
   the most giving way first, and 100000 rows each daemon-wide. A changed
   card that isn't held is delivered with reason `card_changed`.
+- SPEC §11: the short code comes from a SAS run, a commit-then-reveal
+  exchange of random nonces between two members' instances inside the
+  group (`control.sas_commit`, `control.sas_reveal`), derived from the
+  epoch authenticator and both nonces. The earlier code was derived from
+  the epoch authenticator alone, which the epoch's last committer chooses,
+  so an attacker in the middle of two forked views could try commits
+  offline until both views showed the same code. A run is pairwise, starts
+  only from a human's verify command, is bound to one epoch and times out
+  after 600 s; codes keep their lengths. A lost run can't be hidden: a
+  "codes differ" answer is always acted on, an abort after a reveal is a
+  warning (two with one peer stop further runs and offer the mismatch
+  action), and a run unpaired for 60 s is reported as a possible fork.
+  Codes and run events are human-only by type. Verifications recorded
+  under the earlier code are reset once.
+- Runtime and CLI: instance labels that don't mirror are no longer a
+  silent retry. In the forked-view attack the attacker's own instance ids
+  make them differ, so `verify` asks about the code and the labels always.
+  A code that differs is the mismatch whatever the labels, since the
+  attacker can also copy the real instance ids. With the same code, it
+  asks for the other human's labels when they don't mirror, and the
+  daemon counts a warning and treats it as codes that differ, unless both
+  labels name instances in its view (replicas paired crosswise, which
+  restart with `--instance`; `POST .../sas/runs/{run}/labels`). The
+  ceremony budget is keyed by the sending instance's identity as well as
+  its id, so another member can't use up a peer's budget by certifying an
+  instance under the same id, and a held commitment prompts once. A new
+  `control.sas_cancel` gives up an unrevealed commitment on a restart, a
+  timeout or the human's cancel (`POST .../sas/runs/{run}/cancel`, or
+  Ctrl-C in `verify`); a cancel after the receiver's reveal is ignored. A
+  run that another member's leave ends names that member in its warning.
+  The cadence Update is also deferred while a code waits for its answer.
+- Core, bindings, runtime and CLI: a pending leave proposal no longer fails
+  SAS runs. MLS seals no message while a proposal waits for its commit, so
+  a run waits for that commit, as it does for its own pending commit
+  (`Group::has_pending_proposals`). A run counts as revealed only once its
+  reveal is sealed: a reveal held back by a pending proposal ends the run
+  `proposal_pending`, which counts no warning and starts again after the
+  commit, and a reveal of a run that already ended is dropped. `verify` no
+  longer blames the relay for it.
+- Core, bindings, runtime and CLI: the SAS run of SPEC §11 is implemented.
+  The core derives the commitment and the code (`Group::sas_commitment`,
+  `Group::sas_code`, which refuses any epoch but the group's current one)
+  from nonces it generates and wipes (`SasNonce`); the vectors are in
+  `testdata/sas-commit-reveal.json`, which replaces `sas-vectors.json`. The
+  runtime runs the exchange (`runtime/sas.py`): it pairs with the first
+  commitment addressed to it, reveals only once it holds the peer's
+  commitment and the relay accepted its own, stores the answered
+  commitment before the reveal, aborts on a bad or early reveal, a second
+  commitment, an epoch change, a send error or a timeout, counts warnings
+  per peer in its encrypted store, defers the cadence Update for at most
+  600 s during a run, and keeps ceremony messages out of the safety
+  policy's rates (12 a minute per instance, counting only those addressed
+  to it) and away from every adapter. A regression test grinds Updates on
+  copied state as the review's probe did: the earlier code is chosen, the
+  run's code is not.
 - Core and protocol: a commit after which two leaves of one identity have
   the same `instance_id` is refused by its committer and rejected by every
   member (SPEC §9.2, "One leaf per instance"), and so is a commit whose

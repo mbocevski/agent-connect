@@ -140,14 +140,20 @@ class Deployment:
     def audit(self, service: str) -> list[dict[str, Any]]:
         return list(self.cli(service, "audit", echo=False)["audit"])
 
-    def human_api(self, service: str, path: str, body: dict[str, Any]) -> Any:
-        """POST to the local API with the human token, as ``curl`` would."""
+    def human_api(
+        self, service: str, path: str, body: dict[str, Any] | None = None, *, echo: bool = True
+    ) -> Any:
+        """The local API with the human token, as ``curl`` would call it: a
+        POST of ``body``, or a GET without one."""
+        data = "--data-binary @- " if body is not None else ""
         script = (
             f'curl -sS --fail-with-body --unix-socket "{SOCKET}" '
             f'-H "Authorization: Bearer $(cat "{HUMAN_TOKEN}")" '
-            f'-H "Content-Type: application/json" --data-binary @- "http://agentconnectd{path}"'
+            f'-H "Content-Type: application/json" {data}"http://agentconnectd{path}"'
         )
-        out = self.sh(service, script, stdin=json.dumps(body))
+        out = self.sh(service, script, stdin=None if body is None else json.dumps(body))
+        if not echo:
+            return json.loads(out)
         if not self.quiet:
             show(
                 f"[{service}] curl --unix-socket ... -H 'Authorization: Bearer <human token>' "
@@ -209,6 +215,7 @@ def _brief(out: str) -> str:
         return out
     if isinstance(data, dict):
         keep = ("status", "group_id", "url", "epoch", "sas", "outcome", "msg_id", "request_id")
+        keep += ("labels",)
         brief = {k: v for k, v in data.items() if k in keep}
         if "sas" in brief and isinstance(brief["sas"], dict):
             brief["sas"] = f"{brief['sas']['emoji']}  {brief['sas']['decimal']}"
@@ -267,31 +274,98 @@ def invite_and_join(
     return dict(joined)
 
 
-def converge_sas(dep: Deployment, services: Sequence[str], group_id: str) -> dict[str, Any]:
-    """Wait until every member is on one epoch with one short code; print it."""
+def converge(dep: Deployment, services: Sequence[str], group_id: str) -> dict[str, Any]:
+    """Wait until every member is on one epoch with the same member count."""
 
     def same() -> dict[str, Any] | None:
         views = [dep.group(s, group_id) for s in services]
-        codes = {(v["epoch"], (v["sas"] or {}).get("decimal")) for v in views}
-        members = {len(v["members"]) for v in views}
-        if len(codes) == 1 and len(members) == 1 and None not in {c[1] for c in codes}:
+        if len({(v["epoch"], len(v["members"])) for v in views}) == 1:
             return views[0]
         return None
 
     view = wait_for("the members to agree on the group", same)
     if not dep.quiet:
-        for s in services:
-            print(
-                f"  {s}: epoch {view['epoch']}, short code {view['sas']['emoji']}  "
-                f"{view['sas']['decimal']}",
-                flush=True,
-            )
+        print(f"  {', '.join(services)}: epoch {view['epoch']}", flush=True)
     return view
 
 
-def verify(dep: Deployment, service: str, group_id: str) -> None:
-    """The human compares the code (out of band) and answers ``y``."""
-    dep.run(service, "agentconnect", "verify", group_id, stdin="y\n")
+def verify_pair(dep: Deployment, one: str, other: str, group_id: str) -> dict[str, Any]:
+    """Both humans run ``agentconnect verify`` at the same time, each for the
+    other (SPEC 11): their daemons run the commit-then-reveal exchange, both
+    show the same code with mirrored instance labels, and each human answers
+    ``y`` twice (the labels, then the code). Returns ``one``'s answer."""
+    ids = {s: identity(dep, s) for s in (one, other)}
+    procs = {}
+    for me, peer in ((one, other), (other, one)):
+        command = [
+            *dep._base(),
+            "exec",
+            "-T",
+            me,
+            "agentconnect",
+            "verify",
+            group_id,
+            ids[peer],
+            "--json",
+        ]
+        procs[me] = subprocess.Popen(  # noqa: S603
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if not dep.quiet:
+            show(f"[{me}] agentconnect verify {group_id} <{peer}> --json")
+    outs = {}
+    try:
+        for me, proc in procs.items():
+            out, err = proc.communicate("y\ny\n", timeout=WAIT)
+            if proc.returncode != 0:
+                msg = f"verify on {me} failed ({proc.returncode}): {out} {err}"
+                raise DemoError(msg)
+            outs[me] = json.loads(out.strip().splitlines()[-1])
+    finally:
+        for proc in procs.values():
+            if proc.poll() is None:
+                proc.kill()
+    first, second = outs[one], outs[other]
+    mirrored = {"self": second["labels"]["peer"], "peer": second["labels"]["self"]}
+    if first["sas"] != second["sas"] or first["labels"] != mirrored:
+        msg = f"{one} and {other} didn't read the same code: {first} {second}"
+        raise DemoError(msg)
+    if not dep.quiet:
+        show(f"[{one}] (verify finished)", _brief(json.dumps(first, ensure_ascii=False)))
+        show(f"[{other}] (verify finished)", _brief(json.dumps(second, ensure_ascii=False)))
+    return dict(first)
+
+
+def sas_runs(
+    dep: Deployment, one: str, other: str, group_id: str, *, within: float = WAIT
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A SAS run started on both sides through the human API, without
+    answering it; returns both views once both ended (or after ``within``,
+    as they stand: a run that never pairs keeps waiting)."""
+    ids = {s: identity(dep, s) for s in (one, other)}
+    runs = {
+        me: dep.human_api(me, f"/v0/groups/{group_id}/members/{ids[peer]}/sas", {}, echo=False)
+        for me, peer in ((one, other), (other, one))
+    }
+
+    def views() -> dict[str, dict[str, Any]]:
+        return {
+            me: dep.human_api(me, f"/v0/groups/{group_id}/sas/runs/{r['run']}", echo=False)
+            for me, r in runs.items()
+        }
+
+    def all_ended() -> dict[str, dict[str, Any]] | None:
+        seen = views()
+        return seen if all(x["state"] in ("done", "aborted") for x in seen.values()) else None
+
+    with contextlib.suppress(DemoError):
+        wait_for("both SAS runs to end", all_ended, within=within)
+    seen = views()
+    return seen[one], seen[other]
 
 
 def identity(dep: Deployment, service: str) -> str:
@@ -330,10 +404,9 @@ def one_to_one(dep: Deployment, run_id: str) -> OneToOne:
     gid = invite["group_id"]
     invite_and_join(dep, "daemon-b", invite["url"])
 
-    say("Both humans read the short code; they compare it on a call, then verify")
-    view = converge_sas(dep, ["daemon-a", "daemon-b"], gid)
-    verify(dep, "daemon-a", gid)
-    verify(dep, "daemon-b", gid)
+    say("Both humans run verify at once and compare the code on a call (SPEC 11)")
+    converge(dep, ["daemon-a", "daemon-b"], gid)
+    shown = verify_pair(dep, "daemon-a", "daemon-b", gid)
     for s in ("daemon-a", "daemon-b"):
         if not all(mb["verified"] for mb in dep.group(s, gid)["members"] if not mb["self"]):
             msg = f"{s} doesn't show the other member verified"
@@ -396,7 +469,7 @@ def one_to_one(dep: Deployment, run_id: str) -> OneToOne:
     dep.wait_event("daemon-a", "member_left")
     if not dep.quiet:
         show("[daemon-a] agentconnect events --json", "member_left: answer-bot left the group")
-    return OneToOne(gid, m, view["sas"]["decimal"])
+    return OneToOne(gid, m, shown["sas"]["decimal"])
 
 
 # -- demo 2: a group of three --------------------------------------------------------------------
@@ -423,15 +496,17 @@ def form_group(dep: Deployment, max_agent_turns: int = 4) -> tuple[str, dict[str
         invite_and_join(dep, joiner, invite["url"])
     say("A's human sets the loop guard: at most this many agent turns in a row")
     dep.cli("daemon-a", "group", "policy", gid, "--max-agent-turns", str(max_agent_turns))
-    say("All three humans see the same short code, compare it and verify")
-    view = converge_sas(dep, list(HOSTS.values()), gid)
+    say("The humans compare short codes, a pair at a time, and verify (SPEC 11)")
+    view = converge(dep, list(HOSTS.values()), gid)
     if view["floor"]["mode"] != "mention":
         msg = f"the floor is {view['floor']['mode']}, not mention"
         raise DemoError(msg)
     if not dep.quiet:
         print(f"  floor: {view['floor']['mode']} (three members)", flush=True)
-    for s in HOSTS.values():
-        verify(dep, s, gid)
+    hosts = list(HOSTS.values())
+    for i, one in enumerate(hosts):
+        for other in hosts[i + 1 :]:
+            verify_pair(dep, one, other, gid)
     return gid, {k: identity(dep, s) for k, s in HOSTS.items()}
 
 
@@ -469,26 +544,20 @@ def group_demo(dep: Deployment, run_id: str) -> GroupRun:
     wait_for("both answers", lambda: audit_from(dep, "daemon-a", ids["b"], gid) or None)
 
     say("The owner's human removes the LangGraph agent: it can't read the next epoch")
-    before = converge_sas(dep, ["daemon-a", "daemon-b"], gid)
+    before = converge(dep, ["daemon-a", "daemon-b"], gid)
     dep.cli("daemon-a", "remove", gid, ids["c"], "--yes")
     dep.wait_event("agent-c", "removed")
     after = wait_for(
         "a new epoch on A and B",
         lambda: (
             v
-            if (v := converge_sas(dep, ["daemon-a", "daemon-b"], gid))["epoch"] > before["epoch"]
+            if (v := converge(dep, ["daemon-a", "daemon-b"], gid))["epoch"] > before["epoch"]
             and len(v["members"]) == 2  # noqa: PLR2004 - A and B
             else None
         ),
     )
-    if after["sas"]["decimal"] == before["sas"]["decimal"]:
-        msg = "the short code didn't change with the removal"
-        raise DemoError(msg)
     if not dep.quiet:
-        print(
-            f"  short code before: {before['sas']['decimal']}, after: {after['sas']['decimal']}",
-            flush=True,
-        )
+        print(f"  epoch before: {before['epoch']}, after: {after['epoch']}", flush=True)
     sent = human_send(
         dep, "daemon-a", gid, f"C is gone; B, can you still read this ({m[2]})?", [ids["b"]]
     )
@@ -506,8 +575,8 @@ def group_demo(dep: Deployment, run_id: str) -> GroupRun:
             f"{after['epoch']}; nothing from the new epoch reached it",
             flush=True,
         )
-    for s in ("daemon-a", "daemon-b"):
-        verify(dep, s, gid)
+    say("A and B compare a new short code, of the group without C")
+    verify_pair(dep, "daemon-a", "daemon-b", gid)
 
     say("Loop guard: the Agent SDK agent and the release agent debate until the guard pauses them")
     human_send(

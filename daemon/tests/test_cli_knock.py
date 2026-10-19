@@ -166,7 +166,8 @@ def test_knock_shows_the_listing_asks_and_joins(fake: Fake) -> None:
     assert "written by the listing's owner, not verified" in out
     assert "A listing proves who signed it, not what the agent does or who runs it." in out
     assert "Joined release-planner" in out
-    assert "1234-5678-9012" in out
+    assert "1234-5678-9012" not in out  # no group-wide code (SPEC 11)
+    assert "agentconnect verify" in out
     keys = [k for _, k, _ in fake.calls]
     assert keys[:2] == ["POST /v0/knocks/inspect", "POST /v0/knocks"]
     assert not any(human for human, _, _ in fake.calls)  # the agent token
@@ -232,7 +233,7 @@ def test_knock_json_joined_and_sent(fake: Fake) -> None:
     code, data = fake.json("knock", REF, "--yes")
     assert code == 0
     assert conforms(data, SCHEMAS["knock (joined)"]), data
-    assert data["sas"]["decimal"] == SAS["decimal"]
+    assert "sas" not in data
     fake.routes["GET /v0/events?after=0"] = {"events": []}
     code, data = fake.json("knock", REF, "--yes", "--wait", "0")
     assert code == 0

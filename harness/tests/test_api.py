@@ -115,20 +115,48 @@ async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
 
     _, info_a = await alice.call("GET", f"/v0/groups/{gid}")
     _, info_b = await bob.call("GET", f"/v0/groups/{gid}")
-    assert info_a["sas"] == info_b["sas"]
+    assert "sas" not in info_a
+    assert "sas" not in info_b
     assert {m["role"] for m in info_a["members"]} == {"owner", "member"}
     status, err = await alice.call("POST", f"/v0/groups/{gid}/members/{bob.node.me}/verify", {})
     assert status == 403
     path = f"/v0/groups/{gid}/members/{bob.node.me}/verify"
     status, err = await alice.call("POST", path, {"verified": True}, scope="human")
-    assert (status, err["code"]) == (400, "bad_request")  # which code was compared?
-    stale = {"verified": True, "epoch": info_a["epoch"] - 1}
-    status, err = await alice.call("POST", path, stale, scope="human")
-    assert (status, err["code"]) == (409, "stale_epoch")
-    assert "compare again" in err["message"]
-    shown = {"verified": True, "epoch": info_a["epoch"]}
-    status, done = await alice.call("POST", path, shown, scope="human")
-    assert done == {"verified": True}
+    assert (status, err["code"]) == (400, "bad_request")  # which run was compared?
+    # The old answer for a group-wide code is refused, never mapped (SPEC 11.8).
+    old = {"verified": True, "epoch": info_a["epoch"]}
+    status, err = await alice.call("POST", path, old, scope="human")
+    assert (status, err["code"]) == (400, "bad_request")
+    # A SAS run: both humans start their side, the agent token can't.
+    start_a = f"/v0/groups/{gid}/members/{bob.node.me}/sas"
+    start_b = f"/v0/groups/{gid}/members/{alice.node.me}/sas"
+    status, err = await alice.call("POST", start_a, {})
+    assert (status, err["code"]) == (403, "human_only")
+    status, run_a = await alice.call("POST", start_a, {}, scope="human")
+    assert (status, run_a["state"]) == (200, "waiting")
+    status, err = await alice.call("POST", start_a, {}, scope="human")
+    assert (status, err["code"]) == (409, "conflict")  # one run per pair at a time
+    status, run_b = await bob.call("POST", start_b, {}, scope="human")
+    assert status == 200
+    view = f"/v0/groups/{gid}/sas/runs/"
+
+    async def done(caller: Any, run: str) -> dict[str, Any]:
+        ended = ("done", "aborted")
+        await caller.node.wait(lambda: caller.node.daemon.sas_run(gid, run)["state"] in ended)
+        _, seen = await caller.call("GET", view + run, scope="human")
+        return dict(seen)
+
+    seen_a, seen_b = await done(alice, run_a["run"]), await done(bob, run_b["run"])
+    assert seen_a["state"] == seen_b["state"] == "done"
+    assert seen_a["sas"] == seen_b["sas"]
+    assert seen_a["labels"] == {"self": seen_b["labels"]["peer"], "peer": seen_b["labels"]["self"]}
+    status, err = await alice.call("GET", view + run_a["run"])
+    assert (status, err["code"]) == (403, "human_only")
+    status, err = await alice.call("POST", path, {"verified": True, "run": "nope"}, scope="human")
+    assert (status, err["code"]) == (404, "not_found")
+    shown = {"verified": True, "run": run_a["run"]}
+    status, done_ = await alice.call("POST", path, shown, scope="human")
+    assert done_ == {"verified": True}
     _, info_a = await alice.call("GET", f"/v0/groups/{gid}")
     assert info_a["trust_state"]["verified_members"] == 1
 

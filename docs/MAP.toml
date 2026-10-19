@@ -28,6 +28,7 @@ internal = [
     "core/src/group/tests.rs",
     "core/src/group/group_mode_tests.rs",
     "core/src/group/knock_tests.rs",
+    "core/src/group/sas_grind_tests.rs",
     "core/src/journal.rs",
     "core/src/mls.rs",
     "core/src/provider.rs",
@@ -116,6 +117,7 @@ exclude = [
     "daemon/src/agentconnect/runtime/knocks.py",
     "daemon/src/agentconnect/runtime/groups.py",
     "daemon/src/agentconnect/runtime/floor.py",
+    "daemon/src/agentconnect/runtime/sas.py",
 ]
 docs = ["docs/sdk.md", "docs/adr/005-deployment-modes.md"]
 
@@ -134,8 +136,12 @@ docs = ["docs/discovery.md"]
 [[rule]]
 name = "group-mode"
 # Membership: leaves, removals, the events they raise, the update cadence;
-# floor control in moderated groups.
-code = ["daemon/src/agentconnect/runtime/groups.py", "daemon/src/agentconnect/runtime/floor.py"]
+# floor control in moderated groups; SAS runs.
+code = [
+    "daemon/src/agentconnect/runtime/groups.py",
+    "daemon/src/agentconnect/runtime/floor.py",
+    "daemon/src/agentconnect/runtime/sas.py",
+]
 docs = ["docs/groups.md"]
 
 [[rule]]
@@ -249,6 +255,7 @@ name = "group-mode"
 paths = [
     "daemon/src/agentconnect/runtime/groups.py",
     "daemon/src/agentconnect/runtime/floor.py",
+    "daemon/src/agentconnect/runtime/sas.py",
     "core/src/policy.rs",
 ]
 doc = "docs/groups.md"

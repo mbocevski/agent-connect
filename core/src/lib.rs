@@ -67,7 +67,7 @@ pub use mls::{EXT_GROUP_META, EXT_GROUP_POLICY, EXT_INSTANCE_CERT, HPKE_PUBLIC_K
 pub use policy::{GroupMeta, GroupPolicy};
 pub use provider::{DbKey, MemoryStore, SqliteStore, Store};
 pub use rng::Rng;
-pub use sas::Sas;
+pub use sas::{Participant, Sas, SasNonce};
 
 /// Protocol version implemented by this crate (SPEC §13).
 pub const PROTOCOL_VERSION: u32 = 0;

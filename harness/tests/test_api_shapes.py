@@ -89,10 +89,15 @@ async def test_responses_and_requests_match_the_declared_shapes(
     await alice.call("GET", "/v0/groups")
     await alice.call("GET", f"/v0/groups/{gid}")
     await bob.call("GET", f"/v0/groups/{gid}")
+    run = await alice.call("POST", f"/v0/groups/{gid}/members/{bob.node.me}/sas", {}, "human")
+    bob.node.daemon.sas_start(gid, alice.node.me)
+    await alice.node.wait(lambda: alice.node.daemon.sas_run(gid, run["run"])["state"] == "done")
+    await alice.call("GET", f"/v0/groups/{gid}/sas/runs/{run['run']}", scope="human")
+    await alice.call("POST", f"/v0/groups/{gid}/sas/runs/{run['run']}/peer-started", scope="human")
     await alice.call(
         "POST",
         f"/v0/groups/{gid}/members/{bob.node.me}/verify",
-        {"verified": True, "epoch": alice.node.epoch(gid)},
+        {"verified": True, "run": run["run"]},
         "human",
     )
     await alice.call("POST", f"/v0/groups/{gid}/messages", {"text": "hello", "to": ["*"]})

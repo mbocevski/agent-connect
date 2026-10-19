@@ -157,11 +157,63 @@ it as new: each instance carries `joined_epoch`, the epoch this runtime
 first saw it in, and a member lists in `instances_since_verified` the
 instances that joined after you last verified it. `groups show` marks them
 "NEW since you verified". Compare the short code with that member again to
-clear the mark. For a member verified by a daemon from before this was
-recorded, `instances_since_verified` is `null` (unknown) and `groups show`
-says "unknown: verify again". `agentconnect verify` sends the epoch whose
-code it showed; if the group has moved on by the time you answer, the daemon
-refuses (`409 stale_epoch`) and you compare the new code.
+clear the mark ([Comparing short codes](#comparing-short-codes)). For a
+member verified by a daemon from before this was recorded,
+`instances_since_verified` is `null` (unknown) and `groups show` says
+"unknown: verify again".
+
+## Comparing short codes
+
+The short code comes from a SAS run between two daemons (SPEC
+[§11](../SPEC.md#11-short-authentication-string-sas)). Both humans run
+`agentconnect verify <group> <member>` at the same time, on a call or in
+person, each naming the other. The two daemons each commit to a random
+nonce inside the group, reveal it once they hold the other's commitment,
+and derive the code from the epoch and both nonces. There is no group-wide
+code: in a group of N members, each human compares codes with each of the
+N − 1 others.
+
+- `verify` shows the code with two instance labels, yours and theirs; the
+  other human reads the same two the other way round. It asks about the
+  code and about the labels, always. A code that differs is the
+  mismatch, whatever the labels: an attacker in the middle can copy the
+  real instance ids. With the same code, labels that don't mirror count as
+  a warning, and `verify` asks for the two labels the other human reads. If
+  both name instances in your view (theirs one of the member's, and their
+  "yours" one of your own identity's), two runs of replicas paired
+  crosswise: start again, naming the instance with `--instance`. Anything
+  else is treated as codes that differ: an attacker in the middle uses
+  instance ids of its own.
+- Answering that the codes differ leaves the group, whatever happened
+  since the code appeared (`sas_mismatch`). Answering that they match marks
+  the member verified, within 600 s of the code appearing, also when the
+  epoch moved on meanwhile.
+- After 60 s without the other side, `verify` says that your daemons may
+  not see the same group, and offers to treat it as different codes: a fork
+  shows either as codes that differ or as runs that never pair.
+- A run that ends after your daemon revealed its nonce is a warning, and
+  names the member whose commit ended it. After two warnings with one
+  member, `verify` stops and offers the mismatch action; the daemon never
+  leaves on its own, because a relay that drops messages causes the same.
+- One run per pair of identities at a time: a second one, also from
+  another instance of your identity, answers `409 conflict`.
+- `Ctrl-C` while `verify` waits gives the run up: before your daemon
+  revealed its nonce, the other daemon is told (`control.sas_cancel`) and
+  nothing is counted. A restart does the same for the commitments it left.
+- While a run is under way or its code waits for your answer, the daemon
+  defers its update cadence, for at most 600 s in total. Another member's
+  leave can't wait (no message goes out while a proposal is pending); a run
+  it ends is a warning that names the member who left.
+- While a leave is pending, runs wait for its commit and then go on. A run
+  whose reveal couldn't go out because of it ends (`proposal_pending`) with
+  nothing counted, and starts again after the commit.
+- The codes and the run events (`sas_requested`, `sas_paired`, `sas_code`,
+  `sas_aborted`, `sas_unpaired`, `sas_stopped`, `verifications_reset`) are
+  the human's. The agent never sees them, and no event it sees carries a
+  code.
+- The first start of this version resets every verified flag once and says
+  why (`verifications_reset`): those flags rested on a group-wide code that
+  an attacker in the middle could choose.
 
 Within an identity, an instance id names one leaf. The core refuses a
 commit that would add a second leaf with an id the identity already has

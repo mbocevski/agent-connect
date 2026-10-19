@@ -163,7 +163,10 @@ impl Members {
             .map(|(_, g)| g)
             .collect();
         for g in &honest {
-            assert_eq!((g.epoch(), g.sas()), (honest[0].epoch(), honest[0].sas()));
+            assert_eq!(
+                (g.epoch(), g.state_fingerprint()),
+                (honest[0].epoch(), honest[0].state_fingerprint())
+            );
         }
     }
 
@@ -193,20 +196,20 @@ impl Members {
         policy: Option<&[u8]>,
         err: &Error,
     ) {
-        let (epoch, sas) = (self.gs[from].epoch(), self.gs[from].sas());
+        let (epoch, sas) = (self.gs[from].epoch(), self.gs[from].state_fingerprint());
         let out = self.gs[from]
             .commit_unchecked(&self.cs[from], adds, removes, meta, policy)
             .unwrap();
         assert_eq!(out.epoch, epoch);
         assert_eq!(self.gs[from].epoch(), epoch + 1);
-        assert_ne!(self.gs[from].sas(), sas);
+        assert_ne!(self.gs[from].state_fingerprint(), sas);
         // Its own fan-out copy is an echo for the sender.
         assert_eq!(
             self.gs[from].process(&self.cs[from], &out.commit),
             Ok(Event::OwnEcho)
         );
         self.forked.insert(from);
-        let forked_sas = self.gs[from].sas();
+        let forked_sas = self.gs[from].state_fingerprint();
         for (i, g) in self.gs.iter_mut().enumerate() {
             if self.forked.contains(&i) || !g.is_active() {
                 continue;
@@ -217,8 +220,12 @@ impl Members {
                 Err(err),
                 "member {i}"
             );
-            assert_eq!((g.epoch(), g.sas()), (epoch, sas), "member {i}");
-            assert_ne!(g.sas(), forked_sas);
+            assert_eq!(
+                (g.epoch(), g.state_fingerprint()),
+                (epoch, sas.clone()),
+                "member {i}"
+            );
+            assert_ne!(g.state_fingerprint(), forked_sas);
         }
         self.converged();
     }
@@ -745,8 +752,8 @@ fn review_concurrent_owner_replica_leaves_then_commit() {
         assert!(!m.gs[1].is_active(), "order {n}");
         assert!(m.gs[0].is_active(), "order {n}");
         assert_eq!(
-            (m.gs[0].epoch(), m.gs[0].sas()),
-            (m.gs[2].epoch(), m.gs[2].sas())
+            (m.gs[0].epoch(), m.gs[0].state_fingerprint()),
+            (m.gs[2].epoch(), m.gs[2].state_fingerprint())
         );
         assert_eq!(
             m.gs[0].propose_leave(&m.cs[0]),
@@ -772,8 +779,8 @@ fn a_commit_between_two_owner_replica_leaves_converges() {
     assert!(m.gs[1].is_active());
     assert_eq!(m.gs[2].process(&m.cs[2], &p2), Err(Error::WrongEpoch));
     assert_eq!(
-        (m.gs[1].sas(), m.gs[1].epoch()),
-        (m.gs[2].sas(), m.gs[2].epoch())
+        (m.gs[1].state_fingerprint(), m.gs[1].epoch()),
+        (m.gs[2].state_fingerprint(), m.gs[2].epoch())
     );
 }
 
@@ -1451,7 +1458,7 @@ fn an_update_may_not_change_its_instance_certificate() {
     m.join(0, client("upd-b", &clock));
     m.join(0, instance_of(&x, "upd-x1", &clock));
     m.join(0, instance_of(&x, "upd-x2", &clock));
-    let (epoch, sas) = (m.gs[0].epoch(), m.gs[0].sas());
+    let (epoch, sas) = (m.gs[0].epoch(), m.gs[0].state_fingerprint());
 
     // X2 re-certifies its own key under X1's instance id (anyone holding
     // X's IK can sign that) and commits it as a self-update.
@@ -1480,7 +1487,11 @@ fn an_update_may_not_change_its_instance_certificate() {
                 Err(Error::Unauthorized(FIXED_CERT)),
                 "member {i}"
             );
-            assert_eq!((m.gs[i].epoch(), m.gs[i].sas()), (epoch, sas), "member {i}");
+            assert_eq!(
+                (m.gs[i].epoch(), m.gs[i].state_fingerprint()),
+                (epoch, sas.clone()),
+                "member {i}"
+            );
         }
         m.gs[3].discard_pending_commit(&m.cs[3]).unwrap();
     }
@@ -1488,7 +1499,7 @@ fn an_update_may_not_change_its_instance_certificate() {
     // A committer that merges it anyway is alone on its fork.
     let _ = self_update_with_cert(&mut m, 3, &twin);
     m.gs[3].mls.merge_pending_commit(&m.cs[3].provider).unwrap();
-    assert_ne!(m.gs[3].sas(), m.gs[0].sas());
+    assert_ne!(m.gs[3].state_fingerprint(), m.gs[0].state_fingerprint());
     let same = m.gs[3]
         .members()
         .unwrap()

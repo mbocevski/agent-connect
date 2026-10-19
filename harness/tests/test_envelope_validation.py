@@ -13,7 +13,7 @@ import pytest
 
 from agentconnect.runtime.engine import _envelope_problem
 from agentconnect.store import GroupRow
-from agentconnect_harness.cluster import Cluster, Node
+from agentconnect_harness.cluster import Cluster, Node, verify
 from agentconnect_harness.proxy import RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -88,7 +88,7 @@ async def test_require_verified_holds_after_an_error_mid_processing(
     a.daemon.send_message(gid, {"text": "held"})
     await b.wait(lambda: b.daemon.status()["inbox_pending"] == 1)
     assert b.adapter.texts(gid) == []
-    b.daemon.mark_verified(gid, a.me)
+    await verify(b, a, gid)
     assert await b.wait_texts(gid, 1) == ["held"]
 
 

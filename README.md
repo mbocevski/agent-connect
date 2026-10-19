@@ -46,15 +46,19 @@ daemon adds Bob's daemon to the group. Messages are A2A v1.0 objects inside
 MLS application messages. The group uses one ciphersuite, a post-quantum
 hybrid of ML-KEM-768 and X25519, and there is no negotiation.
 
-**The short code.** After a join, every daemon derives a short code from the
-group's current state: seven emoji, or twelve digits as `NNNN-NNNN-NNNN`.
-Members with the same view of the group see the same code. A relay that tries
-to sit in the middle has to give the two sides different views, and then the
-codes differ. Compare them over a channel other than the one that carried the
-link, such as a phone call: someone who could read the link in your chat could
-also fake a code you send through the same chat. Only a human can mark the
-code as compared. The daemon accepts that from a separate human token, and
-there is no operation an agent can call to do it.
+**The short code.** Two members' humans compare a short code, seven emoji or
+twelve digits as `NNNN-NNNN-NNNN`. Both run `agentconnect verify` at the same
+time: their daemons each commit to a random value inside the group, then
+reveal it, and both derive the code from the group's current state and both
+values. Two members with the same view of the group see the same code. A
+relay that tries to sit in the middle has to give the two sides different
+views, and then the codes differ, or the comparison never completes. The
+commitment means it can't try values until the codes agree. Compare over a
+channel other than the one that carried the link, such as a phone call:
+someone who could read the link in your chat could also fake a code you send
+through the same chat. Only a human can start a comparison or mark it done.
+The daemon accepts that from a separate human token, and there is no
+operation an agent can call to do it.
 
 ## Status
 
@@ -63,7 +67,8 @@ Pre-alpha. Nothing has been released and there is no public relay.
 What works on `main` today:
 
 - **Core** (`core/`, Rust): MLS groups on OpenMLS with the single v0
-  ciphersuite, invite links, join requests, the short code, and an MLS store
+  ciphersuite, invite links, join requests, the short code's commitment and
+  derivation, and an MLS store
   encrypted at rest with SQLCipher. Python bindings are in `core-py/`. The
   protocol is in [SPEC.md](SPEC.md).
   <!-- component: core -->
@@ -77,7 +82,8 @@ What works on `main` today:
   ([ADR-005](docs/adr/005-deployment-modes.md)).
   <!-- component: runtime -->
 - **CLI** (`agentconnect`): runs the daemon and covers the invite lifecycle:
-  create and accept invites, approve joins, compare the short code, send a
+  create and accept invites, approve joins, compare the short code with
+  each other member (a SAS run, both humans at once), send a
   test message and read events, leave a group, remove a member or only
   some of its instances, such as a dead replica, change roles and the group
   policy, and hand ownership over. It provisions a replica: `identity
@@ -235,7 +241,7 @@ agentconnect accept '<url>'
 
 Alice lists the join request, which shows Bob's claimed name and key
 fingerprint, and approves it. Replace `<request_id>` with the id from the
-list. Bob's `accept` then finishes and prints the group's short code.
+list. Bob's `accept` then finishes.
 
 <!-- runnable: alice -->
 ```sh
@@ -243,10 +249,13 @@ agentconnect approvals
 agentconnect approvals approve <request_id>
 ```
 
-Both of them now compare the short code, on a call or in person. `verify`
-shows the code and asks whether the other side sees the same one. Replace
-`<group>` with the group id (`agentconnect groups` lists it). Answering `N`
-reports a mismatch and leaves the group.
+Both of them now compare the short code, on a call or in person, and both
+run `verify` at the same time: the two daemons exchange a commitment to a
+random value and then the value, and each shows the same code with two
+instance labels. `verify` asks whether the other side reads the same labels
+and the same code. Replace `<group>` with the group id (`agentconnect groups`
+lists it); with more members, name the one to compare with. Answering `N` to
+the code reports a mismatch and leaves the group.
 
 <!-- runnable: alice -->
 ```sh
@@ -344,8 +353,9 @@ callback_url` on host B; [demo/config](demo/config)).
    docker compose exec daemon-a agentconnect approvals approve <request_id> --yes
    ```
 
-2. Both humans read the short code from `agentconnect verify <group>`,
-   compare it out of band and answer `y`.
+2. Both humans run `agentconnect verify <group>` at the same time, read
+   the same short code and instance labels, compare them out of band and
+   answer `y`.
 3. B's agent asks A's agent for the release notes. A's agent streams a
    task (`working`, two artifact chunks, `completed`), and B's agent prints
    each update. The demo sends B's requests with `agentconnect send`, which
@@ -375,7 +385,8 @@ callback_url` on host B; [demo/config](demo/config)).
    so C's human runs the CLI in the agent's container, on its data
    directory.
 2. A's human sets the loop guard (`agentconnect group policy <group>
-   --max-agent-turns 4`). All three see the same short code and verify it.
+   --max-agent-turns 4`). Each pair of humans compares its own short code
+   (`agentconnect verify <group> <member>` on both sides) and verifies.
    With three members the floor is `mention`.
 3. A's human asks the LangGraph agent a question. A message from the human
    goes through the local API with the human token, since `agentconnect
@@ -384,8 +395,9 @@ callback_url` on host B; [demo/config](demo/config)).
    agent's audit log records the question as context. A question to both
    gets both answers.
 4. A's human removes the LangGraph agent (`agentconnect remove <group>
-   <identity>`). Its runtime reports `removed` and stays at the old epoch;
-   A's and B's short code changes, and the next message never reaches C.
+   <identity>`). Its runtime reports `removed` and stays at the old epoch,
+   and the next message never reaches C. A and B stay verified for each
+   other; the demo runs one more comparison between them.
 5. A's human tells the Agent SDK agent to keep debating with the release
    agent. They answer each other until the loop guard stops the exchange,
    and both humans get a `loop_guard` event.

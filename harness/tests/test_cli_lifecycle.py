@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -17,7 +18,8 @@ from typer.testing import CliRunner
 from agentconnect import cli_support
 from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
-from agentconnect_harness.cluster import Cluster, Node, status
+from agentconnect.runtime.sas import label
+from agentconnect_harness.cluster import Cluster, Node, compare, status
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import on_free_port
 
@@ -118,7 +120,7 @@ async def test_two_daemons_create_accept_approve_verify_send_leave(  # noqa: PLR
         (req,) = json.loads(listed)["approvals"]
         assert req["display_name"] == "bob"
         assert req["fingerprint"]
-        assert req["group_sas"]["decimal"]
+        assert "group_sas" not in req  # no group-wide code (SPEC 11)
         code, _ = alice.run_sync("approvals", "approve", req["request_id"], "--yes")
         assert code == 0
         asyncio.run_coroutine_threadsafe(
@@ -135,21 +137,31 @@ async def test_two_daemons_create_accept_approve_verify_send_leave(  # noqa: PLR
     assert joined["group_id"] == gid
     assert joined["name"] == "Deploys"
     assert joined["hint"].startswith("ask your human to compare the short code ")
-    assert joined["sas"]["decimal"] == bob.node.sas(gid)
+    assert "sas" not in joined
     await cluster.settle(gid, 1)
+    monkeypatch.setattr(cli_support, "pause", time.sleep)
 
-    # Both sides see the same code; verifying is a human, interactive step.
+    # Verifying is a human, interactive step on both sides at once (SPEC 11):
+    # a SAS run, the same code and mirrored labels, and each human's answer.
     code, shown = await alice.json("groups", "show", gid)
     assert code == 0
-    assert shown["sas"]["decimal"] == joined["sas"]["decimal"]
+    assert "sas" not in shown
     assert shown["verified_summary"] == "0 of 1 verified"
     assert {m["role"] for m in shown["members"]} == {"owner", "member"}
-    code, out = await alice.run("verify", gid, input="y\n")
+    # (One CLI at a time in this process: bob's human takes the API's side.)
+    verifying = asyncio.ensure_future(alice.run("verify", gid, input="y\ny\n"))
+    await alice.node.wait(lambda: bool(alice.node.daemon.sas._active))
+    run_b = bob.node.daemon.sas_start(gid, alice.node.me)["run"]
+    code, out = await verifying
     assert code == 0, out
-    assert "Do the other members see exactly this code? [y/N]" in out
+    assert "read exactly this code? [y/N]" in out
+    assert "the same two instance labels, the other way round? [y/N]" in out
+    seen_b = bob.node.daemon.sas_run(gid, run_b)
+    assert seen_b["sas"]["decimal"] in out  # the same code on both screens
+    assert f"yours {seen_b['labels']['peer']}, theirs {seen_b['labels']['self']}" in out
+    bob.node.daemon.mark_verified(gid, alice.node.me, True, run_b)
     code, shown = await alice.json("groups", "show", gid)
     assert (shown["verified_summary"], shown["hint"]) == ("1 of 1 verified", None)
-    assert (await bob.run("verify", gid[:8], input="y\n"))[0] == 0
 
     code, _sent = await alice.json("send", gid, "hello bob")
     assert code == 0
@@ -250,7 +262,10 @@ async def test_verify_no_leaves_and_reports_the_owner_handover(
 ) -> None:
     (a, b, _c), gid = await group(3)
     alice = await serve(a)
-    code, out = await alice.json("verify", gid, input="n\n")
+    verifying = asyncio.ensure_future(alice.json("verify", gid, b.me, input="n\ny\n"))
+    await a.wait(lambda: bool(a.daemon.sas._active))
+    b.daemon.sas_start(gid, a.me)  # b's human starts the other side
+    code, out = await verifying
     assert code == 6
     assert out["outcome"] == "mismatch"
     assert out["ownership_transfer"] == {
@@ -266,13 +281,18 @@ async def test_verify_no_after_a_fork_for_a_plain_member(
     serve: Callable[[Node], Awaitable[Cli]],
     malicious_relay: Callable[[Node], RelayProxy],
 ) -> None:
+    """A forked view shows as a run that never pairs (SPEC 12): here the
+    relay refuses the forked member's messages, the run ends unpaired, and
+    the human, told the daemons may not see the same group, treats it as
+    different codes."""
     (a, _b, c), gid = await group(3)
     cli_c = await serve(c)
     malicious_relay(c).fork_own_commits()
     c.daemon.update(gid)
     await c.wait(lambda: c.epoch(gid) == a.epoch(gid) + 1)
-    assert c.sas(gid) != a.sas(gid)
-    code, out = await cli_c.json("verify", gid, input="n\n")
+    assert c.state(gid) != a.state(gid)
+    a.daemon.sas_start(gid, c.me)
+    code, out = await cli_c.json("verify", gid, a.me, input="y\n")
     assert (code, out["status"], out["ownership_transfer"]) == (6, "left", None)
     assert status(c, gid) == "left"
     code, listed = await cli_c.json("groups")
@@ -314,3 +334,87 @@ async def test_invite_create_require_verified_sets_the_policy(
     await alice.node.idle()
     code, shown = await alice.json("groups", "show", made["group_id"])
     assert shown["require_verified"] is True
+
+
+@pytest.mark.parametrize("code_answer", ["n", "y"])
+async def test_one_attacker_in_two_forked_groups_ends_in_a_mismatch(
+    cluster: Cluster, serve: Callable[[Node], Awaitable[Cli]], code_answer: str
+) -> None:
+    """SPEC 11.7, review 67 finding 1: Mallory has Alice's link and the relay
+    (SPEC 14.4). View 1 is Alice's group with Mallory's instance m1; view 2
+    is Mallory's group, posing as Alice, with Bob. Mallory runs both sides as
+    an ordinary daemon. Alice's human runs `verify` and hears Bob's code and
+    labels on the call. Whether or not the human takes the codes for the same,
+    the labels don't mirror, and the comparison ends in the mismatch: the
+    group is left. Never a silent retry."""
+    alice = await serve(await cluster.node("alice"))
+    m1 = await cluster.node("m1")
+    m2 = await cluster.node("m2", identity_of=m1)
+    bob = await cluster.node("bob")
+    g1 = alice.node.daemon.create_group("Plans", "p")
+    await alice.node.idle()
+    await cluster.invite(alice.node, m1, g1)
+    g2 = m2.daemon.create_group("Plans", "p")
+    await m2.idle()
+    await cluster.invite(m2, bob, g2)
+    seen_b, _ = await compare(bob, m2, g2)  # what Bob's human reads out
+    assert seen_b["state"] == "done"
+    verifying = asyncio.ensure_future(
+        alice.json(
+            "verify",
+            g1,
+            input=f"{code_answer}\nn\n{seen_b['labels']['self']} {seen_b['labels']['peer']}\n",
+        )
+    )
+    await alice.node.wait(lambda: bool(alice.node.daemon.sas._active))
+    m1.daemon.sas_start(g1, alice.node.me)  # Mallory answers as any daemon would
+    code, out = await verifying
+    assert (code, out["outcome"], out["status"]) == (6, "mismatch", "left")
+    assert status(alice.node, g1) == "left"
+
+
+@pytest.mark.parametrize("code_answer", ["n", "y"])
+async def test_twin_instance_ids_never_turn_codes_that_differ_into_a_restart(
+    cluster: Cluster, serve: Callable[[Node], Awaitable[Cli]], code_answer: str
+) -> None:
+    """Review 67 V-1 (probe P6): instance ids are unique only within an
+    identity (SPEC 9.2), so Mallory gives her view-1 identity a second
+    instance with Bob's id, and her view-2 instance Alice's id. Bob then
+    reads labels (bob, alice) that Alice's daemon explains as replicas paired
+    crosswise. "Codes differ" is still the mismatch; only "same code" with
+    those labels is the restart, and it counts a warning. (The twin is fed
+    in as the core's member list would show it, as test_group_roles does.)"""
+    alice = await serve(await cluster.node("alice"))
+    m1 = await cluster.node("m1")
+    bob = await cluster.node("bob")
+    g1 = alice.node.daemon.create_group("Plans", "p")
+    await alice.node.idle()
+    await cluster.invite(alice.node, m1, g1)
+    b_id = bob.daemon.instance.instance_id_hex
+    a_id = alice.node.daemon.instance.instance_id_hex
+    store = alice.node.daemon.store
+    real = store.members
+
+    def members(gid: str) -> Any:
+        out = []
+        for m in real(gid):
+            if m.identity == m1.me:
+                twin = {**m.instances[0], "instance_id": b_id}
+                m = replace(m, instances=[*m.instances, twin])  # noqa: PLW2901
+            out.append(m)
+        return out
+
+    store.members = members  # ty: ignore[invalid-assignment]
+    verifying = asyncio.ensure_future(
+        alice.json("verify", g1, input=f"{code_answer}\nn\n{label(b_id)} {label(a_id)}\n")
+    )
+    await alice.node.wait(lambda: bool(alice.node.daemon.sas._active))
+    m1.daemon.sas_start(g1, alice.node.me)
+    code, out = await verifying
+    if code_answer == "n":
+        assert (code, out["outcome"], out["status"]) == (6, "mismatch", "left")
+        assert status(alice.node, g1) == "left"
+    else:
+        assert (code, out["error"]["code"]) == (3, "labels_differ")
+        assert status(alice.node, g1) == "active"
+        assert store.sas_warnings(g1, m1.me)[0] == 1

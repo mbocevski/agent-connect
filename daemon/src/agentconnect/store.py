@@ -474,7 +474,33 @@ CREATE TABLE IF NOT EXISTS listings_seen (
     seen_at INTEGER NOT NULL,
     PRIMARY KEY (directory, name)
 );
+CREATE TABLE IF NOT EXISTS sas_answered (
+    group_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    commitment BLOB NOT NULL,
+    PRIMARY KEY (group_id, epoch, commitment)
+);
+CREATE TABLE IF NOT EXISTS sas_sent (
+    group_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    commitment BLOB NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, commitment)
+);
+CREATE TABLE IF NOT EXISTS sas_warnings (
+    group_id TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    committers TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (group_id, peer)
+);
 """
+
+# The one-time reset of verified flags (SPEC 11.8): flags recorded under the
+# group-wide code rest on a code an attacker in the middle could choose.
+SAS_RUN_MARKER = ("schema/sas_run", "1")
+SAS_RESET_NOTICE = "notice/sas_reset"
 
 GROUP_COLUMNS = (
     "group_id",
@@ -715,6 +741,7 @@ class Store:
             with self.tx():
                 self._db.execute("DELETE FROM handled WHERE key NOT LIKE '[%'")
                 self.kv_set("schema/handled_keys", "namespaced")
+        self._reset_verified_once()
         # The in-process adapter's event queue is read per group.
         event_columns = {
             r[0] for r in self._all("SELECT name FROM pragma_table_info('adapter_events')")
@@ -752,6 +779,19 @@ class Store:
 
     def close(self) -> None:
         self._db.close()
+
+    def _reset_verified_once(self) -> None:
+        """SPEC 11.8: reset every verified flag once, in one transaction with
+        its persisted marker, before anything is delivered."""
+        if self.kv_get(SAS_RUN_MARKER[0]) == SAS_RUN_MARKER[1]:
+            return
+        with self.tx():
+            cur = self._db.execute(
+                "UPDATE members SET verified = 0, verified_epoch = NULL WHERE verified = 1"
+            )
+            if cur.rowcount > 0:
+                self.kv_set(SAS_RESET_NOTICE, str(cur.rowcount))
+            self.kv_set(*SAS_RUN_MARKER)
 
     @contextmanager
     def tx(self) -> Generator[_Connection]:
@@ -924,6 +964,94 @@ class Store:
         )
         return cur.rowcount == 1
 
+    # -- SAS runs (agentconnect.runtime.sas) ------------------------------------
+
+    def sas_answered(self, group_id: str, epoch: int, commitment: bytes) -> bool:
+        """Whether this instance answered ``commitment`` in ``epoch`` (SPEC 11.3)."""
+        row = self._one(
+            "SELECT 1 FROM sas_answered WHERE group_id = ? AND epoch = ? AND commitment = ?",
+            group_id,
+            epoch,
+            commitment,
+        )
+        return row is not None
+
+    def add_sas_answered(self, group_id: str, epoch: int, commitment: bytes) -> None:
+        self._db.execute(
+            "INSERT OR IGNORE INTO sas_answered (group_id, epoch, commitment) VALUES (?, ?, ?)",
+            (group_id, epoch, commitment),
+        )
+
+    def forget_sas_answered(self, group_id: str, epoch: int) -> None:
+        """Answered commitments are kept for the rest of their epoch only."""
+        self._db.execute(
+            "DELETE FROM sas_answered WHERE group_id = ? AND epoch < ?", (group_id, epoch)
+        )
+
+    def add_sas_sent(
+        self, group_id: str, epoch: int, peer: str, commitment: bytes, at: int
+    ) -> None:
+        """This instance's commitment, unrevealed so far: a restart cancels
+        it (SPEC 11.3)."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO sas_sent (group_id, epoch, peer, commitment, at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_id, epoch, peer, commitment, at),
+        )
+
+    def forget_sas_sent(self, group_id: str, commitment: bytes) -> None:
+        self._db.execute(
+            "DELETE FROM sas_sent WHERE group_id = ? AND commitment = ?", (group_id, commitment)
+        )
+
+    def forget_sas_sent_before(self, group_id: str, epoch: int) -> None:
+        self._db.execute("DELETE FROM sas_sent WHERE group_id = ? AND epoch < ?", (group_id, epoch))
+
+    def forget_all_sas_sent(self) -> None:
+        self._db.execute("DELETE FROM sas_sent")
+
+    def sas_sent(self) -> list[dict[str, Any]]:
+        rows = self._all("SELECT group_id, epoch, peer, commitment, at FROM sas_sent")
+        return [
+            {"group_id": r[0], "epoch": r[1], "peer": r[2], "commitment": bytes(r[3]), "at": r[4]}
+            for r in rows
+        ]
+
+    def sas_warnings(self, group_id: str, peer: str) -> tuple[int, list[str]]:
+        """The warning count with ``peer`` and the members whose commits
+        ended those runs (SPEC 11.3)."""
+        row = self._one(
+            "SELECT count, committers FROM sas_warnings WHERE group_id = ? AND peer = ?",
+            group_id,
+            peer,
+        )
+        if row is None:
+            return 0, []
+        return int(row[0]), [str(c) for c in json.loads(row[1])]
+
+    def set_sas_warnings(self, group_id: str, peer: str, count: int, committers: list[str]) -> None:
+        if count <= 0:
+            self._db.execute(
+                "DELETE FROM sas_warnings WHERE group_id = ? AND peer = ?", (group_id, peer)
+            )
+            return
+        self._db.execute(
+            "INSERT INTO sas_warnings (group_id, peer, count, committers) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(group_id, peer) DO UPDATE SET count = excluded.count, "
+            "committers = excluded.committers",
+            (group_id, peer, count, json.dumps(committers[-16:])),
+        )
+
+    def drop_queued_sas(self) -> int:
+        """Queued ceremony messages of runs a restart ended: never sent."""
+        rows = self._all(
+            "SELECT seq FROM outbox WHERE state = 'queued' AND kind = 'app' "
+            "AND json_extract(payload, '$.sas') IS NOT NULL"
+        )
+        for (seq,) in rows:
+            self.update_outbox(int(seq), state="failed")
+        return len(rows)
+
     def put_card(self, group_id: str, identity: str, card: dict[str, Any]) -> None:
         self._db.execute(
             "INSERT OR REPLACE INTO agent_cards (group_id, identity, card) VALUES (?, ?, ?)",
@@ -999,6 +1127,9 @@ class Store:
                 "listed_peers",
                 "floor_state",
                 "floor_writes",
+                "sas_answered",
+                "sas_sent",
+                "sas_warnings",
             ):
                 db.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))  # noqa: S608
             db.execute(

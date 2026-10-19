@@ -93,7 +93,7 @@ async def settled(nodes: list[Node], gid: str) -> None:
         if len(epochs()) == 1:
             break
     assert len(epochs()) == 1
-    assert len({n.sas(gid) for n in nodes}) == 1
+    assert len({n.state(gid) for n in nodes}) == 1
     for n in nodes:
         assert not n.daemon.group_info(gid)["out_of_sync"]
 

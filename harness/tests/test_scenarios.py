@@ -37,7 +37,7 @@ async def test_one_to_one_lifecycle(cluster: Cluster) -> None:
     a.daemon.approve(pending["request_id"])
     await b.wait(lambda: b.daemon.store.group(gid) is not None)
     await cluster.settle(gid, 1)
-    assert a.sas(gid) == b.sas(gid)
+    assert a.state(gid) == b.state(gid)
 
     a.daemon.send_message(gid, {"text": "hi bob"})
     assert await b.wait_texts(gid, 1) == ["hi bob"]
@@ -58,7 +58,7 @@ async def test_one_to_one_lifecycle(cluster: Cluster) -> None:
 
 async def test_five_member_group_exchanges_messages(group: GroupFixture) -> None:
     nodes, gid = await group(5)
-    assert len({n.sas(gid) for n in nodes}) == 1
+    assert len({n.state(gid) for n in nodes}) == 1
     assert nodes[0].daemon.group_info(gid)["policy"]["floor"] == "mention"
     for i, n in enumerate(nodes):
         n.daemon.send_message(gid, {"text": f"from {i}"}, to=[nodes[(i + 1) % 5].me])
@@ -98,7 +98,7 @@ async def test_restart_mid_conversation_loses_nothing(
     b.proxy.heal()
     await b.start()
     assert await a.wait_texts(gid, 1) == ["queued"]
-    assert a.sas(gid) == b.sas(gid)
+    assert a.state(gid) == b.state(gid)
     assert b.daemon.group_info(gid)["status"] == "active"
 
 
@@ -110,7 +110,7 @@ async def test_epoch_conflict_resolves(group: GroupFixture) -> None:
     a.daemon.update(gid)
     b.daemon.update(gid)
     await cluster_settle(a, b, c, gid, epoch + 2)
-    assert len({n.sas(gid) for n in (a, b, c)}) == 1
+    assert len({n.state(gid) for n in (a, b, c)}) == 1
     c.daemon.send_message(gid, {"text": "after"}, to=["*"])
     assert await a.wait_texts(gid, 1) == ["after"]
 
@@ -183,7 +183,7 @@ async def test_fork_shows_as_differing_sas(group: GroupFixture, malicious_relay:
     b.daemon.update(gid)
     await b.wait(lambda: b.epoch(gid) == epoch + 1)
     assert a.epoch(gid) == c.epoch(gid) == epoch
-    assert a.sas(gid) == c.sas(gid) != b.sas(gid)
+    assert a.state(gid) == c.state(gid) != b.state(gid)
 
 
 async def test_own_commit_lost_after_rebuild_marks_out_of_sync(

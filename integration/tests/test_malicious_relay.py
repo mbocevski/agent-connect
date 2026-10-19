@@ -33,9 +33,9 @@ def b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
-def state(dep: Any, gid: str, service: str) -> tuple[int, str]:
+def state(dep: Any, gid: str, service: str) -> tuple[int, int]:
     view = dep.group(service, gid)
-    return int(view["epoch"]), str(view["sas"]["decimal"])
+    return int(view["epoch"]), len(view["members"])
 
 
 def statement(driver: ModuleType, dep: Any, gid: str, to: str, text: str) -> None:
@@ -98,13 +98,13 @@ def test_an_injected_commit_is_rejected(
         assert not [e for e in dep.events(s) if e["type"] == "out_of_sync"]
 
 
-def test_a_forked_group_view_shows_in_the_sas(
+def test_a_forked_group_view_shows_in_sas_runs(
     trio: tuple[Any, str, dict[str, str]], driver: ModuleType
 ) -> None:
     """A's commit reaches B only: A and B move to an epoch C never sees, and
-    their short code differs from C's."""
+    the fork shows as SAS runs that never pair (SPEC 12)."""
     dep, gid, _ids = trio
-    epoch, sas = state(dep, gid, "agent-c")
+    epoch, members = state(dep, gid, "agent-c")
     dep.tap("host-a", "fork")
     dep.cli("daemon-a", "group", "policy", gid, "--max-agent-turns", "9", echo=False)
     driver.wait_for("A's own commit", lambda: state(dep, gid, "daemon-a")[0] == epoch + 1 or None)
@@ -112,6 +112,12 @@ def test_a_forked_group_view_shows_in_the_sas(
     dep.tap("host-b", "inject", frame={"t": "deliver", "env": withheld["env"]})
     driver.wait_for("B on A's epoch", lambda: state(dep, gid, "daemon-b")[0] == epoch + 1 or None)
     a, b, c = (state(dep, gid, s) for s in ("daemon-a", "daemon-b", "agent-c"))
-    assert a == b
-    assert c == (epoch, sas)
-    assert a[1] != c[1]
+    assert a == b == (epoch + 1, members)
+    assert c == (epoch, members)
+    # The relay is still at C's epoch, so it refuses what A and B send in
+    # theirs: no run pairs, across the fork or on A's side of it.
+    for one, other in (("daemon-a", "agent-c"), ("daemon-a", "daemon-b")):
+        for seen in driver.sas_runs(dep, one, other, gid, within=15):
+            assert "peer_instance" not in seen, seen  # never paired
+            assert "sas" not in seen
+            assert "unpaired_text" in seen or seen["state"] == "waiting", seen

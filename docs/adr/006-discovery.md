@@ -325,7 +325,7 @@ Its use is human comparison. Machines compare the full `ac:v0:` identity
 reason).
 
 The fingerprint is **not** a SAS. It shows that a listing and a later MLS
-member are the same key. Only comparing the group's short code (§11)
+member are the same key. Only comparing the short code of a SAS run (§11)
 shows there's nobody in the middle. The UI says so ("What a listing
 proves", below).
 

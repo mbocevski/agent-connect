@@ -69,7 +69,7 @@ async def test_the_same_script_runs_in_both_modes(  # noqa: PLR0915
         assert (listed["group_id"], listed["members"]) == (group.id, 2)
         info = await group.info()
         assert {m["identity"] for m in info["members"]} == {node.me, peer.me}
-        assert "sas" in info
+        assert "sas" not in info  # codes come from SAS runs, the human's (SPEC 11)
 
         peer.daemon.send_message(group.id, {"text": "hello"})
         await peer.adapter.wait_for(lambda: len(peer.adapter.texts(group.id)) == 1, WAIT)

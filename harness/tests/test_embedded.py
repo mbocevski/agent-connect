@@ -106,8 +106,14 @@ async def test_the_human_runs_the_cli_against_an_embedded_agent(
     await peer.wait(lambda: peer.daemon.store.group(group.id) is not None)
     await cluster.settle(group.id, before + 1)
 
-    # The human compares the short code and confirms.
-    code, out = await asyncio.to_thread(cli, agent.config.data_dir, "verify", group.id, input="y\n")
+    # The human compares the short code with the peer's human, who starts
+    # the other side of the SAS run, and confirms (SPEC 11).
+    verifying = asyncio.ensure_future(
+        asyncio.to_thread(cli, agent.config.data_dir, "verify", group.id, input="y\ny\n")
+    )
+    await agent.wait(lambda: bool(agent.daemon.sas._active))
+    peer.daemon.sas_start(group.id, agent.me)
+    code, out = await verifying
     assert code == 0, out
     members = {m.identity: m for m in agent.daemon.store.members(group.id)}
     assert members[peer.me].verified

@@ -138,7 +138,7 @@ proptest! {
         let mut world = World { peers: vec![owner], groups: vec![group], next_seed: 0 };
         for op in &ops {
             world.apply(op, base * 100);
-            assert_converged(&world.groups);
+            assert_converged(&world.peers, &world.groups);
             let members = world.groups[0].members().unwrap();
             prop_assert_eq!(members.len(), world.groups.len());
         }

@@ -438,7 +438,7 @@ fn forged_own_commit_echo_neither_confirms_nor_discards() {
         gs[2].process(&cs[2], &out.commit),
         Ok(Event::Commit(_))
     ));
-    assert_eq!(gs[0].sas(), gs[2].sas());
+    assert_eq!(gs[0].state_fingerprint(), gs[2].state_fingerprint());
 }
 
 /// Review F3: one commit removes C and adds D, who takes C's leaf. C's

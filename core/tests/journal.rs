@@ -17,7 +17,7 @@ use agentconnect_core::group::Event;
 use agentconnect_core::{
     Client, DbKey, Error, Group, Identity, Instance, InviteLink, Rng, SqliteStore, Store,
 };
-use common::{assert_converged, clock, group_of, inner, invite, meta_for, peer};
+use common::{assert_converged, clock, group_of, inner, invite, meta_for, peer, same_view};
 
 const ACTIONS: [Action; 2] = [Action::Error, Action::Panic];
 
@@ -115,7 +115,7 @@ fn a_commit_survives_a_failure_at_every_step_and_the_sas_converges() {
                 .unwrap();
             assert!(again.replayed && again.value == got.value);
             groups[2].process(&peers[2].client, &out.commit).unwrap();
-            assert_converged(&groups);
+            assert_converged(&peers, &groups);
         }
     }
 }
@@ -177,7 +177,7 @@ fn an_own_commit_confirmation_survives_a_failure_and_its_echo_is_the_same_entry(
             assert_eq!(first, second);
             assert_eq!(groups[0].epoch(), epoch + 1);
             groups[1].process(&peers[1].client, &out.commit).unwrap();
-            assert_converged(&groups);
+            assert_converged(&peers, &groups);
             assert!(a.journal_consume(Some(groups[0].group_id()), &key).unwrap());
             assert_eq!(
                 groups[0]
@@ -293,7 +293,7 @@ fn a_welcome_survives_a_failure_at_every_step_and_a_restart() {
         .join_journaled(link.secret(), &meta, &welcome, "w", b"ctx")
         .unwrap();
     assert!(again.replayed);
-    assert_eq!(again.value.sas(), ga.sas());
+    assert!(same_view(&b, &again.value, &a.client, &ga));
     assert_eq!(
         b.join_journaled(link.secret(), &meta, b"other bytes", "w", b"")
             .unwrap_err(),

@@ -64,7 +64,6 @@ def group_info(*, verified: bool = False, members: int = 2, epoch: int = 1) -> d
             "members": members,
         },
         "members": ms,
-        "sas": SAS,
         "policy_summary": {
             "invite": "owner",
             "remove": "owner",
@@ -272,21 +271,23 @@ def joined(seq: int = 1) -> dict[str, Any]:
                 "seq": seq,
                 "group_id": GID,
                 "type": "joined",
-                "data": {"invite_id": "abc", "sas": SAS},
+                "data": {"invite_id": "abc"},
                 "at": 1,
             }
         ]
     }
 
 
-def test_accept_confirms_then_joins_and_shows_the_sas(fake: Fake) -> None:
+def test_accept_confirms_then_joins_and_points_at_verify(fake: Fake) -> None:
     accept_routes(fake, joined())
     result = fake.run("accept", URL, input="y\n")
     assert result.exit_code == 0, result.output
     assert "Invited by alice" in result.stdout
-    assert SAS_EMOJI[0][0] in result.stdout
-    assert "1234-5678-9012" in result.stdout
+    # No group-wide code any more: each pair compares its own (SPEC 11).
+    assert SAS_EMOJI[0][0] not in result.stdout
+    assert "1234-5678-9012" not in result.stdout
     assert "different channel" in result.stdout
+    assert f"agentconnect verify {GID} <member>" in result.stdout
 
 
 def test_accept_declined_sends_nothing(fake: Fake) -> None:
@@ -302,8 +303,10 @@ def test_accept_json_schema_and_hint(fake: Fake) -> None:
     assert code == 0
     assert out["status"] == "joined"
     assert out["hint"] == (
-        "ask your human to compare the short code 1234-5678-9012 with the other members"
+        "ask your human to compare the short code with each other member: "
+        f"`agentconnect verify {GID} <member>` on both sides"
     )
+    assert "sas" not in out
     assert conforms(out, SCHEMAS["accept (approved)"])
 
 
@@ -405,7 +408,8 @@ def test_groups_show_human(fake: Fake) -> None:
     out = fake.run("groups", "show", GID[:5]).stdout
     assert "0 of 1 verified" in out
     assert "Pending approvals  1" in out
-    assert "1234-5678-9012" in out
+    assert "1234-5678-9012" not in out
+    assert "agentconnect verify" in out
     assert "owner" in out
 
 
@@ -494,11 +498,11 @@ def test_unknown_and_ambiguous_group(fake: Fake) -> None:
 # -- approvals ---------------------------------------------------------------------------
 
 
-def test_approvals_list_shows_fingerprint_and_sas(fake: Fake) -> None:
+def test_approvals_list_shows_fingerprint_and_no_code(fake: Fake) -> None:
     fake.routes["GET /v0/approvals"] = {"approvals": [APPROVAL]}
     out = fake.run("approvals").stdout
     assert "fp-bob" in out
-    assert "1234-5678-9012" in out
+    assert "1234-5678-9012" not in out
     assert BIDI not in out  # bidi control stripped from the claimed name
     code, data = fake.json("approvals", "list")
     assert code == 0
@@ -577,37 +581,138 @@ def test_human_only_refusal_maps_to_refused(fake: Fake) -> None:
 # -- verify ---------------------------------------------------------------------------------
 
 
-def test_verify_yes_marks_every_other_member(fake: Fake) -> None:
-    fake.routes[f"POST /v0/groups/{GID}/members/{BOB}/verify"] = {"verified": True}
-    result = fake.run("verify", GID, input="y\n")
+RUN = "R" * 22
+LABELS = {"self": "00000000", "peer": "11111111"}
+
+
+def run_view(state: str = "done", **extra: Any) -> dict[str, Any]:
+    view: dict[str, Any] = {
+        "run": RUN,
+        "group_id": GID,
+        "peer": BOB,
+        "peer_name": "bob",
+        "epoch": 1,
+        "state": state,
+        "unpaired": False,
+        "peer_started": False,
+        "reason": None,
+        "warning": False,
+        "committer": None,
+        "next": None,
+        "warnings": 0,
+        "stopped": False,
+        "answerable": state == "done",
+        "expires_at": 600,
+    }
+    if state == "done":
+        view |= {"peer_instance": "1" * 16, "sas": SAS, "labels": LABELS}
+    return view | extra
+
+
+def sas_routes(fake: Fake, *views: dict[str, Any], gid: str = GID) -> None:
+    """Start answers ``waiting``; the polls answer ``views`` in order."""
+    fake.routes[f"POST /v0/groups/{gid}/members/{BOB}/sas"] = run_view("waiting", group_id=gid)
+    fake.routes[f"GET /v0/groups/{gid}/sas/runs/{RUN}"] = list(views or (run_view(),))
+    fake.routes[f"POST /v0/groups/{gid}/members/{BOB}/verify"] = {"verified": True}
+    fake.routes[f"POST /v0/groups/{gid}/sas/mismatch"] = {"status": "left"}
+
+
+def test_verify_runs_a_comparison_and_marks_the_member(fake: Fake) -> None:
+    sas_routes(fake, run_view("exchanging"), run_view())
+    result = fake.run("verify", GID, input="y\ny\n")
     assert result.exit_code == 0, result.output
-    assert "Do the other members see exactly this code? [y/N]" in result.stdout
-    # The epoch whose code was shown goes with the answer (SPEC 11).
-    assert fake.posts("/verify")[0] == (True, {"verified": True, "epoch": 1})
-    code, out = fake.json("verify", GID, input="y\n")
-    assert (code, out) == (0, {"outcome": "verified", "group_id": GID, "verified": [BOB]})
-    assert conforms(out, SCHEMAS["verify (verified)"])
+    out = result.stdout
+    assert "Comparing short codes with bob" in out
+    assert SAS_EMOJI[0][0] in out
+    assert "1234-5678-9012" in out
+    assert "yours 00000000, theirs 11111111" in out
+    assert "Does bob's human read exactly this code? [y/N]" in out
+    assert "And the same two instance labels, the other way round? [y/N]" in out
+    assert fake.posts(f"/members/{BOB}/sas")[0] == (True, {})  # the human token
+    # The answer names the run whose code was shown (SPEC 11.5).
+    assert fake.posts("/verify")[0] == (True, {"verified": True, "run": RUN})
+    assert fake.pauses == [0.5, 0.5]  # waiting, exchanging, done
+    sas_routes(fake)
+    code, out_json = fake.json("verify", GID, input="y\ny\n")
+    assert code == 0
+    assert out_json["verified"] == [BOB]
+    assert out_json["run"] == RUN
+    assert out_json["labels"] == LABELS
+    assert conforms(out_json, SCHEMAS["verify (verified)"])
+
+
+def test_verify_names_a_member_and_an_instance(fake: Fake) -> None:
+    info = group_info()
+    carol = member("ac:v0:carol")
+    info["members"].append(carol)
+    fake.routes[f"GET /v0/groups/{GID}"] = info
+    sas_routes(fake)
+    assert fake.json("verify", GID)[1]["error"]["code"] == "needs_member"
+    assert fake.json("verify", GID, "nobody")[1]["error"]["code"] == "not_found"
+    result = fake.run("verify", GID, "fp-bob", "--instance", "1" * 16, input="y\ny\n")
+    assert result.exit_code == 0, result.output
+    assert fake.posts(f"/members/{BOB}/sas")[-1][1] == {"instance": "1" * 16}
+    assert fake.run("verify", GID, BOB, input="y\ny\n").exit_code == 0
 
 
 def test_verify_default_answer_is_no(fake: Fake) -> None:
-    fake.routes[f"POST /v0/groups/{GID}/sas/mismatch"] = {"status": "left"}
-    result = fake.run("verify", GID, input="\n")
+    sas_routes(fake)
+    result = fake.run("verify", GID, input="\ny\n")  # the code: no; the labels: yes
     assert result.exit_code == 6
     assert not fake.posts("/verify")
+    assert fake.posts("/mismatch")[0] == (True, {"run": RUN})
 
 
 def test_verify_without_a_person_never_verifies(fake: Fake) -> None:
+    sas_routes(fake)
     result = fake.run("verify", GID, input="")  # no answer at all: EOF
     assert result.exit_code == 3
     assert not fake.posts("/verify")
     assert not fake.posts("/mismatch")
 
 
-def test_verify_refuses_when_the_group_changed_meanwhile(fake: Fake) -> None:
-    fake.routes[f"GET /v0/groups/{GID}"] = [group_info(), group_info(epoch=2)]
-    result = fake.run("verify", GID, input="y\n")
-    assert result.exit_code == 3
-    assert "changed while you compared" in result.output
+def test_verify_labels_that_dont_mirror_are_a_mismatch(fake: Fake) -> None:
+    """Review 67 finding 1: in the SPEC 14.4 attack the labels don't mirror.
+    That is never a silent retry: the other human's labels go to the daemon,
+    which counts a warning and leaves as for codes that differ."""
+    sas_routes(fake)
+    labels = f"POST /v0/groups/{GID}/sas/runs/{RUN}/labels"
+    fake.routes[labels] = {"outcome": "mismatch", "status": "left"}
+    # Even a "same code" answer: the labels decide it.
+    result = fake.run("verify", GID, input="y\nn\nnope\n2222aaaa 3333bbbb\n")
+    assert result.exit_code == 6, result.output
+    assert "You have left" in result.stdout
+    assert "8 hex characters" in result.output  # asked again for a bad answer
+    assert fake.posts("/labels")[0] == (True, {"self": "2222aaaa", "peer": "3333bbbb"})
+    assert not fake.posts("/verify")
+
+
+def test_verify_labels_of_crossed_replicas_count_and_restart(fake: Fake) -> None:
+    """Same code, labels that name replicas paired crosswise: no answer is
+    recorded, and the humans start again with --instance."""
+    sas_routes(fake)
+    labels = f"POST /v0/groups/{GID}/sas/runs/{RUN}/labels"
+    text = "The labels name other instances of you and of bob."
+    fake.routes[labels] = {"outcome": "replicas", "instance": "2" * 16, "text": text}
+    result = fake.run("verify", GID, input="y\nn\n22222222 00000000\n")
+    assert result.exit_code == 3, result.output
+    assert text in result.output
+    assert f"--instance {'2' * 16}" in result.output
+    assert not fake.posts("/verify")
+    assert not fake.posts("/mismatch")
+
+
+def test_verify_codes_that_differ_are_a_mismatch_whatever_the_labels(fake: Fake) -> None:
+    """Review 67 V-1: "codes differ" always posts the mismatch (SPEC 11.5).
+    The labels, which an attacker in the middle can make look like replicas,
+    never turn it into a restart."""
+    sas_routes(fake)
+    labels = f"POST /v0/groups/{GID}/sas/runs/{RUN}/labels"
+    fake.routes[labels] = {"outcome": "replicas", "instance": "2" * 16, "text": "x"}
+    result = fake.run("verify", GID, input="n\nn\n22222222 00000000\n")
+    assert result.exit_code == 6, result.output
+    assert fake.posts("/mismatch")[0] == (True, {"run": RUN})
+    assert not fake.posts("/labels")
     assert not fake.posts("/verify")
 
 
@@ -618,18 +723,92 @@ def test_verify_needs_other_members_and_an_active_group(fake: Fake) -> None:
     assert fake.json("verify", GID)[1]["error"]["code"] == "not_active"
 
 
+def test_verify_an_unpaired_run_offers_the_mismatch(fake: Fake) -> None:
+    """SPEC 11.5: after 60 s unpaired the human hears that the daemons may
+    not see the same group, and may treat it as different codes."""
+    text = "If bob says they have started, your daemons don't see the same group."
+    unpaired = run_view("waiting", unpaired=True, unpaired_text=text)
+    sas_routes(fake, unpaired)
+    result = fake.run("verify", GID, input="d\n")
+    assert result.exit_code == 6
+    assert text in result.stdout
+    assert fake.posts("/mismatch")[0] == (True, {"run": RUN})
+    # "started": recorded, and the run goes on.
+    sas_routes(fake, unpaired, run_view())
+    started = f"POST /v0/groups/{GID}/sas/runs/{RUN}/peer-started"
+    fake.routes[started] = run_view("waiting", unpaired=True, peer_started=True)
+    result = fake.run("verify", GID, input="s\ny\ny\n")
+    assert result.exit_code == 0, result.output
+    assert fake.posts("/peer-started")
+
+
+def test_verify_follows_a_restart_and_reports_warnings(fake: Fake) -> None:
+    restarted = run_view("aborted", reason="epoch_changed", next="N" * 22)
+    sas_routes(fake, restarted)
+    fake.routes[f"GET /v0/groups/{GID}/sas/runs/{'N' * 22}"] = run_view(run="N" * 22)
+    result = fake.run("verify", GID, input="y\ny\n")
+    assert result.exit_code == 0, result.output
+    assert fake.posts("/verify")[-1][1] == {"verified": True, "run": "N" * 22}
+    warned = run_view(
+        "aborted",
+        reason="epoch_changed",
+        warning=True,
+        committer=BOB,
+        warning_text="The comparison ended the way an attacker in the middle ends a run.",
+    )
+    sas_routes(fake, warned)
+    result = fake.run("verify", GID)
+    assert result.exit_code == 1
+    assert "WARNING" in result.stdout
+    assert "came from bob" in result.stdout
+    assert fake.json("verify", GID)[1]["error"]["code"] == "sas_epoch_changed"
+
+
+def test_verify_after_two_warnings_offers_the_mismatch(fake: Fake) -> None:
+    stop = "Comparisons with bob ended twice without a code."
+    stopped = run_view(
+        "aborted",
+        reason="timed_out",
+        warning=True,
+        warning_text="w",
+        stopped=True,
+        stop_text=stop,
+        warnings=2,
+    )
+    sas_routes(fake, stopped)
+    result = fake.run("verify", GID, input="y\n")
+    assert result.exit_code == 6
+    assert stop in result.stdout
+    assert fake.posts("/mismatch")
+    # The start refused until the human acknowledges.
+    sas_routes(fake)
+    fake.routes[f"POST /v0/groups/{GID}/members/{BOB}/sas"] = [
+        ApiClientError(409, "sas_stopped", stop),
+        run_view("waiting"),
+    ]
+    result = fake.run("verify", GID, input="n\n")
+    assert result.exit_code == 3
+    fake.routes[f"POST /v0/groups/{GID}/members/{BOB}/sas"] = [
+        ApiClientError(409, "sas_stopped", stop),
+        run_view("waiting"),
+    ]
+    result = fake.run("verify", GID, input="y\ny\ny\n")
+    assert result.exit_code == 0, result.output
+    assert fake.posts(f"/members/{BOB}/sas")[-1][1] == {"acknowledge": True}
+
+
 def mismatch_event(transfer: dict[str, Any] | None) -> dict[str, Any]:
-    data: dict[str, Any] = {"epoch": 1, "sas": SAS}
+    data: dict[str, Any] = {"epoch": 1, "run": RUN}
     if transfer is not None:
         data["transfer"] = transfer
     return {"events": [{"seq": 9, "group_id": GID, "type": "sas_mismatch", "data": data, "at": 1}]}
 
 
 def test_verify_no_reports_the_mismatch_and_handover(fake: Fake) -> None:
-    fake.routes[f"POST /v0/groups/{GID}/sas/mismatch"] = {"status": "left"}
+    sas_routes(fake)
     fake.routes["GET /v0/events?after=0"] = mismatch_event({"new_owner": BOB, "confirmed": True})
     fake.routes["GET /v0/events?after=9"] = {"events": []}
-    code, out = fake.json("verify", GID, input="n\n")
+    code, out = fake.json("verify", GID, input="n\ny\n")
     assert code == 6
     assert out == {
         "outcome": "mismatch",
@@ -638,21 +817,21 @@ def test_verify_no_reports_the_mismatch_and_handover(fake: Fake) -> None:
         "ownership_transfer": {"new_owner": BOB, "confirmed": True, "new_owner_name": "bob"},
     }
     assert conforms(out, SCHEMAS["verify (mismatch)"])
-    assert fake.posts("/mismatch")[0] == (True, {"epoch": 1})
-    text = fake.run("verify", GID, input="n\n").stdout
+    assert fake.posts("/mismatch")[0] == (True, {"run": RUN})
+    text = fake.run("verify", GID, input="n\ny\n").stdout
     assert "handed to bob" in text
     assert "You have left" in text
 
 
 def test_verify_no_unconfirmed_handover_and_non_owner(fake: Fake) -> None:
-    fake.routes[f"POST /v0/groups/{GID}/sas/mismatch"] = {"status": "left"}
+    sas_routes(fake)
     fake.routes["GET /v0/events?after=9"] = {"events": []}
     fake.routes["GET /v0/events?after=0"] = mismatch_event({"new_owner": BOB, "confirmed": False})
-    assert "NOT confirmed" in fake.run("verify", GID, input="n\n").stdout
+    assert "NOT confirmed" in fake.run("verify", GID, input="n\ny\n").stdout
     fake.routes["GET /v0/events?after=0"] = mismatch_event(None)
-    out = fake.run("verify", GID, input="n\n").stdout
+    out = fake.run("verify", GID, input="n\ny\n").stdout
     assert "don't rejoin" in out
-    out = fake.json("verify", GID, input="n\n")[1]
+    out = fake.json("verify", GID, input="n\ny\n")[1]
     assert out["ownership_transfer"] is None
     assert conforms(out, SCHEMAS["verify (mismatch)"])
 
@@ -790,7 +969,7 @@ def test_every_id_argument_may_start_with_a_dash(fake: Fake, gid: str) -> None:
     dashed(fake, gid)
     fake.routes[f"POST /v0/groups/{gid}/leave"] = {"status": "left"}
     fake.routes[f"POST /v0/groups/{gid}/messages"] = {"msg_id": "m1"}
-    fake.routes[f"POST /v0/groups/{gid}/members/{BOB}/verify"] = {"verified": True}
+    sas_routes(fake, run_view(group_id=gid), gid=gid)
     fake.routes[f"POST /v0/groups/{gid}/invites"] = {"url": URL, "invite_id": gid, "expires_at": 5}
     fake.routes[f"POST /v0/approvals/{gid}/approve"] = {"status": "approving"}
     fake.routes[f"POST /v0/approvals/{gid}/reject"] = {"status": "rejected"}
@@ -798,10 +977,8 @@ def test_every_id_argument_may_start_with_a_dash(fake: Fake, gid: str) -> None:
 
     code, shown = fake.json("groups", "show", gid)
     assert (code, shown["group_id"]) == (0, gid)
-    assert fake.json("verify", gid, input="y\n") == (
-        0,
-        {"outcome": "verified", "group_id": gid, "verified": [BOB]},
-    )
+    code, verified = fake.json("verify", gid, input="y\ny\n")
+    assert (code, verified["group_id"], verified["verified"]) == (0, gid, [BOB])
     assert fake.json("leave", gid) == (0, {"group_id": gid, "status": "left"})
     # Options before, between and after the positionals; a text that starts
     # with "-" is a positional too.

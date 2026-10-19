@@ -305,11 +305,35 @@ _GROUP_INFO: dict[str, Any] = {
         }
     ],
     "agent_cards": "object",
-    "sas?": {"decimal": "str", "emoji_indices": ["int"]},
     "origin?": {"kind": "str", "directory": "str", "name": "str"},
 }
 
 _HELD: dict[str, Any] = HELD
+
+_SAS_RUN: dict[str, Any] = {
+    "run": "str",
+    "group_id": "str",
+    "peer": "str",
+    "peer_name": Opt("str"),
+    "epoch": Opt("int"),
+    "state": "str",
+    "unpaired": "bool",
+    "peer_started": "bool",
+    "reason": Opt("str"),
+    "warning": "bool",
+    "committer": Opt("str"),
+    "next": Opt("str"),
+    "warnings": "int",
+    "stopped": "bool",
+    "answerable": "bool",
+    "expires_at": "int",
+    "peer_instance?": "str",
+    "sas?": {"decimal": "str", "emoji_indices": ["int"]},
+    "labels?": {"self": "str", "peer": "str"},
+    "stop_text?": "str",
+    "unpaired_text?": "str",
+    "warning_text?": "str",
+}
 
 _SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": "object"}
 
@@ -376,7 +400,7 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "GET",
         "/v0/groups/{gid}",
         "_group_info",
-        "One group: members, roles, verified flags, short code, `out_of_sync` and "
+        "One group: members, roles, verified flags, `out_of_sync` and "
         "the peers' Agent Cards (each wrapped as `untrusted`). Each member lists its "
         "instances, `self` marking this one and `joined_epoch` the epoch this runtime first "
         "saw it in; `instances_since_verified` are those that joined after you verified the "
@@ -612,13 +636,83 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
     ),
     RouteSpec(
         "POST",
+        "/v0/groups/{gid}/members/{identity}/sas",
+        "_sas_start",
+        "Start a SAS run with a member (SPEC 11.3): the daemon sends its commitment and "
+        "pairs with the first commitment the member's daemon sends back, from the "
+        "instance named in `instance` if given. Both humans start their own side. "
+        "`409 conflict` while a run with the member is under way, also from another "
+        "instance of your identity; `409 sas_stopped` after two warnings with the member, "
+        "until you pass `acknowledge: true`. The answer is the run, as "
+        "`GET /v0/groups/{gid}/sas/runs/{run}` shows it.",
+        request={"instance?": "str", "acknowledge?": "bool"},
+        response=_SAS_RUN,
+        human=True,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/groups/{gid}/sas/runs/{run}",
+        "_sas_run",
+        "A SAS run: `state` (`starting`, `waiting`, `exchanging`, `done`, `aborted`), the "
+        "code and both instance labels once `done`, `unpaired` (and `unpaired_text`) when "
+        "the run is still unpaired after 60 s, the abort `reason`, whether it was a "
+        "`warning` (and the `committer` whose commit ended it), `next` when the daemon "
+        "restarted the run in a new epoch, and `stopped` after two warnings with the "
+        "member. `answerable` is whether `same` can still be recorded for it.",
+        response=_SAS_RUN,
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/sas/runs/{run}/peer-started",
+        "_sas_peer_started",
+        "The other human says they started their side: if the run then times out "
+        "unpaired, that is a warning (SPEC 11.3).",
+        response=_SAS_RUN,
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/sas/runs/{run}/cancel",
+        "_sas_cancel",
+        "Give a SAS run up. Before this daemon revealed its nonce, the peer is told "
+        "(`control.sas_cancel`) and nothing is counted; after it, the run ends and the "
+        "peer's run ends as a warning (SPEC 11.3).",
+        response=_SAS_RUN,
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/sas/runs/{run}/labels",
+        "_sas_labels",
+        "The other human reads the same code, but instance labels that don't mirror yours "
+        "(a code that differs goes to `sas/mismatch`, whatever the labels): `self` is the label "
+        "they read as theirs, `peer` the one they read as yours. It counts as a warning. If "
+        "both name instances in your view (theirs one of the member's, `peer` one of your "
+        "identity's), two comparisons of replicas paired crosswise: `outcome` is "
+        "`replicas` and `instance` the member's instance to name with `--instance`. "
+        "Otherwise it is treated as codes that differ: the daemon leaves the group "
+        "(`outcome` `mismatch`, SPEC 11.5).",
+        request={"self": "str", "peer": "str"},
+        response={
+            "outcome": "str",
+            "instance?": "str",
+            "text?": "str",
+            "status?": "str",
+        },
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
         "/v0/groups/{gid}/members/{identity}/verify",
         "_verify",
-        "Mark a member verified (the human compared the short code). `verified` "
-        "defaults to `true`; marking verified needs `epoch`, the epoch whose short code "
-        "the human compared (`GET /v0/groups/{gid}` shows it with the code). If the group "
-        "has moved on since, the code changed: `409 stale_epoch`, compare again (SPEC 11).",
-        request={"verified?": "bool", "epoch?": "int"},
+        'Record the human\'s answer "same code" for a SAS run (SPEC 11.5): `run` is the '
+        "run whose code and labels the human compared. It must have its code, the answer "
+        "must come within 600 s of it, and no newer run or warning with the member may "
+        "have come since: otherwise `409 stale_epoch` (or `409 not_done`), compare again. "
+        "`verified: false` clears the flag and needs no run. A body with `epoch` (the "
+        "group-wide code this replaced) is refused with `400 bad_request`.",
+        request={"verified?": "bool", "run?": "str"},
         response={"verified": "bool"},
         human=True,
     ),
@@ -722,9 +816,10 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/groups/{gid}/sas/mismatch",
         "_sas_mismatch",
-        "Report that the short codes differ. The daemon leaves the group "
-        "(SPEC 11). `epoch` is the epoch the human compared.",
-        request={"epoch?": Opt("int")},
+        "Report that the short codes differ, or take the mismatch action of a run that "
+        "never paired or of a stop after two warnings. Always accepted: the daemon leaves "
+        "the group (SPEC 11.5). `run` names the run, when there is one.",
+        request={"run?": Opt("str")},
         response={"status": "str"},
         human=True,
     ),
@@ -1032,8 +1127,25 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (
         409,
         "stale_epoch",
-        "The group changed since the epoch you passed: its short code is a new one. Show "
-        "the new code and compare again.",
+        "The SAS run's code can't be confirmed any more: more than 600 s passed since it "
+        "was shown, or a newer run or a warning with the member came since. Compare again.",
+    ),
+    (
+        409,
+        "not_done",
+        "The SAS run has no code: it is still under way, or it ended without one.",
+    ),
+    (
+        409,
+        "conflict",
+        "A SAS run with this member is already under way, here or on another instance of "
+        "your identity.",
+    ),
+    (
+        409,
+        "sas_stopped",
+        "Two SAS runs with this member ended with a warning. Start again with "
+        "`acknowledge: true`, or treat it as different codes (`sas/mismatch`).",
     ),
     (
         409,
@@ -1415,20 +1527,47 @@ class ApiServer:
         verified = b.get("verified", True)
         if not isinstance(verified, bool):
             raise ApiError(400, "bad_request", "verified must be a boolean")
-        epoch = b.get("epoch")
-        if (epoch is None and verified) or (
-            epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool))
-        ):
-            msg = "epoch must be the integer epoch whose short code the human compared"
+        if "epoch" in b:
+            # SPEC 11.8: the old answer for a group-wide code, never mapped.
+            msg = "verify takes the run compared (`run`), not an epoch: compare again"
             raise ApiError(400, "bad_request", msg)
-        self.daemon.mark_verified(p["gid"], p["identity"], verified, epoch)
+        run = b.get("run")
+        if (run is None and verified) or (run is not None and not isinstance(run, str)):
+            raise ApiError(400, "bad_request", "run must name the SAS run the human compared")
+        self.daemon.mark_verified(p["gid"], p["identity"], verified, run)
         return {"verified": verified}
 
+    async def _sas_start(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        instance, acknowledge = b.get("instance"), b.get("acknowledge", False)
+        if instance is not None and not isinstance(instance, str):
+            raise ApiError(400, "bad_request", "instance must be an instance id")
+        if not isinstance(acknowledge, bool):
+            raise ApiError(400, "bad_request", "acknowledge must be a boolean")
+        return self.daemon.sas_start(p["gid"], p["identity"], instance, acknowledge)
+
+    async def _sas_run(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.sas_run(p["gid"], p["run"])
+
+    async def _sas_cancel(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.sas_cancel(p["gid"], p["run"])
+
+    async def _sas_labels(self, p: dict[str, str], b: dict[str, Any]) -> Any:
+        mine, yours = b.get("self"), b.get("peer")
+        if not isinstance(mine, str) or not isinstance(yours, str):
+            raise ApiError(400, "bad_request", "self and peer are the labels the other human reads")
+        return await self.daemon.sas_labels(p["gid"], p["run"], mine, yours)
+
+    async def _sas_peer_started(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.sas_peer_started(p["gid"], p["run"])
+
     async def _sas_mismatch(self, p: dict[str, str], b: dict[str, Any]) -> Any:
-        epoch = b.get("epoch")
-        if epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool)):
-            raise ApiError(400, "bad_request", "epoch must be an integer")
-        return {"status": await self.daemon.sas_mismatch(p["gid"], epoch)}
+        # Never refused for its body (SPEC 11.5): an `epoch` is ignored.
+        run = b.get("run")
+        return {
+            "status": await self.daemon.sas_mismatch(
+                p["gid"], run if isinstance(run, str) else None
+            )
+        }
 
     async def _listing_preview(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
         return await self.daemon.listings.preview(b)

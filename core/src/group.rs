@@ -39,7 +39,7 @@ use crate::policy::{
 use crate::provider::{Provider, Store};
 use crate::records::{self, OwnCommits, PendingRecord, PreviousMembers, wire_hash};
 use crate::rng::Rng;
-use crate::sas::Sas;
+use crate::sas::{self, Participant, Sas, SasNonce};
 
 /// Why an instance whose own leave is pending may not commit: the commit
 /// would carry its own removal.
@@ -1681,6 +1681,13 @@ impl Group {
         self.mls.pending_commit().is_some()
     }
 
+    /// Whether a proposal (a leave, SPEC §9.2) is stored for the next
+    /// commit. While one is, OpenMLS seals no application message.
+    #[must_use]
+    pub fn has_pending_proposals(&self) -> bool {
+        self.mls.pending_proposals().next().is_some()
+    }
+
     /// This instance's leaf index.
     #[must_use]
     pub fn own_leaf_index(&self) -> u32 {
@@ -1717,13 +1724,89 @@ impl Group {
             .collect()
     }
 
-    /// The SAS for the current epoch (SPEC §11).
+    /// The epoch authenticator, as a fingerprint of the group state for
+    /// unit tests. Never a code: a code comes from a SAS run (SPEC §11.4).
+    #[cfg(test)]
+    pub(crate) fn state_fingerprint(&self) -> Vec<u8> {
+        self.mls.epoch_authenticator().as_slice().to_vec()
+    }
+
+    /// [`Group::state_fingerprint`] for the bindings' tests. Only with the
+    /// `test-hooks` feature, which release builds leave off.
+    #[cfg(feature = "test-hooks")]
     #[must_use]
-    pub fn sas(&self) -> Sas {
+    pub fn state_fingerprint_for_testing(&self) -> Vec<u8> {
+        self.mls.epoch_authenticator().as_slice().to_vec()
+    }
+
+    /// This instance's SAS commitment for a run with `peer` in the current
+    /// epoch (SPEC §11.2).
+    #[must_use]
+    pub fn sas_commitment<S: Store>(
+        &self,
+        client: &Client<S>,
+        peer: &str,
+        nonce: &SasNonce,
+    ) -> [u8; sas::NONCE_LEN] {
+        sas::commitment(
+            self.group_id(),
+            self.epoch(),
+            client.instance().identity(),
+            client.instance().instance_id(),
+            peer,
+            nonce.expose(),
+        )
+    }
+
+    /// The code of a completed SAS run (SPEC §11.4): this instance with
+    /// `own` and the peer instance with its revealed `peer_nonce`.
+    ///
+    /// The code is derived only under the authenticator of the group's
+    /// current epoch, and only for the epoch the run named.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::WrongEpoch`] if `epoch` isn't the current epoch.
+    /// - [`Error::Malformed`] if the peer is this instance's own identity.
+    /// - [`Error::UnknownMember`] if the peer instance isn't a member.
+    pub fn sas_code<S: Store>(
+        &self,
+        client: &Client<S>,
+        epoch: u64,
+        own: &SasNonce,
+        peer_identity: &str,
+        peer_instance: u64,
+        peer_nonce: &[u8; sas::NONCE_LEN],
+    ) -> Result<Sas> {
+        if epoch != self.epoch() || epoch > sas::MAX_EPOCH {
+            return Err(Error::WrongEpoch);
+        }
+        if peer_identity == client.instance().identity() {
+            return Err(Error::Malformed("SAS run with oneself"));
+        }
+        if !self
+            .members()?
+            .iter()
+            .any(|m| m.identity == peer_identity && m.instance_id == peer_instance)
+        {
+            return Err(Error::UnknownMember);
+        }
+        let me = Participant {
+            identity: client.instance().identity(),
+            instance_id: client.instance().instance_id(),
+            nonce: own.expose(),
+        };
+        let peer = Participant {
+            identity: peer_identity,
+            instance_id: peer_instance,
+            nonce: peer_nonce,
+        };
         Sas::derive(
             self.mls.epoch_authenticator().as_slice(),
             self.group_id(),
-            self.epoch(),
+            epoch,
+            &me,
+            &peer,
         )
     }
 
@@ -2857,5 +2940,7 @@ impl Group {
 mod group_mode_tests;
 #[cfg(test)]
 mod knock_tests;
+#[cfg(test)]
+mod sas_grind_tests;
 #[cfg(test)]
 mod tests;

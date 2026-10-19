@@ -103,8 +103,8 @@ REPLICA_REMINDER = (
     "import` printed. The other members will see a new instance of yours join."
 )
 COMPARE_REMINDER = (
-    "Compare the short code with the other members over a different channel "
-    "(a call or in person), then run `agentconnect verify <group>`."
+    "Compare the short code with each other member over a different channel (a call "
+    "or in person): both of you run `agentconnect verify <group> <member>` at the same time."
 )
 
 # SPEC 4.3: the maximum invite lifetime.
@@ -374,9 +374,11 @@ class Sas:
 def unverified_hint(info: dict[str, Any]) -> str | None:
     """The agent-facing nudge when other members exist and aren't all verified."""
     trust = info["trust_state"]
-    if trust["members"] > 1 and trust["self"] != "verified" and "sas" in info:
-        decimal = info["sas"]["decimal"]
-        return f"ask your human to compare the short code {decimal} with the other members"
+    if trust["members"] > 1 and trust["self"] != "verified" and info["status"] == "active":
+        return (
+            "ask your human to compare the short code with each other member: "
+            f"`agentconnect verify {info['group_id']} <member>` on both sides"
+        )
     return None
 
 
@@ -391,7 +393,6 @@ def group_view(api: ApiClient, group_id: str) -> dict[str, Any]:
     info = api.request("GET", f"/v0/groups/{group_id}")
     trust = info["trust_state"]
     others = max(trust["members"] - 1, 0)
-    sas = Sas.of(info["sas"]).as_json() if "sas" in info else None
     return {
         "group_id": info["group_id"],
         "name": info["name"],
@@ -403,7 +404,6 @@ def group_view(api: ApiClient, group_id: str) -> dict[str, Any]:
         "require_verified": bool(info["policy"].get("require_verified")),
         "trust_state": trust,
         "verified_summary": f"{trust['verified_members']} of {others} verified",
-        "sas": sas,
         "leaving": info.get("leaving"),
         "policy_summary": info["policy_summary"],
         "floor": info["floor"],

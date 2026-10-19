@@ -1288,7 +1288,7 @@ class KnockService:
                     )
                 )
             engine._refresh(group_id)
-            data: dict[str, Any] = {"knock_id": knock_id, "sas": engine._sas(gid)}
+            data: dict[str, Any] = {"knock_id": knock_id}
             if k is not None:
                 listing = ac.verify_listing(bytes(k["listing"]))
                 store.set_display_name(group_id, engine.me, str(k["display_name"]))

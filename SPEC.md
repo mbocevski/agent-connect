@@ -18,7 +18,8 @@ From then on the agents exchange messages in real time.
   read message content.
 - Trust comes from the **invite secret**, which is carried in the URL fragment
   and never sent to the relay. Optionally it is strengthened by comparing a
-  **short authentication string (SAS)** across members.
+  **short authentication string (SAS)**: two members' daemons derive it
+  together, and their humans compare it out of band (§11).
 - Message payloads are **A2A v1.0** objects carried inside MLS application
   messages.
 
@@ -44,6 +45,7 @@ what it does not protect against.
 | **Mailbox** | The relay-side queue for one instance. It is addressed by `mailbox_id` = base64url(SHA-256(SK.pub))[0..22]. |
 | **Invite** | A use-limited capability to join one group, made of a public `invite_id` and a secret `invite_secret`. |
 | **Owner / admin / member** | Group roles (§9). |
+| **SAS run** | One commit-then-reveal exchange between two instances of different members, started by a human, that yields the short code their humans compare (§11). |
 | **Listing** | A signed A2A AgentCard with the `e2e` extension (§13.1). |
 | **Directory** | A server that indexes and serves listings (§13.2). |
 | **Door** | A relay-registered public handle `door_id` with an HPKE key, that accepts knocks (§6.6). |
@@ -146,7 +148,9 @@ what it does not protect against.
   received, both use the epoch's keys) have passed since its last own
   commit, whichever comes first. The instance does this
   immediately before its next send. This renews post-quantum forward secrecy and
-  post-compromise security.
+  post-compromise security. A ceremony message (§11.2) is not a send that
+  triggers it. While the instance takes part in a SAS run it defers a due
+  Update, but for at most 600 s in total (§11.3).
 
 ### 3.2 Extension codepoints
 
@@ -221,10 +225,13 @@ ASCII strings and `‖` means concatenation.
 |---|---|
 | `join_key` | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/join", L = 32) |
 | `welcome_key` (§6.4) | HKDF(ikm = invite_secret, salt = invite_id, info = "agentconnect/v0/welcome", L = 32) |
-| `sas_bytes` | HKDF(ikm = epoch_authenticator, salt = group_id, info = "agentconnect/v0/sas" ‖ u64be(epoch), L = 6) |
+| SAS `commitment` (§11.2) | SHA-256("agentconnect/v0/sas-commit" ‖ lp(group_id) ‖ u64be(epoch) ‖ lp(sender) ‖ lp(sender_instance) ‖ lp(peer) ‖ lp(nonce)) |
+| `sas_bytes` (§11.4) | HKDF(ikm = epoch_authenticator, salt = group_id, info = "agentconnect/v0/sas-code" ‖ u64be(epoch) ‖ P_lo ‖ P_hi, L = 6) |
 | knock `welcome_key` (§6.6) | HKDF(ikm = welcome_secret, salt = knock_id, info = "agentconnect/v0/knock-welcome", L = 32) |
 
-`knock_id` and `door_id` are the raw 16 bytes here, not base64url.
+`knock_id` and `door_id` are the raw 16 bytes here, not base64url, and so
+is `group_id`. `lp` is the length prefix of §6.1, and §11 defines the SAS
+inputs. The SAS `commitment` is a plain SHA-256 hash, not an HKDF output.
 
 Other labels:
 
@@ -856,9 +863,15 @@ Inner = {
 | `control.pause` | `{"reason": "loop_guard" \| "human"}` | Any member |
 | `control.resume` | `{}` | Any member, with a human-originated message (`origin: "human"`) |
 | `control.capabilities` | `{"adapters": [...], "accepts": [...part kinds]}` | Any member |
+| `control.sas_commit` | `{"commitment", "epoch", "peer"}` (§11.2) | Any member, only in a SAS run its human started (§11.3) |
+| `control.sas_reveal` | `{"answers", "epoch", "nonce"}` (§11.2) | Any member, only in a SAS run its human started (§11.3) |
+| `control.sas_cancel` | `{"commitment", "epoch"}` (§11.2) | Any member, about its own commitment, before its reveal (§11.3) |
 
 - `control.close`: a receiver MUST NOT leave on its own. It prompts its human
   (the reference daemon raises a `close_requested` event), who decides.
+- `control.sas_commit`, `control.sas_reveal` and `control.sas_cancel` are
+  handled by the daemon alone (§11.5): they are never delivered to an adapter, not even as
+  context, and they never trigger anyone.
 
 A receiver MUST ignore a control message from a sender the table doesn't
 allow; in particular a `control.resume` whose `origin` isn't `"human"`.
@@ -1452,7 +1465,8 @@ messages per minute, all instances of one identity together 3 times that
 (90), and the group as a whole 120. A sender instance is identified by its
 instance certificate (§3.3), so replicas of one identity (§9.4) each get the
 per-sender rate, and the identity cap keeps replicas from multiplying an
-identity's budget. Messages received in the reconnect
+identity's budget. Ceremony messages (§11.2) don't count against these
+rates; they have a budget of their own (§11.3). Messages received in the reconnect
 drain (§8.2) are exempt from the per-minute rates, since they queued while
 the member was away (an implementation SHOULD still bound the exemption;
 the reference daemon allows 1000 per connection, and per identity twice its
@@ -1513,9 +1527,8 @@ reference daemon raises `send_failed`).
 ### 10.4 Verification gating
 
 If `require_verified` is set, a daemon MUST hold deliveries to its adapters
-until its human has verified the current epoch (§11), that is until
-`trust_state.self` is `verified`: every other current member is
-verified. A member that joins later re-gates deliveries until it is
+until `trust_state.self` is `verified`: its human has verified every other
+current member (§11). A member that joins later re-gates deliveries until it is
 verified too.
 
 ### 10.5 Agent Cards
@@ -1592,49 +1605,683 @@ daemon offers:
 
 ## 11. Short authentication string (SAS)
 
-- **Derivation:** `sas_bytes` is defined in §3.5 and is computed per epoch.
-  Its 48 bits are rendered two ways:
+The short code lets two humans check that their daemons see the same
+group. One instance of each member takes part in a short exchange inside
+the group, a **SAS run**: each commits to a fresh random nonce, then both
+reveal their nonces, and the code is derived from the epoch's
+`epoch_authenticator` (RFC 9420 §8.7) and both nonces.
+
+The nonces are what makes the code worth comparing. The last committer of
+an epoch chooses its `epoch_authenticator`: it can try commits offline and
+keep the one it likes. An attacker in the middle of two forked views
+(§14.4) is a member of both, so a code derived from the authenticator alone
+could be ground until the two views show the same code, in about 2^21
+commits per view for a 42-bit code. In a run, the attacker has to fix its
+nonce in each view before it learns that view's honest nonce, which leaves
+it one guess per run (§11.6). The exchange follows the hash commitment of
+ZRTP (RFC 6189 §4.4.1.1) and of Matrix SAS verification (§16).
+
+One guess per run is worth something only if a lost guess is seen. So the
+rules below also make sure that an attacker who loses a run can't hide it:
+a "codes differ" answer is always acted on, aborts after a reveal are
+warnings, and a run that never pairs is reported as a possible fork.
+
+### 11.1 Who takes part
+
+- **A run is pairwise.** It is between one instance of each of two
+  different members, whose humans compare the code over a channel
+  **independent** of the one that carried the invite (for example a call,
+  or in person). Each human starts the run on their own daemon, for the
+  other member.
+- **What a match shows.** The code binds the epoch's
+  `epoch_authenticator`, which is derived from the whole group state of the
+  epoch: the ratchet tree with every leaf and its instance certificate, and
+  the GroupContext. Equal codes therefore show, except with probability
+  about 2^-k per run (§11.6), that the two instances have the same view of
+  the group, with the same member list and the same replicas. They don't
+  show that any other member is who its name says: that needs a run
+  between that member and each human who relies on it.
+- **Each pair compares its own code.** In a group of N identities, a
+  member's human runs N − 1 comparisons. Runs with different members are
+  independent and MAY take place at the same time, for example on one group
+  call.
+- **Why pairwise.** In the fork of §14.4 the attacker relays between A's
+  view and B's view: it is A's partner in one and B's partner in the other.
+  The fork shows up when A's human and B's human compare, and that
+  comparison needs only their two instances. A group-wide run would need
+  every instance online (replicas and idle agents included), would let any
+  member stall everyone's verification, and would need the members to agree
+  on who takes part before anyone reveals. It would detect no fork that the
+  pairwise runs between the humans who compare don't detect.
+- **Replicas.** A run is between instances; its result is about identities.
+  - A human runs it on one instance. The other instances of that identity
+    take no part, keep their own verified flags (§11.5) and are verified
+    on separately.
+  - At most one run per pair of identities is under way in a group at a
+    time (§11.3 step 1). Of the peer's instances, the run pairs with the
+    first one whose commitment it accepts, or with the one the human
+    named, and stays pinned to it (§11.3 step 2).
+  - Both instance labels are shown with the code (§11.5), so the humans
+    can tell when they read the codes of two different runs.
+  - A run with one's own identity is refused.
+  - A match verifies the peer identity (§11.5). A new instance of that
+    identity that joins later is shown as new.
+
+### 11.2 Messages
+
+A run uses three control messages (§7.2, §7.3), the **ceremony
+messages**, sent as MLS application messages in the group:
+
+```text
+control.sas_commit  body = {"commitment": "<b64url, 32 bytes>", "epoch": <u64>, "peer": "ac:v0:…"}
+control.sas_reveal  body = {"answers": "<b64url, 32 bytes>", "epoch": <u64>, "nonce": "<b64url, 32 bytes>"}
+control.sas_cancel  body = {"commitment": "<b64url, 32 bytes>", "epoch": <u64>}
+```
+
+- `epoch` is the MLS epoch of the run (§11.3), an integer in the I-JSON
+  range (§3.2), so at most 2^53 − 1. An instance in a later MLS epoch
+  can't start a run; no group gets there in practice.
+- `peer` is the identity the sender wants to compare codes with, as its
+  canonical identity identifier (§2: `ac:v0:` and the canonical base64url
+  of the 32-byte key).
+- `answers` is the peer's commitment that this reveal pairs with (§11.3).
+- In a cancel, `commitment` is the sender's own commitment, which it gives
+  up before its reveal (§11.3).
+- `nonce` is the sender's own nonce, the one its commitment hides: 32 bytes
+  from a CSPRNG, fresh for each run, and never used again, in another run
+  or with another peer.
+- Binary fields are canonical base64url of 32 bytes without padding (43
+  characters). Unknown body fields are ignored, as in every control (§7.2).
+- The Inner message (§7.2) of a `control.sas_commit` carries
+  `to: [peer]`. That of a `control.sas_reveal` carries in `to` the identity
+  of the instance whose commitment it answers, and that of a
+  `control.sas_cancel` the identity its commitment named. In all three,
+  `origin` is `"human"`, `hop` is 0, and `reply_to` and `addressee` are
+  absent.
+- A receiver MUST ignore a ceremony message:
+  - whose Inner fields differ from these;
+  - whose body `epoch` differs from the MLS epoch it was sent in;
+  - whose body fields don't have exactly the forms above.
+- **Addressing.** A receiver X MUST ignore a `control.sas_commit` whose
+  `peer` isn't X's own identity identifier, compared byte for byte, and a
+  `control.sas_reveal` or `control.sas_cancel` whose `to` isn't
+  `[X's identity]`, and a reveal whose `answers` isn't X's current
+  commitment. An ignored message is not held, prompts
+  nobody, and doesn't count as a restart (§11.3). The one exception is the
+  check of step 1 in §11.3, which looks at commitments sent by the other
+  instances of X's own identity.
+- Sizes: in JCS form (§3.2) a `control.sas_commit` body is 129 bytes at
+  epoch 0 and at most 144 bytes, a `control.sas_reveal` body 121 to 136
+  bytes, and a `control.sas_cancel` body 70 to 85 bytes. Each Inner message
+  is under 400 bytes, so it goes out in the 1 KiB padding bucket (§7.1),
+  like other short messages.
+
+The commitment:
+
+```text
+commitment = SHA-256("agentconnect/v0/sas-commit"
+                     ‖ lp(group_id)          # the raw 16 bytes
+                     ‖ u64be(epoch)
+                     ‖ lp(sender)            # UTF-8 identity identifier of the committing member
+                     ‖ lp(sender_instance)   # its 8-byte instance_id, big-endian
+                     ‖ lp(peer)              # UTF-8 identity identifier of the peer
+                     ‖ lp(nonce))            # 32 bytes
+```
+
+- `lp` is the length prefix of §6.1, and the label is not length-prefixed.
+  The input is 208 bytes.
+- `sender` and `sender_instance` are those of the MLS sender leaf, its
+  credential and instance certificate (§7.2). When X checks a peer's
+  commitment, `peer` is X's own identity identifier. X recomputes the
+  commitment from these values, never from fields the message states.
+- The commitment binds the group, the epoch, the sender, its instance and
+  the peer. So it can't be copied into another view as someone else's,
+  reflected back to its sender, or used in another epoch or another pair.
+
+### 11.3 The run
+
+A run of instance X with peer identity Y, in X's epoch e, goes through
+these steps:
+
+1. **Start.** X's human starts the run (§11.5), and MAY name the peer
+   instance.
+   - X MUST refuse when Y is X's own identity or Y is not a current member.
+   - X MUST refuse while another run of X with Y is under way. It MUST also
+     refuse when it holds a `control.sas_commit` with `peer` Y from another
+     instance of X's own identity, sent in epoch e less than 600 s ago: one
+     run per pair of identities at a time.
+   - While X has a pending MLS commit (§8.3), X waits until the commit is
+     confirmed or discarded, and e is the epoch after that. While a
+     proposal is pending (a leave, §9.2), X waits until it is committed,
+     and e is the epoch of that commit.
+   - X draws a fresh nonce and sends
+     `control.sas_commit{commitment, epoch: e, peer: Y}`.
+2. **Pair.** X pairs the run with the first commitment, in order of
+   receipt, that comes from an instance `i` of Y (the named instance, if
+   the human named one), is addressed to X (§11.2) and carries `epoch` e.
+   It may have arrived during the run or been held from before it (below).
+   X MUST NOT pair with a commitment it has answered before. Pairing pins
+   the run to `i` for the rest of the run.
+3. **Reveal.** Once the run is paired **and** the relay has accepted X's own
+   `control.sas_commit` (its `accepted` frame, §8.2), X sends
+   `control.sas_reveal{answers: <i's commitment>, epoch: e, nonce}`. X MUST
+   NOT send its reveal before both. X's reveal counts as sent once it is
+   sealed (MLS-encrypted); from then on X's nonce is spent.
+   - Holding the peer's commitment is the security condition. Waiting for
+     `accepted` is about ordering only: through an honest relay it keeps
+     X's commitment ahead of its reveal. A malicious relay can only stall
+     the run with it.
+4. **Check.** On a `control.sas_reveal` from `i` that is addressed to X and
+   carries `epoch` e, X recomputes `i`'s commitment from the revealed nonce
+   (§11.2) and compares it with the commitment it paired with. If they
+   differ, the run aborts (`bad_reveal`).
+5. **Done.** Once X has sent its reveal and checked `i`'s, it derives the
+   code (§11.4) and shows it to its human. No code, and no part of one, is
+   shown before this step. The code is derived only under the
+   `epoch_authenticator` of e, never under that of another epoch, even
+   from the same revealed nonces.
+
+**Ordering rules.**
+
+- No reveal before both commitments (step 3): a party reveals only once it
+  holds its peer's commitment, so the peer is bound before it learns the
+  nonce.
+- A reveal addressed to X from an instance of Y that arrives while the run
+  isn't paired yet is rejected, and the run aborts (`out_of_order`).
+- A reveal from an instance other than `i` is ignored: it belongs to
+  another run.
+- A reveal that doesn't open its commitment aborts the run (`bad_reveal`,
+  step 4).
+- A second commitment from `i` addressed to X during the run, other than
+  the one paired, aborts the run (`peer_restarted`). X never answers it,
+  neither with the nonce it may already have revealed nor with any other
+  in this run.
+- X keeps the commitments it has answered, for the rest of their epoch,
+  in its encrypted store, so that a restart doesn't forget them. It writes
+  the answered commitment to the store before it sends the reveal. This is
+  defence in depth: answering a commitment again with a fresh nonce would
+  give the attacker another uniform code, not a better chance.
+
+**Bound to one epoch.**
+
+- Every message of a run carries e and is checked against it, and the
+  commitment hashes it.
+- When X processes an MLS commit (its epoch changes) before step 5, the
+  run aborts (`epoch_changed`). A code already shown stays answerable
+  (§11.5).
+- While the human's command still waits, the implementation MAY start a
+  new run in the new epoch, with a fresh nonce, but only when the abort
+  came before X's own reveal, and at most 3 times per command. After that
+  the human starts again.
+- A message from an earlier epoch (the grace window of §8.3) never pairs
+  with, or completes, a run of a later one.
+
+**Interaction with X's own commits.**
+
+- While X takes part in a run (from step 1 until its human answers, or
+  the run aborts), it defers its §3.1 cadence Update once it is due. All
+  these deferrals together last at most 600 s until X's next commit; then
+  the Update goes out, and aborts any run under way. A held commitment
+  doesn't defer it. X SHOULD defer the departed-role clean-up of §9.2 too.
+  A commit its human asks for goes out at once and aborts the run.
+- A commit of pending proposals, such as another member's leave (§9.2),
+  can't wait: while a proposal is pending, the MLS library seals no
+  application message, the ceremony messages included. It goes out as
+  §9.2 says. When X's own commit that ends a run carries another member's
+  leave, the warning names that member, not X.
+- A ceremony message that can't be sealed because a proposal is pending
+  isn't sent. The run it belongs to ends before X's reveal
+  (`proposal_pending`, not a warning) and starts again under the restart
+  rule above, waiting for the commit (step 1). A reveal is never sealed
+  for a run that ended before it was: it is dropped, and X's nonce stays
+  unspent.
+- A ceremony message is not a send that triggers the cadence Update.
+- A ceremony message queued behind a pending commit (§8.3) is dropped when
+  that commit is confirmed, never sent in the new epoch. It is sent if the
+  commit is discarded.
+- An `error` frame for X's `control.sas_commit` ends the run (`send_failed`).
+  An `error` for its reveal also ends the run, after the reveal, since the
+  relay may have delivered it anyway.
+- A run doesn't survive a restart of its daemon: it ends, and its human
+  starts again. X keeps its commitments that are not revealed yet in its
+  encrypted store, and on a restart cancels each one sent in its current
+  epoch less than 600 s ago.
+
+**Commitments before the run.** Y's human may start first. A commitment
+addressed to X (§11.2) that X receives while it has no run with Y is
+**held**: at most one per sending instance (a newer one from that instance
+replaces it), until 600 s after receipt or until X's epoch changes. Holding
+it sends nothing. X tells its human that Y wants to compare codes (§11.5),
+and only the human's own start answers it.
+
+**Timeouts.**
+
+- A run that hasn't reached step 5 within 600 s of its start aborts
+  (`timed_out`). 600 s is also the timeout of Matrix SAS verification.
+- A run that is still unpaired 60 s after its start tells its human that
+  the daemons may not see the same group (§11.5).
+- Timeouts are measured on X's own clock.
+- When X's run times out before X's reveal, X cancels its commitment.
+
+**Cancelling.** `control.sas_cancel` gives up the sender's own commitment,
+and only before the sender revealed its nonce: on a restart, on a timeout,
+or when the human gives the run up. A receiver honours it only for a
+commitment from that same sending instance (identity and instance) that it
+holds, or that a run of its own is paired with and hasn't revealed against:
+the held commitment is dropped, or the run aborts (`peer_cancelled`). Every
+other cancel is ignored, in particular one that arrives after the
+receiver's reveal: that run goes on and ends as a warning, as a withheld
+reveal does. A cancel before the receiver's reveal counts no warning, since
+an abort there tells nobody anything about a nonce (§11.6, item 5). Without
+it, a commitment its sender gave up would stay held for 600 s, and a run
+that paired with it would end as a warning after its reveal. A run the
+human gives up after X's reveal sends no cancel; the peer's run ends as a
+warning. Cancels count against the ceremony budget below.
+
+**Warnings and the abort count.**
+
+- These aborts are **warnings**:
+  - every abort after X sent (sealed) its reveal, whatever its reason,
+    including `epoch_changed`, `timed_out`, `peer_restarted` and
+    `send_failed`, but
+    not an end the human asked for (the mismatch action, giving the run
+    up);
+  - `bad_reveal` and `out_of_order`, whenever they happen;
+  - a run that times out unpaired after the human said that the peer had
+    started (§11.5);
+  - instance labels that don't mirror (§11.5).
+- An `epoch_changed` warning names the member whose MLS commit ended the
+  run.
+- X keeps a count of warnings per group and peer identity in its encrypted
+  store. A run whose codes the human confirmed resets it.
+- When the count reaches 2, X stops: it starts no further run with Y on
+  its own and offers the mismatch action (§11.5). The stop message names
+  the member that committed, for each `epoch_changed` warning, and says
+  that this pattern is what an attacker in the middle produces, but also
+  what a relay that drops messages or an ordinary commit by another member
+  produces. The human may start another run after acknowledging this.
+- X doesn't leave on its own: a malicious relay alone can cause these
+  aborts, by dropping a reveal.
+- Precedent: neither ZRTP nor Matrix fails hard on repeated aborts. ZRTP
+  warns its user on every call after a cache mismatch until the SAS is
+  verified (RFC 6189 §4.3.2), and Matrix cancels every attempt when one
+  device starts several (§16). The count here is a warning with an
+  explicit next step, for the same reason.
+
+**Limits.**
+
+- Ceremony messages don't count against the §10.2 rates. A receiver
+  accepts at most 12 per minute from each sending instance, separately
+  from the per-identity and group caps, and drops the rest. The instance is
+  named with its identity: an `instance_id` is unique only within an
+  identity (§9.2), so another member can't use up a peer's budget by
+  certifying an instance with the same id. Only ceremony messages
+  addressed to the receiver (§11.2) count; the others are ignored anyway.
+  A command with its 3 restarts sends at most 8, and a cancel each.
+- Every state an instance keeps per sending instance, the held commitment
+  and the budget, is keyed by the instance's identity and `instance_id`
+  together.
+- In each group an instance keeps at most one held commitment per sending
+  instance and one run per peer identity, so its state is bounded by the
+  group size.
+
+### 11.4 The code
+
+```text
+P_x       = lp(identity_x) ‖ lp(instance_x) ‖ lp(nonce_x)    # one participant of the run
+(lo, hi)  = the two participants, ordered by their identity identifiers as byte strings
+info      = "agentconnect/v0/sas-code" ‖ u64be(epoch) ‖ P_lo ‖ P_hi
+sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6)
+```
+
+- `epoch_authenticator` is the MLS value of epoch e (RFC 9420 §8.7) in the
+  instance's own state, and `group_id` is the raw 16 bytes.
+- `identity_x` is the participant's identity identifier in UTF-8,
+  `instance_x` its 8-byte `instance_id` and `nonce_x` its revealed nonce.
+- `info` is 234 bytes. The two identities always differ (§11.1), so the
+  order is total and both participants compute the same `info`.
+- The 48 bits are rendered two ways:
   - **Emoji:** the first 42 bits as 7 indices of 6 bits each into the
     64-entry emoji table, `testdata/sas-emoji.json` (the Matrix SAS table).
   - **Decimal:** the first 39 bits as three 13-bit numbers, each plus 1000,
     shown as `NNNN-NNNN-NNNN`.
-- All members at the same epoch with the same group state see the same SAS.
-  A relay or attacker that forks the group (giving different members
-  different views) causes the codes to differ.
-- **Verification is a human action:**
-  - Humans compare the SAS over a channel **independent** of the one used to
-    share the invite (for example a call, or in person).
-  - Implementations MUST NOT let an agent mark verification on its own. There
-    is no agent-callable verify operation.
-  - A verification applies to the epoch whose SAS the human was shown. If the
-    epoch (and so the SAS) changed between showing the code and the human's
-    answer, the implementation MUST refuse to record the answer and show the
-    new code instead.
-  - If the human answers that the codes differ, the instance MUST leave the
-    group and raise a `sas_mismatch` alert. A member that isn't the owner's
-    last instance sends a leave proposal (§9.2) and deletes its local
-    state. The owner's last instance, which may not propose its own
-    removal, MUST first attempt an ownership transfer (§9.2): a commit
-    whose GroupContextExtensions proposal carries the full extension set
-    with `owner` set to the lowest-index admin, or if there is none the
-    lowest-index other member. It sends that commit, waits a short bounded
-    time for the relay's confirmation (the reference daemon waits 10 s),
-    and then deletes its local state whatever the outcome, reporting in
-    the alert whether the transfer was confirmed. If it was, the former
-    owner is a plain member and its leaf is removed under the normal §9.2
-    rules (it SHOULD send a leave proposal first). A sole member only
-    deletes its state.
-  - A mismatch means the views may be forked. A transfer from a forked
-    view only reaches that view: the real group then keeps the departed
-    instance as its owner, no policy change or removal of it can pass, and
-    its members MUST recreate the group (new group, new invites) to
-    regain an owner.
+- **Instance labels.** The code is shown with two labels: the first 8 hex
+  characters of X's own `instance_id` and of `i`'s. They aren't part of
+  the code. An attacker in the middle chooses its own `instance_id`s: with
+  them, the labels of the two views don't mirror; with copies of the real
+  ones, they mirror and the codes differ. Either way the humans see it
+  (§11.5).
+- **Length.** The codes keep these lengths. An attacker in the middle wins
+  one run with probability 2^-42 (about 2.3 × 10^-13) when the humans
+  compare emoji, and 2^-39 (about 1.8 × 10^-12) when they compare the
+  decimal code (§11.6). After a million runs its chance is still below
+  2 × 10^-6. ZRTP's example is a 16-bit SAS, one chance in 65536 per call
+  (RFC 6189 §7), and Matrix uses the same two renderings. A longer code
+  would take longer to read out in every comparison, and these figures
+  don't call for it.
+- **No other code.** An implementation MUST NOT show a code that isn't the
+  output of a completed run. There is no group-wide code: any code that is
+  computed from the `epoch_authenticator` alone can be ground (§11.6).
+
+### 11.5 Verification is a human action
+
+- **Only a human starts a run.** A run starts from the human's own verify
+  command, on a human-only surface (the CLI, or the human side of the local
+  API). The daemon sends the reveal of step 3 on its own, as part of the
+  run its human started.
+- **Agents take no part.** Implementations MUST NOT let an agent start or
+  answer a run, see a code, or mark verification. No agent-callable
+  operation, SDK call or tool may do any of these.
+- **Ceremony messages stay in the daemon.** Receivers handle them in the
+  daemon and MUST NOT pass them, or anything derived from them, to an
+  agent.
+- **Human-only by type.** Every event and API result that carries a code,
+  the state of a run, or a held commitment is human-only by its type. An
+  implementation MUST NOT give an agent an event or result of such a type,
+  and MUST NOT put a code into one of a type that agents receive (a join,
+  an epoch change, a knock outcome, the group view). Removing a field by
+  name on the way to the agent is not enough.
+- **Embedded mode.** When the runtime runs inside the agent's own process
+  (ADR-005), "agents take no part" holds by the scope of the API the
+  agent's code is given, not by a process boundary. An agent that reads
+  the runtime's memory is a compromised host (§12).
+- **What the human sees:**
+  - while the run waits for the peer: "Waiting for <name> to start the
+    comparison on their side";
+  - after 60 s unpaired: "If <name> says they have started, your daemons
+    don't see the same group. Treat this as different codes." The human
+    can wait, take the mismatch action, or say that the peer has started
+    (§11.3, warnings). A run that ends without ever pairing shows the same
+    text and offers the mismatch action;
+  - once the run is paired: that the codes are being exchanged;
+  - at step 5: the code with both instance labels (§11.4), and the
+    question whether the other human reads exactly the same code, with the
+    same two labels the other way round;
+  - on an abort: the reason, and for a warning (§11.3) that the run ended
+    the way an attacker in the middle ends a run it can't win, with the
+    member whose commit ended it;
+  - at a warning count of 2: the stop of §11.3 and the mismatch action.
+- **Both questions, always.** The implementation asks whether the other
+  human reads the same code and whether they read the same two labels the
+  other way round. Neither question ends the comparison without a result.
+- **Codes that differ are a mismatch, whatever the labels.** The labels
+  never explain a code that differs. An attacker in the middle chooses her
+  own `instance_id`s, and an `instance_id` is unique only within an
+  identity (§9.2): she can give her instances the ids of the real ones,
+  Y's in X's view and X's in Y's, so that the labels look like replicas
+  paired crosswise.
+- **Labels that don't mirror**, with the same code, count as a warning
+  (§11.3). The implementation asks for the two labels the other human
+  reads. They are treated as codes that differ, unless both name instances
+  in X's view: the other human's own label one of Y's instances, and their
+  peer label one of X's own identity's instances. Only then are they two
+  runs of replicas paired crosswise: no answer is recorded, and the humans
+  start again, naming the instance to compare with.
+- **Why the replicas path is safe.** It needs the same code in both views.
+  An attacker in the middle gets that only by winning the run, with the
+  probability of §11.4, the same chance with which a "same code" with
+  labels that mirror would mark her verified. The replicas path gives her
+  less than that win: no verification, a warning, and a restart that she
+  has to win again.
+- **"Codes differ" is always acted on.** For any run whose code was shown,
+  an implementation MUST accept the answer "the codes differ" and act on
+  it, whatever has happened since: an epoch change, an abort, or a timeout.
+  It MUST NOT refuse it as stale.
+- **"Same code"** applies to the run whose code the human was shown, to
+  its peer identity. An implementation MUST accept it only for a completed
+  run, answered within 600 s of step 5, also when the epoch changed
+  meanwhile. Later, it refuses and a new run is needed. Starting a new
+  run with Y, or a warning about Y, also ends this window for every earlier
+  run with Y, so a "same" never applies to a code the humans didn't
+  compare last. "Differ" stays accepted (above). The match shows
+  that both instances agreed on the group in epoch e; verified flags
+  persist across epochs anyway (trust states, below), and a fork that
+  starts after e can split the two members but not put someone between
+  them.
+- **Codes differ.** If the human answers that the codes differ, the
+  instance MUST leave the group and raise a `sas_mismatch` alert. A member
+  that isn't the owner's last instance sends a leave proposal (§9.2) and
+  deletes its local state. The owner's last instance, which may not
+  propose its own removal, MUST first attempt an ownership transfer (§9.2):
+  a commit whose GroupContextExtensions proposal carries the full extension
+  set with `owner` set to the lowest-index admin, or if there is none the
+  lowest-index other member. It sends that commit, waits a short bounded
+  time for the relay's confirmation (the reference daemon waits 10 s), and
+  then deletes its local state whatever the outcome, reporting in the alert
+  whether the transfer was confirmed. If it was, the former owner is a
+  plain member and its leaf is removed under the normal §9.2 rules (it
+  SHOULD send a leave proposal first). A sole member only deletes its
+  state. The mismatch action offered from a waiting run or at a warning
+  count of 2 leads here too.
+- A mismatch means the views may be forked. A transfer from a forked view
+  only reaches that view: the real group then keeps the departed instance
+  as its owner, no policy change or removal of it can pass, and its members
+  MUST recreate the group (new group, new invites) to regain an owner.
 - **Trust states:** each instance tracks a local per-member `verified` flag.
   - A new member starts `unverified`.
-  - When the epoch changes, previously verified members stay verified. The
-    UI shows the new SAS and "N of M verified".
+  - A run whose codes the human confirmed marks the peer identity
+    `verified` at this instance. Another instance of the same identity
+    keeps its own flags.
+  - When the epoch changes, verified members stay verified. The UI shows
+    "N of M verified".
   - A new instance of a verified identity does not reset the flag;
     implementations SHOULD show it as new.
+- (Informative.) In the reference daemon, `agentconnect verify <group>
+  [<member>]` starts a run through the human-only API (the member may be
+  left out when there is only one other member), shows its progress, the
+  code and the labels, and asks the question. The verify route
+  (`POST /v0/groups/{gid}/members/{identity}/verify`) takes the run it
+  answers in place of the `epoch` it takes today, and refuses a body that
+  names an epoch (§11.8). `POST /v0/groups/{gid}/sas/mismatch` takes the
+  run, or no run for the actions of a waiting run and of the stop. The
+  group view and the events no longer carry a group code.
+
+### 11.6 Security argument (informative)
+
+The model: SHA-256 and HKDF-SHA256 behave as random oracles; MLS
+authenticates the sender leaf and the epoch of every application message
+within a view; honest instances follow §11.3. k is the number of bits the
+humans compare: 42 (emoji) or 39 (decimal).
+
+**An attacker in both forked views (§14.4).** M is a member of view 1,
+with A, and of view 2, with B. It controls the relay, knows both epoch
+authenticators and chose them. No message crosses the two views, so A's
+run pairs only with M in view 1 and B's only with M in view 2.
+
+1. **One run, one guess.** A reveals its nonce n_A only after it has
+   paired with M's commitment c_1 in epoch e_1. At that point everything
+   that goes into A's code except n_A is fixed: the authenticator, because
+   a commit aborts the run and the code is never derived under another
+   epoch's authenticator; the two participants; and M's nonce, because
+   opening c_1 to a second nonce needs a SHA-256 collision (about 2^128
+   work). Of n_A, M has seen only c_A, and finding n_A from it takes about
+   2^256 hash evaluations. So A's code is uniform from M's point of view.
+   The same holds for B's run in view 2.
+2. **The two codes are independent.** M wins only when the two codes are
+   equal. Say B reveals after A; the order is M's choice. When B reveals,
+   M's nonce in view 2 is already fixed and n_B is new to M, so B's code
+   is uniform whatever M learned in view 1. The codes are equal with
+   probability 2^-k.
+3. **The delay race.** M may hold back its commitment in view 2 until A has
+   revealed in view 1, and choose its view-2 nonce knowing A's code. That
+   gains nothing: B reveals only after it has paired with M's commitment,
+   so whatever M's nonce is, n_B makes B's code uniform. M can't learn n_B
+   sooner, since B never reveals before it pairs (step 3) and c_B hides
+   n_B.
+4. **No offline grinding.** M can still grind its MLS commits beforehand
+   and choose both authenticators, but nothing it can compute before the
+   honest nonce arrives predicts the code. Equal inputs to the KDF in both
+   views would need equal authenticators, which means equal group states,
+   so no fork, and A's identity as a participant in view 2, which needs A's
+   identity key.
+5. **A lost run is seen.** M knows both codes before it reveals, so it
+   knows which runs it loses. Every way out is visible:
+   - letting both runs finish shows two different codes, acted on as a
+     mismatch whatever the labels say (M's own instance ids or copies of
+     the real ones), even if M then commits (§11.5). The same code with
+     labels that don't mirror needs a won run, as any same code does;
+   - aborting after the honest instance's reveal (withholding, committing,
+     restarting) is a warning, and two of them with one peer stop further
+     runs and offer the mismatch action (§11.3);
+   - never committing in a view leaves the run unpaired, which after 60 s
+     is reported as a possible fork (§11.5).
+   Aborts before the honest reveal tell M nothing about the honest nonce,
+   so the restarts they allow give M no information. Each run gives M one
+   chance of 2^-k, and r runs at most r · 2^-k.
+
+**A malicious member that isn't in the middle.** It can't send as A or B
+(MLS signatures), and A pairs only with commitments addressed to it from
+instances of the identity its human chose. It sees every commitment and
+reveal of the group; a revealed nonce is worth nothing, since each nonce is
+used in one run. It can abort other members' runs by committing, and its
+own by withholding its reveal: denial of service, shown to the humans as
+warnings that name it. In its own runs it has the same one chance per run
+as M.
+
+**A malicious relay.** Ceremony messages are MLS application messages, so
+the relay can't read them, forge them, or replay them (generation counters
+and `msg_id`, §8.3). It can:
+
+- reorder a reveal before its commitment: the run aborts (`out_of_order`);
+- delay or drop messages: the run times out, after a reveal as a warning;
+- withhold an MLS commit from one member, which leaves two members in
+  different epochs: their messages don't pair (the epoch is checked and is
+  in the commitment), and the run times out;
+- when several replicas of both identities run at once, pair them
+  crosswise if it withholds the commitments that would make step 1 refuse.
+  The humans then read codes of different runs, and the instance labels
+  show it (§11.5).
+
+None of this makes the codes of a fork match. Two instances paired in one
+run that share a view compute the same code: they use the same
+authenticator and the same authenticated nonces. All of it is denial of
+service, which the relay can cause anyway (§12).
+
+**Replays of old commitments or reveals.** Within an epoch, MLS rejects a
+replayed message. Across epochs, a message carries its epoch, the
+commitment hashes it, and a run pairs only within its own epoch. A
+commitment is answered at most once and a nonce is revealed once (steps 2
+and 3), so an old commitment can't draw a second nonce, and a reveal
+completes only the run whose commitment its `answers` names.
+
+### 11.7 Vectors and tests
+
+Implementations in this repository MUST have:
+
+- **Vectors.** `testdata/sas-commit-reveal.json` replaces
+  `testdata/sas-vectors.json` and is generated by `core/src/vectors.rs`
+  like the other core vectors (`TESTING.md`). Each case gives the
+  `group_id`, the epoch, the `epoch_authenticator`, both participants
+  (identity, `instance_id`, nonce), each commitment with its 208-byte
+  input, the 234-byte `info`, `sas_bytes`, the emoji indices and the
+  decimal code. The Rust and Python suites both check it, including that
+  swapping the participants gives the same code and that changing any one
+  input changes the commitment or the code.
+- **Negative tests**, in `core` and in the daemon:
+  - a reveal whose nonce doesn't open its commitment: `bad_reveal`, and no
+    code;
+  - a reveal before its commitment: `out_of_order`, and no code;
+  - a commitment or reveal of epoch e delivered in epoch e + 1, and a
+    reveal of an earlier run in the same epoch: ignored, and no code;
+  - no code is ever derived under an authenticator other than that of the
+    run's epoch, also from nonces revealed before an epoch change;
+  - a commit during a run before X's reveal: `epoch_changed`, not a
+    warning, and a restarted run uses a fresh nonce; after X's reveal: a
+    warning naming the committer, and no restart;
+  - a second commitment from the paired instance after X revealed:
+    `peer_restarted`, and X's nonce is never sent again;
+  - addressing: B runs with A and with C at the same time, and neither run
+    aborts; C is not prompted for B's run with A; a commitment addressed
+    to another member is not held and doesn't replace a held one;
+  - "codes differ" after an epoch change, after an abort and after a
+    timeout still leaves the group and raises `sas_mismatch`; "same" after
+    an epoch change is accepted within 600 s of step 5 and refused later,
+    and refused for an earlier run once a new run with that peer started
+    or a warning about it was raised;
+  - two warnings with one peer stop further runs and offer the mismatch
+    action, the count survives a restart, and a confirmed run resets it;
+  - an unpaired run reports a possible fork after 60 s;
+  - a second run with the same peer from another instance of one's
+    identity is refused, and the labels are shown with the code;
+  - a ceremony send doesn't trigger the cadence Update; a due Update is
+    deferred during a run for at most 600 s in total, also across
+    back-to-back runs, and a held commitment doesn't defer it; a queued
+    ceremony message is dropped across an epoch change; and an `error` on
+    `control.sas_commit` ends the run;
+  - the ceremony budget: messages over 12 a minute from one instance are
+    dropped, ordinary traffic doesn't use up the budget, and neither do
+    ceremony messages addressed to other members;
+  - an answered commitment is in the store before its reveal is sent, so
+    a crash between the two never lets it be answered again;
+  - both timeouts, on the fake clock;
+  - a forked view (one attacker in two groups), end to end through the
+    CLI on both hosts: it ends with codes that differ or labels that don't
+    mirror, so with the mismatch, never with a silent retry; and a fork of
+    one group by the relay: the runs never pair;
+  - labels that don't mirror with the same code: a warning, and the
+    mismatch unless both labels name instances in the local view (replicas
+    paired crosswise); codes that differ: the mismatch whatever the labels,
+    also when the attacker's instances carry the real instances' ids;
+  - a pending proposal: a run started during it waits and then completes;
+    a reveal that couldn't be sealed ends the run `proposal_pending` with
+    no warning, and the run starts again after the commit;
+  - cancels: a held commitment dropped, a paired run before its reveal
+    aborted with no warning, a cancel after the reveal or from another
+    instance ignored (the run still ends as a warning), and the cancels
+    sent on a restart and on a timeout;
+  - a member that certifies an instance under another member's
+    `instance_id` doesn't use up that member's budget;
+  - a commit of another member's leave that ends a run names that
+    member in the warning;
+  - the agent token can't start a run, see a code or receive a run event,
+    no ceremony message reaches an adapter, and no event type that agents
+    receive carries a code;
+  - the one-time reset of verified flags happens once, across a crash, and
+    a verify body that names an epoch is refused.
+- **The grinding attack.** An attacker in both views of a fork grinds its
+  commits on copies of its MLS state, as the review's probe did, until
+  each view's authenticator gives a code of its choice under the earlier v0
+  derivation; then it runs comparisons with A and with B. Over a seeded
+  series of runs, with the code cut to 12 bits for the test, the codes
+  shown to A and B match no more often than 2^-12 predicts, and with the
+  real lengths no run in the series matches. Grinding needs the copied
+  state, so this test runs in `core`; the harness's malicious relay forks
+  a group of real daemons and shows the fork as runs that never pair.
+- **The run's ordering against Mallory's strategies.** A model of the run
+  rules over the real groups (reveal only once paired, check the reveal
+  against the commitment, derive the code only under the run's epoch)
+  plays Mallory's strategies: committing before the honest nonce, choosing
+  its view-2 nonce after Alice's code (the delay race), a reveal that
+  doesn't open its commitment, and committing ahead, then re-deriving from
+  the revealed nonces under the new epoch it ground. The last one would
+  choose the code if a daemon re-derived; the run gives no code. Codes cut
+  to 12 bits match at chance.
+
+### 11.8 Compatibility
+
+- v0 is unreleased, so the SAS run replaces the earlier v0 code, which was
+  derived from the `epoch_authenticator` alone, without a new protocol
+  version (§13). Its label `agentconnect/v0/sas` is retired. The new
+  labels differ from it, so the two derivations can't be confused.
+- **The reset.** Verifications recorded under the earlier code rest on a
+  code that an attacker in the middle could choose. An updated
+  implementation MUST reset every `verified` flag to `unverified` once,
+  and tell its human why. It records the reset with a persisted, versioned
+  marker in its encrypted store, in the same transaction as the reset, so
+  the reset happens exactly once, also across a crash. It does so before
+  any delivery. Under `require_verified` (§10.4) deliveries are then held
+  until the members are verified again.
+- **The old answer.** An implementation MUST refuse a verification answer
+  that names an epoch instead of a run (`bad_request`), and MUST NOT map it
+  to the latest run.
+- **Older peers.** A daemon built to the earlier text ignores the new
+  control kinds (§7.2). There is no detection of such a peer.
+  `control.capabilities` (§7.3) isn't sent by current implementations, and
+  v0 has no deployed daemons on the earlier text. A run with an older peer
+  therefore shows as a run that never pairs, with the warning of §11.5.
+  A notice such as "the peer's daemon is too old" would also be an excuse
+  that an attacker in the middle could trigger at will, by not advertising
+  support.
 
 ## 12. Threat model
 
@@ -1648,11 +2295,11 @@ daemon offers:
 
 | Attacker | Capability | Mitigation | Residual risk |
 |---|---|---|---|
-| Honest-but-curious relay | Sees all envelopes | MLS E2E; padding | **Metadata:** membership size and churn, timing, message sizes (bucketed), mailbox ids |
-| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; single-use KeyPackages and the inviter's replay record stop JoinRequest replays (§6.2); MLS signatures and epochs; replay protection via generation counters and `msg_id`; own commits confirmed only by `msg_id` or exact bytes (§8.3); routing-hint checks; SAS detects forks | Denial of service; forking that goes undetected if the SAS isn't compared |
-| **Link leaked before use** (chat/email provider, inbox access, LLM logs, tampered landing page) | Joins as a member | Use limits and the "already used" warning; inviter approval; **SAS** | **Becomes a member if approved. Full MITM if the relay colludes and the SAS isn't compared.** |
+| Honest-but-curious relay | Sees all envelopes | MLS E2E; padding | **Metadata:** membership size and churn, timing, message sizes (bucketed), mailbox ids. A SAS run is two short messages from each of two members within seconds, so the relay can guess when members compare codes |
+| Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; single-use KeyPackages and the inviter's replay record stop JoinRequest replays (§6.2); MLS signatures and epochs; replay protection via generation counters and `msg_id`; own commits confirmed only by `msg_id` or exact bytes (§8.3); routing-hint checks; SAS runs detect forks, as different codes or as runs that never pair (§11) | Denial of service, SAS runs included; forking that goes undetected if the SAS isn't compared, and with probability at most about 2^-42 (emoji) or 2^-39 (decimal) per SAS run if it is (§11.6) |
+| **Link leaked before use** (chat/email provider, inbox access, LLM logs, tampered landing page) | Joins as a member | Use limits and the "already used" warning; inviter approval; **SAS** | **Becomes a member if approved. Full MITM if the relay colludes and the SAS isn't compared**, and with probability at most about 2^-42 (emoji) or 2^-39 (decimal) per SAS run if it is (§11.6) |
 | Link leaked after exhaustion or expiry | — | The secret only authenticates joins | None |
-| Malicious member | Reads everything while a member; injects content | Roles and policy; removal (new epoch); endpoint policy (§10) | Everything it saw while it was a member. It can stop the group by sending a commit the honest members reject (the relay advances its epoch, the honest members don't); recovery is a new group (§9.2 "SHOULD leave") |
+| Malicious member | Reads everything while a member; injects content | Roles and policy; removal (new epoch); endpoint policy (§10) | Everything it saw while it was a member. It can stop the group by sending a commit the honest members reject (the relay advances its epoch, the honest members don't); recovery is a new group (§9.2 "SHOULD leave"). It can abort SAS runs, which their humans see (§11.5) |
 | Removed member | Holds old keys | MLS forward secrecy across epochs | Past epochs it was part of |
 | Quantum adversary recording traffic | Future decryption | Hybrid ML-KEM-768 + X25519 KEM in every path secret; Update cadence | Rests on ML-KEM-768 (and X25519 until a quantum computer exists) |
 | **Model provider of any member's agent** | Sees what that agent processes | — (inherent) | **Sees plaintext. E2E runs daemon to daemon, not to the model.** |
@@ -1701,6 +2348,29 @@ messages instead of silent. A member MUST treat a marker as "possibly out of
 sync", never as proof of relay honesty, and the absence of a marker proves
 nothing. Detecting a dishonest relay stays with the epoch, routing-hint and
 SAS checks above.
+
+**Short code.** Comparing the code is a probabilistic check. In each SAS
+run an attacker in the middle succeeds with probability at most about
+2^-42 for the emoji code or 2^-39 for the decimal code, in the model of
+§11.6. A fork shows either as different codes or as runs that never pair:
+the attacker can't make a run between two honest members of different
+views, so it can only lose a run, abort it, or leave it unpaired. A "codes
+differ" answer is always acted on, an abort after a reveal is a warning,
+and a run unpaired for 60 s is reported as a possible fork (§11.3, §11.5).
+None of these makes the instance leave on its own: a malicious relay can
+cause aborts and unpaired runs too, so the human decides. A relay, or a
+member that commits during runs, can still push the humans towards the
+mismatch action, and so towards leaving and recreating the group. That is
+denial of service, which the relay can cause anyway; it doesn't let anyone
+into the middle. A member can also stall runs by proposing its own leave:
+while the proposal waits for its commit, no application message is sealed,
+so every run in the group waits (§11.3). The stall lasts until a member
+commits the leave; the reference daemon has the next leaf commit when the
+lowest one hasn't after 60 s, so about 60 s per committer that doesn't
+commit. The proposer leaves with that commit, and an honest lowest leaf
+that is offline causes the same stall. The earlier v0
+code, derived from the `epoch_authenticator` alone, could be ground offline
+by the epoch's last committer; the SAS run replaced it (§11.8).
 
 **Non-goals for v0:**
 
@@ -1917,8 +2587,8 @@ Machines compare the full `ac:v0:` identity.
   domain's web server vouches for that key.
 - It does **not** prove that the agent does what its card says, that it's
   safe to hand it anything, or who is on the other end. The fingerprint is
-  not a SAS: only comparing the group's short code (§11) shows there is
-  nobody in the middle.
+  not a SAS: only comparing the short code of a SAS run (§11) detects
+  someone in the middle.
 
 A listed identity is public: anyone can tell that a member with that
 identity in any group is the listed agent. An identity used for listing
@@ -2251,9 +2921,15 @@ H_A      A (inviter daemon)          Relay                 B (joiner daemon)    
  │          │── send(wrapped Welcome) ─▶│── deliver(wrapped) ─────▶│ unwrap, join     │
  │          │── invite.consume ────────▶│                          │ check meta       │
  │          │                           │                          │                  │
- │◀─ SAS ───│                           │                          │─── SAS ─────────▶│
- │◀═══════════════ humans compare the SAS over an independent channel ═════════════▶│
  │── verify▶│                           │                          │◀── verify ───────│
+ │          │── sas_commit(c_A) ───────▶│─────────────────────────▶│                  │
+ │          │◀──────────────────────────│◀────── sas_commit(c_B) ──│                  │
+ │          │── sas_reveal(n_A) ───────▶│─────────────────────────▶│                  │
+ │          │◀──────────────────────────│◀────── sas_reveal(n_B) ──│                  │
+ │          │ check c_B, derive code    │                          │ check c_A, code  │
+ │◀─ code ──│                           │                          │─── code ────────▶│
+ │◀═══════════════ humans compare the code over an independent channel ════════════▶│
+ │── same ─▶│                           │                          │◀── same ─────────│
  │          │◀════════ application messages (A2A in MLS), fanned out ═════════════▶│
  │          │── control.close ─────────▶│─────────────────────────▶│ leave            │
 ```
@@ -2266,7 +2942,7 @@ A: verify, approve, commit [Add(C), GroupContextExtensions(floor=mention)]; Welc
    (C is the third identity and floor_pinned is false; a new instance of A or B wouldn't switch the floor)
 A ── commit (epoch n) ──▶ Relay ──▶ B, A          (B checks the commit against policy)
 A ── welcome ──────────▶ Relay ──▶ C
-A, B, C: new SAS for epoch n+1. A and B stay verified for each other; C starts unverified.
+Epoch n+1: A and B stay verified for each other; C starts unverified, and A's and B's humans each run a SAS run with C.
 ```
 
 ### 14.3 Epoch conflict
@@ -2283,7 +2959,13 @@ B: discards its pending commit, processes A's commit, rebuilds at epoch 6, resen
 Attacker has the leaked link and the relay colludes:
   Attacker joins as "B" toward A    (group view 1)
   Attacker invites the real B into a second group posing as A    (group view 2)
-A sees SAS(view 1); B sees SAS(view 2) → different codes → the humans notice → sas_mismatch → leave
+A runs a SAS run with "B" (the attacker, view 1); B runs one with "A" (the attacker, view 2)
+  in each view the attacker commits before it learns that view's honest nonce (§11.3)
+A's code depends on n_A, B's on n_B → the codes differ, except with probability 2^-42 (emoji) or 2^-39 (decimal)
+  → the humans notice → sas_mismatch → leave (accepted even if the attacker commits first, §11.5)
+Aborting after a reveal → a warning naming the committer; two of them → stop, mismatch action offered (§11.3)
+Never committing in one view → that run never pairs → after 60 s: "your daemons don't see the same group" (§11.5)
+So the fork shows either as different codes or as runs that never pair
 ```
 
 ### 14.5 Leave
@@ -2294,7 +2976,7 @@ C ── control.leave (epoch n) ──▶ Relay ──▶ A, B     (a notice; m
 C ── proposal Remove(leaf 2) (epoch n) ──▶ Relay ──▶ A, B     (both store it)
 A: lowest leaf not itself leaving → commit [Remove(leaf 2)]
 A ── commit (epoch n) ──▶ Relay ──▶ B, C            (B checks it against the policy; C is removed)
-A, B: new SAS for epoch n+1; C deletes its state
+A, B: epoch n+1, still verified for each other; C deletes its state
 ```
 
 ### 14.6 Owner transfer, then leave
@@ -2398,6 +3080,13 @@ Decided by the maintainer (2026-10-18), group mode, now normative:
 - Whether to batch context for the agent is the adapter's choice (§9.3,
   §10.6).
 
+Decided by the maintainer (2026-10-19), now normative:
+
+- The short code comes from a commit-then-reveal exchange of nonces inside
+  the group, as in ZRTP and Matrix SAS verification, because the epoch's
+  last committer chooses the `epoch_authenticator` (§11). v0 changes in
+  place, and earlier verifications are reset (§11.8).
+
 Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 
 - Invite binding: the AEAD-wrapped Welcome (§6.4) is the only mode. An
@@ -2417,5 +3106,14 @@ Resolved by `docs/spikes/mls-xwing.md` (2026-10-17):
 - A2A Protocol Specification v1.0, <https://a2a-protocol.org/v1.0.0/specification/>
 - draft-chapman-a2a-mls-03 (MLS carried inside A2A)
 - draft-mpsb-agntcy-slim-02 (AGNTCY SLIM)
-- Matrix SAS verification (the emoji table)
+- RFC 6189, *ZRTP: Media Path Key Agreement for Unicast Secure RTP*, §4.4.1.1
+  (the hash commitment that leaves an attacker in the middle one guess at
+  the SAS), §4.3.2 (the warning on every call after a cache mismatch, with
+  no hard failure), §4.5.2 (the SAS) and §7 (one chance in 65536 for a
+  16-bit SAS)
+- Matrix Client-Server API v1.16, *Short Authentication String (SAS)
+  verification* (the commitment in `m.key.verification.accept`, the
+  10-minute timeout, cancelling every attempt when one device starts
+  several, and the emoji table),
+  <https://spec.matrix.org/v1.16/client-server-api/#short-authentication-string-sas-verification>
 - IETF KEYTRANS drafts (future identity transparency)
