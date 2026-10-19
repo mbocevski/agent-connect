@@ -67,7 +67,7 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 11 | Open, follow-up task |
+| Medium | 12 | 11 open, follow-up task; SR-61 fixed in this PR |
 | Low | 28 | Open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
@@ -433,6 +433,37 @@ triggered, against 28 plain messages.
 Fix: give the task budget, and triggering, only to updates whose
 `reply_to` names a message this instance sent; count the rest as ordinary
 messages or deliver them as context; say so in SPEC §9.3 and §10.2.
+
+### SR-61: a removed member keeps its last epoch's HPKE private keys
+
+- **Severity:** Medium. Private key material outlives the group it belongs
+  to. Whoever later reads the store, with its key, gets the member's leaf
+  and path HPKE private keys of the epoch before its removal.
+- **Component:** core (`group.rs`, `Group::delete`; OpenMLS 0.9.1
+  `MlsGroup::delete` and `StagedCommit` merge).
+- **Status:** fixed in this PR.
+- **Confirmed.** Found by mutation testing: closing the gaps in
+  `provider.rs` added a test that every OpenMLS row of a deleted group is
+  gone.
+
+When a member merges the commit that removes it, OpenMLS takes the path for
+a group it is no longer in and doesn't delete the previous epoch's
+encryption key pairs. `MlsGroup::delete` then deletes the key pairs of the
+current epoch only, so one row of `openmls_epoch_keys_pairs` stayed for
+every group the instance was removed from, or left. The daemon deletes
+groups through `Group::delete`, so the rows stayed in its store. A removal
+blanks the removed leaf's direct path, so no later commit should be
+encrypted to these keys. A commit that lost its epoch could have been.
+Probe: A removes B from a group of two at epoch 1; after B deletes the
+group, the row for epoch 1, leaf 1 (4477 bytes) is still there.
+
+Fix: `Group::delete` and the refused-Welcome path delete every row keyed by
+the group in every OpenMLS table after OpenMLS's own delete. Opening a
+SQLite store deletes the epoch key pairs of groups with no state left, which
+removes what earlier versions left behind. Tests in `provider.rs` delete a
+group that is active, has a pending leave, was removed and was left, and
+check that no row of any table references it, on both stores; one opens a
+store written the old way.
 
 ## Findings: Low
 

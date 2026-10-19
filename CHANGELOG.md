@@ -1234,6 +1234,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core: deleting a group left the HPKE private keys of the epoch before
+  the instance's removal in the store (SR-61, `docs/security-review-v0.md`).
+  OpenMLS deletes only the current epoch's key pairs, and a member that
+  merged its own removal still held the previous epoch's. Deleting a group
+  now deletes every OpenMLS row keyed by it, and opening a store deletes the
+  key pairs that earlier versions left for groups that no longer exist.
 - A2A adapter: deliveries were deduplicated by `msg_id` alone, so a member
   that sent a message under another member's `msg_id` first made the
   adapter skip the other member's message as a redelivery. They are now
