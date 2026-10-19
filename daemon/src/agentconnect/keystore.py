@@ -93,28 +93,30 @@ class DataDirLock:
 
     The holder writes ``<owner> <pid>`` into the file, so a second runtime
     can say who has the directory. That note is informational only: the
-    ``flock`` is the lock."""
+    ``flock`` is the lock. ``note=False`` (the CLI's identity commands,
+    which are no runtime) leaves the last runtime's note as it is."""
 
     FILE = "daemon.lock"
 
-    def __init__(self, data_dir: Path, owner: str = "daemon") -> None:
+    def __init__(self, data_dir: Path, owner: str = "daemon", *, note: bool = True) -> None:
         private_dir(data_dir)
         path = data_dir / self.FILE
         self._fd: int | None = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            note = self._note(self._fd)
+            held = self._note(self._fd)
             os.close(self._fd)
             self._fd = None
-            holder = "unknown" if note is None else f"{LOCK_HOLDERS[note[0]]}, pid {note[1]}"
+            holder = "unknown" if held is None else f"{LOCK_HOLDERS[held[0]]}, pid {held[1]}"
             msg = (
                 f"another agentconnect runtime ({holder}) is using {data_dir}: "
                 "stop it, or use another data directory"
             )
-            raise DataDirLockedError(msg, None if note is None else note[0]) from None
-        os.ftruncate(self._fd, 0)
-        os.pwrite(self._fd, f"{owner} {os.getpid()}\n".encode("ascii"), 0)
+            raise DataDirLockedError(msg, None if held is None else held[0]) from None
+        if note:
+            os.ftruncate(self._fd, 0)
+            os.pwrite(self._fd, f"{owner} {os.getpid()}\n".encode("ascii"), 0)
 
     @classmethod
     def probe(cls, data_dir: Path) -> tuple[bool, str | None]:

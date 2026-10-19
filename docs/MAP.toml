@@ -62,10 +62,12 @@ internal = [
 
 [[rule]]
 name = "cli"
+# The commands, and provisioning a replica, which only the CLI does.
 code = [
     "daemon/src/agentconnect/cli.py",
     "daemon/src/agentconnect/cli_json.py",
     "daemon/src/agentconnect/cli_support.py",
+    "daemon/src/agentconnect/provision.py",
 ]
 docs = ["docs/cli.md"]
 
@@ -166,6 +168,7 @@ name = "core-protocol"
 # The modules that implement a SPEC section, other than discovery.
 code = [
     "core/src/encoding.rs",
+    "core/src/export.rs",
     "core/src/group.rs",
     "core/src/identity.rs",
     "core/src/invite.rs",
@@ -251,7 +254,11 @@ doc = "docs/adr/005-deployment-modes.md"
 
 [[component]]
 name = "cli"
-paths = ["daemon/src/agentconnect/cli*.py", "daemon/src/agentconnect/apiclient.py"]
+paths = [
+    "daemon/src/agentconnect/cli*.py",
+    "daemon/src/agentconnect/apiclient.py",
+    "daemon/src/agentconnect/provision.py",
+]
 doc = "docs/cli.md"
 
 [[component]]

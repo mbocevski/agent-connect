@@ -7,6 +7,7 @@
 //! our own types or bytes.
 //!
 //! - [`identity`]: identities, instances and instance certificates (§2, §3.3)
+//! - [`export`]: the wrapped identity export that provisions a replica (§9.4)
 //! - [`invite`]: invite URLs, `join_key`/`welcome_key`, the wrapped Welcome (§4, §6.4)
 //! - [`join`]: the JoinRequest (§6.1)
 //! - [`group`]: [`Client`] and [`Group`]: creation, joins, commits, policy
@@ -30,6 +31,7 @@ pub mod clock;
 pub mod db;
 pub mod encoding;
 mod error;
+pub mod export;
 #[doc(hidden)]
 pub mod failpoint;
 pub mod group;

@@ -578,7 +578,7 @@ class GroupService:
         gid = unb64(group_id)
         policy = self._policy(gid)
         if not may_invite(policy, e.me):
-            self.close_invites(group_id)
+            self.close_invites(group_id, keep_replica=True)
         group = e.store.group(group_id)
         out_of_sync = group is not None and group.out_of_sync  # its commits can't land
         if not e.config.groups_cleanup_departed_roles or self.leaving(group_id) or out_of_sync:
@@ -629,14 +629,20 @@ class GroupService:
             for r in self._engine.store.outbox()
         )
 
-    def close_invites(self, group_id: str) -> None:
+    def close_invites(self, group_id: str, *, keep_replica: bool = False) -> None:
         """Close this instance's open invites for the group, because it may
         no longer invite or is no longer in the group. They are ``revoking``
         at once, so a join request for one is ignored, and the timer revokes
         them at the relay (:meth:`revoke_closed_invites`), so a joiner that
-        redeemed one hears it was used instead of waiting."""
+        redeemed one hears it was used instead of waiting. ``keep_replica``
+        keeps the replica invites open: adding an instance of one's own
+        identity needs no `invite` permission (SPEC 9.2)."""
         e = self._engine
-        ids = [str(i["invite_id"]) for i in e.store.invites("open") if i["group_id"] == group_id]
+        ids = [
+            str(i["invite_id"])
+            for i in e.store.invites("open")
+            if i["group_id"] == group_id and not (keep_replica and i["replica"])
+        ]
         if not ids:
             return
         for invite_id in ids:
