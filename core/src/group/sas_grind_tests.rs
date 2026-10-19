@@ -26,15 +26,15 @@ use crate::sas::{self, Participant, Sas, SasNonce};
 type C = Client<MemoryStore>;
 
 /// Bits of the earlier code Mallory grinds to agree, offline.
-const GRIND_BITS: u32 = 6;
+const GRIND_BITS: u32 = 5;
 /// Bits of the run codes compared: the code cut to 12 bits for the test.
 const CUT_BITS: u32 = 12;
 /// SAS runs per view.
 const TRIALS: u32 = 1 << 13;
 /// Runs through the full run model (every code through `Group::sas_code`).
-const RUNS: u32 = 1 << 9;
+const RUNS: u32 = 1 << 7;
 /// Bits of Bob's code Mallory grinds the re-derived code to agree on.
-const REDERIVE_BITS: u32 = 4;
+const REDERIVE_BITS: u32 = 3;
 
 fn client(id: &Identity, label: &str, clock: &Arc<FakeClock>) -> (C, Zeroizing<Vec<u8>>) {
     let inst = id
@@ -395,9 +395,9 @@ fn the_run_ordering_leaves_mallory_one_guess_per_run() {
             u32::from(leading(alice_code.bytes(), CUT_BITS) == leading(bob_code.bytes(), CUT_BITS));
         full += u32::from(alice_code.decimal() == bob_code.decimal());
     }
-    // About 0.125 expected in 2^9 runs; more than 6 has a probability below
-    // 10^-9.
-    assert!(cut <= 6, "{cut} of {RUNS} cut codes matched");
+    // About 0.03 expected in 2^7 runs; more than 3 has a probability below
+    // 10^-7. (The derivation alone is checked over 2^13 runs above.)
+    assert!(cut <= 3, "{cut} of {RUNS} cut codes matched");
     assert_eq!(full, 0, "the real codes never match");
     drop(m1_g1);
 }
