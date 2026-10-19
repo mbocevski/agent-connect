@@ -7,9 +7,10 @@ import contextlib
 import os
 import shutil
 import signal
+import socket
 import stat
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +23,9 @@ from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import app
 from agentconnect.config import Config
-from agentconnect.runtime.api import ApiServer
+from agentconnect.runtime.api import MAX_PENDING, MAX_PENDING_HARD, ApiServer
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
-from agentconnect_harness.cluster import Cluster, Node, api_token
+from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token
 from agentconnect_harness.relay import on_free_port
 
 
@@ -55,6 +56,17 @@ async def sockdir() -> AsyncIterator[Path]:
     d = Path(tempfile.mkdtemp(prefix="ac-"))
     yield d
     shutil.rmtree(d, ignore_errors=True)
+
+
+async def until(predicate: Callable[[], bool]) -> None:
+    """Poll (yielding to the loop): the server's connection handlers run
+    on this loop and announce nothing."""
+
+    async def loop() -> None:
+        while not predicate():  # noqa: ASYNC110 - nothing to wait on
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(loop(), WAIT)
 
 
 async def serve(cluster: Cluster, name: str, sockdir: Path, auto_approve: bool) -> Api:
@@ -413,18 +425,23 @@ async def test_api_hardening(
 ) -> None:
     api = await serve(cluster, "h", sockdir, auto_approve=False)
     addr = str(api.server.address)
-    monkeypatch.setattr("agentconnect.runtime.api.READ_TIMEOUT", 0.3)
-    monkeypatch.setattr("agentconnect.runtime.api.MAX_CONNECTIONS", 1)
-    # A client that never finishes its request is cut off (408)...
+    monkeypatch.setattr("agentconnect.runtime.api.HEADER_TIMEOUT", 0.3)
+    monkeypatch.setattr("agentconnect.runtime.api.MAX_PENDING", 1)
+    monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 0)
     reader, writer = await asyncio.open_unix_connection(addr)
     writer.write(b"GET /v0/status HTTP/1.1\r\n")
     await writer.drain()
-    # ...and while it holds the only slot, others get 503.
+    await until(lambda: len(api.server._pending) == 1)
+    # A connection that hasn't sent its request yet gives way to a new one
+    # when no room is left (503)...
     r2, w2 = await asyncio.open_unix_connection(addr)
-    assert b" 503 " in await r2.read()
-    w2.close()
-    assert b" 408 " in await reader.read()
+    w2.write(b"GET /v0/status HTTP/1.1\r\n")
+    await w2.drain()
+    assert b" 503 " in await reader.read()
     writer.close()
+    # ...and one that doesn't send its headers in time is cut off (408).
+    assert b" 408 " in await r2.read()
+    w2.close()
     await api.server.stop()
     # The socket path must not be some other file.
     other = sockdir / "not-a-socket"
@@ -451,3 +468,229 @@ async def test_tcp_api_refuses_browser_requests(cluster: Cluster) -> None:
         rebound = {**auth, "host": "evil.example"}
         assert (await c.get("/v0/status", headers=rebound)).status_code == 403
     await server.stop()
+
+
+# More half-sent connections than any limit: more than MAX_CONNECTIONS was.
+HALF_OPEN = 80
+
+
+@pytest.mark.parametrize("over", ["unix", "tcp"])
+async def test_half_sent_connections_dont_keep_the_human_out(
+    cluster: Cluster, sockdir: Path, over: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Connections that never finish their request (no token yet) can't
+    take the capacity a request with a token needs: a human-token request
+    and an agent-token request still get through, on the Unix socket and
+    on loopback TCP. (Each has waited long enough to give way.)"""
+    monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 0)
+    if over == "tcp":
+        node = await cluster.node("half-tcp")
+        server = await on_free_port(lambda port: _tcp_api(node, port))
+        port = int(str(server.address).rsplit(":", 1)[1])
+        transport = httpx.AsyncHTTPTransport()
+        base, host = str(server.address), f"127.0.0.1:{port}"
+
+        async def connect() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            return await asyncio.open_connection("127.0.0.1", port)
+
+    else:
+        api = await serve(cluster, "half", sockdir, auto_approve=False)
+        server = api.server
+        transport, base, host = api.transport, "http://ac", "ac"
+
+        async def connect() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            return await asyncio.open_unix_connection(str(server.address))
+
+    held = []
+    try:
+        for _ in range(HALF_OPEN):
+            reader, writer = await connect()
+            writer.write(f"GET /v0/status HTTP/1.1\r\nhost: {host}\r\n".encode())
+            await writer.drain()
+            held.append((reader, writer))
+        await until(lambda: server._connections == min(HALF_OPEN, MAX_PENDING))
+        async with httpx.AsyncClient(transport=transport, base_url=base) as c:
+            for scope in ("human", "agent", "human"):
+                auth = {"authorization": f"Bearer {api_token(server, scope)}"}
+                resp = await c.get("/v0/status", headers=auth)
+                assert resp.status_code == 200, (scope, resp.text)
+        # The oldest unfinished ones were closed to make room, with a 503.
+        reader, _ = held[0]
+        assert b" 503 " in await reader.read()
+    finally:
+        for _, writer in held:
+            writer.close()
+        await server.stop()
+
+
+def whole_request(host: str, token: str, path: str = "/v0/status") -> bytes:
+    return f"GET {path} HTTP/1.1\r\nhost: {host}\r\nauthorization: Bearer {token}\r\n\r\n".encode()
+
+
+async def status_of(sock: socket.socket) -> bytes:
+    """The status code the server answered on ``sock``, once it closed."""
+    loop = asyncio.get_running_loop()
+    sock.setblocking(False)
+    data = b""
+    try:
+        while chunk := await asyncio.wait_for(loop.sock_recv(sock, 65536), WAIT):
+            data += chunk
+    except ConnectionResetError:
+        return b"reset"
+    finally:
+        sock.close()
+    return data.split(b" ", 2)[1] if data else b"closed"
+
+
+async def listener(cluster: Cluster, sockdir: Path, over: str) -> tuple[ApiServer, Any, str]:
+    """An API server on the Unix socket or loopback TCP, a function making
+    blocking connections to it, and the Host its requests name."""
+    if over == "tcp":
+        node = await cluster.node("tcp")
+        server = await on_free_port(lambda port: _tcp_api(node, port))
+        port = int(str(server.address).rsplit(":", 1)[1])
+        return server, lambda: socket.create_connection(("127.0.0.1", port)), f"127.0.0.1:{port}"
+    api = await serve(cluster, "unix", sockdir, auto_approve=False)
+
+    def connect() -> socket.socket:
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(str(api.server.address))
+        return s
+
+    return api.server, connect, "ac"
+
+
+@pytest.mark.parametrize("n", [12, 24, 40, 60])
+@pytest.mark.parametrize("over", ["unix", "tcp"])
+async def test_requests_that_arrive_together_all_get_through(
+    cluster: Cluster, sockdir: Path, over: str, n: int
+) -> None:
+    """Whole requests that arrive together, as an SDK's parallel calls do,
+    are all answered: a connection whose headers arrived never gives way,
+    and the server reads what has arrived before it closes anything."""
+    server, connect, host = await listener(cluster, sockdir, over)
+    token = api_token(server, "agent")
+    socks = []
+    try:
+        for _ in range(n):  # blocking: all of them are in before the loop runs
+            s = connect()
+            s.sendall(whole_request(host, token))
+            socks.append(s)
+        statuses = await asyncio.gather(*(status_of(s) for s in socks))
+        assert statuses == [b"200"] * n
+    finally:
+        for s in socks:
+            s.close()
+        await server.stop()
+
+
+@pytest.mark.parametrize("burst", [MAX_PENDING - 1, MAX_PENDING, 40])
+async def test_connects_behind_a_whole_request_dont_close_it(
+    cluster: Cluster, sockdir: Path, burst: int
+) -> None:
+    """Loopback TCP, where any local user can connect: with the pool full
+    of half-sent connections, the human's whole request is answered even
+    when bare connects land right behind it."""
+    server, connect, host = await listener(cluster, sockdir, "tcp")
+    held: list[socket.socket] = []
+    try:
+        for _ in range(MAX_PENDING):
+            s = connect()
+            s.sendall(b"GET /v0/status HTTP/1.1\r\n")
+            held.append(s)
+        await until(lambda: len(server._pending) == MAX_PENDING)
+        human = connect()
+        human.sendall(whole_request(host, api_token(server, "human")))
+        for _ in range(burst):  # the kernel completes them before the loop runs
+            held.append(connect())
+        assert await status_of(human) == b"200"
+    finally:
+        for s in held:
+            s.close()
+        await server.stop()
+
+
+async def test_a_connection_that_sent_nothing_gives_way_first(
+    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past the limit, an unfinished connection that has sent nothing is
+    closed before an older one that has sent part of its request, and only
+    once it has waited EVICT_AFTER."""
+    server, connect, host = await listener(cluster, sockdir, "unix")
+    held: list[socket.socket] = []
+    try:
+        partial = connect()
+        partial.sendall(f"GET /v0/status HTTP/1.1\r\nhost: {host}\r\n".encode())
+        held.append(partial)
+        await until(lambda: len(server._pending) == 1 and server._pending[0].started)
+        for _ in range(MAX_PENDING - 1):
+            held.append(connect())
+        await until(lambda: len(server._pending) == MAX_PENDING)
+        held.append(connect())  # none has waited long enough: let in over the limit
+        await until(lambda: len(server._pending) == MAX_PENDING + 1)
+        monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 0)
+        held.append(connect())
+        assert await status_of(held[1]) == b"503"  # the oldest that sent nothing
+        partial.sendall(f"authorization: Bearer {api_token(server, 'human')}\r\n\r\n".encode())
+        assert await status_of(partial) == b"200"
+    finally:
+        for s in held:
+            s.close()
+        await server.stop()
+
+
+@pytest.mark.parametrize("burst", [1, 2, 8])
+async def test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one(
+    cluster: Cluster, sockdir: Path, burst: int
+) -> None:
+    """Loopback TCP with the pool at its hard limit, every connection having
+    sent a byte and stalled. The human's whole request arrives with bare
+    connects right behind it: each new connection closes the oldest
+    stalled one, never the fresh request whose first byte isn't read yet."""
+    server, connect, host = await listener(cluster, sockdir, "tcp")
+    held: list[socket.socket] = []
+    try:
+        for i in range(MAX_PENDING_HARD):
+            s = connect()
+            s.sendall(b"G")
+            held.append(s)
+            if i % 32 == 31:
+                await until(lambda n=i + 1: len(server._pending) >= n)
+        await until(
+            lambda: (
+                len(server._pending) == MAX_PENDING_HARD and all(p.started for p in server._pending)
+            )
+        )
+        human = connect()
+        human.sendall(whole_request(host, api_token(server, "human")))
+        for _ in range(burst):  # the kernel completes them before the loop runs
+            held.append(connect())
+        assert await status_of(human) == b"200"
+        for s in held[: burst + 1]:  # the oldest stalled ones gave way
+            assert await status_of(s) == b"503"
+    finally:
+        for s in held:
+            s.close()
+        await server.stop()
+
+
+async def test_a_refused_requests_body_is_read_before_the_answer(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    """A request refused at its headers (here: a wrong token) still has its
+    body read, so the answer reaches the client instead of a reset."""
+    server, connect, host = await listener(cluster, sockdir, "unix")
+    body = b"{" + b" " * 300_000 + b"}"
+    s = connect()
+    try:
+        s.sendall(
+            f"POST /v0/groups HTTP/1.1\r\nhost: {host}\r\nauthorization: Bearer wrong\r\n"
+            f"content-length: {len(body)}\r\n\r\n".encode()
+        )
+        loop = asyncio.get_running_loop()
+        s.setblocking(False)
+        await asyncio.wait_for(loop.sock_sendall(s, body), WAIT)
+        assert await status_of(s) == b"401"
+    finally:
+        s.close()
+        await server.stop()

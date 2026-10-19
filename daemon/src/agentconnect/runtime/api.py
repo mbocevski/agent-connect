@@ -38,6 +38,7 @@ import json
 import os
 import re
 import stat
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,14 +61,33 @@ LOG = log.get("agentconnect.api")
 
 MAX_BODY = 1 << 20
 MAX_HEADER = 16 << 10
+HEADER_TIMEOUT = 2.0  # seconds to send the request line and the headers
 READ_TIMEOUT = 10.0  # seconds to send a whole request
-MAX_CONNECTIONS = 64
-# Agent-token requests in progress at most: the rest of MAX_CONNECTIONS is
-# kept for the human token, so authenticated agent requests (long polls
-# included) can't take every connection. The cap applies after
-# authentication: connections that never send a whole request still count
-# against MAX_CONNECTIONS until READ_TIMEOUT.
+# Connections whose request line and headers haven't all arrived (no token
+# checked yet), in all and per peer UID where the socket reports one (the
+# separate-OS-user mode). A connection whose headers arrived is never
+# closed to make room. Past a limit, a new connection closes an unfinished
+# one that has waited EVICT_AFTER seconds: of its own UID at that UID's
+# limit, else of the UID holding the most; one that has sent nothing first,
+# then the oldest (503 busy). So idle or half-sent connections can't keep
+# out a request that has a token, and requests that arrive together (an
+# SDK's parallel calls) don't push each other out. Past a hard limit,
+# waiting doesn't count, and the oldest one that sent part of a request
+# and stalled goes first. On TCP there is no UID: only the totals apply.
+MAX_PENDING = 32
+MAX_PENDING_PER_PEER = 8
+MAX_PENDING_HARD = 128
+MAX_PENDING_PER_PEER_HARD = 64
+EVICT_AFTER = 0.5
+# Requests in progress at most once their token is checked, per token: the
+# agent token's (long polls included) can't take the human token's. Only
+# the human's own tools hold the human token (in the separate-OS-user mode
+# only the human's UIDs may use it), so only they can use up its 16.
 MAX_AGENT_REQUESTS = 48
+MAX_HUMAN_REQUESTS = 16
+# Event streams (GET /v0/events as SSE) per peer UID in the
+# separate-OS-user mode: one agent user can't hold every agent request.
+MAX_STREAMS_PER_PEER = 16
 SCOPE = "_scope"  # handler parameter carrying the request's token scope
 ACCEPT = "_accept"  # ... the Accept header
 LAST_EVENT_ID = "_last_event_id"  # ... the Last-Event-ID header
@@ -102,8 +122,8 @@ class SseStream:
     """A handler result that keeps the connection open and writes SSE frames
     until the client goes away (``text/event-stream``, see :mod:`sse`)."""
 
-    def __init__(self, hub: SseAdapter, sub: Subscription) -> None:
-        self.hub, self.sub = hub, sub
+    def __init__(self, hub: SseAdapter, sub: Subscription, peer: int | None = None) -> None:
+        self.hub, self.sub, self.peer = hub, sub, peer
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -184,9 +204,21 @@ class DeliveryPoll:
 
 @dataclass
 class Connection:
-    """One connection's request: whether it counts as an agent request."""
+    """One connection's request: which token's requests it counts as."""
 
     agent: bool = False
+    human: bool = False
+
+
+@dataclass(eq=False)
+class Pending:
+    """A connection whose request line and headers haven't all arrived."""
+
+    peer: int | None  # its UID, where the socket reports one
+    task: asyncio.Task[Any] | None  # the task serving it
+    writer: asyncio.StreamWriter
+    since: float  # loop time it was accepted
+    started: bool = False  # it has sent a byte
 
 
 Handler = Callable[[dict[str, str], dict[str, Any]], Awaitable[Any]]
@@ -979,7 +1011,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     ),
     (404, "not_found", "No such endpoint, group, invite or request."),
     (405, "method_not_allowed", "The path exists but not for this method."),
-    (408, "timeout", "The request was not received within 10 seconds."),
+    (
+        408,
+        "timeout",
+        "The request line and headers were not received within 2 seconds, or the whole "
+        "request within 10.",
+    ),
     (
         409,
         "stale_epoch",
@@ -1056,9 +1093,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (
         503,
         "busy",
-        "Too many open connections, or too many agent-token requests at once (part of the "
-        "capacity is kept for the human token). Deliveries: `429` when 4 polls of the "
-        "token wait already.",
+        "A connection whose request line and headers hadn't arrived was closed to make "
+        "room for a newer one (past 32 such connections, 8 per OS user in the "
+        "separate-OS-user mode), too many requests with one token are in progress (48 "
+        "with the agent token, 16 with the human token), or one OS user holds 16 event "
+        "streams (separate-OS-user mode). Deliveries: `429` when 4 polls of the token "
+        "wait already.",
     ),
 )
 
@@ -1120,6 +1160,8 @@ class ApiServer:
         self._stopping = asyncio.Event()  # long polls answer at once
         self._polls: dict[str, int] = {}  # long polls waiting, per token scope
         self._agent_requests = 0  # agent-token requests in progress
+        self._human_requests = 0  # human-token requests in progress
+        self._pending: list[Pending] = []  # still sending, oldest first
         self._idle = asyncio.Event()
         self._idle.set()
         self._port: int | None = None
@@ -1427,7 +1469,12 @@ class ApiServer:
             raise ApiError(409, "no_sse_adapter", 'set daemon.default_adapter = "sse"')
         if group is not None and self.daemon.store.group(group) is None:
             raise ApiError(404, "not_found", "no such group")
-        return SseStream(hub, hub.subscribe(group, p.get(LAST_EVENT_ID)))
+        peer = self.gate.peer_uid()
+        if peer is not None and sum(s.peer == peer for s in self._streams) >= (
+            MAX_STREAMS_PER_PEER
+        ):
+            raise ApiError(503, "busy", "too many event streams from this user")
+        return SseStream(hub, hub.subscribe(group, p.get(LAST_EVENT_ID)), peer)
 
     def _queue(self) -> DeliveryQueue:
         queue = self.daemon.adapters.get("mcp")
@@ -1504,6 +1551,15 @@ class ApiServer:
         body: bytes,
         conn: Connection | None = None,
     ) -> tuple[int, Any]:
+        route, args = self._route(method, target, headers, conn)
+        return await self._run(route, args, body)
+
+    def _route(
+        self, method: str, target: str, headers: dict[str, str], conn: Connection | None
+    ) -> tuple[Route, dict[str, str]]:
+        """Match the request and check its token, before its body is read:
+        the route and the handler's parameters, or an ``ApiError``. Counts it
+        toward its token's cap when ``conn`` is given."""
         path, _, query = target.partition("?")
         params = dict(
             (k, v) for k, _, v in (part.partition("=") for part in query.split("&") if part)
@@ -1522,21 +1578,31 @@ class ApiServer:
                     raise ApiError(503, "busy", "too many agent requests")
                 self._agent_requests += 1
                 conn.agent = True
-            try:
-                data = json.loads(body) if body else {}
-            except ValueError:
-                raise ApiError(400, "bad_request", "body is not JSON") from None
-            if not isinstance(data, dict):
-                raise ApiError(400, "bad_request", "body must be a JSON object")
+            elif scope == "human" and conn is not None:
+                if self._human_requests >= MAX_HUMAN_REQUESTS:
+                    raise ApiError(503, "busy", "too many human requests")
+                self._human_requests += 1
+                conn.human = True
             extra = {
                 SCOPE: scope,
                 ACCEPT: headers.get("accept", ""),
                 LAST_EVENT_ID: headers.get("last-event-id", ""),
             }
-            return 200, await route.handler({**params, **m.groupdict(), **extra}, data)
+            groups = {k: str(v) for k, v in m.groupdict().items()}  # every group is required
+            return route, {**params, **groups, **extra}
         if allowed:
             raise ApiError(405, "method_not_allowed", "method not allowed")
         raise ApiError(404, "not_found", "no such endpoint")
+
+    @staticmethod
+    async def _run(route: Route, args: dict[str, str], body: bytes) -> tuple[int, Any]:
+        try:
+            data = json.loads(body) if body else {}
+        except ValueError:
+            raise ApiError(400, "bad_request", "body is not JSON") from None
+        if not isinstance(data, dict):
+            raise ApiError(400, "bad_request", "body must be a JSON object")
+        return 200, await route.handler(args, data)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if isinstance(self.address, Path):
@@ -1552,14 +1618,12 @@ class ApiServer:
         if not self.gate.admit(writer):
             await self._reply(writer, 403, {"code": "peer_refused", "message": "user refused"})
             return
-        if self._connections >= MAX_CONNECTIONS:
-            await self._reply(writer, 503, {"code": "busy", "message": "too many connections"})
-            return
+        pending = self._admit(writer)
         self._connections += 1
         self._idle.clear()
         conn = Connection()
         try:
-            status, payload = await self._request(reader, conn)
+            status, payload = await self._request(reader, conn, pending)
             if isinstance(payload, DeliveryPoll):
                 answer = await payload.run(reader)
                 if answer is None:
@@ -1576,9 +1640,70 @@ class ApiServer:
         finally:
             if conn.agent:
                 self._agent_requests -= 1
+            if conn.human:
+                self._human_requests -= 1
+            self._unpend(pending)
             self._connections -= 1
             if self._connections == 0:
                 self._idle.set()
+
+    def _admit(self, writer: asyncio.StreamWriter) -> Pending:
+        """Count a new connection as pending until its request line and
+        headers have arrived. Past a limit (``MAX_PENDING``), close one that
+        is still pending first: of the same peer at its limit, else of the
+        peer with the most."""
+        peer = self.gate.peer_uid()
+        mine = [p for p in self._pending if p.peer == peer]
+        victim = None
+        if peer is not None and len(mine) >= MAX_PENDING_PER_PEER:
+            victim = self._victim(mine, hard=len(mine) >= MAX_PENDING_PER_PEER_HARD)
+        if victim is None and len(self._pending) >= MAX_PENDING:
+            counts = Counter(p.peer for p in self._pending)
+            most = max(counts.values())
+            heaviest = next(p.peer for p in self._pending if counts[p.peer] == most)
+            victim = self._victim(
+                [p for p in self._pending if p.peer == heaviest],
+                hard=len(self._pending) >= MAX_PENDING_HARD,
+            )
+        if victim is not None:
+            self._evict(victim)
+        pending = Pending(peer, asyncio.current_task(), writer, asyncio.get_running_loop().time())
+        self._pending.append(pending)
+        return pending
+
+    @staticmethod
+    def _victim(pool: list[Pending], hard: bool) -> Pending | None:
+        """The one of ``pool`` (oldest first) to close. Below a hard limit:
+        among those pending for ``EVICT_AFTER``, one that has sent nothing,
+        else the oldest; ``None`` when none has waited that long, and the
+        new connection is let in over the limit. Past a hard limit, waiting
+        doesn't protect: the oldest that sent part of a request and stalled
+        goes first, before any that sent nothing, since one of those may be
+        a whole request that just arrived and isn't read yet."""
+        if hard:
+            stalled = [p for p in pool if p.started]
+            return (stalled or pool)[0]
+        now = asyncio.get_running_loop().time()
+        pool = [p for p in pool if now - p.since >= EVICT_AFTER]
+        quiet = [p for p in pool if not p.started]
+        return (quiet or pool or [None])[0]
+
+    def _unpend(self, pending: Pending) -> None:
+        with contextlib.suppress(ValueError):
+            self._pending.remove(pending)
+
+    def _evict(self, pending: Pending) -> None:
+        """Close a connection that hasn't sent its request (``busy``)."""
+        self._unpend(pending)
+        LOG.info("api_connection_evicted")
+        data = json.dumps({"code": "busy", "message": "too many unfinished requests"}).encode()
+        pending.writer.write(
+            f"HTTP/1.1 503 {STATUS_TEXT[503]}\r\ncontent-type: application/json\r\n"
+            f"content-length: {len(data)}\r\nconnection: close\r\n\r\n".encode()
+            + data
+        )
+        if pending.task is not None:
+            pending.task.cancel()  # its handler closes the connection
 
     def _check_origin(self, headers: dict[str, str]) -> None:
         """Loopback TCP: no browser requests (no ``Origin``), and a ``Host``
@@ -1593,14 +1718,32 @@ class ApiServer:
             raise ApiError(403, "forbidden", "unexpected Host header")
 
     async def _request(
-        self, reader: asyncio.StreamReader, conn: Connection | None = None
+        self,
+        reader: asyncio.StreamReader,
+        conn: Connection | None = None,
+        pending: Pending | None = None,
     ) -> tuple[int, Any]:
         status, payload = 500, {"code": "internal", "message": "internal error"}
         try:
             async with asyncio.timeout(READ_TIMEOUT):
-                method, target, headers, body = await self._read(reader)
-            self._check_origin(headers)
-            status, payload = await self.handle(method, target, headers, body, conn)
+                try:
+                    method, target, headers, length = await self._read_head(reader, pending)
+                finally:
+                    if pending is not None:
+                        self._unpend(pending)  # its headers arrived: it never gives way
+                try:
+                    self._check_origin(headers)
+                    route, args = self._route(method, target, headers, conn)
+                except ApiError:
+                    if length and pending is not None:
+                        # Refused before its body was read: read the body
+                        # (so the answer isn't lost to a reset) as an
+                        # unfinished connection again, which may give way.
+                        self._pending.append(pending)
+                        await reader.readexactly(length)
+                    raise
+                body = await reader.readexactly(length) if length else b""
+            status, payload = await self._run(route, args, body)
         except TimeoutError:
             status, payload = 408, {"code": "timeout", "message": "request not received in time"}
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ValueError):
@@ -1615,8 +1758,15 @@ class ApiServer:
         return status, payload
 
     @staticmethod
-    async def _read(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:
-        head = await reader.readuntil(b"\r\n\r\n")
+    async def _read_head(
+        reader: asyncio.StreamReader, pending: Pending | None
+    ) -> tuple[str, str, dict[str, str], int]:
+        """The request line, the headers and the body's length."""
+        async with asyncio.timeout(HEADER_TIMEOUT):
+            head = await reader.readexactly(1)
+            if pending is not None:
+                pending.started = True
+            head += await reader.readuntil(b"\r\n\r\n")
         if len(head) > MAX_HEADER:
             raise ApiError(413, "too_large", "headers too large")
         lines = head.decode("latin-1").split("\r\n")
@@ -1629,8 +1779,7 @@ class ApiServer:
         length = int(headers.get("content-length", "0") or 0)
         if length < 0 or length > MAX_BODY:
             raise ApiError(413, "too_large", "body too large")
-        body = await reader.readexactly(length) if length else b""
-        return method, target, headers, body
+        return method, target, headers, length
 
     @staticmethod
     async def _reply(writer: asyncio.StreamWriter, status: int, payload: Any) -> None:
