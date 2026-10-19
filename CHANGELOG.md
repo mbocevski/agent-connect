@@ -1204,12 +1204,20 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Safety policy: delivered task updates and controls were audit decision
   rows, kept only by the group's cap, oldest first. One member could push
   out a group's 20000 decision rows in about 20 minutes, including the
-  `deliver` row of an earlier injection. Delivered task updates, controls
-  and Agent Cards are now `routine` rows, a class of their own with the
-  per-sender cap that drops have, so they can't push out a delivered
-  message, a hold or a human decision. When a class reaches the group's
-  cap, the sender holding the most rows of it gives way first. The
-  retention purge's daemon-wide cap of 100000 rows now applies per class.
+  `deliver` row of an earlier injection, and members holding more than
+  their share could push out another member's oldest rows, such as the
+  human's approval of its held message. Audit rows now come in four
+  classes. `security` rows (content delivered to the agent or sent by it,
+  a changed Agent Card's text, holds and their outcomes, and refusals of
+  what a sender may not do) are never trimmed for volume, only by
+  `policy.audit_retention_days`: each sender keeps its oldest
+  `policy.audit_max_rows_per_sender` per group and decision, and the rest
+  are counted (`suppressed` in `GET /v0/audit`, "not kept" in
+  `agentconnect audit`). `decision` rows (controls that change state,
+  task cancels), `routine` rows (unchanged cards, leave notices,
+  capabilities) and drops keep the group's cap each, the senders holding
+  the most giving way first, and 100000 rows each daemon-wide. A changed
+  card that isn't held is delivered with reason `card_changed`.
 - Core and protocol: a commit after which two leaves of one identity have
   the same `instance_id` is refused by its committer and rejected by every
   member (SPEC §9.2, "One leaf per instance"), and so is a commit whose

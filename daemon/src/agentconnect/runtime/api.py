@@ -662,7 +662,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/audit",
         "_audit",
         "The audit log, oldest first, at most 200 rows per call: who, when, kind, size "
-        "and the policy's decision for every message in and out. Never a body.",
+        "and the policy's decision for every message in and out. Never a body. "
+        "`suppressed` counts the security rows a sender sent past its share, which are "
+        "not stored ([safety.md](safety.md#audit-log)).",
         query="`after`: only rows with a greater `seq` (default 0). `group`: only that group.",
         response={
             "audit": [
@@ -678,7 +680,17 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
                     "decision": "str",
                     "reason": "str",
                 }
-            ]
+            ],
+            "suppressed": [
+                {
+                    "group_id": "str",
+                    "sender": "str",
+                    "decision": "str",
+                    "count": "int",
+                    "first_at": "int",
+                    "last_at": "int",
+                }
+            ],
         },
         human=True,
     ),
@@ -1241,7 +1253,11 @@ class ApiServer:
 
     async def _audit(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         after = _query_int(p, "after")
-        return {"audit": self.daemon.store.audit(p.get("group") or None, after)}
+        group = p.get("group") or None
+        return {
+            "audit": self.daemon.store.audit(group, after),
+            "suppressed": self.daemon.store.audit_suppressed(group),
+        }
 
     async def _transcript(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
         rows = self.daemon.transcript(p["gid"], _query_int(p, "after"))

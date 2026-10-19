@@ -680,6 +680,10 @@ class SafetyPolicy:
                 return decision
             if decision is not None:
                 return Decision(Verdict.HOLD_FOR_APPROVAL, "card_changed")
+        if m.kind == "a2a.agent_card" and m.card_changed:
+            # Not held (approve_inbound off): its text still reaches the
+            # agent, as context only. The audit log keeps it with content.
+            return as_context("card_changed")
         if m.kind in NON_CONTENT_KINDS:
             # Controls and cards carry no content (agentconnect.schemas) and
             # never trigger the agent; they are context only.

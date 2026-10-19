@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,7 @@ from agentconnect.policy import (
     hold,
 )
 from agentconnect.schemas import CANCEL_FIELDS, CARD_FIELDS, normalize
-from agentconnect.store import Store
+from agentconnect.store import Store, _water_level, audit_class
 from agentconnect_sdk.models import Message, parse_payload
 
 G = "g1"
@@ -536,7 +537,7 @@ def test_a_changed_card_is_held_with_inbound_approval(policy: SafetyPolicy) -> N
     card = {"kind": "a2a.agent_card", "origin": "agent", "body": VALID_CARD}
     unchanged = Inbound(G, MALLORY, "m/i1", card, 100, OWNER, 1, 20, True, card_changed=False)
     changed = Inbound(G, MALLORY, "m/i1", card, 100, OWNER, 1, 20, True, card_changed=True)
-    assert policy.inbound(changed) == as_context("not_content"), "no approval: context"
+    assert policy.inbound(changed) == as_context("card_changed"), "no approval: context"
     policy.update(G, {"require_approval": "inbound"})
     assert policy.inbound(unchanged) == as_context("not_content")
     assert policy.inbound(changed) == hold("card_changed")
@@ -934,16 +935,20 @@ def test_a_flood_of_drops_keeps_the_injections_deliver_row(
     policy.audit(G, "in", msg_id="inject", decision="deliver", **meta)
     policy.audit(G, "in", msg_id="held", decision="hold_for_approval", **meta)
     for i in range(2100):
-        policy.audit(G, "in", msg_id=f"junk{i}", decision="drop", reason="malformed", **meta)
+        policy.audit(G, "in", msg_id=f"junk{i}", decision="drop", reason="rate_limited", **meta)
     kept = {r["msg_id"] for r in store.audit(G, limit=10_000)}
-    assert {"inject", "held"} <= kept, "the decisions stay"
-    drops = [r for r in store.audit(G, limit=10_000) if r["decision"] == "drop"]
-    assert len(drops) == 2000, "the drops have their own cap"
+    assert {"inject", "held"} <= kept, "the security rows stay"
+    drops = [r["msg_id"] for r in store.audit(G, limit=10_000) if r["decision"] == "drop"]
+    assert drops == [f"junk{i}" for i in range(100, 2100)], "the drops keep their newest"
 
 
-# -- R3-3: volume can't evict a security-relevant decision ----------------------------
+# -- R3-3: volume can't evict a security-relevant row ---------------------------------
 
 HONEST = "ac:v0:honest"
+
+
+def ids(store: Store) -> set[str]:
+    return {r["msg_id"] for r in store.audit(G, limit=100_000)}
 
 
 def decisions_before(policy: SafetyPolicy) -> None:
@@ -964,92 +969,320 @@ def decisions_before(policy: SafetyPolicy) -> None:
     )
 
 
-def test_a_flood_of_task_updates_and_controls_keeps_every_decision(
-    policy: SafetyPolicy, store: Store
+@pytest.mark.parametrize(
+    ("inject", "flood"),
+    [
+        # An injection carried in a task artifact, then the sender's own
+        # task updates.
+        (("a2a.task_artifact", "deliver", ""), ("a2a.task_status", "deliver", "")),
+        # A changed card whose text reached the agent (no inbound approval),
+        # then the sender's own floor controls.
+        (
+            ("a2a.agent_card", "deliver_as_context", "card_changed"),
+            ("control.floor", "deliver_as_context", "not_content"),
+        ),
+    ],
+)
+def test_a_senders_flood_keeps_its_own_content_delivery(
+    policy: SafetyPolicy, store: Store, inject: tuple[str, str, str], flood: tuple[str, str, str]
 ) -> None:
-    """Delivered task updates, controls and cards (allowed at a far higher
-    rate than messages) are routine rows: a flood of them pushes out only
-    the flooder's own routine rows, never a delivery of a message, a hold or
-    a human decision, the flooder's own included."""
-    policy.audit_group_rows, policy.audit_sender_rows = 50, 10
-    decisions_before(policy)
-    policy.audit(
-        G,
-        "in",
-        sender=HONEST,
-        msg_id="honest-update",
-        kind="a2a.task_status",
-        size=10,
-        decision="deliver",
-    )
-    flood = [
-        ("a2a.task_status", "deliver", ""),
-        ("a2a.task_artifact", "deliver_as_context", "not_addressed"),
-        ("control.floor", "deliver_as_context", "not_content"),
-        ("a2a.agent_card", "deliver_as_context", "not_content"),
-    ]
-    for i in range(300):
-        kind, decision, reason = flood[i % len(flood)]
+    """At the default caps: a delivered task artifact or changed card is
+    content, so a flood of the sender's own task updates or controls, as
+    many as its share, doesn't erase it."""
+    for i, (kind, decision, reason) in enumerate(
+        [inject] + [flood] * (policy.audit_sender_rows + 1)
+    ):
         policy.audit(
             G,
             "in",
             sender=MALLORY,
-            msg_id=f"u{i}",
+            msg_id="inject" if i == 0 else f"u{i}",
             kind=kind,
             size=10,
             decision=decision,
             reason=reason,
         )
-    kept = [r["msg_id"] for r in store.audit(G, limit=10_000)]
-    assert kept[:5] == ["honest-deliver", "honest-held", "inject", "held", "honest-update"]
-    assert kept[5:] == [f"u{i}" for i in range(290, 300)], "the flooder keeps its newest"
+    assert "inject" in ids(store)
 
 
-def test_a_flood_of_messages_gives_way_before_anyone_else(
-    policy: SafetyPolicy, store: Store
-) -> None:
-    """Delivered messages are kept per group only, and when the group is
-    full the sender holding the most gives way first, oldest first: a member
-    flooding with messages can't push out another member's decisions."""
+def test_a_flooder_cant_erase_its_own_injection(policy: SafetyPolicy, store: Store) -> None:
+    """A busy group at its cap: ten members with 100 messages each, then
+    Mallory's injection is delivered and Mallory floods with more messages
+    than the group holds. Its injection, and every other member's row,
+    stay; Mallory's own messages past its share are counted, not kept."""
+    policy.audit_group_rows, policy.audit_sender_rows = 1000, 100
+    meta: dict[str, Any] = {"kind": "a2a.message", "size": 10}
+    for i in range(100):
+        for s in range(10):
+            policy.audit(
+                G, "in", sender=f"ac:v0:m{s}", msg_id=f"m{s}-{i}", decision="deliver", **meta
+            )
+    policy.audit(G, "in", sender=MALLORY, msg_id="inject", decision="deliver", **meta)
+    for n in range(1500):
+        policy.audit(G, "in", sender=MALLORY, msg_id=f"x{n}", decision="deliver", **meta)
+    kept = ids(store)
+    assert "inject" in kept
+    assert {f"m{s}-{i}" for s in range(10) for i in range(100)} <= kept
+    assert {f"x{n}" for n in range(99)} <= kept
+    assert f"x{99}" not in kept
+    (counted,) = store.audit_suppressed(G)
+    assert (counted["sender"], counted["decision"], counted["count"]) == (MALLORY, "deliver", 1401)
+
+
+def test_sybils_cant_push_out_another_members_approval(policy: SafetyPolicy, store: Store) -> None:
+    """A group at its cap of 1000: an honest member's 120 rows, the oldest
+    the human's approval of its held message, then nine sybil members
+    (a multi-use invite) sending far more than the group holds."""
+    policy.audit_group_rows = 1000
+    meta: dict[str, Any] = {"kind": "a2a.message", "size": 10}
+    policy.audit(G, "in", sender=HONEST, msg_id="honest-approved", decision="approved", **meta)
+    for i in range(119):
+        policy.audit(G, "in", sender=HONEST, msg_id=f"h{i}", decision="deliver", **meta)
+    for n in range(200):
+        for s in range(9):
+            policy.audit(
+                G, "in", sender=f"ac:v0:sybil{s}", msg_id=f"s{s}-{n}", decision="deliver", **meta
+            )
+    kept = ids(store)
+    assert "honest-approved" in kept
+    assert {f"h{i}" for i in range(119)} <= kept
+
+
+def test_a_flood_of_routine_rows_keeps_every_other_row(policy: SafetyPolicy, store: Store) -> None:
+    """Unchanged cards, leave notices and capabilities are routine rows: a
+    flood of them pushes out only the flooder's own routine rows, never a
+    delivery, a hold, a human decision or a control that changed the
+    group's state, the flooder's own included."""
     policy.audit_group_rows, policy.audit_sender_rows = 50, 10
     decisions_before(policy)
+    for i, kind in enumerate(("control.close", "control.pause", "control.resume", "control.floor")):
+        policy.audit(
+            G,
+            "in",
+            sender=MALLORY,
+            msg_id=f"c{i}",
+            kind=kind,
+            size=10,
+            decision="deliver_as_context",
+            reason="not_content",
+        )
+    flood = ("a2a.agent_card", "control.leave", "control.capabilities")
     for i in range(300):
         policy.audit(
-            G, "in", sender=MALLORY, msg_id=f"m{i}", kind="a2a.message", size=10, decision="deliver"
+            G,
+            "in",
+            sender=MALLORY,
+            msg_id=f"u{i}",
+            kind=flood[i % len(flood)],
+            size=10,
+            decision="deliver_as_context",
+            reason="not_content",
         )
     kept = [r["msg_id"] for r in store.audit(G, limit=10_000)]
-    assert len(kept) == 50
-    assert kept[:2] == ["honest-deliver", "honest-held"]
-    assert kept[2:] == [f"m{i}" for i in range(252, 300)]
-    # Lacking a per-sender cap, its own record outlasts a whole group's worth.
-    policy.audit_group_rows = 400
-    decisions_before(policy)
-    for i in range(300):
-        policy.audit(
-            G, "in", sender=MALLORY, msg_id=f"n{i}", kind="a2a.message", size=10, decision="deliver"
-        )
-    assert {"inject", "held"} <= {r["msg_id"] for r in store.audit(G, limit=10_000)}
+    assert kept[:8] == ["honest-deliver", "honest-held", "inject", "held", "c0", "c1", "c2", "c3"]
+    assert kept[8:] == [f"u{i}" for i in range(290, 300)], "the flooder keeps its newest"
+
+
+def test_a_senders_security_rows_past_its_share_are_counted(
+    policy: SafetyPolicy, store: Store, fake_clock: FakeClock
+) -> None:
+    """A sender keeps its oldest share of security rows per decision; the
+    rest are counted (when, how many), and a share of one decision doesn't
+    use up another's."""
+    policy.audit_sender_rows = 100
+    meta: dict[str, Any] = {"sender": MALLORY, "kind": "a2a.message", "size": 10}
+    first = fake_clock.unix_millis() // 1000
+    for i in range(150):
+        policy.audit(G, "in", msg_id=f"d{i}", decision="deliver", **meta)
+        fake_clock.advance(1)
+    for i in range(3):
+        policy.audit(G, "in", msg_id=f"bad{i}", decision="drop", reason="malformed", **meta)
+    kept = [r["msg_id"] for r in store.audit(G, limit=10_000)]
+    assert kept == [*(f"d{i}" for i in range(100)), "bad0", "bad1", "bad2"]
+    assert store.audit_suppressed(G) == [
+        {
+            "group_id": G,
+            "sender": MALLORY,
+            "decision": "deliver",
+            "count": 50,
+            "first_at": first + 100,
+            "last_at": first + 149,
+        }
+    ]
+    assert store.audit_suppressed("other") == []
+
+
+SECURITY_ROWS = [
+    # What reached the agent or left it, in a group (safety.md, audit log).
+    ("deliver", "a2a.message", ""),
+    ("deliver_as_context", "a2a.message", "not_addressed"),
+    ("deliver_as_context", "a2a.message", "loop_guard"),
+    ("deliver", "a2a.task_status", ""),
+    ("deliver", "a2a.task_artifact", ""),
+    ("deliver_as_context", "a2a.agent_card", "card_changed"),
+    # Holds, and how they ended.
+    ("hold_for_approval", "a2a.message", "require_approval"),
+    ("hold_for_approval", "a2a.agent_card", "card_changed"),
+    ("approved", "a2a.message", ""),
+    ("rejected", "a2a.message", ""),
+    ("cancelled", "a2a.message", ""),
+    ("expired", "a2a.message", ""),
+    # Refusals that say a sender tried what it may not.
+    ("drop", "control.resume", "not_human"),
+    ("drop", "control.close", "not_owner"),
+    ("drop", "control.pause", "not_for_agents"),
+    ("drop", "control.floor", "malformed"),
+    ("drop", "a2a.message", "part_kind"),
+    ("drop", "a2a.agent_card", "bad_signature"),
+]
+
+
+@pytest.mark.parametrize(("decision", "kind", "reason"), SECURITY_ROWS)
+def test_what_safety_md_calls_security_relevant_is_a_security_row(
+    decision: str, kind: str, reason: str
+) -> None:
+    assert audit_class(G, decision, kind, reason) == "security"
+
+
+@pytest.mark.parametrize(
+    ("group", "decision", "kind", "reason", "expected"),
+    [
+        (G, "deliver_as_context", "control.close", "not_content", "decision"),
+        (G, "deliver_as_context", "control.pause", "not_content", "decision"),
+        (G, "deliver_as_context", "control.resume", "not_content", "decision"),
+        (G, "deliver_as_context", "control.floor", "not_content", "decision"),
+        (G, "deliver", "a2a.task_cancel", "", "decision"),
+        (G, "deliver_as_context", "a2a.agent_card", "not_content", "routine"),
+        (G, "deliver_as_context", "control.leave", "not_content", "routine"),
+        (G, "deliver_as_context", "control.capabilities", "not_content", "routine"),
+        (G, "drop", "a2a.message", "rate_limited", "drop"),
+        (G, "drop", "a2a.message", "too_large", "drop"),
+        (G, "drop", "a2a.message", "hold_overflow", "drop"),
+        (G, "drop", "join_request", "join_replay", "drop"),
+        # A knock (no group yet): only the human's decision is protected.
+        ("", "approved", "knock", "", "security"),
+        ("", "rejected", "knock", "", "security"),
+        ("", "expired", "knock", "", "decision"),
+        ("", "hold_for_approval", "knock", "knock", "decision"),
+        ("", "drop", "knock", "knock_check:signature", "drop"),
+    ],
+)
+def test_the_other_rows_classes(
+    group: str, decision: str, kind: str, reason: str, expected: str
+) -> None:
+    assert audit_class(group, decision, kind, reason) == expected
 
 
 def test_the_retention_purge_keeps_each_class_apart(store: Store) -> None:
-    """The daemon-wide cap of the periodic purge is per class too: drops
-    and routine rows from many groups can't push out decisions."""
-    meta: dict[str, Any] = {"at": 0, "direction": "in", "size": 1, "reason": ""}
+    """The daemon-wide cap of the periodic purge is per class: drops and
+    routine rows from many groups can't push out decisions, and no cap
+    trims security rows. Age trims every class, and the suppressed counts."""
+    meta: dict[str, Any] = {"direction": "in", "size": 1, "reason": "", "keep_sender": 1}
     store.audit_add(
-        G, sender=HONEST, msg_id="deliver", kind="a2a.message", decision="deliver", **meta
+        G, at=0, sender=HONEST, msg_id="deliver", kind="a2a.message", decision="deliver", **meta
+    )
+    store.audit_add(
+        G, at=0, sender=HONEST, msg_id="more", kind="a2a.message", decision="deliver", **meta
     )
     for i in range(20):
         store.audit_add(
-            f"g{i}", sender=MALLORY, msg_id=f"d{i}", kind="a2a.message", decision="drop", **meta
+            f"g{i}",
+            at=0,
+            sender=MALLORY,
+            msg_id=f"d{i}",
+            kind="a2a.message",
+            decision="drop",
+            **meta,
         )
         store.audit_add(
             f"g{i}",
+            at=0,
             sender=MALLORY,
             msg_id=f"r{i}",
-            kind="a2a.task_status",
+            kind="control.leave",
+            decision="deliver_as_context",
+            **meta,
+        )
+        store.audit_add(
+            f"g{i}",
+            at=10,
+            sender=MALLORY,
+            msg_id=f"s{i}",
+            kind="a2a.message",
             decision="deliver",
             **meta,
         )
     store.audit_purge(-1, 5)
     kept = [r["msg_id"] for r in store.audit(limit=10_000)]
-    assert kept == ["deliver", *[x for i in range(15, 20) for x in (f"d{i}", f"r{i}")]]
+    assert kept == [
+        "deliver",
+        *[x for i in range(20) for x in ((f"d{i}", f"r{i}") if i >= 15 else ()) + (f"s{i}",)],
+    ]
+    assert len(store.audit_suppressed()) == 1
+    store.audit_purge(5, 5)
+    assert [r["msg_id"] for r in store.audit(limit=10_000)] == [f"s{i}" for i in range(20)]
+    assert store.audit_suppressed() == []
+
+
+def test_a_full_group_trims_from_the_top(store: Store) -> None:
+    """Past the group's cap a class gives way from the senders holding the
+    most, oldest first, down to a common level."""
+    meta: dict[str, Any] = {"at": 0, "direction": "in", "size": 1, "reason": "not_content"}
+    for sender, n in (("a", 60), ("b", 30), ("c", 30), ("d", 5)):
+        for i in range(n):
+            store.audit_add(
+                G,
+                sender=sender,
+                msg_id=f"{sender}{i}",
+                kind="control.pause",
+                decision="deliver_as_context",
+                **meta,
+            )
+    store.audit_add(
+        G,
+        sender="e",
+        msg_id="e0",
+        kind="control.pause",
+        decision="deliver_as_context",
+        keep_group=70,
+        **meta,
+    )
+    rows = store.audit(G, limit=1_000)
+    assert len(rows) == 70
+    # b and c hold as many, and b's rows are older: b gives way first.
+    assert Counter(r["sender"] for r in rows) == {"a": 21, "b": 21, "c": 22, "d": 5, "e": 1}
+    assert [r["msg_id"] for r in rows if r["sender"] == "a"] == [f"a{i}" for i in range(39, 60)]
+
+
+def test_a_full_group_trims_one_percent_at_once(store: Store) -> None:
+    """Each trim goes 1% below the cap, so the senders are counted once
+    per hundred rows at the cap, not on every row."""
+    meta: dict[str, Any] = {"at": 0, "direction": "in", "size": 1, "reason": "rate_limited"}
+    for i in range(101):
+        store.audit_add(
+            G, sender=f"s{i % 7}", msg_id=f"d{i}", kind="a2a.message", decision="drop", **meta
+        )
+    store.audit_add(
+        G, sender="s0", msg_id="x0", kind="a2a.message", decision="drop", keep_group=100, **meta
+    )
+    assert len(store.audit(G, limit=1_000)) == 99
+    store.audit_add(
+        G, sender="s0", msg_id="x1", kind="a2a.message", decision="drop", keep_group=100, **meta
+    )
+    assert len(store.audit(G, limit=1_000)) == 100
+
+
+@pytest.mark.parametrize(
+    ("counts", "target", "cut"),
+    [
+        ([60, 30, 30, 5], 1, [1, 0, 0, 0]),
+        ([60, 30, 30, 5], 30, [30, 0, 0, 0]),
+        ([60, 30, 30, 5], 32, [31, 1, 0, 0]),
+        ([10, 10, 10], 4, [2, 1, 1]),
+        ([10, 10, 10], 30, [10, 10, 10]),
+        ([1], 1, [1]),
+    ],
+)
+def test_the_water_level(counts: list[int], target: int, cut: list[int]) -> None:
+    assert _water_level(counts, target) == cut
+    assert sum(cut) == target

@@ -1575,9 +1575,10 @@ def audit(
         query = f"?after={after}"
         if group is not None:
             query += f"&group={resolve_group(api, group)}"
-        rows = api.request("GET", f"/v0/audit{query}")["audit"]
+        answer = api.request("GET", f"/v0/audit{query}")
+        rows, suppressed = answer["audit"], answer["suppressed"]
         if as_json:
-            emit_json({"audit": rows})
+            emit_json({"audit": rows, "suppressed": suppressed})
             return
         for r in rows:
             # Every field may come from a peer: print none of it raw.
@@ -1586,6 +1587,11 @@ def audit(
                 f"{r['seq']}  {_when(r['at'])}  {clean(r['direction']):<3} "
                 f"{clean(r['decision'])}{why}  {clean(r['kind'])} {r['size']}B  "
                 f"{clean(r['sender'])}"
+            )
+        for c in suppressed:
+            typer.echo(
+                f"not kept: {c['count']} more {clean(c['decision'])} rows from "
+                f"{clean(c['sender'])}, {_when(c['first_at'])} to {_when(c['last_at'])}"
             )
 
 

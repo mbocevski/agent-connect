@@ -1135,14 +1135,31 @@ ROW: dict[str, Any] = {
 }
 
 
+SUPPRESSED: dict[str, Any] = {
+    "group_id": GID,
+    "sender": BOB,
+    "decision": "deliver",
+    "count": 12,
+    "first_at": 1000,
+    "last_at": 2000,
+}
+
+
 def test_audit(held: Fake) -> None:
-    held.routes["GET /v0/audit?after=0"] = {"audit": [ROW, ROW | {"reason": ""}]}
-    held.routes[f"GET /v0/audit?after=3&group={GID}"] = {"audit": []}
+    held.routes["GET /v0/audit?after=0"] = {
+        "audit": [ROW, ROW | {"reason": ""}],
+        "suppressed": [SUPPRESSED],
+    }
+    held.routes[f"GET /v0/audit?after=3&group={GID}"] = {"audit": [], "suppressed": []}
     out = held.run("audit").stdout
     assert "drop (too_large)" in out
+    assert f"not kept: 12 more deliver rows from {BOB}" in out
     code, data = held.json("audit")
     assert (code, conforms(data, SCHEMAS["audit"])) == (0, True)
-    assert held.json("audit", "--group", GID, "--after", "3") == (0, {"audit": []})
+    assert held.json("audit", "--group", GID, "--after", "3") == (
+        0,
+        {"audit": [], "suppressed": []},
+    )
     assert all(human for human, key, _ in held.calls if "/v0/audit" in key)
 
 
@@ -1235,7 +1252,8 @@ def test_peer_strings_are_printed_without_control_sequences(held: Fake) -> None:
         "messages": [HELD_ITEM | {"kind": ESC, "sender": "ac:v0:" + ESC}],
     }
     held.routes["GET /v0/audit?after=0"] = {
-        "audit": [ROW | {"kind": ESC, "sender": ESC, "reason": ESC, "msg_id": ESC}]
+        "audit": [ROW | {"kind": ESC, "sender": ESC, "reason": ESC, "msg_id": ESC}],
+        "suppressed": [SUPPRESSED | {"sender": ESC, "decision": ESC}],
     }
     entry = {k: ROW[k] for k in ("seq", "group_id", "at", "direction", "msg_id")}
     held.routes[f"GET /v0/groups/{GID}/transcript?after=0"] = {

@@ -834,7 +834,7 @@ Response:
 
 ### `GET /v0/audit`
 
-The audit log, oldest first, at most 200 rows per call: who, when, kind, size and the policy's decision for every message in and out. Never a body.
+The audit log, oldest first, at most 200 rows per call: who, when, kind, size and the policy's decision for every message in and out. Never a body. `suppressed` counts the security rows a sender sent past its share, which are not stored ([safety.md](safety.md#audit-log)).
 
 Needs the **human token**.
 
@@ -855,6 +855,14 @@ Response:
     "size": int,
     "decision": str,
     "reason": str
+  }],
+  "suppressed": [{
+    "group_id": str,
+    "sender": str,
+    "decision": str,
+    "count": int,
+    "first_at": int,
+    "last_at": int
   }]
 }
 ```

@@ -317,8 +317,10 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         "policy.audit_retention_days",
         "policy_audit_retention_days",
         shown_default(DEFAULT_AUDIT_RETENTION_DAYS),
-        "Days the metadata-only audit log keeps a row (1 to 365). It also keeps at most "
-        "the newest 100000 rows.",
+        "Days the metadata-only audit log keeps a row (1 to 365), the only limit on its "
+        "security rows. Drops, routine rows and decisions also keep at most their newest "
+        "100000 rows each, 300000 in all; security rows are bounded per sender instead "
+        "(`policy.audit_max_rows_per_sender` per group and decision).",
     ),
     ConfigKey(
         "policy.transcript_max_bytes",
@@ -331,17 +333,19 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         "policy.audit_max_rows_per_group",
         "policy_audit_max_rows_per_group",
         shown_default(DEFAULT_AUDIT_GROUP_ROWS),
-        "Audit rows one group keeps at most in each class (drops, routine rows, decisions; "
-        "1000 to 20000). Past that, the sender holding the most rows of the class gives "
-        "way, oldest first.",
+        "Drops, routine rows and decisions one group keeps at most, each (1000 to 20000). "
+        "Past that, the senders holding the most rows of the class give way, oldest "
+        "first. Security rows don't count toward it.",
     ),
     ConfigKey(
         "policy.audit_max_rows_per_sender",
         "policy_audit_max_rows_per_sender",
         shown_default(DEFAULT_AUDIT_SENDER_ROWS),
-        "Drops, and routine rows (delivered task updates, controls and cards), one sender "
-        "keeps in a group at most, each (100 to 2000), so a sender flooding the log with "
-        "them pushes out only its own. Decisions have no per-sender cap.",
+        "Drops and routine rows one sender keeps in a group at most, each, the newest "
+        "(100 to 2000), so a sender flooding the log with them pushes out only its own. "
+        "Of its security rows (content that reached the agent or left it, holds and "
+        "their outcomes, refusals of what it may not do) it keeps the oldest this many "
+        "per decision and counts the rest. Decisions have no per-sender cap.",
     ),
     ConfigKey(
         "policy.max_pending_joins_per_invite",

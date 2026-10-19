@@ -291,7 +291,17 @@ SCHEMAS: dict[str, Any] = {
                 "decision": "str",
                 "reason": "str",
             }
-        ]
+        ],
+        "suppressed": [
+            {
+                "group_id": "str",
+                "sender": "str",
+                "decision": "str",
+                "count": "int",
+                "first_at": "int",
+                "last_at": "int",
+            }
+        ],
     },
     "transcript": {
         "transcript": [
@@ -407,7 +417,9 @@ NOTES: dict[str, str] = {
     ),
     "audit": (
         "`decision` is `deliver`, `deliver_as_context`, `hold_for_approval`, `drop`, "
-        "`approved`, `rejected` or `expired`. There is never a body."
+        "`approved`, `rejected`, `cancelled` or `expired`. There is never a body. "
+        "`suppressed` counts the security rows a sender sent past its share, per group, "
+        "sender and decision: they are not stored."
     ),
     "verify (verified)": "`outcome` is `verified`; `verified` lists the identities marked.",
     "verify (mismatch)": (
