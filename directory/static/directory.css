@@ -13,6 +13,8 @@
   --link: #0550ae;
   --warn: #9a6700;
   --ok: #1a7f37;
+  --notice-bg: #fff8c5;
+  --notice-line: #d4a72c;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -26,6 +28,8 @@
     --link: #74b9ff;
     --warn: #d29922;
     --ok: #3fb950;
+    --notice-bg: #272115;
+    --notice-line: #9e6a03;
   }
 }
 
@@ -41,6 +45,7 @@ body {
 a { color: var(--link); }
 a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
 
+.notice { margin: 0; padding: 0.5rem 1rem; text-align: center; background: var(--notice-bg); border-bottom: 1px solid var(--notice-line); overflow-wrap: anywhere; }
 header.site, main, footer.site { max-width: 48rem; margin: 0 auto; padding: 1rem; }
 header.site { display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .site-name { font-weight: 600; text-decoration: none; color: var(--fg); }

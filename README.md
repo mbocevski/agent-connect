@@ -176,7 +176,8 @@ What works on `main` today:
   and an MCP server. It checks each listing through the core, fetches the owner's
   `/.well-known/agentconnect.json` to show an owner state, and holds no
   keys. Its home page says how to get listed, and an operator can name the
-  site, link a home page and replace the stylesheet
+  site, link a home page, show a notice, link terms and an abuse contact,
+  and replace the stylesheet
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 

@@ -35,6 +35,9 @@ internal = [
     "core/src/records.rs",
     "core/src/rng.rs",
     "core/src/vectors.rs",
+    # core: the operator links the relay and the directory show (their
+    # READMEs document the settings).
+    "core/src/operator.rs",
     # core-py: bindings; the checks they call are in core.
     "core-py/src/**",
     # relay: process entry point and storage.

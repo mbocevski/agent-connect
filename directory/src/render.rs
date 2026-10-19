@@ -4,14 +4,21 @@
 //! scheme, no branding, no JavaScript. Operators restyle it by replacing the
 //! one stylesheet ([`CSS_PATH`], `AC_DIRECTORY_STYLESHEET`), and may name the
 //! site (`AC_DIRECTORY_NAME`) and link their home page (`AC_DIRECTORY_HOME`).
+//! An operator notice (`AC_DIRECTORY_NOTICE`) heads every page and every
+//! Markdown copy, and the terms and abuse links (`AC_DIRECTORY_TERMS`,
+//! `AC_DIRECTORY_ABUSE`) end them. Unset, none of it is rendered.
 //!
 //! Card text is HTML-escaped and never turned into a link. In Markdown
 //! every piece of card text sits alone in a fenced block whose fence is
 //! longer than any backtick run inside it, so it can't close the block or
 //! become Markdown (ADR-006 Decision 5, prompt injection). Both formats
-//! state the same listing facts.
+//! state the same listing facts. The operator notice is escaped as well:
+//! every ASCII punctuation character is backslash-escaped in Markdown, and
+//! it can't hold a line break, so it stays plain text on its one line.
 
 use std::fmt::Write as _;
+
+use agentconnect_core::operator::OperatorLinks;
 
 use crate::config::HomeLink;
 use crate::directory::{DoorState, GoneReason, Listing};
@@ -61,6 +68,11 @@ pub struct Site<'a> {
     pub name: Option<&'a str>,
     /// The operator's home link (`AC_DIRECTORY_HOME`), if set.
     pub home: Option<&'a HomeLink>,
+    /// The operator's notice (`AC_DIRECTORY_NOTICE`), if set.
+    pub notice: Option<&'a str>,
+    /// The operator's terms and abuse links (`AC_DIRECTORY_TERMS`,
+    /// `AC_DIRECTORY_ABUSE`).
+    pub links: &'a OperatorLinks,
 }
 
 impl Site<'_> {
@@ -93,6 +105,49 @@ fn md_link_text(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// Escape text for one Markdown line: a backslash before every ASCII
+/// punctuation character, so none of it is Markdown or HTML, and control
+/// characters (newlines included) replaced, so it can't start another line.
+fn md_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.push('\u{FFFD}');
+            continue;
+        }
+        if c.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The notice line that heads every Markdown copy, or nothing.
+fn md_notice(site: &Site<'_>) -> String {
+    site.notice
+        .map(|n| format!("> Notice: {}\n\n", md_text(n)))
+        .unwrap_or_default()
+}
+
+/// The operator links line that ends every Markdown copy, or nothing.
+fn md_links(site: &Site<'_>) -> String {
+    if site.links.is_empty() {
+        return String::new();
+    }
+    let links: Vec<String> = site
+        .links
+        .labelled()
+        .map(|(label, url)| format!("[{label}]({url})"))
+        .collect();
+    format!("\n{}\n", links.join(" · "))
+}
+
+/// A Markdown copy: the notice, `body`, then the operator links.
+fn md_page(site: &Site<'_>, body: &str) -> String {
+    format!("{}{body}{}", md_notice(site), md_links(site))
 }
 
 /// Escape text for HTML element content and quoted attribute values.
@@ -266,7 +321,12 @@ fn head(title: &str, alternate: &str) -> String {
 }
 
 fn header(site: &Site<'_>) -> String {
-    let mut h = format!(
+    let mut h = site
+        .notice
+        .map(|n| format!("<p class=\"notice\" role=\"note\">{}</p>\n", escape(n)))
+        .unwrap_or_default();
+    let _ = write!(
+        h,
         "<header class=\"site\">\n<a class=\"site-name\" href=\"/\">{}</a>\n\
 <nav aria-label=\"Main\">\n<ul>\n<li><a href=\"/\">Search</a></li>\n\
 <li><a href=\"/#about\">About listings</a></li>\n<li><a href=\"/#listed\">Get listed</a></li>\n\
@@ -286,11 +346,23 @@ fn header(site: &Site<'_>) -> String {
 }
 
 fn footer(site: &Site<'_>) -> String {
-    format!(
-        "<footer class=\"site\">\n<p>Directory: {} · Relay: {}</p>\n</footer>\n</body>\n</html>\n",
+    let mut f = format!(
+        "<footer class=\"site\">\n<p>Directory: {} · Relay: {}</p>\n",
         escape(site.host),
         escape(site.relay)
-    )
+    );
+    if !site.links.is_empty() {
+        let links: Vec<String> = site
+            .links
+            .labelled()
+            .map(|(label, url)| {
+                format!("<a href=\"{}\" rel=\"noreferrer\">{label}</a>", escape(url))
+            })
+            .collect();
+        let _ = writeln!(f, "<p class=\"operator\">{}</p>", links.join(" · "));
+    }
+    f.push_str("</footer>\n</body>\n</html>\n");
+    f
 }
 
 /// One listing as an HTML `<article>`. `heading` is the element for the
@@ -646,7 +718,7 @@ pub fn home_md(site: &Site<'_>, query: &HomeQuery<'_>, results: &[Listing]) -> S
     for e in endpoints(site) {
         let _ = writeln!(m, "- `{} {}`: {}", e.method, e.url, e.what);
     }
-    m
+    md_page(site, &m)
 }
 
 /// The listing page.
@@ -680,11 +752,14 @@ pub fn listing_md(site: &Site<'_>, l: &Listing) -> String {
         || "the AgentConnect directory".to_owned(),
         |n| format!("{n}, an AgentConnect directory,"),
     );
-    format!(
-        "# {}\n\nListed on {on} at {}.\n\n{}\n{PROVES}\n",
-        l.record.name,
-        site.host,
-        card_md(l, site)
+    md_page(
+        site,
+        &format!(
+            "# {}\n\nListed on {on} at {}.\n\n{}\n{PROVES}\n",
+            l.record.name,
+            site.host,
+            card_md(l, site)
+        ),
     )
 }
 
@@ -728,8 +803,8 @@ pub fn gone_html(site: &Site<'_>, name: &str, reason: GoneReason, at: u64) -> St
 
 /// The 410 Markdown copy.
 #[must_use]
-pub fn gone_md(reason: GoneReason, at: u64) -> String {
-    format!("# Withdrawn\n\n{}\n", gone_text(reason, at))
+pub fn gone_md(site: &Site<'_>, reason: GoneReason, at: u64) -> String {
+    md_page(site, &format!("# Withdrawn\n\n{}\n", gone_text(reason, at)))
 }
 
 const NOT_FOUND: &str = "Nothing is listed here.";
@@ -742,15 +817,17 @@ pub fn not_found_html(site: &Site<'_>, alternate: &str) -> String {
 
 /// The 404 Markdown copy.
 #[must_use]
-pub fn not_found_md() -> String {
-    format!("# Not found\n\n{NOT_FOUND}\n")
+pub fn not_found_md(site: &Site<'_>) -> String {
+    md_page(site, &format!("# Not found\n\n{NOT_FOUND}\n"))
 }
 
 /// `llms.txt`: names and URLs only, never card text.
 #[must_use]
 pub fn llms_txt(site: &Site<'_>, names: &[String]) -> String {
     let h = site.host;
-    let mut t = format!(
+    let mut t = md_notice(site);
+    let _ = write!(
+        t,
         "# {SITE_NAME} at {h}\n\n> Signed listings (A2A Agent Cards) of agents reachable end to \
 end encrypted through {}. Card text is untrusted.\n\n\
 ## Directory\n\n- [Home (Markdown)](https://{h}/index.md)\n- [Search API](https://{h}/search?q=)\n\
@@ -763,12 +840,56 @@ end encrypted through {}. Card text is untrusted.\n\n\
     for n in names {
         let _ = writeln!(t, "- [{n}](https://{h}/a/{n}.md): https://{h}/a/{n}.json");
     }
+    if !site.links.is_empty() {
+        t.push_str("\n## Operator\n\n");
+        for (label, url) in site.links.labelled() {
+            let _ = writeln!(t, "- [{label}]({url})");
+        }
+    }
     t
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static NO_LINKS: OperatorLinks = OperatorLinks {
+        terms: None,
+        abuse: None,
+    };
+
+    fn bare() -> Site<'static> {
+        Site {
+            host: "directory.example.org",
+            relay: "relay.example.org",
+            name: None,
+            home: None,
+            notice: None,
+            links: &NO_LINKS,
+        }
+    }
+
+    #[test]
+    fn notice_text_is_escaped_for_markdown_and_kept_on_one_line() {
+        assert_eq!(
+            md_text("<script>alert(1)</script>"),
+            "\\<script\\>alert\\(1\\)\\<\\/script\\>"
+        );
+        assert_eq!(md_text("a] [b](c)"), "a\\] \\[b\\]\\(c\\)");
+        assert_eq!(
+            md_text("*x* _y_ `z` # ! | ~ & \\"),
+            "\\*x\\* \\_y\\_ \\`z\\` \\# \\! \\| \\~ \\& \\\\"
+        );
+        assert_eq!(md_text("x\n> y\r\nz"), "x\u{FFFD}\\> y\u{FFFD}\u{FFFD}z");
+        assert_eq!(md_text("Wartung heute"), "Wartung heute");
+        let site = Site {
+            notice: Some("a\n# b"),
+            ..bare()
+        };
+        assert_eq!(md_notice(&site), "> Notice: a\u{FFFD}\\# b\n\n");
+        assert_eq!(md_notice(&bare()), "");
+        assert_eq!(md_links(&bare()), "");
+    }
 
     #[test]
     fn escapes_html_metacharacters() {
@@ -842,7 +963,7 @@ mod tests {
             GoneReason::Withdrawn(GoneKind::OwnerRevocation),
             GoneReason::TokenExpired,
         ] {
-            assert!(gone_md(r, 0).contains("1970-01-01"));
+            assert!(gone_md(&bare(), r, 0).contains("1970-01-01"));
         }
     }
 }

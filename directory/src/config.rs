@@ -4,6 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use agentconnect_core::identity::canonical_relay_host;
+use agentconnect_core::operator::{OperatorLinks, web_url};
 
 /// Default listen address.
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8090";
@@ -79,10 +80,12 @@ impl Cidr {
 
 /// Longest operator name or home link label, in characters.
 pub const MAX_SITE_TEXT: usize = 80;
+/// Longest operator notice (`AC_DIRECTORY_NOTICE`), in characters.
+pub const MAX_NOTICE: usize = 200;
 
 /// Operator text shown on every page: trimmed, not empty, no control
-/// characters, at most [`MAX_SITE_TEXT`] characters.
-fn site_text(var: &str, what: &str, value: &str) -> Result<String, String> {
+/// characters, at most `max` characters.
+fn site_text(var: &str, what: &str, value: &str, max: usize) -> Result<String, String> {
     let v = value.trim();
     if v.is_empty() {
         return Err(format!("{var} has an empty {what}"));
@@ -90,10 +93,8 @@ fn site_text(var: &str, what: &str, value: &str) -> Result<String, String> {
     if v.chars().any(char::is_control) {
         return Err(format!("{var}: the {what} has a control character"));
     }
-    if v.chars().count() > MAX_SITE_TEXT {
-        return Err(format!(
-            "{var}: the {what} is longer than {MAX_SITE_TEXT} characters"
-        ));
+    if v.chars().count() > max {
+        return Err(format!("{var}: the {what} is longer than {max} characters"));
     }
     Ok(v.to_owned())
 }
@@ -105,22 +106,6 @@ pub struct HomeLink {
     pub url: String,
     /// The link text.
     pub label: String,
-}
-
-/// Characters a home link URL may hold after its scheme: RFC 3986
-/// unreserved and reserved characters and `%`, except the parentheses
-/// (they would end a Markdown link).
-fn url_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'*+,;=%".contains(c)
-}
-
-fn is_loopback(host: &str) -> bool {
-    let name = host
-        .strip_prefix('[')
-        .and_then(|h| h.split_once(']'))
-        .map_or_else(|| host.split(':').next().unwrap_or_default(), |(h, _)| h);
-    name.eq_ignore_ascii_case("localhost")
-        || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 impl HomeLink {
@@ -135,25 +120,8 @@ impl HomeLink {
             .trim()
             .split_once(char::is_whitespace)
             .ok_or_else(|| format!("{VAR} needs a URL, whitespace, then a label"))?;
-        let label = site_text(VAR, "label", label)?;
-        let bad = || format!("{VAR} is not an absolute https:// URL: {url}");
-        let (rest, https) = if let Some(r) = url.strip_prefix("https://") {
-            (r, true)
-        } else if let Some(r) = url.strip_prefix("http://") {
-            (r, false)
-        } else {
-            return Err(bad());
-        };
-        if !rest.chars().all(url_char) {
-            return Err(bad());
-        }
-        let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-        canonical_relay_host(host).map_err(|_| bad())?;
-        if !https && !is_loopback(host) {
-            return Err(format!(
-                "{VAR}: http:// is allowed for a loopback host only: {url}"
-            ));
-        }
+        let label = site_text(VAR, "label", label, MAX_SITE_TEXT)?;
+        web_url(VAR, url)?;
         Ok(Self {
             url: url.to_owned(),
             label,
@@ -203,6 +171,11 @@ pub struct Config {
     /// `AC_DIRECTORY_HOME`: a link to the operator's home page in the
     /// header.
     pub home: Option<HomeLink>,
+    /// `AC_DIRECTORY_NOTICE`: a one-line notice shown above every page.
+    pub notice: Option<String>,
+    /// `AC_DIRECTORY_TERMS` and `AC_DIRECTORY_ABUSE`: the operator's terms
+    /// page and abuse contact, shown in every page's footer.
+    pub links: OperatorLinks,
 }
 
 fn list(v: Option<String>) -> Vec<String> {
@@ -288,11 +261,15 @@ impl Config {
                 None => None,
             };
         let name = get("AC_DIRECTORY_NAME")
-            .map(|n| site_text("AC_DIRECTORY_NAME", "name", &n))
+            .map(|n| site_text("AC_DIRECTORY_NAME", "name", &n, MAX_SITE_TEXT))
             .transpose()?;
         let home = get("AC_DIRECTORY_HOME")
             .map(|h| HomeLink::parse(&h))
             .transpose()?;
+        let notice = get("AC_DIRECTORY_NOTICE")
+            .map(|n| site_text("AC_DIRECTORY_NOTICE", "notice", &n, MAX_NOTICE))
+            .transpose()?;
+        let links = OperatorLinks::from_lookup("AC_DIRECTORY", &get)?;
         Ok(Self {
             addr,
             db,
@@ -311,6 +288,8 @@ impl Config {
             metrics_addr,
             name,
             home,
+            notice,
+            links,
         })
     }
 
@@ -652,6 +631,100 @@ mod tests {
                 .unwrap_err(),
                 err,
                 "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_notice_and_operator_links_are_optional() {
+        let c = with(&[]).unwrap();
+        assert!(c.notice.is_none() && c.links.is_empty());
+        let notice = "n".repeat(MAX_NOTICE);
+        let c = Config::from_lookup(lookup(&[
+            DB,
+            KEYS,
+            HOST,
+            RELAYS,
+            ("AC_DIRECTORY_NOTICE", &format!("  {notice} ")),
+            ("AC_DIRECTORY_TERMS", "https://example.org/terms"),
+            ("AC_DIRECTORY_ABUSE", "mailto:abuse@example.org"),
+        ]))
+        .unwrap();
+        assert_eq!(c.notice, Some(notice));
+        assert_eq!(c.links.terms.as_deref(), Some("https://example.org/terms"));
+        assert_eq!(c.links.abuse.as_deref(), Some("mailto:abuse@example.org"));
+        let c = with(&[("AC_DIRECTORY_ABUSE", "https://example.org/abuse")]).unwrap();
+        assert_eq!(c.links.abuse.as_deref(), Some("https://example.org/abuse"));
+    }
+
+    #[test]
+    fn bad_notices_and_operator_links_are_startup_errors() {
+        let long = "n".repeat(MAX_NOTICE + 1);
+        for (var, value, err) in [
+            (
+                "AC_DIRECTORY_NOTICE",
+                "",
+                "AC_DIRECTORY_NOTICE has an empty notice",
+            ),
+            (
+                "AC_DIRECTORY_NOTICE",
+                "  ",
+                "AC_DIRECTORY_NOTICE has an empty notice",
+            ),
+            (
+                "AC_DIRECTORY_NOTICE",
+                "Maintenance\ntonight",
+                "AC_DIRECTORY_NOTICE: the notice has a control character",
+            ),
+            (
+                "AC_DIRECTORY_NOTICE",
+                "Maintenance\u{1b}[31m",
+                "AC_DIRECTORY_NOTICE: the notice has a control character",
+            ),
+            (
+                "AC_DIRECTORY_NOTICE",
+                long.as_str(),
+                "AC_DIRECTORY_NOTICE: the notice is longer than 200 characters",
+            ),
+            ("AC_DIRECTORY_TERMS", "", "AC_DIRECTORY_TERMS is empty"),
+            (
+                "AC_DIRECTORY_TERMS",
+                "http://example.org/terms",
+                "AC_DIRECTORY_TERMS: http:// is allowed for a loopback host only: \
+http://example.org/terms",
+            ),
+            (
+                "AC_DIRECTORY_TERMS",
+                "https://example.org/terms)",
+                "AC_DIRECTORY_TERMS is not an absolute https:// URL: https://example.org/terms)",
+            ),
+            (
+                "AC_DIRECTORY_ABUSE",
+                "mailto:abuse@example.org?bcc=x@example.org",
+                "AC_DIRECTORY_ABUSE: a mailto: address takes no query or header fields (? or &): \
+mailto:abuse@example.org?bcc=x@example.org",
+            ),
+            (
+                "AC_DIRECTORY_ABUSE",
+                "mailto:abuse@example.org\r\nBcc: x@example.org",
+                "AC_DIRECTORY_ABUSE has a control character",
+            ),
+            (
+                "AC_DIRECTORY_ABUSE",
+                "mailto:abuse",
+                "AC_DIRECTORY_ABUSE is not a valid mailto: address: mailto:abuse",
+            ),
+            (
+                "AC_DIRECTORY_ABUSE",
+                "abuse@example.org",
+                "AC_DIRECTORY_ABUSE is not a mailto: address or an absolute https:// URL: \
+abuse@example.org",
+            ),
+        ] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[DB, KEYS, HOST, RELAYS, (var, value)])).unwrap_err(),
+                err,
+                "{var}={value:?}"
             );
         }
     }
