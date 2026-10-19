@@ -105,8 +105,13 @@ demo-record: demo-image
 # (fuzzing and benchmarks are added with the core)
 test-nightly: nightly-mutants nightly-py
 
-nightly-mutants:
-    cargo mutants -p agentconnect-core --no-shuffle
+# Mutation testing of the core, every mutant (hours; config in .cargo/mutants.toml)
+nightly-mutants *args:
+    cargo mutants -p agentconnect-core --no-shuffle {{ args }}
+
+# One shard of it, as the nightly matrix runs it: just nightly-mutants-shard 3/16
+nightly-mutants-shard shard *args:
+    cargo mutants -p agentconnect-core --no-shuffle --shard {{ shard }} {{ args }}
 
 nightly-py: build-relay-dev
     AC_RUN_QUARANTINE=1 HYPOTHESIS_PROFILE=nightly uv run --all-packages --frozen pytest -q -n auto

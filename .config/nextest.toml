@@ -5,3 +5,8 @@ retries = 0
 
 [profile.ci]
 failure-output = "immediate-final"
+
+# cargo-mutants (.cargo/mutants.toml): stop a mutant's test run at the first
+# failure, since one failing test is enough to catch it.
+[profile.mutants]
+fail-fast = true

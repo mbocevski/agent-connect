@@ -56,8 +56,20 @@ jobs:
           image: ac-${{ matrix.component }}:nightly
           category: image-${{ matrix.component }}
 
+  # Mutation testing of the core, in shards: run serially, it outgrew the
+  # 6 h job limit. Shard k of n takes every n-th mutant (round-robin,
+  # .cargo/mutants.toml); n is the number of matrix entries. Add entries when
+  # a shard gets near its timeout.
   mutants:
+    name: mutants (${{ strategy.job-index }}/${{ strategy.job-total }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    env:
+      SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show active-toolchain || rustup toolchain install
@@ -65,7 +77,30 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: just,cargo-mutants,cargo-nextest
-      - run: just nightly-mutants
+      # In place: the runner is thrown away, and the build reuses the cache.
+      - name: cargo mutants
+        run: just nightly-mutants-shard "$SHARD" --in-place
+      - name: Summary
+        if: always()
+        run: |
+          out=mutants.out
+          {
+            echo "### mutants shard $SHARD"
+            for kind in missed timeout caught unviable; do
+              echo "- $kind: $(cat "$out/$kind.txt" 2>/dev/null | wc -l)"
+            done
+            if [ -s "$out/missed.txt" ]; then
+              printf '\nMissed:\n\n```text\n'
+              cat "$out/missed.txt"
+              printf '```\n'
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutants-${{ strategy.job-index }}
+          path: mutants.out
+          if-no-files-found: ignore
 
   # Quarantined tests and long property runs (non-gating).
   python-long:
@@ -109,23 +144,27 @@ jobs:
 
   # Scheduled-workflow failures only email whoever last edited the cron, so
   # keep one issue open while any nightly job fails: comment on it per failing
-  # run, close it on the next fully green run.
+  # run, close it on the next fully green run. The run's jobs, not `needs`,
+  # name what failed: `needs` has one result per matrix job, so it can't say
+  # which mutants shard or image failed.
   notify:
     if: always()
     needs: [platforms, audit, image-scan, mutants, python-long, rust-branch-coverage, links]
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       issues: write
     steps:
       - name: Open, update or close the nightly issue
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          NEEDS: ${{ toJSON(needs) }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TITLE: "nightly: failing jobs"
         run: |
-          failed="$(jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | "- " + .key + " (" + .value.result + ")"' <<<"$NEEDS")"
+          failed="$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "- " + .name + " (" + .conclusion + ")"')"
           number="$(gh issue list --state open --search "$TITLE in:title" --json number,title --jq "map(select(.title == \"$TITLE\")) | .[0].number // empty")"
           if [ -n "$failed" ]; then
             body="$(printf 'Nightly run %s failed:\n\n%s\n' "$RUN_URL" "$failed")"

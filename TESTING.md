@@ -17,6 +17,14 @@ the slow test to a higher tier or make it faster. Do not raise the budget.
 The Python suite runs on every core (`pytest -n auto`, pytest-xdist); each
 worker starts its own relay, and every worker uses the controller's seed.
 
+Mutation testing (`just nightly-mutants`) runs cargo-mutants on `core` with
+the settings in `.cargo/mutants.toml`: nextest, with its `mutants` profile,
+which stops at the first failing test. The nightly workflow splits the
+mutants into shards, one job each; `just nightly-mutants-shard 3/16` runs
+one of them locally. A missed mutant fails its shard. Add a test that
+catches it, or, if the mutant can't change behaviour, an `exclude_re`
+entry in `.cargo/mutants.toml` with the reason.
+
 ## Where tests live
 
 | Kind | Location |

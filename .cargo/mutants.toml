@@ -1,0 +1,11 @@
+# cargo-mutants configuration (`just nightly-mutants`, the nightly `mutants`
+# matrix). https://mutants.rs/
+
+# nextest runs each test in its own process, in parallel; the `mutants`
+# profile (.config/nextest.toml) stops at the first failing test.
+test_tool = "nextest"
+additional_cargo_test_args = ["--profile=mutants"]
+
+# The nightly job runs the mutants in shards (`--shard k/n`). Round-robin
+# spreads every file over all shards, so they take about as long.
+sharding = "round-robin"
