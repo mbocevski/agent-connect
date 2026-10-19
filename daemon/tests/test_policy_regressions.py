@@ -655,6 +655,16 @@ def test_no_inbound_approval_covers_outbound_sends(policy: SafetyPolicy) -> None
             "a2a.agent_card",
             {"name": "x", "capabilities": {"extensions": [{"uri": "u", "params": []}]}},
         ),
+        (
+            "a2a.agent_card",
+            {"name": "x", "capabilities": {"extensions": [{"uri": "u", "required": "yes"}]}},
+        ),
+        ("a2a.agent_card", {"name": "x", "provider": {"organization": 5}}),
+        ("a2a.agent_card", {"name": "x", "provider": "Example"}),
+        ("a2a.agent_card", {"name": "x", "supportedInterfaces": {"url": "u"}}),
+        ("a2a.agent_card", {"name": "x", "supportedInterfaces": [{"url": "u"}] * 9}),
+        ("a2a.agent_card", {"name": "x", "signatures": {"protected": "p"}}),
+        ("a2a.agent_card", {"name": "x", "signatures": [{"protected": "p"}] * 5}),
         ("a2a.task_cancel", {"id": ""}),
         ("a2a.task_cancel", {"id": "t", "metadata": []}),
         ("a2a.task_cancel", {"id": "t", "tenant": 5}),
@@ -672,14 +682,20 @@ def test_known_card_fields_are_kept_in_shape() -> None:
         "skills": [{"id": "s", "name": "n", "tags": ["t"], "inputModes": ["text/plain"]}],
         "capabilities": {
             "streaming": True,
-            "extensions": [{"uri": "u", "description": "d", "required": True, "params": {}}],
+            "extensions": [
+                {"uri": "u", "description": "d", "required": True, "params": {}},
+                {"uri": "v", "extra": "dropped"},
+            ],
         },
+        "provider": {"organization": "Example", "url": "https://example.org", "x": "y"},
     }
     shaped = normalize("a2a.agent_card", card)
     assert shaped is not None
     assert shaped["capabilities"]["extensions"] == [
-        {"uri": "u", "description": "d", "required": True, "params": {}}
+        {"uri": "u", "description": "d", "required": True, "params": {}},
+        {"uri": "v"},
     ]
+    assert shaped["provider"] == {"organization": "Example", "url": "https://example.org"}
     assert shaped["skills"][0]["tags"] == ["t"]
     assert normalize("a2a.task_cancel", {"id": "t", "tenant": "x", "metadata": {}}) == {
         "id": "t",
