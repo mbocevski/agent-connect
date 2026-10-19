@@ -292,7 +292,8 @@ scenarios are in `harness/tests/`.
     replay and inject frames, rewrite routing hints, forge replies (an
     `epoch_conflict` for a commit it did forward, any error for any
     frame), hold a Welcome back, and fork (confirm a node's commits without
-    forwarding them).
+    forwarding them; `forked` keeps them, so a scenario can inject one into
+    some members only and split the group in two views).
   - `directory`: the real directory binary (`agentconnect-directory`, built
     like the relay; `AC_DIRECTORY_BIN` points at a prebuilt one) on the
     in-memory store, one per session, listing the harness relay and pinning
@@ -328,8 +329,18 @@ scenarios are in `harness/tests/`.
 - **Seeded.** Each daemon's core randomness and backoff jitter come from the
   `rng` fixture (so from `AC_TEST_SEED`), with a fresh derived seed on every
   restart so a restarted daemon never replays its previous keys.
-- **Budget.** Each scenario takes well under 2 s; the whole harness, both
-  hosts, takes a few seconds across the xdist workers.
+- **Group mode acceptance.** `harness/tests/test_group_acceptance.py` runs
+  one group of five through its whole life on both hosts, through the
+  public surfaces: the humans use the CLI and the local API, the agents the
+  SDK and the A2A adapter. Every step checks the events each member's human
+  (`agentconnect events`) and agent (`GET /v0/events` with the agent token,
+  and the adapter) saw, and the members converge at the end. It also holds
+  scenario 7 (mention mode and a loop between two agents) and scenario 13
+  (a fork in a group of five).
+- **Budget.** Each scenario takes well under 2 s, except the group mode
+  lifecycle, which takes about 2.5 s per host because its humans run the
+  CLI; the whole harness, both hosts, takes a few seconds across the xdist
+  workers.
 
 ## Failpoints (crash consistency)
 

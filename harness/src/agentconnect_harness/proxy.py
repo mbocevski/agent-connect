@@ -39,6 +39,7 @@ class RelayProxy:
         self.client_filters: list[Filter] = []
         self.server_filters: list[Filter] = []
         self.delivered: list[Frame] = []  # every deliver frame passed to the daemon
+        self.forked: list[Frame] = []  # the daemon's commits withheld by fork_own_commits
         self._forged: list[Frame] = []  # replies forged to the daemon
         self._sessions: set[_Session] = set()
         self._gone = asyncio.Event()
@@ -207,11 +208,14 @@ class RelayProxy:
 
     def fork_own_commits(self) -> None:
         """Fork: confirm the daemon's commits locally without forwarding
-        them, so it moves to an epoch nobody else is in."""
+        them, so it moves to an epoch nobody else is in. The withheld
+        frames are kept in ``forked``, for the relay to show to some members
+        (``inject`` a ``deliver`` of the envelope)."""
 
         def client(frame: Frame) -> list[Frame]:
             env = frame.get("env") or {}
             if frame.get("t") == "send" and env.get("kind") == "commit":
+                self.forked.append(frame)
                 self._forged.append({"t": "accepted", "msg_id": env["msg_id"]})
                 return []
             return [frame]
