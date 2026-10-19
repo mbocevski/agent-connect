@@ -1723,6 +1723,15 @@ fn identity_id(ik_pub: &[u8]) -> PyResult<String> {
     guarded(|| Ok(core::identity::identity_id(&array(ik_pub, "ik_pub")?)))
 }
 
+/// The SPEC §9.1 defaults for a new group owned by `owner`, as the
+/// policy's canonical JSON (`Client.create_group` takes it).
+#[pyfunction]
+fn default_group_policy<'py>(py: Python<'py>, owner: &str) -> PyResult<Bound<'py, PyBytes>> {
+    let policy = core::GroupPolicy::default_for(owner);
+    policy.validate().map_err(err)?;
+    Ok(PyBytes::new(py, &policy.to_json().map_err(err)?))
+}
+
 /// The identity fingerprint (SPEC §2).
 #[pyfunction]
 fn fingerprint(ik_pub: &[u8]) -> PyResult<String> {
@@ -1783,6 +1792,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(rekey_store, m)?,
         wrap_pyfunction!(verify_instance_cert, m)?,
         wrap_pyfunction!(identity_id, m)?,
+        wrap_pyfunction!(default_group_policy, m)?,
         wrap_pyfunction!(fingerprint, m)?,
         wrap_pyfunction!(mailbox_id, m)?,
         wrap_pyfunction!(canonical_relay_host, m)?,

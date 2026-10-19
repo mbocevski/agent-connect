@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS members (
     role TEXT NOT NULL DEFAULT 'member',
     verified INTEGER NOT NULL DEFAULT 0,
     instances TEXT NOT NULL DEFAULT '[]',
+    verified_epoch INTEGER,
     PRIMARY KEY (group_id, identity)
 );
 CREATE TABLE IF NOT EXISTS agent_cards (
@@ -527,6 +528,10 @@ class MemberRow:
     role: str
     verified: bool
     instances: list[dict[str, Any]]
+    # The epoch whose short code the human compared when marking it verified;
+    # None while unverified, and for a member verified by a daemon that didn't
+    # record it (unknown: its new instances can't be told).
+    verified_epoch: int | None = None
 
 
 @dataclass
@@ -592,6 +597,9 @@ class Store:
         for column, decl in (("hidden", "INTEGER NOT NULL DEFAULT 0"), ("origin", "TEXT")):
             if column not in group_columns:
                 self._db.execute(f"ALTER TABLE groups ADD COLUMN {column} {decl}")
+        member_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('members')")}
+        if "verified_epoch" not in member_columns:
+            self._db.execute("ALTER TABLE members ADD COLUMN verified_epoch INTEGER")
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
         if "at" not in feed_columns:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
@@ -759,11 +767,14 @@ class Store:
 
     def members(self, group_id: str) -> list[MemberRow]:
         rows = self._all(
-            "SELECT identity, display_name, role, verified, instances FROM members "
-            "WHERE group_id = ? ORDER BY identity",
+            "SELECT identity, display_name, role, verified, instances, verified_epoch "
+            "FROM members WHERE group_id = ? ORDER BY identity",
             group_id,
         )
-        return [MemberRow(r[0], r[1], r[2], bool(r[3]), json.loads(r[4])) for r in rows]
+        return [
+            MemberRow(r[0], r[1], r[2], bool(r[3]), json.loads(r[4]), r[5] if r[3] else None)
+            for r in rows
+        ]
 
     def set_members(
         self, group_id: str, members: dict[str, tuple[str, list[dict[str, Any]]]]
@@ -796,10 +807,16 @@ class Store:
             (name, group_id, identity),
         )
 
-    def set_verified(self, group_id: str, identity: str, verified: bool) -> bool:
+    def set_verified(
+        self, group_id: str, identity: str, verified: bool, epoch: int | None = None
+    ) -> bool:
+        """Set a member's verified flag. ``epoch`` is the epoch the human
+        verified at: the member's instances that join after it are new
+        since the verification."""
         cur = self._db.execute(
-            "UPDATE members SET verified = ? WHERE group_id = ? AND identity = ?",
-            (int(verified), group_id, identity),
+            "UPDATE members SET verified = ?, verified_epoch = ? "
+            "WHERE group_id = ? AND identity = ?",
+            (int(verified), epoch if verified else None, group_id, identity),
         )
         return cur.rowcount == 1
 
@@ -1683,6 +1700,27 @@ class Store:
             since,
         )
         return 0 if row is None else int(row[0])
+
+    def pending_approvals_of(self, invite_id: str, identity: str, since: int) -> int:
+        """Join requests of this invite that claim ``identity`` and wait for
+        the human, received at or after ``since`` (older ones have lapsed)."""
+        row = self._one(
+            "SELECT count(*) FROM approvals WHERE invite_id = ? AND identity = ? "
+            "AND status = 'pending' AND received_at >= ?",
+            invite_id,
+            identity,
+            since,
+        )
+        return 0 if row is None else int(row[0])
+
+    def adding_to(self, group_id: str) -> list[str]:
+        """The joiners' mailboxes of the approved joins of this group whose
+        Add is under way (``approving`` until the Welcome went out)."""
+        rows = self._all(
+            "SELECT mailbox_id FROM approvals WHERE group_id = ? AND status = 'approving'",
+            group_id,
+        )
+        return [str(r[0]) for r in rows]
 
     def uses_taken(self, invite_id: str) -> int:
         """Approvals that hold one of the invite's uses (approving or done)."""

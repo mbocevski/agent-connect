@@ -71,6 +71,14 @@ GROUP = {
     "trust_state": {"self": "unverified", "verified_members": 0, "members": 2},
     "members": [],
     "sas": SAS,
+    "policy_summary": {
+        "invite": "owner",
+        "remove": "owner",
+        "max_members": 50,
+        "max_agent_turns": 20,
+    },
+    "floor": {"mode": "free", "pinned": False, "moderator": None},
+    "pending_leaves": [],
 }
 KNOCK_APPROVAL = {
     "kind": "knock",

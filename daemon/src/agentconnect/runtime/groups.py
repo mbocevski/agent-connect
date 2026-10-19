@@ -1,5 +1,19 @@
 """Group membership in the runtime: who is in a group, how they leave or
-are removed, and what each member is told (SPEC 9.2, 9.4, 11; docs/groups.md).
+are removed, who holds which role, and what each member is told (SPEC 9.2,
+9.4, 11; docs/groups.md).
+
+**Roles and the policy.** A role change, an ownership transfer and any other
+policy change is a commit. It is queued as what it changes (a delta), not
+as a whole policy: :func:`planned_policy` applies it to the policy in force
+when the commit is built, so a rebuild after an epoch conflict keeps a
+change another member committed meanwhile. Before queueing, the core's dry
+run (``Client.check_policy_change``) says whether this instance may make
+the change now; the core checks the commit again when it is built, and so
+does every member that receives it. These operations are the human's
+(``docs/api.md``): no agent-scope operation reaches them. After a commit:
+an identity that may no longer invite closes its open invites for the
+group, and the owner's instance drops departed identities from ``admins``
+and ``floor_moderator`` (``groups.cleanup_departed_roles``).
 
 **Leaves.** A leaving instance sends ``control.leave``, a notice only, then
 a Remove proposal for its own leaf; membership changes only with the
@@ -55,6 +69,7 @@ from agentconnect.backoff import Backoff
 from agentconnect.relay import RelayError, b64, unb64
 from agentconnect.runtime.engine import (
     TRANSFER_TIMEOUT_SECS,
+    UNCHANGED,
     UPDATE_AFTER_MESSAGES,
     UPDATE_AFTER_SECS,
     DaemonError,
@@ -63,7 +78,7 @@ from agentconnect.runtime.engine import (
     canonical,
     new_msg_id,
 )
-from agentconnect.store import GroupRow, OutboxRow
+from agentconnect.store import GroupRow, MemberRow, OutboxRow
 from agentconnect.tasks import cancel_and_wait
 
 LOG = log.get("agentconnect.groups")
@@ -75,6 +90,8 @@ UPDATE_JITTER_MESSAGES = 100
 UPDATE_THRESHOLD_INFO = "agentconnect/update-threshold"
 INSTANCE_ID = re.compile(r"^[0-9a-f]{16}$")
 MAX_INSTANCES = 50  # SPEC 8.3: the group size
+# Relay answers to an invite revocation that may succeed later.
+RELAY_RETRY = frozenset({"relay_unreachable", "rate_limited", "internal"})
 OWNER_MUST_TRANSFER = "owner_must_transfer"
 OWNER_INSTANCE = "owner_instance"
 LEAVE_BLOCKED_WARNING = (
@@ -97,6 +114,116 @@ def update_threshold(group_id: str, epoch: int, instance_id: str) -> int:
     return UPDATE_AFTER_MESSAGES - UPDATE_JITTER_MESSAGES + spread
 
 
+# The fields of a policy change (POST /v0/groups/{gid}/policy, `group policy`).
+POLICY_FIELDS = frozenset(
+    {
+        "require_verified",
+        "invite",
+        "remove",
+        "max_members",
+        "floor",
+        "floor_pinned",
+        "floor_moderator",
+        "max_agent_turns",
+    }
+)
+ROLES = ("admin", "member")  # what a role change sets; the owner changes by transfer
+
+
+def policy_changes(fields: dict[str, Any]) -> dict[str, Any]:
+    """The policy changes that the fields of a request ask for, as they sit
+    in the policy: ``max_agent_turns`` goes in ``loop_guard``, and setting
+    ``floor`` pins it (SPEC 9.1: no switch to ``mention`` when a third
+    identity joins) unless the request says ``floor_pinned`` itself. Values
+    are the core's to check."""
+    unknown = sorted(set(fields) - POLICY_FIELDS)
+    if unknown:
+        raise DaemonError("bad_request", f"unknown policy field(s): {', '.join(unknown)}")
+    if not fields:
+        raise DaemonError("bad_request", "nothing to change")
+    changes = dict(fields)
+    if "max_agent_turns" in changes:
+        changes["loop_guard"] = {"max_agent_turns": changes.pop("max_agent_turns")}
+    if "floor" in changes:
+        changes.setdefault("floor_pinned", True)
+    return changes
+
+
+def may_invite(policy: dict[str, Any], identity: str) -> bool:
+    """Whether the policy lets ``identity`` add members (SPEC 9.2)."""
+    invite = policy.get("invite")
+    admins = policy.get("admins")
+    return bool(
+        invite == "members"
+        or identity == policy.get("owner")
+        or (invite == "admins" and isinstance(admins, list) and identity in admins)
+    )
+
+
+def planned_policy(
+    current: dict[str, Any], intent: dict[str, Any], present: set[str]
+) -> dict[str, Any]:
+    """The policy a policy intent makes of ``current``, the policy in force
+    when its commit is built. ``present`` are the identities in the group.
+
+    * ``policy``: ``changes`` over the current fields. A row queued before
+      changes were deltas holds a whole ``policy``: only its
+      ``require_verified`` is applied, the one field such a row could change.
+    * ``owner``: ``identity`` becomes the owner and leaves ``admins``; with
+      ``keep_admin`` the old owner becomes an admin.
+    * ``role``: ``identity`` joins ``admins`` (``admin``) or leaves it
+      (``member``).
+    * ``drop_roles``: those of ``identities`` that are no longer in the group
+      leave ``admins`` and ``floor_moderator``: it only narrows roles."""
+    t = intent["type"]
+    if t == "policy":
+        changes = intent.get("changes")
+        legacy = intent.get("policy")
+        if changes is None and isinstance(legacy, dict) and "require_verified" in legacy:
+            # Queued before changes were deltas: the only change such a row
+            # could hold is require_verified (the API took nothing else).
+            # Never the rest of the policy it cached, such as the owner.
+            changes = {"require_verified": legacy["require_verified"]}
+        return {**current, **(changes if isinstance(changes, dict) else {})}
+    admins = [a for a in current.get("admins") or [] if isinstance(a, str)]
+    if t == "owner":
+        new_owner, old = str(intent["identity"]), current.get("owner")
+        if new_owner == old:
+            return current
+        admins = [a for a in admins if a != new_owner]
+        if intent.get("keep_admin", True) and isinstance(old, str) and old not in admins:
+            admins.append(old)
+        return {**current, "owner": new_owner, "admins": admins}
+    if t == "role":
+        who = str(intent["identity"])
+        if who == current.get("owner"):
+            raise DaemonError("bad_request", "the owner's role changes only with a transfer")
+        if intent.get("role") == "admin":
+            if who not in present:
+                # It left after the change was asked for (SPEC 9.2: roles
+                # name members); don't hand a role to an absent identity.
+                raise DaemonError("not_permitted", "that identity is no longer a member")
+            return {**current, "admins": admins if who in admins else [*admins, who]}
+        return {**current, "admins": [a for a in admins if a != who]}
+    if t == "drop_roles":
+        gone = {str(i) for i in intent.get("identities") or []} - present
+        out = {**current, "admins": [a for a in admins if a not in gone]}
+        if current.get("floor_moderator") in gone:
+            out["floor_moderator"] = None
+        return out
+    raise DaemonError("bad_intent", f"unknown policy intent {t}")
+
+
+def _role_holders(policy: dict[str, Any]) -> set[str]:
+    """The identities a policy gives a role below the owner's."""
+    admins = policy.get("admins")
+    holders: set[str] = {str(a) for a in admins} if isinstance(admins, list) else set()
+    moderator = policy.get("floor_moderator")
+    if isinstance(moderator, str):
+        holders.add(moderator)
+    return holders
+
+
 def role_of(policy: dict[str, Any], identity: str) -> str:
     if identity == policy.get("owner"):
         return "owner"
@@ -104,18 +231,26 @@ def role_of(policy: dict[str, Any], identity: str) -> str:
     return "admin" if isinstance(admins, list) and identity in admins else "member"
 
 
-def _by_identity(members: Iterable[dict[str, Any]]) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
+def _leaf_key(m: dict[str, Any]) -> tuple[str, str]:
+    """An instance as ``(instance_id, mailbox_id)``: a leaf that repeats an
+    instance id with another key (the core refuses one, SPEC 9.2) is never
+    taken for that instance."""
+    return str(m["instance_id_hex"]), str(m.get("mailbox_id", ""))
+
+
+def _by_identity(members: Iterable[dict[str, Any]]) -> dict[str, list[tuple[str, str]]]:
+    out: dict[str, list[tuple[str, str]]] = {}
     for m in members:
-        out.setdefault(str(m["identity"]), []).append(str(m["instance_id_hex"]))
-    return {identity: sorted(ids) for identity, ids in out.items()}
+        out.setdefault(str(m["identity"]), []).append(_leaf_key(m))
+    return {identity: sorted(keys) for identity, keys in out.items()}
 
 
 def membership_events(
     summary: dict[str, Any], current: list[dict[str, Any]]
 ) -> list[tuple[str, dict[str, Any]]]:
     """The membership events of a merged commit, from its summary and the
-    members after it (``Client.members``), in a stable order.
+    members after it (``Client.members``), in a stable order. Instances are
+    told apart by id and mailbox (:func:`_leaf_key`).
 
     An identity all of whose instances the commit added joined
     (``member_joined``); a new instance of an identity already in the group
@@ -125,23 +260,24 @@ def membership_events(
     instance gets ``instance_left`` or ``instance_removed`` per instance."""
     by = str(summary["committer"]["identity"])
     after = _by_identity(current)
-    left = {str(m["instance_id_hex"]) for m in summary.get("left") or []}
+    left = {_leaf_key(m) for m in summary.get("left") or []}
     out: list[tuple[str, dict[str, Any]]] = []
-    for identity, ids in sorted(_by_identity(summary.get("added") or []).items()):
-        if set(after.get(identity, [])) <= set(ids):
+    for identity, keys in sorted(_by_identity(summary.get("added") or []).items()):
+        if set(after.get(identity, [])) <= set(keys):
+            ids = [i for i, _ in keys]
             out.append(("member_joined", {"identity": identity, "instances": ids, "by": by}))
             continue
         out.extend(
-            ("instance_joined", {"identity": identity, "instance_id": i, "by": by}) for i in ids
+            ("instance_joined", {"identity": identity, "instance_id": i, "by": by}) for i, _ in keys
         )
-    for identity, ids in sorted(_by_identity(summary.get("removed") or []).items()):
+    for identity, keys in sorted(_by_identity(summary.get("removed") or []).items()):
         if identity not in after:
-            kind = "member_left" if all(i in left for i in ids) else "member_removed"
+            kind = "member_left" if all(k in left for k in keys) else "member_removed"
             out.append((kind, {"identity": identity, "by": by}))
             continue
-        for i in ids:
-            kind = "instance_left" if i in left else "instance_removed"
-            out.append((kind, {"identity": identity, "instance_id": i, "by": by}))
+        for k in keys:
+            kind = "instance_left" if k in left else "instance_removed"
+            out.append((kind, {"identity": identity, "instance_id": k[0], "by": by}))
     return out
 
 
@@ -189,6 +325,8 @@ class GroupService:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
         self._wake = asyncio.Event()
+        # Between tries of an invite revocation the relay refused for now.
+        self._revoke_backoff = Backoff(base=1.0, cap=300.0, rng=engine.options.backoff_rng)
 
     # -- plumbing -------------------------------------------------------------
 
@@ -212,6 +350,14 @@ class GroupService:
         e = self._engine
         gid = unb64(group_id)
         policy = json.loads(self._client.policy(gid))
+        epoch = self._client.epoch(gid)
+        # The epoch each instance was first seen in (G8), kept while it stays;
+        # by id and mailbox, so a leaf repeating an id never inherits it.
+        seen = {
+            (str(i["instance_id"]), str(i.get("mailbox_id", ""))): int(i.get("joined_epoch", 0))
+            for m in e.store.members(group_id)
+            for i in m.instances
+        }
         grouped: dict[str, list[dict[str, Any]]] = {}
         for m in self._client.members(gid):
             grouped.setdefault(m["identity"], []).append(
@@ -219,6 +365,7 @@ class GroupService:
                     "instance_id": m["instance_id_hex"],
                     "mailbox_id": m["mailbox_id"],
                     "leaf_index": m["leaf_index"],
+                    "joined_epoch": seen.get(_leaf_key(m), epoch),
                 }
             )
         members = {
@@ -226,7 +373,7 @@ class GroupService:
             for identity, instances in grouped.items()
         }
         e.store.set_members(group_id, members)
-        e.store.update_group(group_id, policy=policy, epoch=self._client.epoch(gid))
+        e.store.update_group(group_id, policy=policy, epoch=epoch)
 
     def trust_state(self, group_id: str) -> dict[str, Any]:
         members = self._engine.store.members(group_id)
@@ -269,6 +416,260 @@ class GroupService:
             for m in members
         )
 
+    # -- roles and the policy ---------------------------------------------------
+
+    def _policy(self, gid: bytes) -> dict[str, Any]:
+        return dict(json.loads(self._client.policy(gid)))
+
+    def _identities(self, gid: bytes) -> set[str]:
+        return {str(m["identity"]) for m in self._client.members(gid)}
+
+    @staticmethod
+    def policy_changes_of(fields: dict[str, Any]) -> dict[str, Any]:
+        """:func:`policy_changes` (for the engine, which can't import it)."""
+        return policy_changes(fields)
+
+    def initial_policy(self, fields: dict[str, Any]) -> bytes:
+        """A new group's policy: the SPEC 9.1 defaults with this identity as
+        the owner, and the changes ``fields`` ask for (:func:`policy_changes`)."""
+        defaults = json.loads(ac.default_group_policy(self._engine.me))
+        return canonical({**defaults, **policy_changes(fields)})
+
+    def change_policy(self, group_id: str, intent: dict[str, Any]) -> str:
+        """Queue the commit of a policy intent (:func:`planned_policy`):
+        ``committing``, then ``policy_changed`` or ``commit_failed``; or
+        ``unchanged`` when the policy already says so. The core's dry run of
+        the change, as it would be made now, refuses one this instance may
+        not make with ``not_permitted`` before anything is queued."""
+        e = self._engine
+        group = e._group_or_raise(group_id)
+        gid = unb64(group.group_id)
+        current = self._policy(gid)
+        new = planned_policy(current, intent, self._identities(gid))
+        if new == current:
+            return UNCHANGED
+        self._dry_run(gid, new)
+        e._enqueue("commit", group.group_id, {"intent": intent})
+        return "committing"
+
+    def _dry_run(self, gid: bytes, policy: dict[str, Any]) -> None:
+        try:
+            self._client.check_policy_change(gid, canonical(policy))
+        except ac.AgentConnectError as err:
+            kind = getattr(err, "kind", "other")
+            if kind == "commit_pending":
+                # An own commit is under way; the policy passed validation
+                # (checked first). The core decides again when this one is built.
+                return
+            if kind in ("unauthorized", "not_permitted"):
+                raise DaemonError("not_permitted", str(err)) from None
+            if kind in ("malformed", "unsupported_version"):
+                raise DaemonError("bad_request", str(err)) from None
+            raise
+
+    def build_policy_commit(self, gid: bytes, intent: dict[str, Any]) -> dict[str, Any]:
+        """Build a policy intent's commit against the policy in force now; a
+        change it already has fails as :data:`UNCHANGED` (nothing to tell)."""
+        current = self._policy(gid)
+        present = self._identities(gid)
+        if intent["type"] == "drop_roles":
+            # One that came back since it departed is new: it doesn't keep
+            # the role (only a later grant gives it one again).
+            present -= self._returned(b64(gid), set(intent.get("identities") or []))
+        new = planned_policy(current, intent, present)
+        if new == current:
+            raise DaemonError(UNCHANGED, "the policy already says so")
+        return self._client.set_policy(gid, canonical(new))
+
+    def _departed(self, group_id: str) -> dict[str, int]:
+        """Identities that held a role when a commit took their last
+        instance, each with the epoch that commit started (kv, per group)."""
+        raw = json.loads(self._kv(f"departed_roles/{group_id}") or "{}")
+        return {str(k): int(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+    def _returned(self, group_id: str, identities: set[str]) -> set[str]:
+        """Those of ``identities`` recorded as departed whose every instance
+        joined after the departure: they came back."""
+        departed = self._departed(group_id)
+        out = set()
+        for m in self._engine.store.members(group_id):
+            since = departed.get(m.identity)
+            if (
+                m.identity in identities
+                and since is not None
+                and m.instances
+                and all(int(i.get("joined_epoch", 0)) > since for i in m.instances)
+            ):
+                out.add(m.identity)
+        return out
+
+    def set_role(self, group_id: str, identity: str, role: str) -> str:
+        """Make a member an admin or a plain member (the owner's role changes
+        with :meth:`transfer_to`). Only the owner may, which the core checks."""
+        if role not in ROLES:
+            raise DaemonError("bad_request", "role must be admin or member")
+        gid = unb64(self._engine._group_or_raise(group_id).group_id)
+        if identity not in self._identities(gid):
+            raise DaemonError("not_found", "no such member")
+        current = self._policy(gid)
+        if identity == current.get("owner"):
+            msg = "that member is the owner: hand ownership over to change its role"
+            raise DaemonError("bad_request", msg)
+        grant = {"type": "role", "identity": identity, "role": role}
+        if (
+            role == "admin"
+            and identity in self._departed(group_id)
+            and identity in _role_holders(current)
+        ):
+            # It departed and came back, and the cleanup that drops its role
+            # hasn't landed: answering "unchanged" would leave the role to
+            # that cleanup. Drop the stale role, then grant it: every member
+            # reads the second commit as a grant and forgets the departure.
+            without = {
+                **current,
+                "admins": [a for a in current.get("admins") or [] if a != identity],
+            }
+            self._dry_run(gid, without)
+            e = self._engine
+            e._enqueue(
+                "commit", group_id, {"intent": {"type": "drop_roles", "identities": [identity]}}
+            )
+            e._enqueue("commit", group_id, {"intent": grant})
+            return "committing"
+        return self.change_policy(group_id, grant)
+
+    def transfer_to(self, group_id: str, identity: str, *, keep_admin: bool = True) -> str:
+        """Hand ownership over to another member (SPEC 9.2); with
+        ``keep_admin`` this identity stays an admin. A leave of this
+        instance that waits for it goes on once it lands."""
+        gid = unb64(self._engine._group_or_raise(group_id).group_id)
+        if identity not in self._identities(gid):
+            raise DaemonError("not_found", "no such member")
+        if identity == self._policy(gid).get("owner"):
+            raise DaemonError("bad_request", "that member is the owner already")
+        intent = {"type": "owner", "identity": identity, "keep_admin": keep_admin}
+        return self.change_policy(group_id, intent)
+
+    def room(self, group_id: str) -> int | None:
+        """How many more instances the group's ``max_members`` allows, counting
+        leaves already pending as gone and the Adds under way as in; ``None``
+        for a group that isn't active."""
+        e = self._engine
+        group = e.store.group(group_id)
+        if group is None or group.status != "active":
+            return None
+        gid = unb64(group_id)
+        members = self._client.members(gid)
+        staying = len(members) - len(self._client.pending_leaves(gid))
+        limit = int(self._policy(gid).get("max_members", MAX_INSTANCES))
+        # An Add that merged already counts in the members until its Welcome
+        # went out and its approval is done: count it once.
+        leaves = {str(m["mailbox_id"]) for m in members}
+        adding = [mb for mb in e.store.adding_to(group_id) if mb not in leaves]
+        return limit - staying - len(adding)
+
+    def _follow_policy(self, group_id: str, summary: dict[str, Any]) -> None:
+        """After a merged commit: close this identity's open invites for the
+        group once the policy no longer lets it invite (SPEC 9.2: the core
+        would refuse their Adds), and on the owner's first instance queue a
+        commit that drops identities the commit removed from ``admins`` and
+        ``floor_moderator`` (SPEC 9.2, "Departed roles")."""
+        e = self._engine
+        gid = unb64(group_id)
+        policy = self._policy(gid)
+        if not may_invite(policy, e.me):
+            self.close_invites(group_id)
+        group = e.store.group(group_id)
+        out_of_sync = group is not None and group.out_of_sync  # its commits can't land
+        if not e.config.groups_cleanup_departed_roles or self.leaving(group_id) or out_of_sync:
+            return
+        self._record_departures(group_id, summary, policy)
+        members = self._client.members(gid)
+        owner = policy.get("owner")
+        owner_leaves = sorted(int(m["leaf_index"]) for m in members if m["identity"] == owner)
+        if not owner_leaves or self._own_leaf(members) != owner_leaves[0]:
+            return
+        present = {str(m["identity"]) for m in members}
+        departed = set(self._departed(group_id))
+        gone = sorted((departed - present) | self._returned(group_id, departed))
+        if gone and not self._drop_queued(group_id):
+            LOG.info("departed_roles", group=log.hid(group_id), count=len(gone))
+            e._enqueue("commit", group_id, {"intent": {"type": "drop_roles", "identities": gone}})
+
+    def _record_departures(
+        self, group_id: str, summary: dict[str, Any], policy: dict[str, Any]
+    ) -> None:
+        """Keep the departed-role record (:meth:`_departed`) current: an
+        identity that held a role and lost its last instance in this commit
+        is recorded with the commit's epoch; one that holds no role any
+        more, or was granted one again in this commit, is forgotten."""
+        e = self._engine
+        roles = _role_holders(policy)
+        present = self._identities(unb64(group_id))
+        removed = {str(m["identity"]) for m in summary.get("removed") or []}
+        before = json.loads(summary["previous_policy"]) if summary.get("previous_policy") else None
+        granted: set[str] = set()
+        if before is not None:
+            granted = roles - _role_holders(before)
+        record = {
+            k: v for k, v in self._departed(group_id).items() if k in roles and k not in granted
+        }
+        for identity in (removed - present) & roles:
+            record[identity] = int(summary["epoch"])
+        key = f"departed_roles/{group_id}"
+        if record != self._departed(group_id):
+            e.store.kv_set(key, json.dumps(record, sort_keys=True) if record else "")
+
+    def _drop_queued(self, group_id: str) -> bool:
+        return any(
+            r.kind == "commit"
+            and r.group_id == group_id
+            and "env" not in r.payload
+            and (r.payload.get("intent") or {}).get("type") == "drop_roles"
+            for r in self._engine.store.outbox()
+        )
+
+    def close_invites(self, group_id: str) -> None:
+        """Close this instance's open invites for the group, because it may
+        no longer invite or is no longer in the group. They are ``revoking``
+        at once, so a join request for one is ignored, and the timer revokes
+        them at the relay (:meth:`revoke_closed_invites`), so a joiner that
+        redeemed one hears it was used instead of waiting."""
+        e = self._engine
+        ids = [str(i["invite_id"]) for i in e.store.invites("open") if i["group_id"] == group_id]
+        if not ids:
+            return
+        for invite_id in ids:
+            e.store.set_invite_status(invite_id, "revoking")
+        LOG.info("invites_closed", group=log.hid(group_id), count=len(ids))
+        e._defer(self.wake)
+
+    async def revoke_closed_invites(self) -> float | None:
+        """Drop the secrets of the invites :meth:`close_invites` closed and
+        revoke them at the relay. One the relay refused for now (while this
+        runtime is connected) stays ``revoking``: returns when to try again,
+        after a backoff. Offline, the reconnect wakes the timer."""
+        e = self._engine
+        retry = False
+        for invite in e.store.invites("revoking"):
+            invite_id = str(invite["invite_id"])
+            e.keystore.delete(f"invite/{invite_id}")
+            e._forget_invite_requests(invite_id)
+            if not e.link.connected:
+                continue
+            try:
+                await e.rest.revoke_invite(invite_id)
+            except RelayError as err:
+                if err.code in RELAY_RETRY:
+                    LOG.info("invite_revoke_retry", code=err.code)
+                    retry = True
+                    continue
+            e.store.set_invite_status(invite_id, "revoked")
+        if not retry:
+            self._revoke_backoff.reset()
+            return None
+        return float(self._now() + self._revoke_backoff.next())
+
     # -- commits --------------------------------------------------------------
 
     async def after_commit(
@@ -309,6 +710,7 @@ class GroupService:
             current = json.loads(self._client.policy(gid))
             for kind, data in policy_events(summary, current):
                 await e.emit(group_id, kind, **data)
+        self._follow_policy(group_id, summary)
         trust = self.trust_state(group_id)
         await e.emit(
             group_id,
@@ -367,6 +769,7 @@ class GroupService:
         await e._drop_group_holds(group_id)
         e.store.delete_group_data(group_id)
         self._end_leave(group_id)
+        self.close_invites(group_id)
         await e.emit(group_id, kind, cause=cause, **data)
 
         def forget() -> None:
@@ -623,8 +1026,10 @@ class GroupService:
         return None
 
     async def step(self) -> float | None:
-        """One pass of the timer over the active groups; when the next is due."""
-        times: list[float] = []
+        """One pass of the timer over the active groups, after revoking the
+        invites closed meanwhile; when the next is due."""
+        revoke_again = await self.revoke_closed_invites()
+        times: list[float] = [] if revoke_again is None else [revoke_again]
         for group in self._engine.store.groups():
             if group.status != "active" or group.out_of_sync:
                 continue  # an out-of-sync view decides nothing
@@ -838,11 +1243,35 @@ class GroupService:
 
     # -- the view -------------------------------------------------------------
 
+    @staticmethod
+    def _since_verified(member: MemberRow) -> list[str] | None:
+        """The member's instances that joined after the human verified it
+        (SPEC 11: the flag stays, and the view shows them as new). ``None``
+        (unknown) for a member verified by a daemon that didn't record the
+        epoch: verifying it again tells."""
+        if not member.verified:
+            return []
+        if member.verified_epoch is None:
+            return None
+        return sorted(
+            str(i["instance_id"])
+            for i in member.instances
+            if int(i.get("joined_epoch", 0)) > member.verified_epoch
+        )
+
     def group_info(self, group_id: str) -> dict[str, Any]:
         e = self._engine
         group = e.store.group(group_id)
         if group is None:
             raise DaemonError("not_found", "no such group")
+        policy = group.policy
+        guard = policy.get("loop_guard")
+        pending: list[dict[str, Any]] = []
+        if group.status == "active":
+            pending = [
+                {"identity": str(m["identity"]), "instance_id": str(m["instance_id_hex"])}
+                for m in self._client.pending_leaves(unb64(group_id))
+            ]
         info: dict[str, Any] = {
             "group_id": group.group_id,
             "name": group.name,
@@ -855,6 +1284,20 @@ class GroupService:
             "adapter": group.adapter,
             "trust_state": self.trust_state(group_id),
             "leaving": self.leave_state(group_id),
+            "policy_summary": {
+                "invite": policy.get("invite"),
+                "remove": policy.get("remove"),
+                "max_members": policy.get("max_members"),
+                "max_agent_turns": guard.get("max_agent_turns")
+                if isinstance(guard, dict)
+                else None,
+            },
+            "floor": {
+                "mode": policy.get("floor"),
+                "pinned": bool(policy.get("floor_pinned")),
+                "moderator": policy.get("floor_moderator"),
+            },
+            "pending_leaves": pending,
             "members": [
                 {
                     "identity": m.identity,
@@ -864,8 +1307,14 @@ class GroupService:
                     "role": m.role,
                     "verified": m.verified,
                     "instances": [
-                        {**i, "self": i.get("mailbox_id") == e.mailbox} for i in m.instances
+                        {
+                            **i,
+                            "joined_epoch": int(i.get("joined_epoch", 0)),
+                            "self": i.get("mailbox_id") == e.mailbox,
+                        }
+                        for i in m.instances
                     ],
+                    "instances_since_verified": self._since_verified(m),
                     "self": m.identity == e.me,
                 }
                 for m in e.store.members(group_id)

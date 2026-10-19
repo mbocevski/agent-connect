@@ -27,6 +27,14 @@ GROUP_VIEW: dict[str, Any] = {
     "verified_summary": "str",
     "sas": Opt(SAS),
     "leaving": Opt({"since": "int", "blocked": "bool"}),
+    "policy_summary": {
+        "invite": Opt("str"),
+        "remove": Opt("str"),
+        "max_members": Opt("int"),
+        "max_agent_turns": Opt("int"),
+    },
+    "floor": {"mode": Opt("str"), "pinned": "bool", "moderator": Opt("str")},
+    "pending_leaves": [{"identity": "str", "instance_id": "str"}],
     "members": [
         {
             "identity": "str",
@@ -36,7 +44,15 @@ GROUP_VIEW: dict[str, Any] = {
             "role": "str",
             "verified": "bool",
             "self": "bool",
-            "instances": [{"instance_id": "str", "self": "bool"}],
+            "instances": [
+                {
+                    "instance_id": "str",
+                    "leaf_index": "int",
+                    "joined_epoch": "int",
+                    "self": "bool",
+                    "new_since_verified": Opt("bool"),
+                }
+            ],
         }
     ],
     "pending_approvals": "int",
@@ -137,6 +153,7 @@ APPROVAL: dict[str, Any] = {
     "received_at": "int",
     "display_name_verified": "bool",
     "fingerprint": "str",
+    "identity_requests?": "int",
     "listing?": {"directory": "str", "name": "str"},
     "note?": Opt("str"),
     "note_verified?": "bool",
@@ -151,6 +168,14 @@ SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": 
 # outcomes) to the shape of its stdout with ``--json``.
 SCHEMAS: dict[str, Any] = {
     "group create": {"group_id": "str", "name": "str", "purpose": "str"},
+    "group policy": {"group_id": "str", "status": "str", "changes": "object"},
+    "group role": {"group_id": "str", "identity": "str", "role": "str", "status": "str"},
+    "group transfer": {
+        "group_id": "str",
+        "identity": "str",
+        "keep_admin": "bool",
+        "status": "str",
+    },
     "invite create": {
         "url": "str",
         "invite_id": "str",
@@ -201,6 +226,7 @@ SCHEMAS: dict[str, Any] = {
                 "fingerprint": "str",
                 "received_at": "int",
                 "group_sas": Opt(SAS),
+                "identity_requests?": "int",
                 "listing?": {"directory": "str", "name": "str"},
                 "note?": Opt("str"),
                 "note_verified?": "bool",

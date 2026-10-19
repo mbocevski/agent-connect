@@ -402,7 +402,10 @@ silently, any knock that:
 
 A dropped knock raises no event (a flood would fill the event log); it is
 in the audit log ([safety.md](safety.md#knocks)) and in the
-`knocks_dropped` count. The knocker learns nothing either way.
+`knocks_dropped` count. The knocker learns nothing either way. A check
+that fails for a reason of the daemon's own (its storage, randomness or an
+internal error, told apart by the core's error kind) drops nothing: the
+knock is tried again.
 
 **The replay ledger.** Every knock that passes the checks is remembered by
 its `knock_id` and its KeyPackageRef until `ts + 3900`, whatever happens to

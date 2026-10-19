@@ -70,6 +70,9 @@ pub enum Error {
     /// A commit is already pending relay confirmation (SPEC §8.3).
     #[error("a commit is already pending")]
     CommitPending,
+    /// A commit of pending proposals with none pending.
+    #[error("no pending proposals")]
+    NothingToCommit,
     /// There is no pending commit to confirm or discard.
     #[error("no pending commit")]
     NoPendingCommit,
@@ -215,7 +218,28 @@ pub enum ErrorKind {
     /// A knock Welcome that isn't the group the knock asked for (SPEC
     /// §6.6.5).
     WelcomeMismatch,
-    /// Anything else (storage, MLS, randomness, internal).
+    /// A door key that isn't a usable key of the suite: it doesn't seal, or
+    /// it doesn't belong with its private key (SPEC §6.6.1, §6.6.2).
+    BadDoorKey,
+    /// A commit or proposal the group policy forbids (SPEC §9.2): one
+    /// received from a member, or one this instance would build.
+    Unauthorized,
+    /// A local operation the group's state doesn't allow this instance,
+    /// such as committing while its own leave is pending.
+    NotPermitted,
+    /// A commit of this instance's is already waiting for the relay's
+    /// answer (SPEC §8.3).
+    CommitPending,
+    /// Nothing for the commit to carry: no pending proposals.
+    NothingToCommit,
+    /// The message was processed already (a redelivery, ADR-004).
+    Duplicate,
+    /// An own commit discarded earlier was accepted: re-sync.
+    OwnCommitLost,
+    /// A failure that says nothing about the input: storage, the database
+    /// key, randomness, an internal error. Trying again may work.
+    Transient,
+    /// Anything else (MLS errors and the rest).
     Other,
 }
 
@@ -244,6 +268,14 @@ impl ErrorKind {
             Self::KeyLength => "key_length",
             Self::Authentication => "authentication",
             Self::WelcomeMismatch => "welcome_mismatch",
+            Self::BadDoorKey => "bad_door_key",
+            Self::Unauthorized => "unauthorized",
+            Self::NotPermitted => "not_permitted",
+            Self::CommitPending => "commit_pending",
+            Self::NothingToCommit => "nothing_to_commit",
+            Self::Duplicate => "duplicate",
+            Self::OwnCommitLost => "own_commit_lost",
+            Self::Transient => "transient",
             Self::Other => "other",
         }
     }
@@ -272,6 +304,7 @@ fn reason_kind(reason: &str) -> ErrorKind {
         | "tombstoned"
         | "seq does not increase" => K::Superseded,
         "seal does not open" => K::Authentication,
+        "door key does not seal" | "door key pair mismatch" => K::BadDoorKey,
         _ => K::Malformed,
     }
 }
@@ -302,6 +335,13 @@ impl Error {
             Self::KnockWelcome(_) => K::WelcomeMismatch,
             Self::Replayed => K::Replay,
             Self::LedgerFull => K::Busy,
+            Self::Unauthorized(_) => K::Unauthorized,
+            Self::NotPermitted(_) => K::NotPermitted,
+            Self::CommitPending => K::CommitPending,
+            Self::NothingToCommit => K::NothingToCommit,
+            Self::Duplicate => K::Duplicate,
+            Self::OwnCommitLost => K::OwnCommitLost,
+            Self::Storage(_) | Self::StorageKey | Self::Rng | Self::Internal(_) => K::Transient,
             _ => K::Other,
         }
     }
@@ -319,6 +359,26 @@ pub(crate) fn storage<E: Display>(e: E) -> Error {
 mod tests {
     use super::*;
     use ErrorKind as K;
+
+    #[test]
+    fn group_and_processing_errors_have_kinds() {
+        for (e, k) in [
+            (Error::Unauthorized("x"), K::Unauthorized),
+            (Error::NotPermitted("x"), K::NotPermitted),
+            (Error::CommitPending, K::CommitPending),
+            (Error::NotMember, K::Other),
+            (Error::NothingToCommit, K::NothingToCommit),
+            (Error::Duplicate, K::Duplicate),
+            (Error::OwnCommitLost, K::OwnCommitLost),
+            (Error::Storage("x".into()), K::Transient),
+            (Error::StorageKey, K::Transient),
+            (Error::Rng, K::Transient),
+            (Error::Internal("x"), K::Transient),
+            (Error::Mls("x".into()), K::Other),
+        ] {
+            assert_eq!(e.kind(), k, "{e}");
+        }
+    }
 
     #[test]
     fn discovery_reasons_have_kinds() {
@@ -365,6 +425,8 @@ mod tests {
             (Error::InvalidKnock("lapsed"), K::Expired),
             (Error::KnockWelcome("name"), K::WelcomeMismatch),
             (Error::InvalidKnock("seal does not open"), K::Authentication),
+            (Error::InvalidKnock("door key does not seal"), K::BadDoorKey),
+            (Error::InvalidKnock("door key pair mismatch"), K::BadDoorKey),
             (Error::InvalidListing("not canonical JCS"), K::Malformed),
             (Error::InvalidOwnerFile("not I-JSON"), K::Malformed),
             (Error::UnsupportedVersion, K::UnsupportedVersion),
@@ -374,7 +436,6 @@ mod tests {
             (Error::WelcomeAuth, K::Authentication),
             (Error::InviteExpired, K::Expired),
             (Error::Malformed("x"), K::Malformed),
-            (Error::Storage("x".into()), K::Other),
         ] {
             assert_eq!(e.kind(), k, "{e}");
         }
@@ -399,11 +460,19 @@ mod tests {
             K::KeyLength,
             K::Authentication,
             K::WelcomeMismatch,
+            K::BadDoorKey,
+            K::Unauthorized,
+            K::NotPermitted,
+            K::CommitPending,
+            K::NothingToCommit,
+            K::Duplicate,
+            K::OwnCommitLost,
+            K::Transient,
             K::Other,
         ]
         .into_iter()
         .map(ErrorKind::as_str)
         .collect();
-        assert_eq!(names.len(), 21, "kind names are distinct");
+        assert_eq!(names.len(), 29, "kind names are distinct");
     }
 }

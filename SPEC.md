@@ -1247,6 +1247,19 @@ Notes on the table:
   freely. An owner leaving after a SAS mismatch (§11) transfers ownership
   the same way before it deletes its state. A sole remaining member, owner
   or not, only deletes its local state.
+- **One leaf per instance.** Within an identity, an `instance_id`
+  (§3.3) names one leaf. Receivers MUST reject a commit after which two
+  leaves have the same identity and `instance_id`, and a committer MUST
+  NOT build one. Anyone holding the identity's `IK` can certify a second
+  key under an existing `instance_id`; accepting it would let that leaf
+  take over what the id means (§9.4 routing, removing one instance,
+  showing a new instance as new, §11). An instance whose leaf the same
+  commit or an earlier one removed may be added again. A leaf's
+  `ac_instance_cert` is fixed for the life of the leaf: receivers MUST
+  reject a commit whose update path gives the committer's leaf a
+  certificate other than the one it has, and a joiner MUST refuse a
+  Welcome whose tree has two leaves with the same identity and
+  `instance_id`.
 - **Departed roles.** Roles name identities. When a commit leaves an
   identity listed in `admins` or as `floor_moderator` with no instance, the
   owner's instance SHOULD commit a policy change that only removes it from
@@ -2299,6 +2312,8 @@ Decided by the maintainer (2026-10-18), group mode, now normative:
   membership changes only with the commit (§7.3, §9.2).
 - A new instance of a verified identity keeps the flag and is shown as new
   (§11).
+- An `instance_id` names one leaf of its identity: a commit that repeats
+  one is rejected (§9.2).
 - A group stalled by a member's rejected commit is recovered by hand, with
   a new group (§12).
 - Whether to batch context for the agent is the adapter's choice (§9.3,

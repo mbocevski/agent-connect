@@ -97,8 +97,9 @@ def test_journalled_processing_replays_until_consumed(rng: random.Random, tmp_pa
     assert b.journal_consume("a/1", gid)
     assert not b.journal_consume("nope", gid)
     assert b.journal_pending() == []
-    with pytest.raises(ac.AgentConnectError, match="already processed"):
+    with pytest.raises(ac.AgentConnectError, match="already processed") as e:
         b.process(gid, ct, key="a/1")
+    assert e.value.kind == "duplicate"
     assert b.journal_purge(2**40) == 2  # the Welcome and the message
     with pytest.raises(ac.AgentConnectError, match="failpoint name"):
         b._arm_failpoint_for_testing("no.such.point")

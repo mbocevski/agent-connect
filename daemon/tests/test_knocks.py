@@ -1296,7 +1296,9 @@ async def test_a_door_key_the_core_refuses_leaves_nothing(world: World) -> None:
     class Refusing(Spy):
         @override
         def create_knock(self, *args: Any, **kw: Any) -> Any:
-            raise ac.AgentConnectError("invalid knock: door key does not seal")
+            e = ac.AgentConnectError("invalid knock: door key does not seal")
+            e.kind = "bad_door_key"
+            raise e
 
     k.engine.client = Refusing(k.engine.client)  # ty: ignore[invalid-assignment]
     with pytest.raises(ApiError) as e:

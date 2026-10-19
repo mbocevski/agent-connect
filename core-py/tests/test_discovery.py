@@ -297,8 +297,9 @@ def test_a_door_key_that_does_not_seal_is_refused(rng: random.Random) -> None:
     knocker = make_client(rng)
     door = ac.Door.generate(T0 + 3600)
     for key in (rng.randbytes(1216), bytes(1216)):
-        with pytest.raises(ac.AgentConnectError, match="does not seal"):
+        with pytest.raises(ac.AgentConnectError, match="does not seal") as e:
             knocker.create_knock(door.id, key, "bob")
+        assert e.value.kind == "bad_door_key"
     sealed, pending = knocker.create_knock(door.id, door.public_key, "bob")
     assert sealed
     knocker.forget_knock(pending)

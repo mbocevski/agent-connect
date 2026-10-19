@@ -282,7 +282,7 @@ class KnockService:
         except ac.CoreError:
             raise TransientError(None, "CoreError") from None
         except ac.AgentConnectError as e:
-            if e.kind == "other":  # storage, randomness: not about the knock
+            if e.kind in ("transient", "other"):  # storage, randomness: not about the knock
                 raise TransientError(None, "AgentConnectError") from None
             await self._drop(env, mailbox, len(sealed), f"knock_check:{e.kind}", failed=True)
             return
@@ -1006,7 +1006,7 @@ class KnockService:
                     door["id"], door["key"], name_shown, note, ts=now
                 )
         except ac.AgentConnectError as e:
-            if "door key" in str(e) or e.kind == "key_length":
+            if e.kind in ("bad_door_key", "key_length"):
                 raise ApiError(
                     422, "listing_invalid", "the listing's door key is not usable"
                 ) from None
@@ -1233,11 +1233,10 @@ class KnockService:
         return None
 
     async def _join_failed(self, k: dict[str, Any], e: Exception) -> None:
-        text = str(e)
         kind = getattr(e, "kind", "")
-        if isinstance(e, ac.CoreError) or text.startswith(("storage error", "internal error")):
+        if isinstance(e, ac.CoreError) or kind == "transient":
             raise TransientError(None, type(e).__name__) from None
-        if text == "message already processed":
+        if kind == "duplicate":
             return  # journalled and consumed: recorded already
         if kind == "expired":
             await self._end(

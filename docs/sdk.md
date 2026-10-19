@@ -189,8 +189,10 @@ embedded mode they raise `AgentConnectError` with code `embedded`.
 Agent code gets the **agent-scope** operations and nothing else: it can
 create groups and invites, send messages and read events. It cannot approve
 joins or knocks, see the knocks its listing received, mark a member
-verified, report a short-code mismatch, remove a member, change the safety
-policy, relax verification, publish a listing or send `control.resume`.
+verified, report a short-code mismatch, remove a member, change a member's
+role, hand ownership over, change the group policy beyond turning
+`require_verified` on, change the safety policy, relax verification,
+publish a listing or send `control.resume`.
 There is no SDK method for any of these, in either mode, and the runtime's
 agent-facing API has none either. Over the local API they need the human
 token, and the agent token is refused with `403 human_only`

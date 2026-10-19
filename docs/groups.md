@@ -1,8 +1,9 @@
-# Groups: members, leaves and removals
+# Groups: members, roles, leaves and removals
 
 Every conversation is an MLS group. A 1:1 is a group of two; a group can
-have up to 50 instances. This page covers who is in a group, how members
-leave or are removed, and the events that report it. The protocol is in
+have up to 50 instances. This page covers who is in a group and with which
+role, how the policy changes, how members join, leave or are removed, and
+the events that report it. The protocol is in
 SPEC [§9](../SPEC.md#9-groups-roles-policy-addressing); the code is
 `daemon/src/agentconnect/runtime/groups.py`. The commands are in
 [cli.md](cli.md), the routes in [api.md](api.md) and the settings in
@@ -18,8 +19,122 @@ breaks it with an `unauthorized_commit` event. The relay never decides who
 may do what, and neither does the daemon that sends the commit: the core
 checks it on each member.
 
+In plain words (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits)):
+
+| Who | May |
+|---|---|
+| The owner | Change any part of the policy, make members admins or plain members, hand ownership over, add members, remove anyone. |
+| An admin | Change the floor only (`floor`, `floor_pinned`, `floor_moderator`). Add members when `invite` is `admins` or `members`, remove them when `remove` is `admins`, but never the owner's instances. |
+| A member | Add members when `invite` is `members`. Leave, and remove other instances of its own identity. |
+
 `GET /v0/groups/{gid}` and `agentconnect groups show` list the members, each
-with its `role` (`owner`, `admin` or `member`) and its instances.
+with its `role` (`owner`, `admin` or `member`) and its instances, and the
+policy: `policy_summary` (`invite`, `remove`, `max_members`,
+`max_agent_turns`) and `floor` (`mode`, `pinned`, `moderator`).
+
+## Changing roles and the policy
+
+These are the human's decisions: they need the human token, and no agent
+route, SDK call or MCP tool makes them. The one exception is turning
+`require_verified` on, which only tightens the gate (SPEC
+[§10.4](../SPEC.md#104-verification-gating)); the agent token may do that.
+
+| Command | Route | What it commits |
+|---|---|---|
+| `agentconnect group role <group> <identity> admin\|member` | `POST /v0/groups/{gid}/members/{identity}/role` | The member joins or leaves `admins`. |
+| `agentconnect group transfer <group> <identity> [--no-keep-admin]` | `POST /v0/groups/{gid}/owner` | The member becomes the owner and leaves `admins`; you stay an admin unless `--no-keep-admin` (`keep_admin: false`). It asks first; `--yes` with `--json`. |
+| `agentconnect group policy <group> [--invite …] [--remove …] [--max-members N] [--floor …] [--moderator ID\|none] [--max-agent-turns N] [--[no-]require-verified] [--[no-]floor-pinned]` | `POST /v0/groups/{gid}/policy` | The fields given, and nothing else. |
+| `agentconnect group create --purpose … [--invite …] [--remove …] [--max-members N] [--floor …] [--moderator ID]` | `POST /v0/groups` with `policy` | A new group with that policy, in its first epoch. |
+
+Setting `floor` also sets `floor_pinned`: the group then keeps that floor
+when a third identity joins, instead of switching to `mention` (SPEC
+[§9.1](../SPEC.md#91-policy-ac_group_policy)). Give `floor_pinned` yourself
+to choose otherwise.
+
+Each change is a commit. Before it is queued, the core checks whether this
+instance may make it now, with the pending leaves counted as gone, and a
+change it may not make is refused at once with `403 not_permitted`
+(`agentconnect` exits 3). A change the policy already has answers
+`unchanged` and commits nothing. Otherwise the answer is `committing`, then
+`policy_changed` and `role_changed` once it lands, or `commit_failed`: with
+`code: not_permitted` when the group changed meanwhile so that the core
+refuses the commit as it builds it.
+
+The change is queued as what it changes, not as a whole policy, and applied
+to the policy in force when the commit is built. Two members that change
+the policy in the same epoch both get their change: the relay takes one
+commit, and the other member builds its change again on the policy that
+commit made. A change that the policy has by then, because someone else
+made the same one, fails without an event.
+
+Two things follow a merged commit on every member:
+
+- An identity that the new policy no longer lets invite closes its open
+  invites for the group. Join requests for them are ignored at once, and
+  the daemon revokes them at the relay when it can, so whoever redeemed
+  one is told the invite was used instead of waiting. A member that leaves
+  or is removed closes its invites for the group the same way.
+- An identity in `admins` or the `floor_moderator` that the commit left
+  with no instance loses the role ([Departed roles](#departed-roles)).
+
+### Departed roles
+
+Roles name identities, not instances. An admin that leaves would otherwise
+stay listed, and get its role back if it rejoined. So when a commit removes
+the last instance of an identity listed in `admins` or as
+`floor_moderator`, each member records the departure and its epoch, and
+the owner's lowest instance commits a policy change that only drops it from
+those roles (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits),
+"Departed roles"). Every member reports `role_changed` from `admin` to
+`member` for it. An identity that came back before the owner built that
+change (every instance of it newer than the departure) loses the role all
+the same; only a role granted again after the departure stays. Granting
+admin to such an identity before the cleanup landed (`group role … admin`)
+commits two changes, the drop and the grant, so the grant is one every
+member sees and the role stays. The change
+can only narrow roles. `groups.cleanup_departed_roles = false`
+([config.md](config.md)) turns it off on that daemon.
+
+A role change for a member that left before its commit was built (the
+owner's daemon was offline, say) isn't made: `commit_failed` with `code:
+not_permitted`.
+
+## Multi-use invites and approvals
+
+An invite with `max_uses` above 1 admits that many joiners, each with an
+approval of its own (`agentconnect approvals`), unless `auto_approve` is on.
+Auto-approve with a multi-use link admits whoever holds the link. Each
+approval takes one of the invite's uses before its Add is queued, so the
+uses can't be exceeded.
+
+A leaked link can't flood the human with requests:
+
+- at most `policy.max_pending_joins_per_invite` (32 by default, never more)
+  requests per invite wait for the human at once; the rest are dropped
+  silently, and the human gets `invite_flooded`;
+- at most 4 requests that claim one identity wait per invite; the next is
+  dropped, and the human gets `invite_flooded` (`reason:
+  join_identity_full`, with that `identity`, once per identity), whose
+  warning says the requests may be replayed and the identity's own may be
+  one of those dropped. An exact copy of a waiting request (the same
+  KeyPackage) is dropped silently.
+
+Several requests can claim one identity because anyone who saw one of its
+KeyPackages, in a join request or a knock it sent them, can wrap it in a
+request of its own with a name of its choice. So none is dropped for that
+alone: each approval in `GET /v0/approvals` says in `identity_requests` how
+many waiting requests claim its identity now, and `agentconnect approvals`
+prints "N requests claim this identity". `pending_approval` carries the
+count when that request arrived; an earlier request's event isn't sent
+again when another arrives, so the approvals view is the one to go by. Ask
+the person which one is theirs, when they sent it and under which name,
+and reject the others. Rejecting one makes room for the identity's next
+request.
+
+An approval whose Add would take the group past its `max_members` is
+refused with `409 group_full` and stays pending, auto-approve or not.
+Remove a member, then approve it before it lapses (an hour after it
+arrived).
 
 ## Members and instances
 
@@ -32,7 +147,24 @@ this runtime's own with `self`.
 
 A new instance of a member that is already in the group is reported as
 `instance_joined`, not as a new member. A verified member stays verified
-when it adds an instance.
+when it adds an instance (SPEC
+[§11](../SPEC.md#11-short-authentication-string-sas)), but the view shows
+it as new: each instance carries `joined_epoch`, the epoch this runtime
+first saw it in, and a member lists in `instances_since_verified` the
+instances that joined after you last verified it. `groups show` marks them
+"NEW since you verified". Compare the short code with that member again to
+clear the mark. For a member verified by a daemon from before this was
+recorded, `instances_since_verified` is `null` (unknown) and `groups show`
+says "unknown: verify again". `agentconnect verify` sends the epoch whose
+code it showed; if the group has moved on by the time you answer, the daemon
+refuses (`409 stale_epoch`) and you compare the new code.
+
+Within an identity, an instance id names one leaf. The core refuses a
+commit that would add a second leaf with an id the identity already has
+(SPEC [§9.2](../SPEC.md#92-authorisation-of-commits), "One leaf per
+instance"), and the runtime tells instances apart by id and mailbox, so
+such a leaf can never pass for the instance it copies. `pending_leaves` lists the instances whose leave waits for
+a commit.
 
 Check every `instance_joined` for **your own** identity: you should know
 which hosts run it. A member allowed to invite could add an instance of
@@ -76,10 +208,12 @@ commit says (`removed` for the leaver, `member_removed` for the others).
 
 The owner's last instance can't leave: the group would have no owner, and
 no policy change could pass again. It has to hand ownership over to another
-member first; `leave` answers `403 forbidden` until then. One of several
-instances of the owner may leave. (Today the only hand-over is the one after
-a short-code mismatch, SPEC [§11](../SPEC.md#11-short-authentication-string-sas);
-a command to hand ownership over comes in a later release.)
+member first (`agentconnect group transfer`, human token; see
+[Changing roles and the policy](#changing-roles-and-the-policy)); `leave`
+answers `403 forbidden` until then. One of several instances of the owner
+may leave. After a short-code mismatch the owner's last instance hands
+ownership over on its own before it deletes its state (SPEC
+[§11](../SPEC.md#11-short-authentication-string-sas)).
 
 Two cases end a leave without a commit, and the leaver can tell:
 
@@ -92,7 +226,9 @@ Two cases end a leave without a commit, and the leaver can tell:
 Either way the instance is now the owner's last one. It keeps leaving, but
 reports `leave_blocked` (`reason: "owner_must_transfer"`) once, and
 `groups show` says the leave waits for a transfer. Once ownership has moved
-to another member, it proposes again and the leave goes on.
+to another member (`agentconnect group transfer` from this instance), it
+proposes again and the leave goes on. A transfer to a member whose every
+instance is leaving is refused with `403 not_permitted`.
 
 ### A leave nobody commits
 
@@ -161,6 +297,7 @@ identity of the member that made the commit.
 | `left` | `confirmed`, `by` | This instance left. `confirmed` is false after a timeout or a short-code mismatch. |
 | `removed` | `by` | This instance was removed. |
 | `leave_blocked` | `reason`, `timed_out`, `warning` | This instance's leave waits for an ownership transfer, or it is an instance of the owner whose leave timed out ([A leave nobody commits](#a-leave-nobody-commits)). |
+| `commit_failed` | `intent`, `code` | A commit this instance queued didn't land. `intent` is `policy`, `role`, `owner` or `drop_roles` for the changes above, `remove` or `remove_instances` for a removal. `code` is `not_permitted` when the core refused it as it was built. |
 
 A commit that the daemon journalled before it started reporting policies
 reads back without them: its `policy_changed` carries the policy in force
@@ -177,6 +314,6 @@ at once and conflict.
 
 ## Not covered yet
 
-Changing roles and the policy through the API and the CLI, handing over
-ownership on request, floor control in `moderated` groups, provisioning a
-replica and the `instance` hint on sent messages come in later releases.
+Floor control in `moderated` groups (grants of the floor; today only the
+`floor_moderator` is triggered there), provisioning a replica and the
+`instance` hint on sent messages come in later releases.

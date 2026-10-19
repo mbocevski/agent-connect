@@ -23,10 +23,15 @@ from agentconnect.config import Config
 from agentconnect.failpoints import FailpointError, SimulatedCrash
 from agentconnect.identity import Seeded
 from agentconnect.keystore import FileKeystore
-from agentconnect.relay import b64, unb64
+from agentconnect.relay import RelayError, b64, unb64
 from agentconnect.runtime import Options, Runtime
 from agentconnect.runtime import ledger as replay
-from agentconnect.runtime.engine import HUMAN_EVENTS, DaemonError, Engine
+from agentconnect.runtime.engine import (
+    HUMAN_EVENTS,
+    MAX_PENDING_PER_IDENTITY,
+    DaemonError,
+    Engine,
+)
 
 RELAY = "127.0.0.1:1"
 
@@ -178,16 +183,16 @@ async def test_a_request_id_or_key_package_taken_is_dropped_past_the_ledger(
     and KeyPackage: the request id stays taken, and the KeyPackage of a
     pending approval gets no second one."""
     url = await owner.invite()
-    bob = Joiner(rng, owner.now)
+    bob, carol = Joiner(rng, owner.now), Joiner(rng, owner.now)
     request = bob.request(url)
     first = await owner.deliver(request, bob.mailbox)
-    pending = bob.request(url)
-    await owner.deliver(pending, bob.mailbox)
+    pending = carol.request(url)
+    await owner.deliver(pending, carol.mailbox)
     owner.engine.reject(first)
     owner.engine.store.ledger_purge(owner.now + 30 * 86_400, ledger="join")
     owner.engine._join_ledger = ac.ReplayLedger()
     await owner.deliver(request, b64(rng.randbytes(16)), msg_id=first)
-    await owner.deliver(pending, bob.mailbox)
+    await owner.deliver(pending, carol.mailbox)
     assert owner.audit() == ["join_replay", "join_replay"]
     assert len(owner.engine.join_approvals()) == 1
 
@@ -207,13 +212,14 @@ async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(
     await owner.engine.expire()
     assert owner.ledger() == 1  # its invite has five days left
     owner.clock.set(start)
-    second = bob.request(url)
-    await owner.deliver(second, bob.mailbox)
+    carol = Joiner(rng, owner.now)
+    second = carol.request(url)
+    await owner.deliver(second, carol.mailbox)
     for approval in owner.engine.join_approvals():
         owner.engine.reject(approval["request_id"])
     await owner.engine.expire()
     assert owner.ledger() == 2
-    await owner.deliver(second, bob.mailbox)
+    await owner.deliver(second, carol.mailbox)
     await owner.deliver(first, bob.mailbox)
     assert owner.audit() == ["join_replay", "join_replay"]
     assert owner.engine.join_approvals() == []
@@ -241,15 +247,15 @@ async def test_the_join_ledger_forgets_an_invites_requests_when_it_expires(
 
 
 async def test_a_leaked_link_is_held_to_its_invites_quota(owner: Owner, rng: random.Random) -> None:
-    """A link thief with fresh KeyPackages fills the invite's pending cap and
+    """A link thief with fresh identities fills the invite's pending cap and
     then its ledger quota, never the daemon's ledger: another invite's
     joiner still reaches the human, and the human hears of the flood."""
     await owner.restart(policy_max_pending_joins_per_invite=2)
     leaked = await owner.invite(max_uses=1)
     quota = replay.join_quota(1, owner.engine.config.policy_join_ledger_per_invite)
     assert quota == 64
-    thief = Joiner(rng, owner.now)
     for _ in range(quota + 1):
+        thief = Joiner(rng, owner.now)
         await owner.deliver(thief.request(leaked), thief.mailbox)
     audit = owner.audit()
     assert audit.count("join_invite_full") == quota - 2
@@ -271,6 +277,71 @@ async def test_a_leaked_link_is_held_to_its_invites_quota(owner: Owner, rng: ran
     bob = Joiner(rng, owner.now)
     await owner.deliver(bob.request(other), bob.mailbox)
     assert len(owner.engine.join_approvals()) == 3
+
+
+def _forge(seen_request: bytes, url: str, name: str = "bob") -> bytes:
+    """A link holder wraps a KeyPackage it saw elsewhere (a JoinRequest the
+    victim sent to the holder's own invite) in a JoinRequest for ``url``:
+    it knows the join key, so it can compute the MAC."""
+    link = ac.parse_invite_url(url)
+    seen = json.loads(seen_request)
+    kp = unb64(seen["key_package"])
+    mac = ac.join_request_mac(link.invite_id, link.secret_bytes(), kp, seen["mailbox_id"], name)
+    forged = {**seen, "invite_id": link.invite_id_b64, "display_name": name, "mac": b64(mac)}
+    return json.dumps(forged, sort_keys=True, separators=(",", ":")).encode()
+
+
+async def test_a_stale_key_package_doesnt_crowd_out_the_victims_own_request(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Review 52 F2: a link holder sends one of the victim's KeyPackages in
+    its name. The victim's own request still reaches the human, and both
+    say how many requests claim the identity, so the human chooses."""
+    url, elsewhere = await owner.invite(max_uses=5), await owner.invite()
+    victim, attacker = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    stale = victim.request(elsewhere)  # stands for one sent to the holder's own invite
+    forged_id = await owner.deliver(_forge(stale, url), attacker.mailbox)
+    real_id = await owner.deliver(victim.request(url), victim.mailbox)
+    assert owner.audit() == []
+    waiting = {w["request_id"]: w for w in owner.engine.join_approvals()}
+    assert set(waiting) == {forged_id, real_id}
+    assert {w["identity_requests"] for w in waiting.values()} == {2}
+    events = [
+        e["data"] for e in owner.engine.store.events(limit=100) if e["type"] == "pending_approval"
+    ]
+    assert [e["identity_requests"] for e in events] == [1, 2]
+    owner.engine.reject(forged_id)
+    (left,) = owner.engine.join_approvals()
+    assert (left["request_id"], left["identity_requests"]) == (real_id, 1)
+    # An exact copy of a waiting request is still dropped.
+    await owner.deliver(_forge(stale, url), attacker.mailbox)
+    assert owner.audit() == ["join_replay"]
+
+
+async def test_one_identity_has_a_few_requests_waiting_per_invite(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Fresh KeyPackages of one identity: at most MAX_PENDING_PER_IDENTITY
+    wait per invite. The next is dropped and the human hears of it
+    (``invite_flooded``); another invite has its own count, and once the
+    human decided one, the identity may ask again."""
+    url, other = await owner.invite(), await owner.invite()
+    thief = Joiner(rng, owner.now)
+    first = await owner.deliver(thief.request(url), thief.mailbox)
+    for _ in range(MAX_PENDING_PER_IDENTITY):
+        await owner.deliver(thief.request(url), thief.mailbox)
+    await owner.deliver(thief.request(other), thief.mailbox)
+    assert owner.audit() == ["join_identity_full"]
+    assert [e["data"]["reason"] for e in owner.flooded()] == ["join_identity_full"]
+    assert len(owner.engine.join_approvals()) == MAX_PENDING_PER_IDENTITY + 1
+    owner.engine.reject(first)
+    await owner.deliver(thief.request(url), thief.mailbox)
+    assert len(owner.engine.join_approvals()) == MAX_PENDING_PER_IDENTITY + 1
+    # Requests past the approval window no longer count.
+    owner.clock.advance(3601)
+    owner.engine.join_approvals()  # lapses them
+    await owner.deliver(thief.request(url), thief.mailbox)
+    assert [w["identity_requests"] for w in owner.engine.join_approvals()] == [1]
 
 
 async def test_revoking_or_expiring_an_invite_frees_its_entries(
@@ -520,3 +591,101 @@ async def test_expiring_many_invites_reloads_the_ledger_once(
     assert len(reloads) == 1
     await owner.engine.expire()
     assert len(reloads) == 1
+
+
+# -- invites closed after a commit (docs/groups.md) ------------------------------------------
+
+
+async def test_closed_invites_drop_their_secrets_and_are_revoked_when_the_relay_answers(
+    owner: Owner, rng: random.Random, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A closed invite is `revoking` at once: its join requests are ignored
+    and its secret goes, also while offline; the relay revocation is tried
+    on every pass until the relay answers, whatever it answers."""
+    url = await owner.invite()
+    iid = invite_id(url)
+    gid = owner.engine.store.invite(iid)["group_id"]  # ty: ignore[not-subscriptable]
+    bob = Joiner(rng, owner.now)
+    await owner.deliver(bob.request(url), bob.mailbox)
+    groups = owner.engine.groups
+    groups.close_invites(gid)
+    groups.close_invites(gid)  # nothing left open: a no-op
+    assert owner.engine.store.invite(iid)["status"] == "revoking"  # ty: ignore[not-subscriptable]
+    # Offline: the secret goes, the row stays, and the reconnect tries again.
+    assert await groups.revoke_closed_invites() is None
+    assert owner.engine.keystore.get(f"invite/{iid}") is None
+    assert owner.engine.store.invite(iid)["status"] == "revoking"  # ty: ignore[not-subscriptable]
+    carol = Joiner(rng, owner.now)
+    await owner.deliver(carol.request(url), carol.mailbox)
+    assert len(owner.engine.join_approvals()) == 1  # the new request was ignored
+    answers: list[Exception | None] = [
+        RelayError("relay_unreachable", "down"),
+        RelayError("invite_not_open", "gone"),
+    ]
+
+    async def revoke(_invite_id: str) -> None:
+        answer = answers.pop(0)
+        if answer is not None:
+            raise answer
+
+    monkeypatch.setattr(owner.engine.rest, "revoke_invite", revoke)
+    monkeypatch.setattr(type(owner.engine.link), "connected", property(lambda _self: True))
+    again = await groups.revoke_closed_invites()  # refused for now: after a backoff
+    assert again is not None
+    assert owner.now < again <= owner.now + 300
+    assert owner.engine.store.invite(iid)["status"] == "revoking"  # ty: ignore[not-subscriptable]
+    assert await groups.revoke_closed_invites() is None
+    assert owner.engine.store.invite(iid)["status"] == "revoked"  # ty: ignore[not-subscriptable]
+    assert answers == []
+
+
+async def test_an_approval_for_a_group_already_left_is_not_held_back(
+    owner: Owner, rng: random.Random
+) -> None:
+    """The size check needs an active group; one this instance left only
+    fails its Add later, as before."""
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    first = await owner.deliver(bob.request(url), bob.mailbox)
+    gid = owner.engine.store.approval(first)["group_id"]  # ty: ignore[not-subscriptable]
+    owner.engine.store.update_group(gid, status="left")
+    assert owner.engine.groups.room(gid) is None
+    assert owner.engine.approve(first) == {"status": "approving"}
+
+
+async def test_replayed_key_packages_that_fill_an_identitys_share_are_named(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Review 52 N3: four requests built from the victim's stale KeyPackages
+    fill its share, and its own request is dropped. The human is told
+    which identity and why (not the generic "the link may have leaked"),
+    and the approvals view always has the current count, whatever each
+    request's event said when it arrived."""
+    url, elsewhere = await owner.invite(max_uses=5), await owner.invite()
+    victim, attacker = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    forged = [
+        await owner.deliver(_forge(victim.request(elsewhere), url), attacker.mailbox)
+        for _ in range(MAX_PENDING_PER_IDENTITY)
+    ]
+    real_id = await owner.deliver(victim.request(url), victim.mailbox)
+    assert owner.audit() == ["join_identity_full"]
+    (flood,) = [e["data"] for e in owner.flooded()]
+    assert (flood["reason"], flood["identity"]) == ("join_identity_full", victim.client.identity)
+    assert victim.client.identity in flood["warning"]
+    assert "replayed" in flood["warning"]
+    assert "leaked" not in flood["warning"]
+    events = [
+        e["data"]["identity_requests"]
+        for e in owner.engine.store.events(limit=100)
+        if e["type"] == "pending_approval"
+    ]
+    assert events == [1, 2, 3, 4]  # each at its arrival
+    waiting = owner.engine.join_approvals()
+    assert sorted(w["request_id"] for w in waiting) == sorted(forged)
+    assert real_id not in [w["request_id"] for w in waiting]
+    assert {w["identity_requests"] for w in waiting} == {4}  # the view is current
+    # Once the human rejects one, the victim's next request gets through.
+    owner.engine.reject(forged[0])
+    assert {w["identity_requests"] for w in owner.engine.join_approvals()} == {3}
+    again = await owner.deliver(victim.request(url), victim.mailbox)
+    assert again in [w["request_id"] for w in owner.engine.join_approvals()]

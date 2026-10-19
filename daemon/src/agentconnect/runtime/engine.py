@@ -98,6 +98,9 @@ LOG = log.get("agentconnect.engine")
 UPDATE_AFTER_SECS = 24 * 3600  # SPEC §3.1 update cadence
 UPDATE_AFTER_MESSAGES = 1000
 APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
+# Join requests claiming one identity that wait per invite (docs/groups.md).
+MAX_PENDING_PER_IDENTITY = 4
+JOIN_IDENTITY_FULL = "join_identity_full"
 JOIN_CLOSED_GRACE_SECS = 60
 MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
@@ -143,6 +146,13 @@ INVITE_FLOOD_WARNING = (
     "dropped. If you didn't expect that many, the link may have leaked: revoke "
     "it with `agentconnect invite revoke <invite_id>`."
 )
+IDENTITY_FLOOD_WARNING = (
+    "More than {limit} requests claim identity {identity} on this invite, and new ones are "
+    "dropped. Some may be replayed: anyone who saw one of its KeyPackages (in a join "
+    "request or a knock it sent them) can send one in its name, so its own request may be "
+    "one of those dropped. Verify before approving: ask the person which request is "
+    "theirs, and compare the short code once they join."
+)
 JOIN_LEDGER_FULL_WARNING = (
     "The join ledger is full, so new join requests for every invite are "
     "dropped. Revoke the invites you no longer need: that frees their entries."
@@ -183,18 +193,15 @@ class TransientError(Exception):
         self.group_id, self.reason = group_id, reason
 
 
-# Core errors that say nothing about the message itself (SQLCipher I/O or a
-# lock, the RNG, an internal error); a CoreError (a panic) is transient too.
-TRANSIENT_PREFIXES = (
-    "storage error",
-    "wrong database key",
-    "randomness source failed",
-    "internal error",
-)
 MAX_TRANSIENT_RETRIES = 8
 # Relay errors that say "not now" rather than "no" (SPEC 8.4).
 RETRYABLE_RELAY_ERRORS = frozenset({"rate_limited", "internal"})
 BENIGN = "benign"  # a failed outbox row nobody needs to hear about
+# Commit intents that change the policy, each built against the policy in
+# force when it is built (agentconnect.runtime.groups.planned_policy).
+POLICY_INTENTS = frozenset({"policy", "owner", "role", "drop_roles"})
+UNCHANGED = "unchanged"  # a policy change the policy already has
+GROUP_FULL = "group_full"  # an approval whose Add would pass max_members
 OUTBOUND_PROBLEMS = {
     "unknown_kind": ("bad_request", "unknown message kind"),
     "too_large": ("too_large", "message too large (SPEC 10.2: 256 KiB, or the group's limit)"),
@@ -217,14 +224,15 @@ OUTBOUND_PROBLEMS = {
 
 
 def _core_error(e: Exception) -> str:
-    text = str(e)
-    if isinstance(e, ac.CoreError) or text.startswith(TRANSIENT_PREFIXES):
+    """What a core failure means for the message, by the error's kind: a
+    panic (``CoreError``) and storage, key, randomness or internal failures
+    say nothing about the message itself (``transient``)."""
+    kind = getattr(e, "kind", "other")
+    if isinstance(e, ac.CoreError) or kind == "transient":
         return "transient"
-    if "re-sync required" in text:
-        return "own_commit_lost"
-    if text == "message already processed":
-        return "duplicate"
-    if text.startswith("unauthorized commit"):
+    if kind in ("own_commit_lost", "duplicate"):
+        return str(kind)
+    if kind == "unauthorized":
         return "unauthorized_commit"
     return "rejected"
 
@@ -1656,7 +1664,13 @@ class Engine:
             return "dropped"
 
         async def flooded(reason: str) -> str:
-            await self._tell_join_flood(group_id, invite_id, reason)
+            # Too many requests claiming one identity: say which.
+            await self._tell_join_flood(
+                group_id,
+                invite_id,
+                reason,
+                verified.identity if reason == JOIN_IDENTITY_FULL else None,
+            )
             return drop_it(reason)
 
         async def body() -> str:
@@ -1679,12 +1693,9 @@ class Engine:
             if refused is not None:
                 return drop_it(refused)
             if (
-                self.store.approval(request_id) is not None
-                or self.store.open_approval_for(kp_ref) is not None
-            ):
-                # Past the ledger's window the request id or the KeyPackage
-                # may still be taken: one approval per id and per KeyPackage.
-                return drop_it("join_replay")
+                taken := self._join_taken(request_id, kp_ref, invite_id, verified.identity)
+            ) is not None:
+                return await flooded(taken) if taken == JOIN_IDENTITY_FULL else drop_it(taken)
             waiting = self.store.pending_approvals_for(
                 invite_id, self.now() - APPROVAL_TIMEOUT_SECS
             )
@@ -1710,12 +1721,13 @@ class Engine:
                 identity=verified.identity,
                 display_name=verified.display_name,
                 display_name_verified=False,
+                identity_requests=self._identity_requests(invite_id, verified.identity),
             )
             if self.config.auto_approve:
                 # Joins only: nothing approves a knock but the human (SPEC
                 # 6.6.4). In this transaction, so a failure once it commits
                 # can't leave the approval pending until it lapses.
-                self._approve_join(request_id)
+                self._auto_approve(request_id, group_id)
             self.store.record_inbox(sender, msg_id, None, "done", self.now())
             return "held"
 
@@ -1725,6 +1737,40 @@ class Engine:
             # The in-memory ledger has no remove: rebuild it from the store.
             self._join_ledger = self._load_join_ledger()
             raise
+
+    def _join_taken(
+        self, request_id: str, kp_ref: str, invite_id: str, identity: str
+    ) -> str | None:
+        """Why a new join request can't get an approval of its own, or
+        ``None``. Past the ledger's window the request id or the KeyPackage
+        may still be taken: one approval per id and per KeyPackage (an exact
+        copy is dropped). Distinct requests that claim one identity all reach
+        the human, marked as such, up to :data:`MAX_PENDING_PER_IDENTITY` per
+        invite: anyone who saw one of an identity's KeyPackages can send a
+        request in its name, so the human chooses, and its own can't be
+        crowded out by one other request."""
+        if (
+            self.store.approval(request_id) is not None
+            or self.store.open_approval_for(kp_ref) is not None
+        ):
+            return "join_replay"
+        if self._identity_requests(invite_id, identity) >= MAX_PENDING_PER_IDENTITY:
+            return JOIN_IDENTITY_FULL
+        return None
+
+    def _identity_requests(self, invite_id: str, identity: str) -> int:
+        """Join requests of this invite that claim ``identity`` and wait."""
+        since = self.now() - APPROVAL_TIMEOUT_SECS
+        return self.store.pending_approvals_of(invite_id, identity, since)
+
+    def _auto_approve(self, request_id: str, group_id: str) -> None:
+        """``policy.auto_approve``: approve at once, unless the group is full,
+        when the request waits for the human, who can make room first."""
+        room = self.groups.room(group_id)
+        if room is not None and room < 1:
+            LOG.info("join_request_group_full")
+            return
+        self._approve_join(request_id)
 
     def _over_join_quota(self, invite: dict[str, Any], key: bytes, kp_ref: bytes) -> bool:
         """Whether a request that isn't a replay would take the invite past
@@ -1737,19 +1783,38 @@ class Engine:
         )
 
     async def _tell_join_flood(
-        self, group_id: str | None, invite_id: str | None, reason: str
+        self,
+        group_id: str | None,
+        invite_id: str | None,
+        reason: str,
+        identity: str | None = None,
     ) -> None:
         """Tell the human (never the agent) that join requests are dropped
         by a limit: an invite's (``invite_flooded``, once per invite and
-        reason), or the whole ledger's (``join_ledger_full``, daemon-wide and
-        once a day: the invite whose request found it full is a bystander,
-        so it isn't named)."""
+        reason, and for too many requests claiming one identity once per
+        identity, naming it), or the whole ledger's (``join_ledger_full``,
+        daemon-wide and once a day: the invite whose request found it full is
+        a bystander, so it isn't named)."""
         if invite_id is None:
             await self.emit(
                 None,
                 "join_ledger_full",
                 cause=f"join_ledger_full/{self.now() // 86_400}",
                 warning=JOIN_LEDGER_FULL_WARNING,
+            )
+            return
+        if identity is not None:
+            warning = IDENTITY_FLOOD_WARNING.format(
+                limit=MAX_PENDING_PER_IDENTITY, identity=identity
+            )
+            await self.emit(
+                group_id,
+                "invite_flooded",
+                cause=f"invite_flooded/{invite_id}/{reason}/{identity}",
+                invite_id=invite_id,
+                reason=reason,
+                identity=identity,
+                warning=warning,
             )
             return
         await self.emit(
@@ -2483,8 +2548,10 @@ class Engine:
             return self.client.remove(gid, intent["identity"])
         if t == "remove_instances":
             return self.client.remove_instances(gid, list(intent["instances"]))
-        if t == "policy":
-            return self.client.set_policy(gid, canonical(intent["policy"]))
+        if t in POLICY_INTENTS:
+            # Applied to the policy in force now, so a rebuild after an
+            # epoch conflict keeps a concurrent change (docs/groups.md).
+            return self.groups.build_policy_commit(gid, intent)
         if t == "knock_add":
             return self.knocks.build_add(gid, intent)
         if t == "add":
@@ -2621,10 +2688,18 @@ class Engine:
         try:
             out = self._build(unb64(group.group_id), intent)
         except (ac.AgentConnectError, DaemonError) as e:
-            benign = "no pending proposals" in str(e)
+            # Nothing left to do: the leaves were committed, or the policy
+            # already says what the change asked for.
+            benign = getattr(e, "kind", None) == "nothing_to_commit" or (
+                isinstance(e, DaemonError) and e.code == UNCHANGED
+            )
+            refused = getattr(e, "kind", None) in ("unauthorized", "not_permitted") or (
+                isinstance(e, DaemonError) and e.code == "not_permitted"
+            )
             if not benign:
                 LOG.info("commit_not_built", intent=intent["type"], reason=str(e)[:80])
-            self._fail_codes[row.seq] = BENIGN if benign else "not_built"
+            code = BENIGN if benign else "not_permitted" if refused else "not_built"
+            self._fail_codes[row.seq] = code
             self._fail_intent(intent, "not_built")
             return False
         payload["env"] = {
@@ -2739,9 +2814,17 @@ class Engine:
             raise DaemonError("not_found", "no such active group")
         return group
 
-    def create_group(self, name: str, purpose: str) -> str:
+    def create_group(self, name: str, purpose: str, policy: dict[str, Any] | None = None) -> str:
+        """Create a group this identity owns. ``policy`` holds the fields of
+        a policy change (:func:`~agentconnect.runtime.groups.policy_changes`)
+        over the SPEC 9.1 defaults, set in the group's first epoch: no extra
+        commit, so nothing changes before anyone joins. **Human-only** beyond
+        ``require_verified`` (``AgentApi.create_group``)."""
         try:
-            gid = self.client.create_group(name, purpose)
+            if policy is not None and len(policy) > 0:
+                gid = self.client.create_group(name, purpose, self.groups.initial_policy(policy))
+            else:
+                gid = self.client.create_group(name, purpose)
         except ac.AgentConnectError as e:
             raise DaemonError("bad_request", str(e)) from None
         group_id = gid_b64(gid)
@@ -2924,6 +3007,12 @@ class Engine:
                     "kind": "join",
                     "display_name_verified": False,
                     "fingerprint": ac.fingerprint(ac_identity_key(a["identity"])),
+                    # Requests that claim this identity on this invite, this
+                    # one included: more than one means someone else may
+                    # hold one of its KeyPackages (docs/groups.md).
+                    "identity_requests": self._identity_requests(
+                        str(a["invite_id"]), str(a["identity"])
+                    ),
                 }
             )
         return out
@@ -2977,6 +3066,12 @@ class Engine:
         if invite is None or self._invite_closed(invite):
             self.store.set_approval_status(request_id, "rejected")
             raise DaemonError("invite_not_open", "the invite has no uses left or expired")
+        room = self.groups.room(str(approval["group_id"]))
+        if room is not None and room < 1:
+            # The core would refuse the Add (SPEC 9.2). The request stays
+            # pending: removing a member makes room before it lapses.
+            msg = "the group is full (its policy's max_members): remove someone first"
+            raise DaemonError(GROUP_FULL, msg)
         self.store.set_approval_status(request_id, "approving")
         self._enqueue(
             "commit", approval["group_id"], {"intent": {"type": "add", "request_id": request_id}}
@@ -3191,22 +3286,46 @@ class Engine:
     def remove_instances(self, group_id: str, identity: str, instance_ids: list[str]) -> None:
         self.groups.remove_instances(group_id, identity, instance_ids)
 
-    def set_policy(self, group_id: str, **changes: Any) -> None:
-        """Commit a policy change (the core checks this instance's role)."""
-        group = self._group_or_raise(group_id)
-        policy = {**group.policy, **changes}
-        self._enqueue("commit", group.group_id, {"intent": {"type": "policy", "policy": policy}})
+    def set_policy(self, group_id: str, **changes: Any) -> str:
+        """Commit a change of policy fields, as they sit in the policy:
+        :meth:`GroupService.change_policy`."""
+        return self.groups.change_policy(group_id, {"type": "policy", "changes": changes})
+
+    def change_policy(self, group_id: str, fields: dict[str, Any]) -> str:
+        """**Human-only** beyond raising ``require_verified``: the fields of
+        ``POST /v0/groups/{gid}/policy`` (``groups.policy_changes``)."""
+        return self.set_policy(group_id, **self.groups.policy_changes_of(fields))
+
+    def set_role(self, group_id: str, identity: str, role: str) -> str:
+        """**Human-only.** Make a member an admin or a plain member."""
+        return self.groups.set_role(group_id, identity, role)
+
+    def transfer_ownership(self, group_id: str, identity: str, keep_admin: bool = True) -> str:
+        """**Human-only.** Hand ownership over to another member."""
+        return self.groups.transfer_to(group_id, identity, keep_admin=keep_admin)
 
     async def leave(self, group_id: str) -> str:
         return await self.groups.leave(group_id)
 
-    def mark_verified(self, group_id: str, identity: str, verified: bool = True) -> None:
+    def mark_verified(
+        self, group_id: str, identity: str, verified: bool = True, epoch: int | None = None
+    ) -> None:
         """**Human-only.** Records that the human compared the SAS with this
         member over an independent channel. Never reachable by agents: an
         agent that could mark verification would defeat the SAS check, which
-        exists precisely to catch a relay or link thief in the middle."""
+        exists precisely to catch a relay or link thief in the middle.
+
+        ``epoch`` is the epoch whose code the human was shown (SPEC 11): an
+        answer for an earlier one is refused (``stale_epoch``), and the
+        member's instances that join after it are shown as new."""
         self._group_or_raise(group_id)
-        if identity == self.me or not self.store.set_verified(group_id, identity, verified):
+        current = self._core_epoch(unb64(group_id))
+        if epoch is not None and epoch != current:
+            msg = f"the short code changed since epoch {epoch} (now {current}): compare again"
+            raise DaemonError("stale_epoch", msg)
+        if identity == self.me or not self.store.set_verified(
+            group_id, identity, verified, current
+        ):
             raise DaemonError("not_found", "no such member")
         self._delivery_wake.set()
         self._pulse()

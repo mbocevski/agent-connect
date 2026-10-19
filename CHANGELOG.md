@@ -10,6 +10,59 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Runtime and CLI: roles and the group policy (docs/groups.md). The human
+  token makes a member an admin or a plain member (`POST
+  /v0/groups/{gid}/members/{identity}/role`, `agentconnect group role`),
+  hands ownership over (`POST /v0/groups/{gid}/owner`, `agentconnect group
+  transfer`, which asks first; the old owner stays an admin unless
+  `keep_admin` is false), changes any policy field (`invite`, `remove`,
+  `max_members`, `floor`, `floor_pinned`, `floor_moderator`,
+  `max_agent_turns`, `require_verified` on `POST /v0/groups/{gid}/policy`,
+  `agentconnect group policy`) and sets a policy at creation (`policy` on
+  `POST /v0/groups`, `group create --invite/--remove/--max-members/--floor/
+  --moderator`). Setting `floor` pins it. The agent token can still only
+  turn `require_verified` on, now at creation too; no agent route, SDK call
+  or MCP tool does the rest. The core's dry run (`check_policy_change`)
+  refuses a change this identity may not make with `403 not_permitted`
+  before anything is queued; a change the policy already has answers
+  `unchanged`. A transfer from the owner's last instance lets a leave that
+  waited for it go on. After a commit, an identity that may no longer
+  invite closes its open invites for the group (also when it leaves or is
+  removed), and the owner's instance drops identities that left from
+  `admins` and `floor_moderator` (`groups.cleanup_departed_roles`, on by
+  default). `GET /v0/groups/{gid}` adds `policy_summary`, `floor`,
+  `pending_leaves`, each instance's `joined_epoch` and each member's
+  `instances_since_verified`; `groups show` prints the policy, the floor,
+  the pending leaves and each instance's leaf and epoch, and flags an
+  instance that joined after you verified its member (`null`, "unknown:
+  verify again", for a member verified before the epoch was recorded).
+  First epochs and events tell instances apart by id and mailbox. A
+  departed admin or moderator loses the role also if it came back before
+  the owner's cleanup was built; a role change for a member gone before its
+  commit is built fails with `not_permitted`, and granting admin to one
+  that came back before the cleanup landed commits the grant, so it stays.
+  Join requests: at most 4 that claim one identity wait per invite (then
+  `invite_flooded` with `reason: join_identity_full`, the `identity` and a
+  warning that requests may be replayed); each approval carries the
+  current `identity_requests` (and `pending_approval` the count at its
+  arrival), and `agentconnect approvals` says when several requests claim
+  one identity, so a request built from a KeyPackage someone saw elsewhere
+  doesn't silently crowd out the identity's own. An approval whose Add
+  would pass `max_members` (an Add whose Welcome is on its way counted
+  once) is refused with `409 group_full` and stays pending. A closed
+  invite's revocation that the relay refuses for now is tried again after a
+  backoff.
+- Core: `ErrorKind` gains `unauthorized`, `not_permitted`,
+  `commit_pending`, `nothing_to_commit` (a new `Error::NothingToCommit`,
+  which was `NotPermitted("no pending proposals")`), `bad_door_key` (a door
+  key that doesn't seal or doesn't match its private key), `duplicate`,
+  `own_commit_lost` and `transient` (storage, the database key,
+  randomness, internal errors, which were `other`); Python:
+  `AgentConnectError.kind`. The runtime classifies core failures by kind
+  only, no longer by message text. Python: `default_group_policy(owner)`.
+- Harness: `Cluster.group(n, invite="multi")` (every joiner redeems one
+  invite) and `Node.unchecked_commit` (a commit built without the core's
+  checks, sent through the node's outbox to the real relay).
 - Runtime: group membership (docs/groups.md, `runtime/groups.py`, split out
   of the engine). A leave sends `control.leave`, then the leave proposal;
   which leaves are pending comes from the core (`pending_leaves`), so the
@@ -684,8 +737,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Local API: `POST /v0/groups/{gid}/members/{identity}/verify` needs
+  `epoch`, the epoch whose short code the human compared, to mark a member
+  verified, and answers `409 stale_epoch` when the group has moved on since
+  (SPEC 11); `agentconnect verify` sends it.
+- Local API: `POST /v0/groups/{gid}/policy` answers `{status}`
+  (`committing` or `unchanged`) instead of `{require_verified}`, and takes
+  the other policy fields with the human token. A policy change that the
+  core refuses as it builds the commit raises `commit_failed` with `code:
+  not_permitted` (was `not_built`).
 - CLI: in `groups show --json`, each member's `instances` is a list of
-  `{instance_id, self}` instead of a count.
+  `{instance_id, leaf_index, joined_epoch, self, new_since_verified}`
+  instead of a count, and the view adds `policy_summary`, `floor` and
+  `pending_leaves`.
 - Directory: the home page's search fields are labelled "What the agent
   does" and "Skill tag". "About listings" shows what a listing shows and
   what it doesn't show in two labelled columns (`div.about-cols`,
@@ -890,6 +954,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Runtime: a policy change that lost an epoch conflict was rebuilt from the
+  whole policy cached when it was queued, which could undo a change another
+  member committed meanwhile. Changes are queued as what they change and
+  applied to the policy in force when the commit is built.
 - Runtime: a leave committed after the committing member restarted was
   reported as `member_removed`, and a member whose identity had another
   instance leaving wasn't considered to commit the leave: pending leaves
@@ -952,6 +1020,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core and protocol: a commit after which two leaves of one identity have
+  the same `instance_id` is refused by its committer and rejected by every
+  member (SPEC §9.2, "One leaf per instance"), and so is a commit whose
+  update path changes the committer's instance certificate, which is fixed
+  for a leaf's life; a joiner refuses a Welcome whose tree repeats one.
+  Anyone holding an identity's `IK` can certify a second key under an
+  existing instance id; the copy would have taken over that id's routing
+  hints, its removal and the "new since verified" flag.
 - Core, daemon and SPEC: an invite JoinRequest that was rejected, lapsed
   or dropped could be delivered again by the relay (or anyone holding the
   envelope) and passed every check again, so a request the human rejected

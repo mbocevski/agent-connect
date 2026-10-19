@@ -90,7 +90,10 @@ async def test_responses_and_requests_match_the_declared_shapes(
     await alice.call("GET", f"/v0/groups/{gid}")
     await bob.call("GET", f"/v0/groups/{gid}")
     await alice.call(
-        "POST", f"/v0/groups/{gid}/members/{bob.node.me}/verify", {"verified": True}, "human"
+        "POST",
+        f"/v0/groups/{gid}/members/{bob.node.me}/verify",
+        {"verified": True, "epoch": alice.node.epoch(gid)},
+        "human",
     )
     await alice.call("POST", f"/v0/groups/{gid}/messages", {"text": "hello", "to": ["*"]})
     await alice.call("GET", "/v0/events?after=0")
@@ -157,6 +160,91 @@ async def test_membership_routes_match_the_declared_shapes(cluster: Cluster, soc
     await bob.call("POST", f"/v0/groups/{gid}/leave")
     info = await bob.call("GET", f"/v0/groups/{gid}")
     assert info["leaving"] is None or info["leaving"]["blocked"] is False
+    await alice.server.stop()
+    await bob.server.stop()
+
+
+async def test_role_and_policy_routes_match_the_declared_shapes(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    """The routes of roles and the policy: what each token may do, the
+    core's dry run as `403 not_permitted`, and the answers' shapes."""
+    alice = await serve(cluster, "alice", sockdir, auto_approve=True)
+    bob = await serve(cluster, "bob", sockdir, auto_approve=True)
+    made = {"name": "Ops", "policy": {"floor": "moderated", "max_members": 10}}
+    for scope, answer in (("agent", (403, "human_only")),):
+        assert await refused(alice, "POST", "/v0/groups", made, scope) == answer
+    assert await refused(alice, "POST", "/v0/groups", {"name": "x", "policy": 1}) == (
+        400,
+        "bad_request",
+    )
+    assert await refused(
+        alice, "POST", "/v0/groups", {"name": "x", "policy": {"require_verified": 1}}, "agent"
+    ) == (400, "bad_request")
+    for bad in ({"max_members": 0}, {"owner": bob.node.me}):
+        assert await refused(alice, "POST", "/v0/groups", {"name": "x", "policy": bad}) == (
+            400,
+            "bad_request",
+        )
+    agent_made = {"name": "Mine", "policy": {"require_verified": True}}
+    mine = (await alice.call("POST", "/v0/groups", agent_made))["group_id"]
+    assert alice.node.daemon.group_info(mine)["policy"]["require_verified"] is True
+    gid = (await alice.call("POST", "/v0/groups", made, "human"))["group_id"]
+    assert alice.node.daemon.group_info(gid)["floor"] == {
+        "mode": "moderated",
+        "pinned": True,
+        "moderator": None,
+    }
+    await alice.node.idle()
+    await cluster.invite(alice.node, bob.node, gid)
+
+    path = f"/v0/groups/{gid}/policy"
+    for body in ({"invite": "members"}, {"require_verified": False}, {}):
+        assert await refused(alice, "POST", path, body, "agent") == (403, "human_only")
+    assert await refused(alice, "POST", path, {"require_verified": "yes"}, "agent") == (
+        400,
+        "bad_request",
+    )
+    for body in ({"owner": bob.node.me}, {}, {"max_members": 0}, {"invite": "anyone"}):
+        assert await refused(alice, "POST", path, body) == (400, "bad_request")
+    assert await refused(bob, "POST", path, {"require_verified": True}, "agent") == (
+        403,
+        "not_permitted",
+    )
+    answer = await alice.call("POST", path, {"invite": "members", "max_agent_turns": 5}, "human")
+    assert answer == {"status": "committing"}
+    await alice.node.wait(lambda: alice.node.daemon.store.outbox() == [])
+    assert await alice.call("POST", path, {"invite": "members"}, "human") == {"status": "unchanged"}
+    assert await alice.call("POST", path, {"require_verified": True}) == {"status": "committing"}
+
+    role = f"/v0/groups/{gid}/members/{bob.node.me}/role"
+    assert await refused(alice, "POST", role, {"role": "admin"}, "agent") == (403, "human_only")
+    assert await refused(alice, "POST", role, {"role": "owner"}) == (400, "bad_request")
+    assert await refused(
+        bob, "POST", f"/v0/groups/{gid}/members/{alice.node.me}/role", {"role": "admin"}
+    ) == (400, "bad_request")
+    nobody = f"/v0/groups/{gid}/members/ac:v0:nobody/role"
+    assert await refused(alice, "POST", nobody, {"role": "admin"}) == (404, "not_found")
+    await alice.call("POST", role, {"role": "admin"}, "human")
+
+    owner = f"/v0/groups/{gid}/owner"
+    hand_over = {"identity": bob.node.me, "keep_admin": False}
+    assert await refused(alice, "POST", owner, hand_over, "agent") == (403, "human_only")
+    assert await refused(alice, "POST", owner, {"identity": bob.node.me, "keep_admin": 1}) == (
+        400,
+        "bad_request",
+    )
+    await alice.node.wait(lambda: alice.node.daemon.store.outbox() == [])
+    await alice.call("POST", owner, hand_over, "human")
+    await alice.node.wait(
+        lambda: alice.node.daemon.group_info(gid)["policy"]["owner"] == bob.node.me
+    )
+    info = await alice.call("GET", f"/v0/groups/{gid}")
+    assert info["policy_summary"]["invite"] == "members"
+    assert info["policy_summary"]["max_agent_turns"] == 5
+    assert {"POST /v0/groups/{gid}/owner", "POST /v0/groups/{gid}/members/{identity}/role"} <= (
+        alice.seen
+    )
     await alice.server.stop()
     await bob.server.stop()
 

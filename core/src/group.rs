@@ -29,8 +29,8 @@ use crate::ledger::{LEDGER_GRACE_SECS, ReplayLedger, remember_once};
 use crate::mls::{
     CS, GroupContextInfo, InstanceSigner, LeafInfo, MAX_PAST_EPOCHS, capabilities,
     check_group_context, check_group_info_extensions, check_tree_keys, check_welcome_kem_outputs,
-    group_context_extensions, guard, join_config, join_config_with_padding, leaf_extensions,
-    leaf_mailbox, validate_key_package, validate_leaf,
+    group_context_extensions, guard, instance_cert_bytes, join_config, join_config_with_padding,
+    leaf_extensions, leaf_mailbox, validate_key_package, validate_leaf,
 };
 use crate::padding::bucket_for;
 use crate::policy::{
@@ -979,6 +979,44 @@ impl Joining<'_> {
     }
 }
 
+/// The leaves of a group, as `(identity, instance_id)`, name each instance
+/// once (SPEC §9.4): a second leaf repeating an instance of its identity,
+/// which anyone holding that identity's `IK` can certify, would take over
+/// what that instance id means (routing hints, `--instance` removal, the
+/// instances shown as new).
+const REPEATED_INSTANCE: &str = "an instance id repeated within its identity";
+
+/// A leaf's instance certificate may not change in an update (SPEC §9.2).
+const FIXED_CERT: &str = "an update changed the leaf's instance certificate";
+
+/// Checks that the leaves after a commit name each instance once: the
+/// members but the `removed` leaves, the committer's leaf as its update
+/// path left it (`updated`), and the `added` ones.
+fn check_unique_instances(
+    members: &[MemberInfo],
+    removed: &BTreeSet<u32>,
+    updated: Option<&(u32, LeafInfo)>,
+    added: &[LeafInfo],
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    let leaves = members
+        .iter()
+        .filter(|m| !removed.contains(&m.leaf_index))
+        .map(|m| match updated {
+            Some((leaf, info)) if *leaf == m.leaf_index => {
+                (info.identity.as_str(), info.instance_id)
+            }
+            _ => (m.identity.as_str(), m.instance_id),
+        })
+        .chain(added.iter().map(|a| (a.identity.as_str(), a.instance_id)));
+    for leaf in leaves {
+        if !seen.insert(leaf) {
+            return Err(Error::Unauthorized(REPEATED_INSTANCE));
+        }
+    }
+    Ok(())
+}
+
 /// Whether every admin and the floor moderator of `policy` is `owner`.
 fn roles_only_for(policy: &GroupPolicy, owner: &str) -> bool {
     policy.admins.iter().all(|a| a == owner)
@@ -1369,7 +1407,7 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// [`Error::NotPermitted`] if none are pending, [`Error::CommitPending`],
+    /// [`Error::NothingToCommit`] if none are pending, [`Error::CommitPending`],
     /// or an MLS error.
     pub fn commit_pending_proposals<S: Store>(&mut self, client: &Client<S>) -> Result<CommitOut> {
         self.atomically(client, |g| g.commit_pending_proposals_inner(client))
@@ -1813,7 +1851,8 @@ impl Group {
         if members.len() > usize::try_from(policy.max_members).unwrap_or(usize::MAX) {
             return Err(Error::InvalidGroupContext("group exceeds max_members"));
         }
-        Ok(())
+        check_unique_instances(&members, &BTreeSet::new(), None, &[])
+            .map_err(|_| Error::InvalidGroupContext(REPEATED_INSTANCE))
     }
 
     /// A replayed knock join (a journal entry not consumed yet): the
@@ -1892,6 +1931,33 @@ impl Group {
 
     /// Checks a staged commit against SPEC §3.1/§3.3 and the policy in force
     /// (§9.2) before it is merged.
+    /// The committer's leaf as the commit's update path leaves it, checked:
+    /// the same identity and the same instance certificate, which is fixed
+    /// for a leaf's life (SPEC §9.2), so an update can't take another
+    /// instance's id.
+    fn updated_leaf(
+        &self,
+        staged: &StagedCommit,
+        committer: &MemberInfo,
+    ) -> Result<Option<(u32, LeafInfo)>> {
+        let Some(leaf) = staged.update_path_leaf_node() else {
+            return Ok(None);
+        };
+        let info = validate_leaf(leaf)?;
+        if info.identity != committer.identity {
+            return Err(Error::CredentialMismatch("committer changed its identity"));
+        }
+        let current = self
+            .mls
+            .public_group()
+            .leaf(LeafNodeIndex::new(committer.leaf_index))
+            .ok_or(Error::UnknownMember)?;
+        if instance_cert_bytes(leaf) != instance_cert_bytes(current) {
+            return Err(Error::Unauthorized(FIXED_CERT));
+        }
+        Ok(Some((committer.leaf_index, info)))
+    }
+
     fn inspect_commit<S: Store>(
         &self,
         client: &Client<S>,
@@ -1952,11 +2018,7 @@ impl Group {
                 _ => return Err(Error::Unauthorized("proposal type not allowed in v0")),
             }
         }
-        if let Some(leaf) = staged.update_path_leaf_node()
-            && validate_leaf(leaf)?.identity != committer.identity
-        {
-            return Err(Error::CredentialMismatch("committer changed its identity"));
-        }
+        let updated = self.updated_leaf(staged, &committer)?;
         if let Some(tree) = staged
             .export_ratchet_tree(client.provider.crypto(), self.mls.export_ratchet_tree())
             .map_err(mls)?
@@ -1971,6 +2033,7 @@ impl Group {
 
         let removed_leaves: BTreeSet<u32> = removed.iter().map(|m| m.leaf_index).collect();
         let members = self.members()?;
+        check_unique_instances(&members, &removed_leaves, updated.as_ref(), &added)?;
         let (identities_before, identities_kept) = identities_kept(&members, &removed_leaves);
         let mut identities_after = identities_kept.clone();
         identities_after.extend(added.iter().map(|a| a.identity.clone()));
@@ -2495,7 +2558,7 @@ impl Group {
         client: &Client<S>,
     ) -> Result<CommitOut> {
         if self.pending_leave_leaves()?.is_empty() {
-            return Err(Error::NotPermitted("no pending proposals"));
+            return Err(Error::NothingToCommit);
         }
         commit!(self, client, None, |b| b)
     }

@@ -104,9 +104,15 @@ async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
     assert {m["role"] for m in info_a["members"]} == {"owner", "member"}
     status, err = await alice.call("POST", f"/v0/groups/{gid}/members/{bob.node.me}/verify", {})
     assert status == 403
-    status, done = await alice.call(
-        "POST", f"/v0/groups/{gid}/members/{bob.node.me}/verify", {"verified": True}, scope="human"
-    )
+    path = f"/v0/groups/{gid}/members/{bob.node.me}/verify"
+    status, err = await alice.call("POST", path, {"verified": True}, scope="human")
+    assert (status, err["code"]) == (400, "bad_request")  # which code was compared?
+    stale = {"verified": True, "epoch": info_a["epoch"] - 1}
+    status, err = await alice.call("POST", path, stale, scope="human")
+    assert (status, err["code"]) == (409, "stale_epoch")
+    assert "compare again" in err["message"]
+    shown = {"verified": True, "epoch": info_a["epoch"]}
+    status, done = await alice.call("POST", path, shown, scope="human")
     assert done == {"verified": True}
     _, info_a = await alice.call("GET", f"/v0/groups/{gid}")
     assert info_a["trust_state"]["verified_members"] == 1

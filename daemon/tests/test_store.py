@@ -266,3 +266,25 @@ def test_old_handled_ids_are_cleared_once(tmp_path: Path, opened: Opener, db_key
     s = Store(path, db_key)
     assert s.handled_has("bare-after")  # not on every open
     s.close()
+
+
+def test_a_verification_from_before_its_epoch_was_recorded_reads_as_unknown(
+    tmp_path: Path, opened: Opener, db_key: bytes
+) -> None:
+    """Review 52 F3: a members table from before `verified_epoch` gets the
+    column on open, NULL (unknown) for the rows verified then, not filled in
+    with an epoch the human never compared."""
+    path = tmp_path / "m.sqlite3"
+    s = opened(path)
+    s.add_group(group())
+    s.set_members("g1", {"b": ("member", []), "c": ("member", [])})
+    assert s.set_verified("g1", "b", True, 3)
+    s._db.execute("ALTER TABLE members DROP COLUMN verified_epoch")  # the old schema
+    s.close()
+    s = Store(path, db_key)
+    b, c = s.members("g1")
+    assert (b.verified, b.verified_epoch) == (True, None)
+    assert (c.verified, c.verified_epoch) == (False, None)
+    assert s.set_verified("g1", "b", True, 7)
+    assert s.members("g1")[0].verified_epoch == 7
+    s.close()

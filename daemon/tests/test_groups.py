@@ -19,12 +19,16 @@ from agentconnect.config import (
 from agentconnect.runtime.engine import (
     SUMMARY_REPORTS_LEAVES,
     UPDATE_AFTER_MESSAGES,
+    DaemonError,
     canonical,
     journal_context,
 )
 from agentconnect.runtime.groups import (
     UPDATE_JITTER_MESSAGES,
+    may_invite,
     membership_events,
+    planned_policy,
+    policy_changes,
     policy_events,
     role_of,
     update_threshold,
@@ -213,3 +217,130 @@ def test_journal_entries_say_their_summaries_report_leaves() -> None:
     ctx = json.loads(journal_context(env, from_relay=True))
     assert ctx[SUMMARY_REPORTS_LEAVES] is True
     assert "ct" not in ctx["env"]
+
+
+# -- roles and the policy (G2, G3, G11) ---------------------------------------------------
+
+
+def full_policy(owner: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "v": 0,
+        "owner": owner,
+        "admins": [],
+        "invite": "owner",
+        "remove": "owner",
+        "max_members": 50,
+        "require_verified": False,
+        "floor": "free",
+        "floor_pinned": False,
+        "floor_moderator": None,
+        "loop_guard": {"max_agent_turns": 20},
+        **fields,
+    }
+
+
+def test_a_request_becomes_the_policy_fields_it_changes() -> None:
+    assert policy_changes({"max_agent_turns": 4, "invite": "members"}) == {
+        "invite": "members",
+        "loop_guard": {"max_agent_turns": 4},
+    }
+    # Setting the floor pins it, unless the request says otherwise.
+    assert policy_changes({"floor": "mention"}) == {"floor": "mention", "floor_pinned": True}
+    assert policy_changes({"floor": "free", "floor_pinned": False}) == {
+        "floor": "free",
+        "floor_pinned": False,
+    }
+    assert policy_changes({"floor_moderator": None}) == {"floor_moderator": None}
+    for bad, why in (({}, "nothing to change"), ({"owner": "x"}, "unknown policy field")):
+        with pytest.raises(DaemonError, match=why) as e:
+            policy_changes(bad)
+        assert e.value.code == "bad_request"
+
+
+def test_a_policy_change_is_applied_to_the_policy_in_force(ids: Ids) -> None:
+    """G2: the intent holds what changes, so a rebuild against a newer
+    policy keeps what another member changed meanwhile."""
+    a, b = ids.identity(), ids.identity()
+    queued = {"type": "policy", "changes": {"invite": "members"}}
+    newer = full_policy(a, floor="moderated", floor_pinned=True)
+    assert planned_policy(newer, queued, {a, b}) == {**newer, "invite": "members"}
+    # A row queued before changes were deltas holds a whole policy: only its
+    # require_verified applies, never the rest it cached (review 52 F5).
+    legacy = {"type": "policy", "policy": full_policy(b, admins=[a], require_verified=True)}
+    assert planned_policy(newer, legacy, {a}) == {**newer, "require_verified": True}
+    assert planned_policy(newer, {"type": "policy", "policy": {"owner": b}}, {a}) == newer
+    assert planned_policy(newer, {"type": "policy"}, {a}) == newer
+
+
+def test_a_transfer_and_role_changes(ids: Ids) -> None:
+    a, b, c = ids.identity(), ids.identity(), ids.identity()
+    current = full_policy(a, admins=[b, c])
+    to_b = {"type": "owner", "identity": b, "keep_admin": True}
+    assert planned_policy(current, to_b, {a, b, c}) == {**current, "owner": b, "admins": [c, a]}
+    keep_not = {**to_b, "keep_admin": False}
+    assert planned_policy(current, keep_not, {a, b, c}) == {**current, "owner": b, "admins": [c]}
+    assert planned_policy(current, {**to_b, "identity": a}, {a}) == current
+    # The old owner already an admin (a policy the core accepts) stays once.
+    odd = full_policy(a, admins=[a, b])
+    assert planned_policy(odd, to_b, {a, b})["admins"] == [a]
+
+    make = {"type": "role", "identity": c, "role": "admin"}
+    assert planned_policy(full_policy(a), make, {a, c})["admins"] == [c]
+    # Gone by the time the commit is built (review 52 F4b): no role for it.
+    with pytest.raises(DaemonError) as e:
+        planned_policy(full_policy(a), make, {a})
+    assert e.value.code == "not_permitted"
+    assert planned_policy(current, make, {a, b, c}) == current  # already one
+    drop = {**make, "role": "member"}
+    assert planned_policy(current, drop, {a, b, c})["admins"] == [b]
+    with pytest.raises(DaemonError, match="transfer"):
+        planned_policy(current, {**make, "identity": a}, {a})
+
+
+def test_departed_roles_only_narrow(ids: Ids) -> None:
+    """G11: only identities with no instance left lose their roles, and the
+    change never adds one."""
+    a, b, c, m = (ids.identity() for _ in range(4))
+    current = full_policy(a, admins=[b, c], floor_moderator=m)
+    gone = {"type": "drop_roles", "identities": [b, m]}
+    assert planned_policy(current, gone, {a, c}) == {
+        **current,
+        "admins": [c],
+        "floor_moderator": None,
+    }
+    # One that came back meanwhile keeps its role.
+    assert planned_policy(current, gone, {a, b, c, m}) == current
+    with pytest.raises(DaemonError, match="unknown policy intent"):
+        planned_policy(current, {"type": "nope"}, {a})
+
+
+def test_who_may_invite(ids: Ids) -> None:
+    a, b, c = ids.identity(), ids.identity(), ids.identity()
+    owner_only = full_policy(a, admins=[b])
+    assert may_invite(owner_only, a)
+    assert not may_invite(owner_only, b)
+    admins = {**owner_only, "invite": "admins"}
+    assert may_invite(admins, b)
+    assert not may_invite(admins, c)
+    assert may_invite({**owner_only, "invite": "members"}, c)
+    assert not may_invite({**admins, "admins": None}, b)
+
+
+def test_departed_roles_cleanup_can_be_turned_off(tmp_path: Path) -> None:
+    assert _load(tmp_path, "").groups_cleanup_departed_roles is True
+    cfg = _load(tmp_path, "[groups]\ncleanup_departed_roles = false\n")
+    assert cfg.groups_cleanup_departed_roles is False
+    with pytest.raises(ConfigError, match="must be bool"):
+        _load(tmp_path, '[groups]\ncleanup_departed_roles = "no"\n')
+
+
+def test_a_leaf_repeating_an_instance_id_is_a_new_instance(ids: Ids) -> None:
+    """Review 52 F1: instances are told apart by id and mailbox, so a leaf
+    that repeats an instance id with another key is reported as joining."""
+    a, b = ids.identity(), ids.identity()
+    one = {**member(b, "1" * 16, 1), "mailbox_id": "m1"}
+    twin = {**member(b, "1" * 16, 2), "mailbox_id": "m2"}
+    events = membership_events(summary(a, added=[twin]), [one, twin])
+    assert events == [("instance_joined", {"identity": b, "instance_id": "1" * 16, "by": a})]
+    gone = membership_events(summary(a, removed=[twin], left=[one]), [one])
+    assert gone == [("instance_removed", {"identity": b, "instance_id": "1" * 16, "by": a})]
