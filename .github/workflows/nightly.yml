@@ -58,8 +58,9 @@ jobs:
 
   # Mutation testing of the core, in shards: run serially, it outgrew the
   # 6 h job limit. Shard k of n takes every n-th mutant (round-robin,
-  # .cargo/mutants.toml); n is the number of matrix entries. Add entries when
-  # a shard gets near its timeout.
+  # .cargo/mutants.toml); n is the number of matrix entries. Runners differ in
+  # speed by up to 2x: with 16 shards they took 50 to 100 minutes. Add entries
+  # when a shard gets near its timeout.
   mutants:
     name: mutants (${{ strategy.job-index }}/${{ strategy.job-total }})
     runs-on: ubuntu-24.04
@@ -67,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     env:
       SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
     steps:
