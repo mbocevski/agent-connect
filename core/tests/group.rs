@@ -349,10 +349,13 @@ fn replayed_join_request_cannot_re_add_a_departed_member() {
             out.welcome.as_ref().unwrap(),
         )
         .unwrap();
+    assert!(!ga.has_pending_proposals());
     let leave = gb.propose_leave(&b.client).unwrap();
     ga.process(&a.client, &leave).unwrap();
+    assert!(ga.has_pending_proposals());
     let out = ga.commit_pending_proposals(&a.client).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
+    assert!(!ga.has_pending_proposals());
     assert_eq!(ga.members().unwrap().len(), 1);
 
     // The relay replays B's JoinRequest while the invite still has uses.

@@ -853,3 +853,109 @@ async def test_malformed_ceremony_messages_are_ignored(
     await a.wait(lambda: not a.daemon.status()["inbox_pending"])
     assert view(a, gid, run_id)["state"] == "waiting"
     assert not a.daemon.sas._held
+
+
+# -- a pending proposal (review 67 V-2) ------------------------------------------------------
+
+
+async def last(node: Node, gid: str, run_id: str) -> dict[str, Any]:
+    """The end of a command's runs: the last run, once it ended."""
+    seen = await ended(node, gid, run_id)
+    while seen.get("next"):
+        seen = await ended(node, gid, str(seen["next"]))
+    return seen
+
+
+async def until_epoch_after(node: Node, gid: str, epoch: int, advance: Advance) -> None:
+    for _ in range(30):
+        if node.epoch(gid) > epoch:
+            return
+        await advance(10)
+    await node.wait(lambda: node.epoch(gid) > epoch)
+
+
+async def test_a_pending_proposal_holds_a_run_until_it_is_committed(
+    group: GroupFixture, advance: Advance, partition: Callable[[Node], Awaitable[None]]
+) -> None:
+    """Probe P7: while a proposal is pending, MLS seals no application
+    message. The lowest leaf stays away, as a member that never commits
+    would, and c proposes its leave; b and d start a run with each other.
+    The runs wait as for a pending commit, and go on once the next leaf
+    commits the leave: no `send_failed`, no warning."""
+    (a, b, c, d), gid = await group(4)
+    await partition(a)
+    await c.daemon.leave(gid)
+    for n in (b, d):
+        await n.wait(lambda n=n: n.daemon.client.has_pending_proposals(unb64(gid)))
+    epoch = b.epoch(gid)
+    rb = b.daemon.sas_start(gid, d.me)["run"]
+    rd = d.daemon.sas_start(gid, b.me)["run"]
+    await b.idle()
+    await d.idle()
+    assert view(b, gid, rb)["state"] == view(d, gid, rd)["state"] == "starting"
+    await until_epoch_after(b, gid, epoch, advance)
+    seen_b, seen_d = await last(b, gid, rb), await last(d, gid, rd)
+    assert seen_b["state"] == seen_d["state"] == "done"
+    assert seen_b["sas"] == seen_d["sas"]
+    assert b.daemon.store.sas_warnings(gid, d.me) == (0, [])
+    assert d.daemon.store.sas_warnings(gid, b.me) == (0, [])
+    for n in (b, d):
+        assert not [x for x in events(n, "sas_aborted") if x["reason"] == "send_failed"]
+
+
+async def test_a_reveal_held_by_a_pending_proposal_is_no_warning(
+    group: GroupFixture,
+    rng: random.Random,
+    advance: Advance,
+    partition: Callable[[Node], Awaitable[None]],
+) -> None:
+    """Probe P8: a pairs, and a leave proposal arrives before a's reveal is
+    sealed (the relay's `accepted` for a's commitment held back meanwhile;
+    the lowest leaf away, so the leave waits). A reveal counts once it is
+    sealed: this one never was, so a's nonce never left. The run aborts
+    `proposal_pending`, with no warning, and starts again, waiting for the
+    commit."""
+    (x, a, m_node, c), gid = await group(4)
+    await partition(x)
+    m = Crafted(m_node, rng)
+    proxy = a.proxy
+    state: dict[str, Any] = {"msg_id": None, "release": False}
+    held: list[dict[str, Any]] = []
+
+    def client(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if (
+            state["msg_id"] is None
+            and frame.get("t") == "send"
+            and env.get("kind") == "application"
+        ):
+            state["msg_id"] = env["msg_id"]
+        return [frame]
+
+    def server(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        ours = frame.get("t") == "accepted" and frame.get("msg_id") == state["msg_id"]
+        if ours and not state["release"]:
+            held.append(frame)
+            return []
+        return [frame]
+
+    proxy.client_filters.append(client)
+    proxy.server_filters.append(server)
+    run_id = a.daemon.sas_start(gid, m.me)["run"]
+    await a.wait(lambda: bool(held))
+    m.commit(gid, a.me, m.nonce())
+    await a.wait(lambda: run(a, run_id).paired is not None)
+    await c.daemon.leave(gid)
+    await a.wait(lambda: a.daemon.client.has_pending_proposals(unb64(gid)))
+    epoch = a.epoch(gid)
+    state["release"] = True
+    await proxy.inject(held[0])
+    seen = await ended(a, gid, run_id)
+    assert (seen["reason"], seen["warning"]) == ("proposal_pending", False)
+    assert not run(a, run_id).revealed
+    assert a.daemon.store.sas_warnings(gid, m.me) == (0, [])
+    nxt = str(seen["next"])
+    assert view(a, gid, nxt)["state"] == "starting"  # waits for the commit
+    await until_epoch_after(a, gid, epoch, advance)
+    await a.wait(lambda: run(a, nxt).commit_accepted)
+    assert run(a, nxt).epoch == epoch + 1

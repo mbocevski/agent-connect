@@ -1264,6 +1264,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   Ctrl-C in `verify`); a cancel after the receiver's reveal is ignored. A
   run that another member's leave ends names that member in its warning.
   The cadence Update is also deferred while a code waits for its answer.
+- Core, bindings, runtime and CLI: a pending leave proposal no longer fails
+  SAS runs. MLS seals no message while a proposal waits for its commit, so
+  a run waits for that commit, as it does for its own pending commit
+  (`Group::has_pending_proposals`). A run counts as revealed only once its
+  reveal is sealed: a reveal held back by a pending proposal ends the run
+  `proposal_pending`, which counts no warning and starts again after the
+  commit, and a reveal of a run that already ended is dropped. `verify` no
+  longer blames the relay for it.
 - Core, bindings, runtime and CLI: the SAS run of SPEC §11 is implemented.
   The core derives the commitment and the code (`Group::sas_commitment`,
   `Group::sas_code`, which refuses any epoch but the group's current one)

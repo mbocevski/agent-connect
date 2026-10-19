@@ -583,13 +583,16 @@ def test_pending_leaves_left_and_removing_one_instance(rng: random.Random) -> No
     for joiner in (b1, b2, c):
         grow(a, gid, members, joiner)
     assert a.pending_leaves(gid) == []
+    assert not a.has_pending_proposals(gid)
     proposal = c.propose_leave(gid)
     for m in (a, b1, b2):
         assert m.process(gid, proposal)["type"] == "leave_proposed"
+        assert m.has_pending_proposals(gid)
     for m in members:
         assert [x["identity"] for x in m.pending_leaves(gid)] == [c.identity]
     out = b1.commit_pending_proposals(gid)
     s = b1.confirm_pending_commit(gid, out["msg_id"])
+    assert not b1.has_pending_proposals(gid)
     assert [x["identity"] for x in s["left"]] == [c.identity]
     assert s["left"] == s["removed"]
     for m in (a, b2):

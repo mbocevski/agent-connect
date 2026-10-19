@@ -1261,6 +1261,7 @@ ABORT_TEXT = {
     "out_of_order": "The other daemon revealed before it committed.",
     "peer_restarted": "The other daemon started its side again.",
     "send_failed": "The relay refused a comparison message.",
+    "proposal_pending": "A member's leave waits for its commit; nothing can be sent until then.",
     "group_gone": "The group is no longer active.",
     "failed": "The comparison couldn't start.",
 }

@@ -78,6 +78,8 @@ SAS_EVENTS = frozenset(
 ALWAYS_WARNING = frozenset({"bad_reveal", "out_of_order"})
 # Ends the human asked for: never warnings.
 OWN_ENDS = frozenset({"mismatch", "cancelled", "group_gone"})
+# A ceremony message couldn't be sealed: a proposal waits for its commit.
+PROPOSAL_PENDING = "proposal_pending"
 
 STOP_TEXT = (
     "Comparisons with {name} ended twice without a code. This is what an attacker in the "
@@ -151,7 +153,8 @@ class Run:
     commitment: bytes | None = None
     commit_accepted: bool = False
     paired: tuple[str, bytes] | None = None  # (instance hex, commitment)
-    revealed: bool = False
+    reveal_queued: bool = False
+    revealed: bool = False  # the reveal is sealed: the nonce is spent
     peer_nonce: bytes | None = None
     code: dict[str, Any] | None = None
     shown_at: int | None = None
@@ -289,7 +292,8 @@ class SasService:
         return self.view(group_id, run.run_id)
 
     def _begin(self, run: Run, group: GroupRow | None = None) -> None:
-        """Step 1 once no own commit is pending: the nonce and the commitment."""
+        """Step 1 once no own commit and no proposal is pending: the nonce
+        and the commitment."""
         e = self._e
         gid = unb64(run.group_id)
         if group is None:
@@ -298,8 +302,11 @@ class SasService:
             self._abort(run, "group_gone")
             return
         try:
-            if e.client.has_pending_commit(gid):
-                return  # waits: begun after the commit is confirmed or discarded
+            if e.client.has_pending_commit(gid) or e.client.has_pending_proposals(gid):
+                # Waits: begun after the commit is confirmed or discarded, or
+                # once the pending proposals are committed (nothing is sealed
+                # until then, SPEC 11.3).
+                return
             run.epoch = e._core_epoch(gid)
             run.nonce = e.client.sas_nonce()
             run.commitment = bytes(e.client.sas_commitment(gid, run.peer, run.nonce))
@@ -477,7 +484,7 @@ class SasService:
         """``control.sas_cancel`` for this instance's commitment, only while
         its nonce is unrevealed and its epoch is current (SPEC 11.3)."""
         e = self._e
-        if run.revealed or run.commitment is None or run.epoch is None:
+        if run.reveal_queued or run.commitment is None or run.epoch is None:
             return
         if run.epoch != e._core_epoch(unb64(run.group_id)):
             return  # the epoch's end dropped it everywhere already
@@ -524,8 +531,9 @@ class SasService:
     def _maybe_reveal(self, run: Run) -> None:
         """Step 3: the reveal, once paired and once the relay accepted this
         instance's commitment. The answered commitment is stored in the same
-        transaction that queues the reveal, so before the reveal goes out."""
-        if run.revealed or run.paired is None or not run.commit_accepted or not run.under_way:
+        transaction that queues the reveal, so before the reveal goes out.
+        The run counts as revealed once the reveal is sealed (:meth:`on_sealed`)."""
+        if run.reveal_queued or run.paired is None or not run.commit_accepted or not run.under_way:
             return
         e = self._e
         instance, commitment = run.paired
@@ -534,9 +542,8 @@ class SasService:
             e.store.add_sas_answered(run.group_id, int(run.epoch or 0), commitment)
             e.store.forget_sas_sent(run.group_id, run.commitment or b"")
             self._send(run, SAS_REVEAL, body, [run.peer])
-        run.revealed = True
-        self._maybe_done(run)
-        LOG.info("sas_revealed", group=log.hid(run.group_id), instance=log.hid(instance))
+        run.reveal_queued = True
+        LOG.info("sas_reveal_queued", group=log.hid(run.group_id), instance=log.hid(instance))
 
     def _maybe_done(self, run: Run) -> None:
         """Step 5: the code, under this epoch's authenticator only."""
@@ -746,17 +753,42 @@ class SasService:
         run.commit_accepted = True
         self._maybe_reveal(run)
 
+    def on_sealed(self, meta: dict[str, Any] | None) -> None:
+        """An application message was sealed (``meta`` is None for one that
+        isn't a ceremony message). For the reveal, the nonce is spent from
+        here on, and the code can be derived (step 5)."""
+        if meta is None or meta.get("kind") != SAS_REVEAL:
+            return
+        run = self._runs.get(str(meta.get("run")))
+        if run is None or run.revealed:
+            return
+        run.revealed = True
+        LOG.info("sas_revealed", group=log.hid(run.group_id))
+        self._maybe_done(run)
+
     def on_send_failed(self, meta: dict[str, Any], code: str) -> None:
-        """An ``error`` frame (or a stale epoch) for a ceremony message."""
+        """An ``error`` frame (or a stale epoch) for a ceremony message, or
+        one that couldn't be sealed while a proposal is pending: that run
+        ends before its reveal, with no warning, and starts again, waiting
+        for the commit (SPEC 11.3)."""
         run = self._runs.get(str(meta.get("run")))
         if run is None or not run.under_way or code == "sas_stale":
+            return
+        if code == PROPOSAL_PENDING and not run.revealed:
+            self._abort(run, PROPOSAL_PENDING)
+            self._restart(run)
             return
         self._abort(run, "send_failed")
 
     def stale(self, meta: dict[str, Any], epoch: int) -> bool:
-        """Whether a queued ceremony message belongs to an earlier epoch: it
-        is dropped, never sealed in a new one (SPEC 11.3)."""
-        return bool(meta.get("epoch") != epoch)
+        """Whether a queued ceremony message is dropped instead of sealed:
+        one of an earlier epoch, never sealed in a new one, and a reveal of
+        a run that ended before it was sealed, whose nonce stays unspent
+        (SPEC 11.3)."""
+        if meta.get("epoch") != epoch:
+            return True
+        run = self._runs.get(str(meta.get("run")))
+        return bool(meta.get("kind") == SAS_REVEAL and (run is None or not run.under_way))
 
     # -- epoch changes, aborts and timeouts --------------------------------------------------
 

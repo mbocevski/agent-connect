@@ -1399,6 +1399,13 @@ impl Client {
             .map(|g| g.has_pending_commit()))
     }
 
+    /// Whether a proposal (a leave) waits for the next commit: until then
+    /// no application message can be sealed.
+    fn has_pending_proposals(&self, group_id: &[u8]) -> PyResult<bool> {
+        with_client!(self, |c, groups| group(c, groups, group_id)
+            .map(|g| g.has_pending_proposals()))
+    }
+
     fn remove<'py>(
         &self,
         py: Python<'py>,

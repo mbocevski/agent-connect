@@ -204,6 +204,9 @@ N − 1 others.
   defers its update cadence, for at most 600 s in total. Another member's
   leave can't wait (no message goes out while a proposal is pending); a run
   it ends is a warning that names the member who left.
+- While a leave is pending, runs wait for its commit and then go on. A run
+  whose reveal couldn't go out because of it ends (`proposal_pending`) with
+  nothing counted, and starts again after the commit.
 - The codes and the run events (`sas_requested`, `sas_paired`, `sas_code`,
   `sas_aborted`, `sas_unpaired`, `sas_stopped`, `verifications_reset`) are
   the human's. The agent never sees them, and no event it sees carries a

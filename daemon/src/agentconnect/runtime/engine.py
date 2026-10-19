@@ -98,7 +98,13 @@ from agentconnect.relay import (
 )
 from agentconnect.runtime import ledger as replay
 from agentconnect.runtime.registry import AdapterRegistry
-from agentconnect.runtime.sas import SAS_EVENTS, SAS_KINDS, SasError, SasService
+from agentconnect.runtime.sas import (
+    PROPOSAL_PENDING,
+    SAS_EVENTS,
+    SAS_KINDS,
+    SasError,
+    SasService,
+)
 from agentconnect.schemas import normalize
 from agentconnect.store import SAS_RESET_NOTICE, GroupRow, OutboxRow, Store
 from agentconnect.tasks import cancel_and_wait
@@ -2833,6 +2839,18 @@ class Engine:
                     self._forget_invite_requests(str(invite["invite_id"]))
         return "done"
 
+    def _sas_unsealable(self, sas: dict[str, Any] | None, gid: bytes, epoch: int) -> str | None:
+        """Why a queued ceremony message isn't sealed now, if it isn't."""
+        if sas is None:
+            return None
+        if self.sas.stale(sas, epoch):
+            return "sas_stale"  # dropped across an epoch change, never sealed in a new one
+        if self.client.has_pending_proposals(gid):
+            # MLS seals nothing while a proposal waits for its commit: the
+            # run waits for it (SPEC 11.3).
+            return PROPOSAL_PENDING
+        return None
+
     async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:
         if group.out_of_sync:
             self._fail_codes[row.seq] = "out_of_sync"
@@ -2852,9 +2870,9 @@ class Engine:
                     # a SAS run is under way (SPEC 11.3).
                     group = await self._cadence_update(row, payload, group)
                 epoch = self.client.epoch(gid)
-                if sas is not None and self.sas.stale(sas, epoch):
-                    # Dropped across an epoch change, never sealed in a new one.
-                    self._fail_codes[row.seq] = "sas_stale"
+                unsealable = self._sas_unsealable(sas, gid, epoch)
+                if unsealable is not None:
+                    self._fail_codes[row.seq] = unsealable
                     return "failed"
                 event = None
                 with self.store.tx():
@@ -2872,6 +2890,7 @@ class Engine:
                         "ct": b64(self.client.seal(gid, inner)),
                     }
                     self.store.update_outbox(row.seq, payload=payload)
+                self.sas.on_sealed(sas)
                 if event is not None:
                     await self._notify(event)
             try:

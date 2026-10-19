@@ -1681,6 +1681,13 @@ impl Group {
         self.mls.pending_commit().is_some()
     }
 
+    /// Whether a proposal (a leave, SPEC §9.2) is stored for the next
+    /// commit. While one is, OpenMLS seals no application message.
+    #[must_use]
+    pub fn has_pending_proposals(&self) -> bool {
+        self.mls.pending_proposals().next().is_some()
+    }
+
     /// This instance's leaf index.
     #[must_use]
     pub fn own_leaf_index(&self) -> u32 {
