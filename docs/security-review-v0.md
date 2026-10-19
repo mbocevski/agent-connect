@@ -67,7 +67,7 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 12 | 11 open, follow-up task; SR-61 fixed in this PR |
+| Medium | 12 | 11 open, follow-up task; SR-61 fixed in #72 |
 | Low | 28 | Open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
@@ -441,7 +441,7 @@ messages or deliver them as context; say so in SPEC §9.3 and §10.2.
   and path HPKE private keys of the epoch before its removal.
 - **Component:** core (`group.rs`, `Group::delete`; OpenMLS 0.9.1
   `MlsGroup::delete` and `StagedCommit` merge).
-- **Status:** fixed in this PR.
+- **Status:** fixed in #72.
 - **Confirmed.** Found by mutation testing: closing the gaps in
   `provider.rs` added a test that every OpenMLS row of a deleted group is
   gone.
