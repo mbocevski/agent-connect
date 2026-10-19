@@ -581,3 +581,155 @@ async def test_a_message_in_the_hidden_window_waits_for_the_agent(
     mine = [e["type"] for e in seen if e["group_id"] == gid]
     assert mine[0] == "member_joined"
     assert mine.count("member_joined") == 1
+
+
+# -- a Welcome the relay refuses for now (N5) ------------------------------------
+
+
+def refuse_welcomes(node: Node, times: int, code: str = "quota_exceeded") -> list[str]:
+    """Have the relay answer the node's next ``times`` Welcomes ``code``
+    (by default `quota_exceeded`, the knocker's mailbox is full: a refusal
+    of this Welcome only). Returns the msg_id of every Welcome the node sends,
+    refused or not."""
+    tried: list[str] = []
+
+    def count(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "send" and env.get("kind") == "welcome_wrapped":
+            tried.append(str(env["msg_id"]))
+        return [frame]
+
+    node.proxy.client_filters.append(count)
+    node.proxy.fail_next("send", code, kind="welcome_wrapped", times=times)
+    return tried
+
+
+async def team(cluster: Cluster, owner: Node) -> tuple[Node, str]:
+    """A group of the owner and bob, besides the one an approval creates."""
+    bob = await cluster.node("bob")
+    gid = owner.daemon.create_group("Team", "Plan the release")
+    await owner.idle()
+    await cluster.invite(owner, bob, gid)
+    return bob, gid
+
+
+async def approve_with_refused_welcome(
+    cluster: Cluster, directory: DirectoryProcess, owner: Node, ref: str, refusals: int
+) -> tuple[Node, str, str, str, list[str]]:
+    """Approve a knock whose Welcome the relay refuses ``refusals`` times
+    (`quota_exceeded`), and wait until the first refusal is waiting out its
+    backoff."""
+    k = await knocker(cluster, directory)
+    sent = await k.runtime.agent.knock(ref)
+    (request,) = await pending(owner)
+    tried = refuse_welcomes(owner, refusals)
+    kid = owner.daemon.approve(request["request_id"])["group_id"]
+    await until(lambda: len(tried) == 1 and owner.clock.sleepers > 0)
+    return k, str(sent["knock_id"]), str(request["request_id"]), str(kid), tried
+
+
+async def welcome_goes_out(cluster: Cluster, owner: Node, k: Node, knock_id: str, kid: str) -> None:
+    """Let the backoff run out until the Welcome is taken, and check it went
+    once and the knocker joined once."""
+    for _ in range(10):
+        if knock_event(k, "joined", knock_id) is not None:
+            break
+        await until(
+            lambda: owner.clock.sleepers > 0 or knock_event(k, "joined", knock_id) is not None
+        )
+        await cluster.advance(60)
+    assert await joined(k, knock_id) == kid
+    await cluster.settle(kid, 1)
+    welcomes = [f for f in k.proxy.delivered if f["env"].get("kind") == "welcome_wrapped"]
+    assert len({f["env"]["msg_id"] for f in welcomes}) == 1
+    assert len(events(k, "joined")) == 1
+
+
+async def test_a_welcome_the_relay_refuses_for_now_holds_up_no_other_group(
+    cluster: Cluster, directory: DirectoryProcess, rng: random.Random
+) -> None:
+    """N5: an approved knock's Welcome waits out its backoff on its own. The
+    owner's other groups don't wait behind it: their messages and commits go
+    out meanwhile, in the order they were queued."""
+    owner, ref = await listed(cluster, directory, rng)
+    bob, gid = await team(cluster, owner)
+    k, knock_id, request_id, kid, tried = await approve_with_refused_welcome(
+        cluster, directory, owner, ref, refusals=3
+    )
+    epoch = owner.epoch(gid)
+    owner.daemon.send_message(gid, {"text": "one"})
+    owner.daemon.update(gid)
+    owner.daemon.send_message(gid, {"text": "two"})
+    owner.daemon.send_message(gid, {"text": "three"})
+    # No time passes: the Welcome is still waiting, and nothing else is.
+    assert await bob.wait_texts(gid, 3) == ["one", "two", "three"]
+    await bob.wait(lambda: bob.epoch(gid) == epoch + 1)
+    kinds = [
+        f["env"]["kind"]
+        for f in bob.proxy.delivered
+        if f["env"].get("group_id") == gid and f["env"].get("kind") in ("application", "commit")
+    ]
+    assert kinds[-4:] == ["application", "commit", "application", "application"]
+    assert len(tried) == 1
+    req = owner.daemon.store.knock_request(request_id)
+    assert req is not None
+    assert req["status"] == "approving"
+    assert knock_event(k, "joined", knock_id) is None
+    await welcome_goes_out(cluster, owner, k, knock_id, kid)
+    assert len(tried) == 4  # three refused, then taken
+    assert len(set(tried)) == 1
+    assert bob.adapter.texts(gid) == ["one", "two", "three"]
+
+
+async def test_a_rate_limited_welcome_pauses_every_group(
+    cluster: Cluster, directory: DirectoryProcess, rng: random.Random
+) -> None:
+    """A Welcome answered `rate_limited` met the mailbox's send budget,
+    which every group shares: the owner's other sends wait out the same
+    pause, and then the Welcome, the oldest row, goes first."""
+    owner, ref = await listed(cluster, directory, rng)
+    bob, gid = await team(cluster, owner)
+    k = await knocker(cluster, directory)
+    knock_id = str((await k.runtime.agent.knock(ref))["knock_id"])
+    (request,) = await pending(owner)
+    tried = refuse_welcomes(owner, 1, "rate_limited")
+    kid = str(owner.daemon.approve(request["request_id"])["group_id"])
+    await until(lambda: len(tried) == 1 and owner.clock.sleepers > 0)
+    msg = owner.daemon.send_message(gid, {"text": "one"})
+    await owner.wait(lambda: owner.daemon._next_row() is None)
+    assert owner.daemon.store.outbox_state_of(msg) == "queued"
+    await welcome_goes_out(cluster, owner, k, knock_id, kid)
+    assert await bob.wait_texts(gid, 1) == ["one"]
+    assert len(tried) == 2
+    assert len(set(tried)) == 1
+
+
+async def test_a_welcome_refused_for_now_goes_once_after_a_restart(
+    cluster: Cluster, directory: DirectoryProcess, rng: random.Random
+) -> None:
+    """N5, crash consistency: the owner dies while the Welcome waits out its
+    backoff and other groups' messages wait behind a cut connection. After
+    the restart the Welcome is tried again under the same msg_id, and the
+    messages go out once each, in order, while it waits again."""
+    owner, ref = await listed(cluster, directory, rng)
+    bob, gid = await team(cluster, owner)
+    k, knock_id, request_id, kid, tried = await approve_with_refused_welcome(
+        cluster, directory, owner, ref, refusals=2
+    )
+    await owner.proxy.cut()
+    await owner.wait(lambda: not owner.daemon.link.connected)
+    for text in ("one", "two", "three"):
+        owner.daemon.send_message(gid, {"text": text})
+    owner.proxy.heal()
+    await owner.restart()
+    assert await bob.wait_texts(gid, 3) == ["one", "two", "three"]
+    await until(lambda: len(tried) == 2)
+    owner.daemon.send_message(gid, {"text": "four"})
+    assert await bob.wait_texts(gid, 4) == ["one", "two", "three", "four"]
+    await welcome_goes_out(cluster, owner, k, knock_id, kid)
+    req = owner.daemon.store.knock_request(request_id)
+    assert req is not None
+    assert req["status"] == "approved"
+    assert len(tried) == 3  # once before the restart, once after, then taken
+    assert len(set(tried)) == 1
+    assert bob.adapter.texts(gid) == ["one", "two", "three", "four"]

@@ -21,7 +21,16 @@ from agentconnect.adapter import (
 )
 from agentconnect.keystore import FileKeystore
 from agentconnect.relay import RelayError
-from agentconnect.runtime.engine import DaemonError, Engine, new_msg_id
+from agentconnect.runtime.engine import (
+    JOIN_CLOSED_GRACE_SECS,
+    MAX_COMMIT_ATTEMPTS,
+    RATE_WINDOW_SECS,
+    UPDATE_AFTER_MESSAGES,
+    WELCOME_MARGIN_SECS,
+    DaemonError,
+    Engine,
+    new_msg_id,
+)
 from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
 from agentconnect_harness.proxy import RelayProxy
 
@@ -78,6 +87,177 @@ async def test_relay_errors_on_sends(
     assert not a.daemon.client.has_pending_commit(bytes(base64.urlsafe_b64decode(gid + "==")))
     a.daemon.send_message(gid, {"text": "still in sync"})
     assert await b.wait_texts(gid, 3) == ["resealed", "later", "still in sync"]
+
+
+async def test_a_send_refused_for_now_holds_up_only_its_group(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """N5: a commit or a message the relay refuses for now (`internal`)
+    waits out its backoff without holding up the sender's other groups, and
+    its own group's later rows still wait behind it."""
+    (a, b), gid = await group(2)
+    other = a.daemon.create_group("Other", "Elsewhere")
+    await a.idle()
+    await cluster.invite(a, b, other)
+    proxy = malicious_relay(a)
+    epoch = a.epoch(gid)
+    proxy.fail_next("send", "internal", kind="commit")
+    a.daemon.update(gid)
+    await a.wait(lambda: a.clock.sleepers > 0)
+    a.daemon.send_message(gid, {"text": "after the commit"})
+    a.daemon.send_message(other, {"text": "elsewhere"})
+    assert await b.wait_texts(other, 1) == ["elsewhere"]
+    assert a.epoch(gid) == epoch
+    await advance(1)
+    assert await b.wait_texts(gid, 1) == ["after the commit"]
+    assert a.epoch(gid) == epoch + 1
+    proxy.fail_next("send", "internal", kind="application")
+    a.daemon.send_message(gid, {"text": "first"})
+    await a.wait(lambda: a.clock.sleepers > 0)
+    a.daemon.send_message(gid, {"text": "second"})
+    a.daemon.send_message(other, {"text": "meanwhile"})
+    assert await b.wait_texts(other, 2) == ["elsewhere", "meanwhile"]
+    assert b.adapter.texts(gid) == ["after the commit"]
+    await advance(1)
+    assert await b.wait_texts(gid, 3) == ["after the commit", "first", "second"]
+    await a.idle()
+    assert a.daemon._postponed == {}
+
+
+async def test_rate_limited_pauses_every_group_and_costs_no_try(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """`rate_limited` is the mailbox's send budget, shared by every group:
+    the whole outbox pauses, the oldest row goes first when it resumes, and
+    a row refused more than MAX_COMMIT_ATTEMPTS times this way still goes
+    out."""
+    (a, b), gid = await group(2)
+    other = a.daemon.create_group("Other", "Elsewhere")
+    await a.idle()
+    await cluster.invite(a, b, other)
+    proxy = malicious_relay(a)
+    refusals = MAX_COMMIT_ATTEMPTS + 2
+    left = [refusals]
+
+    def refuse(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if left[0] and env.get("kind") == "application" and env.get("group_id") == gid:
+            left[0] -= 1
+            proxy._forged.append({"t": "error", "msg_id": env["msg_id"], "code": "rate_limited"})
+            return []
+        return [frame]
+
+    proxy.client_filters.append(refuse)
+    a.daemon.send_message(gid, {"text": "first"})
+    await a.wait(lambda: a.clock.sleepers > 0)
+    elsewhere = a.daemon.send_message(other, {"text": "elsewhere"})
+    await a.wait(lambda: a.daemon._next_row() is None)
+    assert a.daemon.store.outbox_state_of(elsewhere) == "queued"  # every group waits
+    for _ in range(refusals + 2):
+        if b.adapter.texts(other):
+            break
+        await a.wait(lambda: a.clock.sleepers > 0 or bool(b.adapter.texts(other)))
+        await advance(60)
+    assert await b.wait_texts(gid, 1) == ["first"]
+    assert await b.wait_texts(other, 1) == ["elsewhere"]
+    await a.idle()
+    assert not a.adapter.of_type("send_failed")
+    assert a.daemon._refusals == {}
+
+
+async def test_a_cadence_updates_refusals_count_toward_its_own_row(
+    group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """The try cap counts the relay's refusals of a row's own send: a
+    cadence Update that runs inside a message's row counts toward the
+    Update, so together they may be refused more often than either may."""
+    (a, b), gid = await group(2)
+    epoch = a.epoch(gid)
+    proxy = malicious_relay(a)
+    a.daemon.store.update_group(gid, msgs_since_commit=UPDATE_AFTER_MESSAGES)
+    each = MAX_COMMIT_ATTEMPTS - 2
+    proxy.fail_next("send", "internal", kind="commit", times=each)
+    proxy.fail_next("send", "internal", kind="application", times=each)
+    a.daemon.send_message(gid, {"text": "after the update"})
+    for _ in range(2 * each + 2):
+        if b.adapter.texts(gid):
+            break
+        await a.wait(lambda: a.clock.sleepers > 0 or bool(b.adapter.texts(gid)))
+        await advance(60)
+    assert await b.wait_texts(gid, 1) == ["after the update"]
+    assert a.epoch(gid) == epoch + 1
+    assert not a.adapter.of_type("send_failed")
+    assert not a.adapter.of_type("commit_failed")
+
+
+# A scaled-down relay (relay.rs: 50 sends a second per mailbox) and an agent
+# whose groups together want three times that.
+BUDGET = 5
+BUSY_GROUPS = 8
+STEP = 0.1  # the daemon clock moves in short steps, as a busy agent does
+SECONDS = 150  # past the 8 backoffs a row's own retries would take
+
+
+def send_budget(node: Node, proxy: RelayProxy, most: int) -> list[str]:
+    """The relay's per-mailbox send limit on the daemon clock: a one-second
+    sliding window, where a refused send uses no budget. An application
+    message inside it is accepted here and goes no further (the test reads
+    only what the sender does), so the real relay's limit, on the real
+    clock, never applies; commits go on to the relay. Returns the msg_ids
+    of the messages accepted."""
+    window: list[float] = []
+    accepted: list[str] = []
+
+    def client(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        if frame.get("t") != "send":
+            return [frame]
+        env = frame["env"]
+        now = node.clock.unix_millis() / 1000
+        while window and now - window[0] >= 1.0:
+            window.pop(0)
+        if len(window) >= most:
+            proxy._forged.append({"t": "error", "msg_id": env["msg_id"], "code": "rate_limited"})
+            return []
+        window.append(now)
+        if env.get("kind") == "application":
+            accepted.append(str(env["msg_id"]))
+            proxy._forged.append({"t": "accepted", "msg_id": env["msg_id"]})
+            return []
+        return [frame]
+
+    proxy.client_filters.append(client)
+    return accepted
+
+
+async def test_busy_groups_share_the_relays_send_budget(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """Under the relay's per-mailbox send limit, busy groups' fresh messages
+    don't take the budget from a row waiting to be sent again: nothing
+    fails, a quiet group's message goes out, and the outbox keeps sending
+    at about the budget."""
+    (a, b), quiet = await group(2)
+    busy = []
+    for i in range(BUSY_GROUPS):
+        gid = a.daemon.create_group(f"Busy {i}", "x")
+        await a.idle()
+        await cluster.invite(a, b, gid)
+        busy.append(gid)
+    await a.idle()
+    accepted = send_budget(a, malicious_relay(a), BUDGET)
+    q = a.daemon.send_message(quiet, {"text": "quiet"})
+    steps = int(SECONDS / STEP)
+    for step in range(steps):
+        if step % 5 == 0:  # each busy group: two messages a second
+            for gid in busy:
+                a.daemon.send_message(gid, {"text": "busy"}, internal=True)
+        await a.wait(lambda: a.daemon._next_row() is None)
+        await advance(STEP)
+    await a.wait(lambda: a.daemon._next_row() is None)
+    assert not a.adapter.of_type("send_failed")
+    assert a.daemon.store.outbox_state_of(str(q)) == "done"
+    assert q in accepted
+    assert len(accepted) >= 0.95 * BUDGET * SECONDS
 
 
 async def test_invite_registration_failures_keep_no_secret(
@@ -228,6 +408,73 @@ async def test_a_welcome_the_relay_refuses_for_now_is_sent_again(
     assert approval_of(a, invite["invite_id"])["status"] == "approved"
     assert not a.adapter.of_type("commit_failed")
     assert len(c.adapter.of_type("joined")) == 1
+
+
+async def test_no_welcome_goes_out_after_the_joiner_gave_up(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """The relay refuses the Welcome (`rate_limited`) until the joiner stops
+    waiting, then would take it. The inviter checks the deadline before
+    every try, so no Welcome goes out that late: the approval fails with
+    `welcome_not_sent` and the instance the Add put in is removed again,
+    instead of a member nobody holds."""
+    (a,), gid = await group(1)
+    c = await cluster.node("c")
+    proxy = malicious_relay(a)
+    invite = await a.daemon.create_invite(gid, ttl_secs=300)
+    gives_up = int(invite["expires_at"]) + JOIN_CLOSED_GRACE_SECS
+    tries: list[float] = []
+
+    def refuse(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "send" and env.get("kind") == "welcome_wrapped":
+            now = a.clock.unix_millis() / 1000
+            tries.append(now)
+            if now < gives_up:
+                proxy._forged.append(
+                    {"t": "error", "msg_id": env["msg_id"], "code": "rate_limited"}
+                )
+                return []
+        return [frame]
+
+    proxy.client_filters.append(refuse)
+    await c.daemon.accept_invite(invite["url"])
+    await a.wait(lambda: bool(tries))
+    while a.clock.unix_millis() / 1000 < gives_up + 120:
+        await advance(5)
+        await a.wait(lambda: not a.daemon.store.outbox() or a.daemon._next_row() is None)
+    await a.idle()
+    assert tries
+    assert max(tries) < gives_up - WELCOME_MARGIN_SECS
+    (failed,) = a.adapter.of_type("commit_failed")
+    assert (failed.data["intent"], failed.data["code"]) == ("add", "welcome_not_sent")
+    assert {m.identity for m in a.daemon.store.members(gid)} == {a.me}
+    assert c.daemon.store.group(gid) is None
+
+
+async def test_a_rate_limited_frame_is_sent_again(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """`group.create` and `join` count against the same per-mailbox budget
+    as sends: one answered `rate_limited` waits out the shared pause and
+    goes again, instead of failing for good."""
+    (a, b), _ = await group(2)
+    malicious_relay(a).fail_next("group.create", "rate_limited")
+    gid = a.daemon.create_group("New", "x")
+    await a.wait(lambda: a.daemon._next_row() is None)
+    await advance(RATE_WINDOW_SECS)
+    await a.idle()
+    assert not a.daemon.store.outbox("failed")
+    await cluster.invite(a, b, gid)
+    c = await cluster.node("c")
+    malicious_relay(c).fail_next("join", "rate_limited")
+    invite = await a.daemon.create_invite(gid)
+    await c.daemon.accept_invite(invite["url"])
+    await c.wait(lambda: c.daemon._next_row() is None)
+    assert not c.adapter.of_type("join_failed")
+    await advance(RATE_WINDOW_SECS)
+    await c.wait(lambda: c.daemon.store.group(gid) is not None)
+    assert not c.adapter.of_type("join_failed")
 
 
 async def test_a_welcome_that_cant_go_out_in_time_removes_the_joiner_again(

@@ -1888,6 +1888,18 @@ class Store:
             return None
         return OutboxRow(row[0], row[1], row[2], json.loads(row[3]), row[4])
 
+    def outbox_lanes(self) -> list[tuple[int, str | None]]:
+        """Every queued row's ``seq``, in order, with its lane: the group it
+        sends to (a frame's own group id when it names one, such as
+        ``group.create`` or a proposal), or ``None`` for a frame of no group
+        (a join, a knock, an invite's consumption)."""
+        rows = self._all(
+            "SELECT seq, COALESCE(group_id, json_extract(payload, '$.frame.group_id'), "
+            "json_extract(payload, '$.frame.env.group_id')) "
+            "FROM outbox WHERE state = 'queued' ORDER BY seq"
+        )
+        return [(int(r[0]), None if r[1] is None else str(r[1])) for r in rows]
+
     def outbox_row(self, seq: int) -> OutboxRow | None:
         row = self._one("SELECT seq, kind, group_id, payload, state FROM outbox WHERE seq = ?", seq)
         return (

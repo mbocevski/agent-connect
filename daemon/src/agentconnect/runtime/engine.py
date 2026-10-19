@@ -5,8 +5,16 @@ Three workers run on one event loop:
 * **inbound**: takes relay frames in order, runs them through the core and
   records the outcome in the inbox (dedup by ``(sender, msg_id)``);
 * **outbox**: sends queued work in order (group creation, joins,
-  application messages, commits, proposals, Welcomes). Because there is
-  one outbox, local commits are serialised;
+  application messages, commits, proposals, Welcomes). Rows of one group
+  go out in the order they were queued, so local commits are serialised.
+  A row the relay refuses for now (``internal``, a Welcome's
+  ``quota_exceeded``) waits out a backoff and holds up only its own group
+  (``Engine._next_row``); ``rate_limited`` is the mailbox's send budget,
+  shared by every group, so it pauses the whole outbox. Two waits still
+  hold up every group: a commit that lost an epoch conflict waits in its
+  row for the winning commit (``Engine._await_epoch``, up to
+  ``REBUILD_WAIT_SECS``), and a request the relay doesn't answer waits
+  ``relay.REQUEST_TIMEOUT`` before the link is treated as down;
 * **delivery**: hands pending inbox rows to the adapter and acks the relay
   frame only once the adapter accepted it.
 
@@ -116,6 +124,11 @@ def instance_hex(instance_id: int) -> str:
 
 
 JOIN_CLOSED_GRACE_SECS = 60
+# The last Welcome to a joiner goes out this long before it stops waiting
+# (its invite's expiry plus JOIN_CLOSED_GRACE_SECS), so it still arrives.
+WELCOME_MARGIN_SECS = 30
+# The relay's send window per mailbox (relay.rs: sends_per_sec over 1 s).
+RATE_WINDOW_SECS = 1.0
 MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
 MAX_REPLY_TO = 16  # SPEC 7.2
@@ -207,6 +220,12 @@ class TransientError(Exception):
         self.group_id, self.reason = group_id, reason
 
 
+class RateLimitedError(TransientError):
+    """The relay answered a send ``rate_limited``. Its send budget is per
+    mailbox, shared by every group, so the whole outbox pauses for one
+    shared backoff (``Engine._outbox``) and the row isn't charged a try."""
+
+
 MAX_TRANSIENT_RETRIES = 8
 # Relay errors that say "not now" rather than "no" (SPEC 8.4).
 RETRYABLE_RELAY_ERRORS = frozenset({"rate_limited", "internal"})
@@ -267,6 +286,15 @@ REST_TS_KEY = "relay/rest_ts"
 REPLAY_JOURNAL = "_replay_journal"
 SUMMARY_REPORTS_LEAVES = "left_reported"
 TransientFailure = (TransientError, FailpointError)
+
+
+@dataclass
+class Postponed:
+    """An outbox row that failed for now: it runs again at ``at`` (Unix
+    seconds on the daemon clock), and its group's later rows wait for it."""
+
+    at: float
+    backoff: Backoff
 
 
 def journal_key(sender: str, msg_id: str) -> str:
@@ -549,6 +577,14 @@ class Engine:
         )
         self._frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._outbox_wake = asyncio.Event()
+        # Outbox rows waiting out a backoff, by seq (_postpone).
+        self._postponed: dict[int, Postponed] = {}
+        # The relay's "not now" answers to each row's own send, by seq
+        # (_refused_for_now): what MAX_COMMIT_ATTEMPTS counts.
+        self._refusals: dict[int, int] = {}
+        # rate_limited pauses the whole outbox until then (Unix seconds).
+        self._throttle = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
+        self._throttled_until = 0.0
         self._delivery_wake = asyncio.Event()
         self._changed = asyncio.Event()
         self._parked: dict[str, list[dict[str, Any]]] = {}
@@ -2551,29 +2587,119 @@ class Engine:
         self._outbox_wake.set()
         return seq
 
+    def _next_row(self) -> OutboxRow | None:
+        """The first queued row that may run now. A group's rows (its lane,
+        ``Store.outbox_lanes``) go out in the order they were queued, so while
+        a lane's first row waits out its backoff the rest of that lane waits
+        behind it, and every other lane goes on. While the relay's send
+        budget is used up (``RateLimitedError``) nothing runs, and then the
+        oldest row goes first."""
+        now = self.clock.unix_millis() / 1000
+        if now < self._throttled_until:
+            return None
+        if not self._postponed:
+            return self.store.next_outbox()
+        lanes = self.store.outbox_lanes()
+        queued = {seq for seq, _ in lanes}
+        for seq in [s for s in self._postponed if s not in queued]:
+            del self._postponed[seq]  # finished some other way
+        seen: set[str | None] = set()
+        for seq, lane in lanes:
+            if lane in seen:
+                continue
+            seen.add(lane)
+            wait = self._postponed.get(seq)
+            if wait is None or wait.at <= now:
+                return self.store.outbox_row(seq)
+        return None
+
+    def _postpone(self, seq: int) -> None:
+        """Run this row again after its own backoff (it stays queued)."""
+        wait = self._postponed.get(seq)
+        if wait is None:
+            backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
+            wait = self._postponed[seq] = Postponed(0.0, backoff)
+        wait.at = self.clock.unix_millis() / 1000 + wait.backoff.next()
+
+    def _refused_for_now(self, seq: int, group_id: str, code: str) -> None:
+        """The relay answered row ``seq``'s own send with a "not now" code
+        (``RETRYABLE_RELAY_ERRORS``). ``rate_limited`` raises
+        ``RateLimitedError`` and isn't counted. Any other such answer counts toward the row's
+        ``MAX_COMMIT_ATTEMPTS`` tries and raises ``TransientError``, so the
+        row is postponed; it returns only when that answer used up the last
+        try, and the caller fails the row. Nothing else counts: not storage
+        or core errors, not epoch conflicts (``_run_commit`` rebuilds up to
+        ``MAX_COMMIT_ATTEMPTS`` times per run), and not a cadence Update's
+        answers, which count toward the Update's own row. The counts start
+        again when the daemon does."""
+        if code == "rate_limited":
+            raise RateLimitedError(group_id, code) from None
+        tries = self._refusals.get(seq, 0) + 1
+        if tries >= MAX_COMMIT_ATTEMPTS:
+            self._refusals.pop(seq, None)
+            return
+        self._refusals[seq] = tries
+        raise TransientError(group_id, code) from None
+
+    def _pause_outbox(self) -> None:
+        """Pause the whole outbox: the next try waits out the shared
+        backoff, which a send that goes through resets. Never less than the
+        relay's rate window, so the first try after a pause finds room
+        instead of doubling the next pause."""
+        pause = max(RATE_WINDOW_SECS, self._throttle.next())
+        self._throttled_until = self.clock.unix_millis() / 1000 + pause
+
+    async def _outbox_idle(self) -> None:
+        """Wait for a new row, for the end of a pause (``RateLimitedError``),
+        or for the first postponed row's time."""
+        if self.clock.unix_millis() / 1000 < self._throttled_until:
+            due = self._throttled_until
+        elif self._postponed:
+            due = min(w.at for w in self._postponed.values())
+        else:
+            await self._outbox_wake.wait()
+            return
+        timer = asyncio.ensure_future(self.clock.sleep_until(due))
+        waker = asyncio.ensure_future(self._outbox_wake.wait())
+        await asyncio.sleep(0)
+        self._pulse()  # announce the pause (tests advance time then)
+        try:
+            await asyncio.wait({timer, waker}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            await cancel_and_wait(timer, waker)
+
     async def _outbox(self) -> None:
-        backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
         while True:
-            row = self.store.next_outbox()
+            row = self._next_row()
             if row is None:
                 self._outbox_wake.clear()
-                await self._outbox_wake.wait()
+                await self._outbox_idle()
                 continue
             await self.link.wait_connected()
             try:
                 state = await self._run_row(row)
             except NotConnectedError:
                 continue
+            except RateLimitedError:
+                # The mailbox's send budget is used up: every lane waits,
+                # and then the oldest row goes first.
+                LOG.warning("outbox_throttled", kind=row.kind)
+                self._pause_outbox()
+                continue
             except TransientFailure:
-                # The row stays queued and runs again from what it recorded;
-                # a confirmed commit is finished from the core's journal.
+                # The row stays queued and runs again from what it recorded,
+                # after a backoff; a confirmed commit is finished from the
+                # core's journal. Only its own lane waits for it.
                 LOG.warning("outbox_transient", kind=row.kind)
-                await self._sleep(backoff.next())
+                self._postpone(row.seq)
                 continue
             except Exception:
                 LOG.exception("outbox_failed", kind=row.kind)
                 state = "failed"
-            backoff.reset()
+            self._postponed.pop(row.seq, None)
+            self._refusals.pop(row.seq, None)
+            if state == "done":
+                self._throttle.reset()
             msg_id = row.payload.get("msg_id")
             event = None
             with self.store.tx():
@@ -2638,6 +2764,9 @@ class Engine:
             await self._request(frame, msg_id)
         except RelayError as e:
             LOG.info("relay_request_failed", t=frame.get("t"), code=e.code)
+            if e.code == "rate_limited":
+                # The mailbox's send budget (group.create, join): not now.
+                raise RateLimitedError(None, e.code) from None
             if frame.get("t") == "join":
                 invite_id = str(frame.get("invite_id"))
                 self.store.finish_join(invite_id, "failed")
@@ -2697,8 +2826,10 @@ class Engine:
                     payload.pop("env")  # too old an epoch: seal again
                     continue
                 if e.code in RETRYABLE_RELAY_ERRORS:
-                    await self._sleep(1.0)
-                    continue
+                    # Not now: the same envelope again after a backoff.
+                    self._refused_for_now(row.seq, group.group_id, e.code)
+                    self._fail_codes[row.seq] = "attempts_exhausted"
+                    return "failed"
                 LOG.info("send_failed", code=e.code)
                 self._fail_codes[row.seq] = e.code
                 return "failed"
@@ -2754,15 +2885,17 @@ class Engine:
         if update is not None and update.state == "queued":
             state = await self._run_commit(update, group)
             self.store.update_outbox(update.seq, state=state)
+            self._refusals.pop(update.seq, None)
         payload.pop("update_row", None)
         self.store.update_outbox(row.seq, payload=payload)
         return self.store.group(group.group_id) or group
 
     async def _run_commit(self, row: OutboxRow, group: GroupRow) -> str:
+        """Build, send and confirm the row's commit. A cadence Update runs
+        inside its message's row, and its refusals count toward its own row."""
         gid = unb64(group.group_id)
         payload = dict(row.payload)
         intent = payload["intent"]
-        backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
         for _ in range(MAX_COMMIT_ATTEMPTS):
             current = self.store.group(group.group_id)
             if current is None or current.status != "active" or current.out_of_sync:
@@ -2784,10 +2917,10 @@ class Engine:
                     if e.code in RETRYABLE_RELAY_ERRORS:
                         # SPEC 8.3: resend the same bytes under the same
                         # msg_id; the relay didn't take it (a rejected send
-                        # doesn't consume its msg_id).
+                        # doesn't consume its msg_id). After a backoff.
                         LOG.info("commit_retry", code=e.code)
-                        await self._sleep(backoff.next())
-                        continue
+                        self._refused_for_now(row.seq, group.group_id, e.code)
+                        break
                     with contextlib.suppress(ac.AgentConnectError):
                         self.client.discard_pending_commit(gid)
                     built_epoch = int(env["epoch"])
@@ -2800,6 +2933,8 @@ class Engine:
                         self._fail_intent(intent, e.code)
                         return "failed"
                     LOG.info("epoch_conflict", group=log.hid(group.group_id))
+                    # In the row: every lane waits, usually only until the
+                    # winning commit (already on its way) is processed.
                     await self._await_epoch(group.group_id, built_epoch)
                     continue
                 await self._confirm_own(gid, group.group_id, env)
@@ -2931,6 +3066,12 @@ class Engine:
         if approval is None:
             return True
         if "welcome" in payload and not payload.get("welcome_sent"):
+            if self.now() >= self._welcome_deadline(approval):
+                # Checked before every try: a Welcome sent this late could
+                # reach a joiner that has stopped waiting.
+                LOG.info("welcome_not_sent", code="too_late")
+                self._welcome_failed(row, group, intent, approval)
+                return False
             if "welcome_msg_id" not in payload:
                 payload["welcome_msg_id"] = new_msg_id()
                 self.store.update_outbox(row.seq, payload=payload)
@@ -2946,9 +3087,13 @@ class Engine:
             try:
                 await self._request({"t": "send", "env": welcome}, str(welcome["msg_id"]))
             except RelayError as e:
-                if e.code in RETRY_WELCOME and self.now() < self._welcome_deadline(approval):
-                    # Not now: the same Welcome again after a backoff.
+                if e.code in RETRY_WELCOME:
+                    # Not now: the same Welcome again after a backoff (the
+                    # whole outbox's, for the mailbox's rate_limited), until
+                    # the deadline above.
                     LOG.info("welcome_retry", code=e.code)
+                    if e.code == "rate_limited":
+                        raise RateLimitedError(group.group_id, e.code) from None
                     raise TransientError(group.group_id, e.code) from None
                 LOG.info("welcome_not_sent", code=e.code)
                 self._welcome_failed(row, group, intent, approval)
@@ -2978,10 +3123,14 @@ class Engine:
         return True
 
     def _welcome_deadline(self, approval: dict[str, Any]) -> int:
-        """When the joiner stops waiting for its Welcome: its invite's
-        expiry plus the grace for a Welcome in flight (:meth:`expire`)."""
+        """The last moment to send the joiner its Welcome: the joiner stops
+        waiting at its invite's expiry plus the grace for a Welcome in flight
+        (:meth:`expire`), and the last one goes ``WELCOME_MARGIN_SECS``
+        before that."""
         invite = self.store.invite(str(approval["invite_id"]))
-        return 0 if invite is None else int(invite["expires_at"]) + JOIN_CLOSED_GRACE_SECS
+        if invite is None:
+            return 0
+        return int(invite["expires_at"]) + JOIN_CLOSED_GRACE_SECS - WELCOME_MARGIN_SECS
 
     def _welcome_failed(
         self, row: OutboxRow, group: GroupRow, intent: dict[str, Any], approval: dict[str, Any]
