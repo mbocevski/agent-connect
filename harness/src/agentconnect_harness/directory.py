@@ -22,7 +22,7 @@ from pathlib import Path
 
 import agentconnect_core as ac
 from agentconnect.config import DirectoryConfig
-from agentconnect_harness.relay import REPO, _newest, free_port
+from agentconnect_harness.relay import REPO, _newest, reserved_port
 
 READY_LINE = "directory listening"
 
@@ -75,24 +75,24 @@ def run_directory(relay_host: str, seed: int) -> Generator[DirectoryProcess]:
     key = ac.DirectoryKey._generate_for_testing(seed)
     public = base64.urlsafe_b64encode(key.public_key).rstrip(b"=").decode()
     for _ in range(5):
-        port = free_port()
-        env = {
-            **os.environ,
-            "AC_DIRECTORY_ADDR": f"127.0.0.1:{port}",
-            "AC_DIRECTORY_HOST": f"127.0.0.1:{port}",
-            "AC_DIRECTORY_DB": "memory:",
-            "AC_DIRECTORY_RELAYS": relay_host,
-            "AC_DIRECTORY_TOKEN_KEYS": public,
-            "RUST_LOG": "info",
-            "NO_COLOR": "1",
-        }
-        proc = subprocess.Popen(  # noqa: S603
-            [str(binary)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-        if proc.stdout is None:
-            msg = "no directory output pipe"
-            raise RuntimeError(msg)
-        ready = any(READY_LINE in line for line in proc.stdout)
+        with reserved_port() as port:
+            env = {
+                **os.environ,
+                "AC_DIRECTORY_ADDR": f"127.0.0.1:{port}",
+                "AC_DIRECTORY_HOST": f"127.0.0.1:{port}",
+                "AC_DIRECTORY_DB": "memory:",
+                "AC_DIRECTORY_RELAYS": relay_host,
+                "AC_DIRECTORY_TOKEN_KEYS": public,
+                "RUST_LOG": "info",
+                "NO_COLOR": "1",
+            }
+            proc = subprocess.Popen(  # noqa: S603
+                [str(binary)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+            if proc.stdout is None:
+                msg = "no directory output pipe"
+                raise RuntimeError(msg)
+            ready = any(READY_LINE in line for line in proc.stdout)
         if ready:
             threading.Thread(target=proc.stdout.read, daemon=True).start()
             try:
@@ -101,6 +101,6 @@ def run_directory(relay_host: str, seed: int) -> Generator[DirectoryProcess]:
                 proc.terminate()
                 proc.wait(timeout=10)
             return
-        proc.wait(timeout=10)  # port taken between probe and bind: retry
+        proc.wait(timeout=10)  # the directory failed to start: retry
     msg = "directory did not start"
     raise RuntimeError(msg)

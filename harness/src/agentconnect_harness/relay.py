@@ -42,10 +42,21 @@ def relay_binary() -> Path:
     return binary
 
 
-def free_port() -> int:
+@contextmanager
+def reserved_port() -> Generator[int]:
+    """A free loopback port, held until the block ends.
+
+    The socket that holds it is bound with ``SO_REUSEADDR`` and never
+    listens: a server that sets the option too (asyncio, uvicorn, tokio) can
+    bind and listen on the port inside the block, while the kernel gives it
+    to nobody who asks for port 0. Leave the block once the server listens.
+    A port probed and released instead can be taken by another xdist worker
+    before the server binds it.
+    """
     with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+        yield int(s.getsockname()[1])
 
 
 @dataclass
@@ -72,30 +83,30 @@ def run_relay(tmp: Path) -> Generator[RelayProcess]:
     """Start the relay and wait for its "listening" log line (no polling)."""
     binary = relay_binary()
     for _ in range(5):
-        port = free_port()
-        env = {
-            **os.environ,
-            "AC_RELAY_ADDR": f"127.0.0.1:{port}",
-            "AC_RELAY_HOST": f"127.0.0.1:{port}",
-            "AC_RELAY_DB": str(tmp / f"relay-{port}.db"),
-            "RUST_LOG": "info",
-            "NO_COLOR": "1",
-        }
-        proc = subprocess.Popen(  # noqa: S603
-            [str(binary)],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        if proc.stdout is None:
-            msg = "no relay output pipe"
-            raise RuntimeError(msg)
-        ready = False
-        for line in proc.stdout:
-            if READY_LINE in line:
-                ready = True
-                break
+        with reserved_port() as port:
+            env = {
+                **os.environ,
+                "AC_RELAY_ADDR": f"127.0.0.1:{port}",
+                "AC_RELAY_HOST": f"127.0.0.1:{port}",
+                "AC_RELAY_DB": str(tmp / f"relay-{port}.db"),
+                "RUST_LOG": "info",
+                "NO_COLOR": "1",
+            }
+            proc = subprocess.Popen(  # noqa: S603
+                [str(binary)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            if proc.stdout is None:
+                msg = "no relay output pipe"
+                raise RuntimeError(msg)
+            ready = False
+            for line in proc.stdout:
+                if READY_LINE in line:
+                    ready = True
+                    break
         if ready:
             # Keep draining output so the relay never blocks on a full pipe.
             threading.Thread(target=proc.stdout.read, daemon=True).start()
@@ -105,6 +116,6 @@ def run_relay(tmp: Path) -> Generator[RelayProcess]:
                 proc.terminate()
                 proc.wait(timeout=10)
             return
-        proc.wait(timeout=10)  # port taken between probe and bind: retry
+        proc.wait(timeout=10)  # the relay failed to start: retry
     msg = "relay did not start"
     raise RuntimeError(msg)
