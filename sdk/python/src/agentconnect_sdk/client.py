@@ -93,14 +93,38 @@ def _parts(content: str | Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [dict(p) for p in content]
 
 
-def _agent_message(group_id: str, content: str | Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """An A2A v1.0 ``Message`` from this agent."""
-    return {
+def _agent_message(
+    group_id: str,
+    content: str | Sequence[Mapping[str, Any]],
+    *,
+    task_id: str | None = None,
+    context_id: str | None = None,
+) -> dict[str, Any]:
+    """An A2A v1.0 ``Message`` from this agent. With ``task_id`` it is a
+    follow-up on that task (A2A: a message that continues a task carries
+    its ``taskId`` and ``contextId``)."""
+    message = {
         "messageId": secrets.token_hex(16),
-        "contextId": group_id,
+        "contextId": context_id or group_id,
         "role": "ROLE_AGENT",
         "parts": _parts(content),
     }
+    if task_id is not None:
+        if not isinstance(task_id, str) or not task_id:
+            raise AgentConnectError("bad_request", "task_id must be a non-empty string", 400)
+        message["taskId"] = task_id
+    return message
+
+
+def _task_of(msg: Message) -> tuple[str, str] | None:
+    """The task a task status or artifact update is about: its ``taskId``
+    and ``contextId``. ``None`` for any other message."""
+    if msg.event not in ("task_status", "task_artifact"):
+        return None
+    task_id, context_id = msg.a2a.get("taskId"), msg.a2a.get("contextId")
+    if not isinstance(task_id, str) or not task_id:
+        return None
+    return task_id, context_id if isinstance(context_id, str) and context_id else ""
 
 
 class Group:
@@ -131,13 +155,17 @@ class Group:
         to: Sequence[str] = ("*",),
         reply_to: Sequence[str] = (),
         instance: str | None = None,
+        task_id: str | None = None,
     ) -> str:
         """Send an A2A message (text, or a list of ``text``/``data`` parts).
         Returns its ``msg_id``. In a ``mention`` group only the identities in
         ``to`` are triggered. ``instance`` (an instance id, 16 lowercase hex)
         narrows that to one instance of them (SPEC section 9.4); every
-        instance still receives the message."""
-        body = _agent_message(self.id, content)
+        instance still receives the message. ``task_id`` makes it a
+        follow-up on that task of a peer's agent, such as the answer to an
+        ``input-required`` status: the peer's A2A adapter continues the task
+        if its requester sends it (``reply`` does this for you)."""
+        body = _agent_message(self.id, content, task_id=task_id)
         return await self._post("a2a.message", body, to, reply_to, instance=instance)
 
     async def reply(self, msg: Message, content: str | Sequence[Mapping[str, Any]]) -> str:
@@ -146,8 +174,16 @@ class Group:
         instance hint (SPEC section 9.4), so everyone sees the answer and only
         the instance that asked is triggered. ``reply_to`` carries
         ``msg.msg_id``, so the runtime sets ``hop`` (SPEC section 10.3) and
-        the loop guard can stop a runaway exchange."""
-        body = _agent_message(self.id, content)
+        the loop guard can stop a runaway exchange. An answer to a task
+        status or artifact update (``msg.event`` ``task_status`` or
+        ``task_artifact``) carries that task's ``taskId`` and ``contextId``,
+        so it continues the task, as the answer to ``input-required`` must;
+        an answer to a plain message names no task."""
+        task = _task_of(msg)
+        if task is None:
+            body = _agent_message(self.id, content)
+        else:
+            body = _agent_message(self.id, content, task_id=task[0], context_id=task[1] or None)
         return await self._answer(msg, "a2a.message", body)
 
     async def reply_status(
