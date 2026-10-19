@@ -680,6 +680,9 @@ class Engine:
                     self.client.discard_pending_commit(gid)
                     LOG.info("discarded_unsent_commit", group=log.hid(group.group_id))
             self.groups.recover(group)
+        # Own floor grants a crash left pending although their send is over;
+        # their events are recorded, and the renotify after the replay tells them.
+        self.floor.reconcile()
         # A join recorded as done whose secret a crash left in the keystore.
         self._forget_join_secrets()
 
@@ -2529,15 +2532,17 @@ class Engine:
                 state = "failed"
             backoff.reset()
             msg_id = row.payload.get("msg_id")
-            self.store.update_outbox(row.seq, state=state)
+            event = None
+            with self.store.tx():
+                self.store.update_outbox(row.seq, state=state)
+                if state == "failed" and row.kind == "app" and row.payload.get("floor"):
+                    # Its write was taken when it was sealed: take it back,
+                    # in the same transaction (FloorService.reconcile).
+                    event = self.floor.unsent(str(row.group_id), str(msg_id))
+            if event is not None:
+                await self._notify(event)
             code = self._fail_codes.pop(row.seq, "failed")
             if state == "failed" and row.group_id is not None:
-                if row.kind == "app" and row.payload.get("floor"):
-                    # Its write was taken when it was sealed: take it back.
-                    with self.store.tx():
-                        event = self.floor.unsent(row.group_id, str(msg_id))
-                    if event is not None:
-                        await self._notify(event)
                 # Tell the caller: it holds a msg_id (or an intent) that will
                 # never be delivered.
                 if row.kind == "app":

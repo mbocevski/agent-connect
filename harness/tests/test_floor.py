@@ -7,6 +7,7 @@ switch to ``mention`` counts identities and respects ``floor_pinned``."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import random
 from collections.abc import Awaitable, Callable
@@ -749,3 +750,114 @@ async def test_a_resealed_grant_replaces_its_write_and_a_failed_one_is_taken_bac
     await b.adapter.wait_for(lambda: bool(b.adapter.of_type("send_failed")), WAIT)
     assert await agreed([a, b, c], gid) == a.me
     assert [e["holder"] for e in data(b, "floor_changed")][-2:] == [c.me, a.me]
+
+
+# -- copies carry only what went out ----------------------------------------------------------
+
+
+def hold_floor_send(node: Node) -> list[str]:
+    """Hold the node's next application send in the proxy, unforwarded;
+    returns where its msg_id goes."""
+    held: list[str] = []
+
+    def hold(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if not held and frame.get("t") == "send" and env.get("kind") == "application":
+            held.append(str(env["msg_id"]))
+            return []
+        return [frame]
+
+    node.proxy.client_filters.append(hold)
+    return held
+
+
+def hold_floor_answer(node: Node) -> tuple[list[str], list[dict[str, Any]]]:
+    """Forward the node's next application send, but hold the relay's answer
+    to it: the others get the message, the node doesn't hear it was taken."""
+    target: list[str] = []
+    answers: list[dict[str, Any]] = []
+
+    def client(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if not target and frame.get("t") == "send" and env.get("kind") == "application":
+            target.append(str(env["msg_id"]))
+        return [frame]
+
+    def server(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        answer = frame.get("t") == "accepted" and target and frame.get("msg_id") == target[0]
+        if answer and not answers:
+            answers.append(frame)
+            return []
+        return [frame]
+
+    node.proxy.client_filters.append(client)
+    node.proxy.server_filters.append(server)
+    return target, answers
+
+
+async def until_true(predicate: Callable[[], bool]) -> None:
+    """Poll what no runtime announces (the proxy's record)."""
+
+    async def loop() -> None:
+        while not predicate():  # noqa: ASYNC110 - nothing to wait on
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(loop(), WAIT)
+
+
+async def test_a_copy_never_carries_a_grant_the_sender_takes_back(
+    cluster: Cluster, group: GroupFixture
+) -> None:
+    """The copier b seals a grant to c (taken, pending) and the relay hasn't
+    answered when b processes the Add of d. The copy b sends d carries the
+    value without that pending grant. The relay then refuses the grant for
+    good; b takes it back, and every member, d included, keeps a."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me)
+    await AgentApi(b.daemon).grant_floor(gid, a.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == a.me)
+    held = hold_floor_send(b)
+    await AgentApi(b.daemon).grant_floor(gid, c.me)
+    await until_true(lambda: bool(held) and holder(b, gid) == c.me)
+    epoch = b.epoch(gid)
+    d = await cluster.node("d")
+    invite = await a.daemon.create_invite(gid)
+    await d.daemon.accept_invite(invite["url"])
+    await b.wait(lambda: b.epoch(gid) == epoch + 1)
+    await b.wait(lambda: len(b.daemon.store.outbox()) >= 2)
+    await b.proxy.inject({"t": "error", "msg_id": held[0], "code": "not_member", "detail": "x"})
+    await d.wait(lambda: d.daemon.store.group(gid) is not None and holder(d, gid) == a.me)
+    await b.adapter.wait_for(lambda: bool(b.adapter.of_type("send_failed")), WAIT)
+    await mark(a, [b, c, d], gid, "t1")
+    assert await agreed([a, b, c, d], gid) == a.me
+    await converged([a, b, c, d], gid)
+
+
+async def test_a_grant_confirmed_after_a_join_is_copied_to_the_newcomer(
+    cluster: Cluster, group: GroupFixture
+) -> None:
+    """The relay took b's grant to c in epoch E and the others hold c, but
+    b hears it only after the Add of d (E+1). b's copy to d carried the
+    settled value, a; once the grant is confirmed it copies c to d, which
+    can't decrypt E."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me)
+    await AgentApi(b.daemon).grant_floor(gid, a.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == a.me)
+    target, answers = hold_floor_answer(b)
+    await AgentApi(b.daemon).grant_floor(gid, c.me)
+    await a.wait(lambda: holder(a, gid) == holder(c, gid) == c.me)
+    await until_true(lambda: bool(answers))
+    epoch = b.epoch(gid)
+    d = await cluster.node("d")
+    invite = await a.daemon.create_invite(gid)
+    await d.daemon.accept_invite(invite["url"])
+    await b.wait(lambda: b.epoch(gid) == epoch + 1)
+    await b.wait(lambda: len(b.daemon.store.outbox()) >= 2)
+    await d.wait(lambda: d.daemon.store.group(gid) is not None)
+    assert holder(d, gid) is None  # the copy waits behind the grant
+    await b.proxy.inject(answers[0])
+    await d.wait(lambda: holder(d, gid) == c.me)
+    assert target
+    assert await agreed([a, b, c, d], gid) == c.me
+    await converged([a, b, c, d], gid)

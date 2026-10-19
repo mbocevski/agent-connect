@@ -1344,7 +1344,10 @@ writes in key order, starting from null:
   receive writes keyed before `e` (a grant from the epoch before, ordered
   by the relay after the commit), the copier SHOULD send the new instances
   a fresh copy each time such a write changes its holder, null included:
-  they can't decrypt those writes. A copy of null names the key of the
+  they can't decrypt those writes. A copy leaves out the copier's own
+  grants that the relay hasn't taken yet, since a send that fails takes
+  its grant back; when the relay takes one sealed before `e`, the copier
+  copies again. A copy of null names the key of the
   reset or drop that made it (`sender` `""`, `counter` 0). A copy is judged
   as a grant from its own sender and epoch, and is written at the copied
   key, which can't be from a later epoch than the copy's; a member that

@@ -1901,6 +1901,15 @@ class Store:
         )
         return [OutboxRow(r[0], r[1], r[2], json.loads(r[3]), r[4]) for r in rows]
 
+    def outbox_state_of(self, msg_id: str) -> str | None:
+        """The state of the outbox row that sends ``msg_id``, if one is kept."""
+        row = self._one(
+            "SELECT state FROM outbox WHERE json_extract(payload, '$.msg_id') = ? "
+            "ORDER BY seq DESC LIMIT 1",
+            msg_id,
+        )
+        return None if row is None else str(row[0])
+
     def update_outbox(
         self, seq: int, payload: dict[str, Any] | None = None, state: str | None = None
     ) -> None:

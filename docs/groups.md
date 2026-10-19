@@ -425,7 +425,10 @@ place in the order, so existing members that have it already change
 nothing, and a join never moves the floor. A grant from the epoch before
 the join that the relay orders after it (a member with a slow link) is one
 the newcomers can't decrypt: when it changes the holder, the same instance
-sends them a new copy, also when the result is nobody. The copy is the
+sends them a new copy, also when the result is nobody. A copy leaves out
+the copier's own grants the relay hasn't taken yet: a send the relay
+refuses for good takes its grant back, and a grant the relay takes after
+the join is copied then. The copy is the
 daemon's own control: hop 0, replying to nothing. On a newcomer, the `by`
 of a `floor_changed` that comes from a copy is what the copier says. The
 holder and the grants it was computed from are kept in the daemon's

@@ -34,8 +34,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   copy of the current value, with its key, from the lowest instance of the
   effective moderator (or the owner) that was in the group before, and a
   new copy when a grant from the epoch before its join, which it can't
-  decrypt, changes the value; copies never move the floor for existing
-  members, and go out at hop 0. New event `floor_changed` (`mode`,
+  decrypt, changes the value; copies leave out the copier's own grants the
+  relay hasn't taken yet, never move the floor for existing members, and
+  go out at hop 0. A refused grant is taken back in the same transaction
+  that marks its send failed, and at start any left pending by an earlier
+  crash is reconciled with its outbox row. New event `floor_changed` (`mode`,
   `moderator`, `effective_moderator`, `holder`, `by`, `reason`: `grant`,
   `policy`, `reset` or `moderator`); `role_changed` also reports the
   moderator (`moderator_from`, `moderator_to`). `GET /v0/groups/{gid}` and

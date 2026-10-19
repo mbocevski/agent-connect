@@ -647,3 +647,71 @@ async def test_an_own_grant_survives_a_crash_after_the_relay_took_it(group: Grou
     assert {holder_of(n, gid) for n in (a, b, c)} == {a.me}
     _, state = b.daemon.store.floor(gid) or (None, {})
     assert state["pending"] == {}
+
+
+async def _floor_of(node: Node, gid: str) -> dict[str, Any]:
+    row = node.daemon.store.floor(gid)
+    assert row is not None
+    return row[1]
+
+
+@pytest.mark.hosts("daemon")
+async def test_a_failed_grant_is_taken_back_with_its_row_after_a_crash(group: GroupFixture) -> None:
+    """The row of b's refused grant is marked failed and the grant taken
+    back in one transaction: a crash in between leaves both as they were,
+    so b sends it again after the restart and every member agrees. Old
+    epochs then fold away as usual."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, a.me)
+    await until(lambda: holder_of(a, gid) == holder_of(b, gid) == holder_of(c, gid) == a.me)
+    fired: list[str] = []
+
+    def crashing(_group_id: str, msg_id: str) -> None:
+        fired.append(msg_id)
+        raise SimulatedCrash
+
+    b.daemon.floor.unsent = crashing  # ty: ignore[invalid-assignment]
+    b.proxy.fail_next("send", "not_member", kind="application")
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: bool(fired))
+    await b.restart()
+    await b.connected()
+    for turns in (10, 11, 12):
+        assert a.daemon.change_policy(gid, {"max_agent_turns": turns}) == "committing"
+        await until(lambda: a.daemon.store.outbox() == [])
+    await settled([a, b, c], gid)
+    assert {holder_of(n, gid) for n in (a, b, c)} == {c.me}
+    state = await _floor_of(b, gid)
+    assert state["pending"] == {}
+    epoch = b.epoch(gid)
+    assert sorted(int(e) for e in state["facts"]) == [epoch - 1, epoch]
+
+
+@pytest.mark.hosts("daemon")
+async def test_a_pending_grant_whose_send_failed_is_taken_back_at_start(
+    group: GroupFixture,
+) -> None:
+    """A database an earlier build left with a failed row and its grant
+    still pending: at start the grant is taken back, and old epochs fold."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, a.me)
+    await until(lambda: holder_of(a, gid) == holder_of(b, gid) == holder_of(c, gid) == a.me)
+    b.daemon.floor.unsent = lambda _gid, _msg_id: None  # ty: ignore[invalid-assignment]
+    b.proxy.fail_next("send", "not_member", kind="application")
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: bool(b.adapter.of_type("send_failed")))
+    assert holder_of(b, gid) == c.me  # the earlier build's state
+    await b.restart()
+    await b.connected()
+    assert holder_of(b, gid) == a.me
+    for turns in (10, 11, 12):
+        assert a.daemon.change_policy(gid, {"max_agent_turns": turns}) == "committing"
+        await until(lambda: a.daemon.store.outbox() == [])
+    await settled([a, b, c], gid)
+    assert {holder_of(n, gid) for n in (a, b, c)} == {a.me}
+    state = await _floor_of(b, gid)
+    assert state["pending"] == {}
+    epoch = b.epoch(gid)
+    assert sorted(int(e) for e in state["facts"]) == [epoch - 1, epoch]

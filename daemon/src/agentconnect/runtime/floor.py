@@ -235,6 +235,15 @@ class FloorService:
         state["source"] = None if source is None else list(source)
         return holder
 
+    def _settled(self, group_id: str, state: dict[str, Any]) -> tuple[str | None, Key | None]:
+        """The register without this instance's own pending grants, which may
+        still be taken back: what a copy carries, so a copy never spreads a
+        grant that never went out."""
+        pending = {tuple(k) for k in state["pending"].values()}
+        base = state["base"] or {"holder": None, "source": None}
+        writes = [w for w in self._engine.store.floor_writes(group_id) if w[:4] not in pending]
+        return fold(base["holder"], _key(base["source"]), writes)
+
     def _merge(
         self, group_id: str, state: dict[str, Any], key: Key, kind: str, value: str | None
     ) -> str | None:
@@ -306,22 +315,28 @@ class FloorService:
             return None
         return floor_write(self._facts(group_id, state, epoch), epoch, sender, instance, shaped)
 
-    def _changed(
+    def _recopy(
         self,
         group_id: str,
         state: dict[str, Any],
-        before: str | None,
-        holder: str | None,
+        settled: tuple[str | None, Key | None],
         key: Key,
+    ) -> None:
+        """After a write at ``key`` that was ``settled`` before: if the
+        settled value changed, tell the instances that joined in a later
+        epoch, which can't decrypt the write, if this instance is the one
+        that copies to them (SPEC 9.3)."""
+        now = self._settled(group_id, state)
+        if now == settled:
+            return
+        for epoch, join in sorted(state["joins"].items()):
+            if key[0] < int(epoch) and join["copier"]:
+                self._send_copy(group_id, now, join["identities"])
+
+    def _changed(
+        self, group_id: str, state: dict[str, Any], holder: str | None, key: Key
     ) -> dict[str, Any] | None:
-        """After a write at ``key`` moved the holder from ``before``: tell
-        the instances that joined in a later epoch, which can't decrypt the
-        write, if this instance is the one that copies to them (SPEC 9.3),
-        and return the ``floor_changed`` data."""
-        if holder != before:
-            for epoch, join in sorted(state["joins"].items()):
-                if key[0] < int(epoch) and join["copier"]:
-                    self._send_copy(group_id, holder, state, join["identities"])
+        """The ``floor_changed`` data after a grant at ``key``."""
         by = key[2] or self._engine.me
         return self._report(state, self._now_facts(group_id), holder, by, "grant")
 
@@ -331,13 +346,15 @@ class FloorService:
         """Take a received grant (inside its message's transaction), whatever
         the local delivery policy decided for the message: a rate or a size
         limit is the receiver's own, and the register must not depend on it."""
-        before, state = self._load(group_id)
+        _, state = self._load(group_id)
         write = self._judge(group_id, state, epoch, sender, instance, inner)
         if write is None:
             return
         key, value = write
+        settled = self._settled(group_id, state)
         holder = self._merge(group_id, state, key, "grant", value)
-        data = self._changed(group_id, state, before, holder, key)
+        self._recopy(group_id, state, settled, key)
+        data = self._changed(group_id, state, holder, key)
         self._engine.store.set_floor(group_id, holder, state)
         if data is not None:
             LOG.info("floor_changed", group=log.hid(group_id), reason="grant")
@@ -355,7 +372,7 @@ class FloorService:
         body = payload["inner"]["body"]
         if "copy" in body:
             return None  # a copy of what this instance holds: nothing to take
-        before, state = self._load(group_id)
+        _, state = self._load(group_id)
         msg_id = str(payload["msg_id"])
         self._take_back(group_id, state, msg_id)
         body["counter"] = min(int(state["counters"].get(str(epoch), 0)) + 1, MAX_FLOOR_COUNTER)
@@ -368,7 +385,7 @@ class FloorService:
             holder = self._merge(group_id, state, key, "grant", value)
         else:
             holder = self._fold(group_id, state)  # a reseal may have taken one back
-        data = self._changed(group_id, state, before, holder, key)
+        data = self._changed(group_id, state, holder, key)
         e.store.set_floor(group_id, holder, state)
         if data is None:
             return None
@@ -380,13 +397,22 @@ class FloorService:
             self._engine.store.delete_floor_write(group_id, key)
 
     def confirmed(self, group_id: str, msg_id: str) -> None:
-        """The relay took this instance's ``control.floor``: it is final."""
-        row = self._engine.store.floor(group_id)
-        if row is not None and msg_id in row[1].get("pending", {}):
-            holder, state = row
-            key = state["pending"].pop(msg_id)
-            self._prune(group_id, state, int(key[0]))
-            self._engine.store.set_floor(group_id, holder, state)
+        """The relay took this instance's ``control.floor``: it is final, and
+        the instances that joined since it was sealed, which can't decrypt
+        it, get a copy if it changes the settled value."""
+        e = self._engine
+        if e.store.floor(group_id) is None:
+            return
+        with e.store.tx():
+            holder, state = self._load(group_id)
+            key = _key(state["pending"].get(msg_id))
+            if key is None:
+                return
+            settled = self._settled(group_id, state)
+            state["pending"].pop(msg_id)
+            self._prune(group_id, state, key[0])
+            self._recopy(group_id, state, settled, key)
+            e.store.set_floor(group_id, holder, state)
 
     def unsent(self, group_id: str, msg_id: str) -> Any:
         """A sealed ``control.floor`` of this instance will never go out: take
@@ -394,17 +420,38 @@ class FloorService:
         e = self._engine
         if e.store.group(group_id) is None:
             return None
-        before, state = self._load(group_id)
+        _, state = self._load(group_id)
         key = _key(state["pending"].get(msg_id))
         if key is None:
             return None
-        self._take_back(group_id, state, msg_id)
+        self._take_back(group_id, state, msg_id)  # copies never carried it
         holder = self._fold(group_id, state)
-        data = self._changed(group_id, state, before, holder, key)
+        data = self._changed(group_id, state, holder, key)
         e.store.set_floor(group_id, holder, state)
         if data is None:
             return None
         return e._record(group_id, "floor_changed", f"floor_unsent/{msg_id}", data)
+
+    def reconcile(self) -> list[Any]:
+        """At start: a pending own grant whose outbox row failed, or is gone,
+        never went out, so take it back; one whose row is done went out.
+        Returns the events to tell."""
+        e = self._engine
+        events = []
+        for group in e.store.groups():
+            row = e.store.floor(group.group_id)
+            if group.status != "active" or row is None:
+                continue
+            for msg_id in list(row[1].get("pending", {})):
+                state = e.store.outbox_state_of(msg_id)
+                if state == "done":
+                    self.confirmed(group.group_id, msg_id)
+                elif state in (None, "failed"):
+                    with e.store.tx():
+                        event = self.unsent(group.group_id, msg_id)
+                    if event is not None:
+                        events.append(event)
+        return events
 
     def grant(self, group_id: str, holder: str | None, *, origin: str) -> dict[str, Any]:
         """Grant the floor to ``holder``, or release it (``None``): send
@@ -465,8 +512,9 @@ class FloorService:
         e.store.set_floor(group_id, holder, state)
         if data is not None:
             await e.emit(group_id, "floor_changed", **data)
-        if joined and state["joins"][str(epoch)]["copier"] and holder is not None:
-            self._send_copy(group_id, holder, state, joined)
+        settled = self._settled(group_id, state)
+        if joined and state["joins"][str(epoch)]["copier"] and settled[0] is not None:
+            self._send_copy(group_id, settled, joined)
 
     @staticmethod
     def _floor_changed(
@@ -522,11 +570,12 @@ class FloorService:
         return lowest is not None and str(lowest["mailbox_id"]) == e.mailbox
 
     def _send_copy(
-        self, group_id: str, holder: str | None, state: dict[str, Any], to: list[str]
+        self, group_id: str, settled: tuple[str | None, Key | None], to: list[str]
     ) -> None:
-        """Send ``to`` the current value with the key of the write that set
-        it: the daemon's own control, hop 0, replying to nothing."""
-        source = _key(state["source"])
+        """Send ``to`` the settled value (:meth:`_settled`) with the key of the
+        write that set it: the daemon's own control, hop 0, replying to
+        nothing."""
+        holder, source = settled
         if source is None:
             return
         epoch, counter, sender, instance = source
