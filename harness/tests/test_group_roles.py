@@ -129,7 +129,14 @@ async def test_the_lifecycle_converges_after_every_step(group: GroupFixture, siz
     await converged(nodes, gid)
     for n in nodes:
         assert data(n, "role_changed") == [
-            {"identity": b.me, "from": "member", "to": "admin", "by": a.me}
+            {
+                "identity": b.me,
+                "from": "member",
+                "to": "admin",
+                "moderator_from": False,
+                "moderator_to": False,
+                "by": a.me,
+            }
         ]
     assert a.daemon.set_role(gid, b.me, "admin") == "unchanged"
     assert a.daemon.set_policy(gid, remove="admins") == "committing"
@@ -425,6 +432,8 @@ async def test_a_departed_admin_loses_the_role(cluster: Cluster, cleanup: bool) 
         "identity": b.me,
         "from": "admin",
         "to": "member",
+        "moderator_from": True,
+        "moderator_to": False,
         "by": a.me,
     }
     assert data(c, "policy_changed")[-1]["by"] == a.me
@@ -511,7 +520,13 @@ async def test_the_view_shows_the_policy_the_floor_and_new_instances(cluster: Cl
         "max_members": 50,
         "max_agent_turns": 20,
     }
-    assert info["floor"] == {"mode": "mention", "pinned": True, "moderator": None}
+    assert info["floor"] == {
+        "mode": "mention",
+        "pinned": True,
+        "moderator": None,
+        "effective_moderator": a.me,
+        "holder": None,
+    }
     bob = next(m for m in info["members"] if m["identity"] == b.me)
     assert bob["verified"] is True
     first = b.daemon.instance.instance_id_hex

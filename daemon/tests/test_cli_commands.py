@@ -70,7 +70,13 @@ def group_info(*, verified: bool = False, members: int = 2, epoch: int = 1) -> d
             "max_members": 50,
             "max_agent_turns": 20,
         },
-        "floor": {"mode": "free", "pinned": False, "moderator": None},
+        "floor": {
+            "mode": "free",
+            "pinned": False,
+            "moderator": None,
+            "effective_moderator": ME,
+            "holder": None,
+        },
         "pending_leaves": [],
     }
 
@@ -448,13 +454,20 @@ def test_groups_show_flags_new_instances_pending_leaves_and_the_floor(fake: Fake
     bob["instances"].append({**bob["instances"][0], "instance_id": "2" * 16, "joined_epoch": 3})
     bob["instances_since_verified"] = ["2" * 16]
     info["pending_leaves"] = [{"identity": BOB, "instance_id": "1" * 16}]
-    info["floor"] = {"mode": "moderated", "pinned": True, "moderator": BOB}
+    info["floor"] = {
+        "mode": "moderated",
+        "pinned": True,
+        "moderator": BOB,
+        "effective_moderator": BOB,
+        "holder": ME,
+    }
     fake.routes[f"GET /v0/groups/{GID}"] = info
     out = fake.run("groups", "show", GID).stdout
     assert f"instance {'2' * 16}  leaf 1  since epoch 3  NEW since you verified" in out
     assert "NEW since you verified" not in out.split(f"instance {'1' * 16}")[1].split("\n")[0]
     assert f"Leaving   {BOB} instance {'1' * 16}" in out
     assert f"Floor     moderated, pinned, moderator {BOB}" in out
+    assert f"  triggered: the moderator {BOB} and the holder {ME}" in out
     _, view = fake.json("groups", "show", GID)
     assert conforms(view, SCHEMAS["groups show"])
     assert [i["new_since_verified"] for i in view["members"][1]["instances"]] == [False, True]
@@ -903,6 +916,22 @@ def test_group_create_with_a_policy_uses_the_human_token(fake: Fake) -> None:
         True,
         {"name": "Ops", "purpose": "Ops", "policy": policy},
     )
+
+
+def test_group_floor_grants_and_releases_with_the_agent_token(fake: Fake) -> None:
+    path = f"POST /v0/groups/{GID}/floor"
+    fake.routes[path] = {"status": "granted", "holder": BOB, "msg_id": "m1"}
+    code, out = fake.json("group", "floor", GID, BOB)
+    assert code == 0
+    assert conforms(out, SCHEMAS["group floor"])
+    assert fake.posts("/floor")[-1] == (False, {"holder": BOB})
+    assert f"Floor granted to {BOB}." in fake.run("group", "floor", GID, BOB).stdout
+    fake.routes[path] = {"status": "granted", "holder": None, "msg_id": "m2"}
+    assert "Floor released" in fake.run("group", "floor", GID, "--release").stdout
+    assert fake.posts("/floor")[-1] == (False, {"holder": None})
+    # One of the two, never both or neither.
+    assert fake.json("group", "floor", GID)[0] == 2
+    assert fake.json("group", "floor", GID, BOB, "--release")[0] == 2
 
 
 def test_the_group_commands_say_who_they_are_for() -> None:

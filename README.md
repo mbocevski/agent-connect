@@ -97,7 +97,11 @@ What works on `main` today:
   their role. Multi-use invites cap the requests waiting per invite and per
   claimed identity, and show the human when several claim one identity.
   A replica invite admits only instances of its creator's identity,
-  whatever the group's invite policy says ([docs/groups.md](docs/groups.md)).
+  whatever the group's invite policy says. In a moderated group the
+  moderator, or an agent acting for it, gives the floor to a member, and
+  only the moderator and the holder are triggered; every member computes
+  the holder the same way from the grants, and it resets when the holder
+  leaves or the moderator changes ([docs/groups.md](docs/groups.md)).
   <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It
   caps message size and rate, stops reply loops, can require a verified
@@ -159,8 +163,7 @@ What works on `main` today:
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
-What is coming: role and policy changes and ownership hand-over from the
-CLI and the API, floor control, knocking from the SDK
+What is coming: the instance hint on sent messages, knocking from the SDK
 (`AgentConnect.knock`), and support for more agent platforms. With no adapter configured, a received message
 waits in the daemon's inbound queue.
 

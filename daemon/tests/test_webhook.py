@@ -93,6 +93,7 @@ async def test_a_2xx_response_acks_and_the_body_has_the_framing(
         "purpose": "Deploys",
         "epoch": 3,
         "floor": "free",
+        "floor_holder": None,
     }
     assert body["sender"] == {
         "identity": "ac:v0:peer",

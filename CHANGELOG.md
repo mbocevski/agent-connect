@@ -10,6 +10,46 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Runtime and CLI: floor control in `moderated` groups (SPEC 9.3,
+  docs/groups.md). The effective moderator (`floor_moderator` while it is a
+  member, else the owner) or the owner gives the floor to a member, or
+  releases it, with `POST /v0/groups/{gid}/floor` (`{"holder": … | null}`,
+  either token; `403 not_permitted` for anyone else, `409 not_moderated`
+  outside `moderated`) or `agentconnect group floor <group> <identity> |
+  --release`; the floor mode and the moderator stay human-only policy.
+  Only the instances of the effective moderator and of the holder are
+  triggered. Every member computes the holder the same way, from the same
+  grants in any order: a grant (`control.floor{holder, counter}`, the
+  counter starting again at each epoch, at most 2^32) is judged on the
+  floor facts of the epoch it was sent in, and the grant with the greatest
+  (epoch, counter, sender, instance) wins. A valid grant moves the floor
+  whatever the receiver's own rates decide for the message. The sender
+  takes its grant as it seals it, in the same transaction, so a crash
+  after the relay took it loses nothing. A commit that changes `floor` or
+  `floor_moderator`, or leaves the holder with no instance, resets it with
+  a write no earlier grant can beat. Grants that don't count are dropped
+  silently (`floor_ignored` in the audit log); a counter above 2^32 is
+  malformed. `control.floor` can't be sent as a plain message, and an
+  agent's grants count against its send rate. A member that joins gets a
+  copy of the current value, with its key, from the lowest instance of the
+  effective moderator (or the owner) that was in the group before, and a
+  new copy when a grant from the epoch before its join, which it can't
+  decrypt, changes the value. A copy is a snapshot for the instances that
+  joined in its epoch, numbered per join (`copy.join`, `copy.seq`): the
+  latest replaces the earlier ones, and every other member ignores copies.
+  Copies leave out the copier's own grants the relay hasn't taken yet, and
+  go out at hop 0. A refused grant is taken back in the same transaction
+  that marks its send failed, and at start any left pending by an earlier
+  crash is reconciled with its outbox row. New event `floor_changed` (`mode`,
+  `moderator`, `effective_moderator`, `holder`, `by`, `reason`: `grant`,
+  `policy`, `reset` or `moderator`); `role_changed` also reports the
+  moderator (`moderator_from`, `moderator_to`). `GET /v0/groups/{gid}` and
+  `groups show` add the effective moderator and the holder, and the
+  webhook, SSE and SDK group objects `floor_holder`. The loop guard still
+  counts every agent turn between the moderator and the holder; a grant
+  neither triggers anyone nor resets it. A journal entry that fails to
+  replay no longer stops the entries after it or the renotify of events.
+  The harness's `converged` compares the floor holder too.
 - CLI and runtime: replica provisioning (docs/cli.md, docs/groups.md).
   `agentconnect identity export --out FILE` writes the identity key into a
   new 0600 file, encrypted (ChaCha20-Poly1305) under a fresh random code
@@ -800,9 +840,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   Admins may change `floor_pinned` with the floor. `moderated` mode gets
   floor control: the effective moderator (`floor_moderator` while it is a
   member, otherwise the owner) or the owner grants the floor with
-  `control.floor`, ordered by `seq`, and each instance keeps the holder,
-  which resets when it has no instance left or a commit changes `floor` or
-  `floor_moderator`. A leaver sends `control.leave` before its self-Remove
+  `control.floor`. Each grant carries a counter that starts again at each
+  epoch and is judged on the floor facts of the epoch it was sent in, and
+  the holder is the grant with the greatest (epoch, counter, sender,
+  instance), so members that saw the same grants agree; a commit that
+  changes `floor` or `floor_moderator`, or leaves the holder with no
+  instance, resets it. A leaver sends `control.leave` before its self-Remove
   proposal, and membership changes only with the commit. Task replies
   should name the requesting instance in `body.metadata.instance`. An
   owner instance should drop departed identities from `admins` and

@@ -39,7 +39,9 @@ HUMAN = {
     "POST /v0/listing/publish",
 }
 # Either token. `POST /v0/groups` and `/policy` take the agent token only for
-# defaults and raising require_verified (test_api_shapes.py runs that).
+# defaults and raising require_verified (test_api_shapes.py runs that). A floor
+# grant is the effective moderator's or the owner's (SPEC 9.3), agent or human;
+# the floor mode and the moderator are policy, so the human's.
 EITHER = {
     "GET /v0/status",
     "GET /v0/groups",
@@ -51,6 +53,7 @@ EITHER = {
     "POST /v0/invites/accept",
     "POST /v0/groups/{gid}/policy",
     "POST /v0/groups/{gid}/messages",
+    "POST /v0/groups/{gid}/floor",
     "POST /v0/groups/{gid}/leave",
     "GET /v0/approvals",
     "GET /v0/groups/{gid}/safety",
@@ -110,6 +113,22 @@ def test_the_sdk_changes_no_role_or_policy() -> None:
 def test_no_mcp_tool_changes_a_role_or_the_policy() -> None:
     names = [t.name for t in TOOLS]
     assert not [n for n in names if any(w in n for w in (*GOVERNING, *ROLES_AND_POLICY))]
+
+
+def test_the_agent_grants_the_floor_but_never_sets_its_mode_or_moderator() -> None:
+    names = [n for n, _ in inspect.getmembers(AgentApi) if not n.startswith("__")]
+    assert [n for n in names if "floor" in n or "moderat" in n] == ["grant_floor"]
+    assert list(inspect.signature(AgentApi.grant_floor).parameters) == [
+        "self",
+        "group_id",
+        "holder",
+    ]
+    mcp = [t.name for t in TOOLS]
+    assert not [n for n in mcp if "floor" in n or "moderat" in n]
+    public = [getattr(agentconnect_sdk, n) for n in agentconnect_sdk.__all__]
+    for obj in (*public, agentconnect_sdk.Group, embedded.EmbeddedHost):
+        names = [n for n, _ in inspect.getmembers(obj) if not n.startswith("_")]
+        assert not [n for n in names if "moderat" in n or n.startswith("set_floor")], obj
 
 
 PROVISIONING = ("export", "import", "provision", "replica", "identity_key")

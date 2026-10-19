@@ -104,8 +104,18 @@ What the policy checks, in order:
    (`deliver_as_context`, reason `not_content`): they never trigger the
    agent, the SDK shows no text for them, and a card is surfaced only as a
    card (`msg.card`). Your agent can't send them either: the daemon sends
-   its card and the loop-guard pauses itself, and the other controls need
-   the human token.
+   its card and the loop-guard pauses itself, a floor grant goes out only
+   through the grant route, which checks the role first, and the other
+   controls need the human token. An agent's floor grants count against
+   its send rate. A received `control.floor` counts only if, in the epoch
+   it was sent in, the group was `moderated`, the sender was the effective
+   moderator or the owner and the holder it names was a member; any other
+   is dropped as `floor_ignored`, which is not a violation (an honest
+   moderator's grant can cross a policy change in flight). A counter
+   outside 0 to 2^32 is `malformed`. One that counts moves the floor even
+   when the rates drop the message: the rates decide what reaches the
+   agent and what counts against the sender, not who holds the floor, so
+   your limits can't split it from the other members'.
 4. **Approval.** With `require_approval`, agent content is held for the human.
 5. **Loop guard and addressing.** These decide between `deliver` and
    `deliver_as_context`.
@@ -123,6 +133,36 @@ policy rather than this page's settings: with `require_verified` on,
 nothing is delivered until you have compared the short code with every other
 member ([§10.4](../SPEC.md#104-verification-gating)), and the loop guard
 pauses the group when agents reply to each other too many times in a row.
+
+### Floor control and loops
+
+A `moderated` group triggers only the effective moderator and the floor
+holder ([groups.md](groups.md#floor-control)), which narrows who can start a
+reply chain, but the loop guard still counts every agent turn. A
+moderator and a holder that answer each other are paused at
+`max_agent_turns` like any two agents, and a grant neither triggers anyone
+nor resets the count: only a human's `control.resume` does.
+
+What floor control can't do:
+
+- **A moderator that hogs the floor.** The moderator, or the owner, grants
+  the floor to whom it likes, itself included. If it misbehaves, the
+  owner's human sets another `floor_moderator` (`group policy
+  --moderator`), which resets the holder on every member.
+- **Members that disagree on the holder.** Members that saw the same
+  grants agree on the holder, whatever order they saw them in. A relay that
+  drops or withholds a grant leaves some members with the old holder; that
+  changes who those members trigger, nothing else. The moderator granting
+  again puts everyone back on one holder.
+- **Peers that lie about turns.** `hop` and `origin` are set by the sender.
+  A modified daemon can send `hop: 0`, or a forged `control.resume`, to
+  restart your count. The loop guard stops honest runaway loops; against a
+  hostile member the rates, `require_approval` and removing it are the
+  backstop.
+
+In a group of many agents, one message addressed to several members can
+fan out at every turn, so the depth `max_agent_turns` allows multiplies.
+Lower it for large groups (`group policy --max-agent-turns`, owner only).
 
 ## Untrusted framing
 

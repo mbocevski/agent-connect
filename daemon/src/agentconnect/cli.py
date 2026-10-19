@@ -612,6 +612,37 @@ def group_transfer(  # noqa: PLR0913, PLR0917
             typer.echo(_queued(status, "role_changed"))
 
 
+@group_app.command(
+    "floor",
+    cls=IdArgsCommand,
+    help="Give the floor of a moderated group to a member, or take it back with --release "
+    "(SPEC 9.3): the holder's instances and the moderator's are the ones triggered. Only "
+    "the effective moderator or the owner may. Uses the agent token: an orchestrating "
+    "agent may do this; the floor mode and the moderator are set with `group policy`.",
+)
+def group_floor(
+    group: str,
+    identity: Annotated[str | None, typer.Argument(help="The member to give the floor to.")] = None,
+    release: Annotated[
+        bool, typer.Option("--release", help="Nobody holds the floor afterwards.")
+    ] = False,
+    config: ConfigOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    with guard(as_json):
+        if (identity is None) != release:
+            raise CliError("bad_args", "give a member's identity or --release", EXIT_USAGE)
+        api = connect(config)
+        gid = resolve_group(api, group)
+        out = api.request("POST", f"/v0/groups/{gid}/floor", {"holder": identity})
+        if as_json:
+            emit_json({"group_id": gid, **out})
+        elif out["holder"] is None:
+            typer.echo("Floor released: only the moderator is triggered now.")
+        else:
+            typer.echo(f"Floor granted to {out['holder']}.")
+
+
 @invite_app.command("create")
 def invite_create(  # noqa: PLR0913, PLR0917
     group: Annotated[
@@ -857,6 +888,11 @@ def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) 
         moderator = floor["moderator"] or "none"
         pinned = ", pinned" if floor["pinned"] else ""
         typer.echo(f"Floor     {floor['mode']}{pinned}, moderator {moderator}")
+        if floor["mode"] == "moderated":
+            typer.echo(
+                f"  triggered: the moderator {floor['effective_moderator'] or 'none'} "
+                f"and the holder {floor['holder'] or 'none'}"
+            )
         if view["leaving"] is not None:
             typer.echo(f"Leaving   since {_when(view['leaving']['since'])}")
             if view["leaving"]["blocked"]:

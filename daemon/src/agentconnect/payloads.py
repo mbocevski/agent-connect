@@ -4,7 +4,7 @@ One shape for both transports, so the SDK parses one thing. A message::
 
     {"event": "message" | "task_status" | "task_artifact" | "task_cancel" |
               "agent_card" | "control.<name>",
-     "msg_id": ..., "group": {id, name, purpose, epoch, floor},
+     "msg_id": ..., "group": {id, name, purpose, epoch, floor, floor_holder},
      "sender": {identity, instance_id, display_name, verified},
      "to": [...], "addressed_to_me": bool, "scope": <group purpose>,
      "untrusted": true, "trust_state": {...},
@@ -53,6 +53,7 @@ def group_json(group: GroupView | None) -> dict[str, Any] | None:
         "purpose": group.purpose,
         "epoch": group.epoch,
         "floor": group.floor,
+        "floor_holder": group.floor_holder,
     }
 
 

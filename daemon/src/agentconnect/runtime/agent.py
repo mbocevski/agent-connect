@@ -1,8 +1,9 @@
 """The agent-scope operations of a runtime (ADR-005, Decision 1).
 
 :class:`AgentApi` is everything an agent may do: groups, invites (create,
-inspect, accept, revoke), send, leave, events, its own held sends, reading
-the safety policy and raising ``require_verified``. The local API's routes
+inspect, accept, revoke), send, leave, granting the floor of a ``moderated``
+group it moderates, events, its own held sends, reading the safety policy
+and raising ``require_verified``. The local API's routes
 call it for the agent token, and the embedded SDK calls it in-process, so
 the two paths can't drift apart. Every answer has the shape of the matching
 route's JSON (``docs/api.md``).
@@ -110,6 +111,14 @@ class AgentApi:
         if not require_verified:
             raise ApiError(403, "human_only", "relaxing verification needs the human token")
         return {"status": self._engine.set_policy(self._visible(group_id), require_verified=True)}
+
+    async def grant_floor(self, group_id: str, holder: str | None) -> dict[str, Any]:
+        """Grant the floor of a ``moderated`` group to a member, or release
+        it (``None``), as the agent (SPEC 9.3). Only the effective moderator
+        or the owner may (``403 not_permitted``): the human chose the
+        moderator by commit, and a grant triggers nobody by itself. The floor
+        mode and the moderator are the human's (``POST .../policy``)."""
+        return self._engine.grant_floor(self._visible(group_id), holder, origin="agent")
 
     async def send(  # noqa: PLR0913
         self,

@@ -33,7 +33,13 @@ GROUP_VIEW: dict[str, Any] = {
         "max_members": Opt("int"),
         "max_agent_turns": Opt("int"),
     },
-    "floor": {"mode": Opt("str"), "pinned": "bool", "moderator": Opt("str")},
+    "floor": {
+        "mode": Opt("str"),
+        "pinned": "bool",
+        "moderator": Opt("str"),
+        "effective_moderator": Opt("str"),
+        "holder": Opt("str"),
+    },
     "pending_leaves": [{"identity": "str", "instance_id": "str"}],
     "members": [
         {
@@ -178,6 +184,7 @@ SCHEMAS: dict[str, Any] = {
         "keep_admin": "bool",
         "status": "str",
     },
+    "group floor": {"group_id": "str", "holder": Opt("str"), "status": "str", "msg_id": "str"},
     "invite create": {
         "url": "str",
         "invite_id": "str",

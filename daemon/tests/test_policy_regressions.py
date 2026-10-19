@@ -109,7 +109,7 @@ def test_parts_under_a_non_content_kind_are_malformed(policy: SafetyPolicy, kind
     [
         ("a2a.agent_card", {"name": "peer", "description": "d", "skills": [{"id": "s"}]}),
         ("control.pause", {"reason": "human"}),
-        ("control.floor", {"holder": None}),
+        ("control.floor", {"holder": None, "counter": 1}),
         ("control.capabilities", {"adapters": ["a2a"], "accepts": ["text", "data"]}),
         ("control.leave", {}),
         ("control.close", {"reason": "done"}),
@@ -686,7 +686,10 @@ def test_known_card_fields_are_kept_in_shape() -> None:
         "tenant": "x",
         "metadata": {},
     }
-    assert normalize("control.floor", {"holder": None}) == {"holder": None}
+    assert normalize("control.floor", {"holder": None, "counter": 1}) == {
+        "holder": None,
+        "counter": 1,
+    }
     assert normalize("a2a.message", {"parts": []}) == {"parts": []}
 
 

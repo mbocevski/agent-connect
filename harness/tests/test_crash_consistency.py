@@ -449,7 +449,16 @@ async def test_a_role_change_is_reported_once_after_a_crash(
     assert a.daemon.set_role(gid, c.me, "admin") == "committing"
     await recover(b, advance, "crash", fired)
     await settled([a, b, c], gid)
-    expected = [{"identity": c.me, "from": "member", "to": "admin", "by": a.me}]
+    expected = [
+        {
+            "identity": c.me,
+            "from": "member",
+            "to": "admin",
+            "moderator_from": False,
+            "moderator_to": False,
+            "by": a.me,
+        }
+    ]
     assert events(b, "role_changed") == expected
     await until(lambda: b.daemon.store.unnotified_events() == [])
     assert [e.data for e in b.adapter.unique_events() if e.type == "role_changed"] == expected
@@ -474,5 +483,235 @@ async def test_departed_roles_are_dropped_once_after_a_crash(
     await until(lambda: json.loads(c.daemon.client.policy(raw(gid)))["admins"] == [])
     await settled([a, c], gid)
     dropped = [e for e in events(c, "role_changed") if e["to"] == "member"]
-    assert dropped == [{"identity": b.me, "from": "admin", "to": "member", "by": a.me}]
+    assert dropped == [
+        {
+            "identity": b.me,
+            "from": "admin",
+            "to": "member",
+            "moderator_from": False,
+            "moderator_to": False,
+            "by": a.me,
+        }
+    ]
     assert [e["by"] for e in events(c, "policy_changed")] == [a.me, a.me]
+
+
+# -- floor control (docs/groups.md#floor-control) ---------------------------------------------
+
+
+def holder_of(node: Node, gid: str) -> str | None:
+    floor = node.daemon.group_info(gid)["floor"]
+    return None if floor["holder"] is None else str(floor["holder"])
+
+
+async def moderated_by(nodes: list[Node], gid: str, moderator: Node) -> None:
+    owner = nodes[0]
+    changes = {"floor": "moderated", "floor_moderator": moderator.me}
+    assert owner.daemon.change_policy(gid, changes) == "committing"
+    await settled(nodes, gid)
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize("step", ["after_core", "in_tx", "after_tx", "after_consume"])
+@pytest.mark.parametrize("mode", MODES)
+async def test_a_floor_grant_is_taken_once_after_a_crash(
+    group: GroupFixture, advance: Advance, step: str, mode: str
+) -> None:
+    """A received grant changes the holder in the same transaction as its
+    inbox record: after a failure around it, the holder is taken and
+    reported once."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    fired = daemon_point(c, f"receive.{step}", mode)
+    b.daemon.grant_floor(gid, c.me)
+    await recover(c, advance, mode, fired)
+    await until(lambda: holder_of(c, gid) == c.me)
+    await settled([a, b, c], gid)
+    granted = [e for e in events(c, "floor_changed") if e["reason"] == "grant"]
+    assert [e["holder"] for e in granted] == [c.me]
+    assert [w[2:5] for w in c.daemon.store.floor_writes(gid) if w[4] == "grant"] == [
+        (b.me, b.daemon.instance.instance_id_hex, "grant")
+    ]
+    if mode == "raise":
+        # A failure after the transaction leaves its events for the next
+        # start (or reconnect) to tell the adapter.
+        await c.restart()
+    await until(lambda: c.daemon.store.unnotified_events() == [])
+    told = [e.data for e in c.adapter.unique_events() if e.type == "floor_changed"]
+    assert [e["reason"] for e in told].count("grant") == 1
+    # The grant reached c's adapter once, as context.
+    await c.adapter.wait_for(
+        lambda: any(d.kind == "control.floor" for d in c.adapter.deliveries), WAIT
+    )
+    await c.idle()
+    floors = {d.msg_id for d in c.adapter.deliveries if d.kind == "control.floor"}
+    assert len(floors) == 1
+
+
+@pytest.mark.hosts("daemon")
+@pytest.mark.parametrize(
+    ("side", "step"),
+    [("receive", s) for s in ("after_core", "in_tx", "after_tx", "after_consume")]
+    + [("confirm", s) for s in ("after_core", "in_tx", "after_tx")],
+)
+async def test_a_holder_reset_is_reported_once_after_a_crash(
+    group: GroupFixture, advance: Advance, malicious_relay: Proxy, side: str, step: str
+) -> None:
+    """The holder is removed: the member that receives the commit (b) or
+    the one that made it (a) crashes around recording it, and reports the
+    reset once after the restart."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: holder_of(a, gid) == holder_of(c, gid) == c.me)
+    node = b if side == "receive" else a
+    if side == "confirm":
+        hold_own_commits(malicious_relay(a), a)
+    fired = daemon_point(node, f"{side}.{step}", "crash")
+    a.daemon.remove_member(gid, c.me)
+    await recover(node, advance, "crash", fired)
+    await until(lambda: status(c, gid) == "removed")
+    await settled([a, b], gid)
+    for n in (a, b):
+        assert holder_of(n, gid) is None
+        resets = [e for e in events(n, "floor_changed") if e["reason"] == "reset"]
+        assert resets == [
+            {
+                "mode": "moderated",
+                "moderator": b.me,
+                "effective_moderator": b.me,
+                "holder": None,
+                "by": a.me,
+                "reason": "reset",
+            }
+        ]
+    await until(lambda: node.daemon.store.unnotified_events() == [])
+    told = [e.data for e in node.adapter.unique_events() if e.type == "floor_changed"]
+    assert [e["reason"] for e in told].count("reset") == 1
+
+
+@pytest.mark.hosts("daemon")
+async def test_the_floor_holder_survives_a_restart(group: GroupFixture) -> None:
+    """The holder is stored, so a restarted member still triggers the
+    holder, and an older grant still loses to the one it took."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: holder_of(a, gid) == holder_of(c, gid) == c.me)
+    taken = a.daemon.store.floor_writes(gid)
+    await a.restart()
+    await a.connected()
+    assert holder_of(a, gid) == c.me
+    assert a.daemon.store.floor_writes(gid) == taken
+    send = c.adapter.send
+    assert send is not None
+    await send(gid, {"text": "after the restart"})
+    await a.adapter.wait_for(lambda: "after the restart" in a.adapter.texts(gid), WAIT)
+    hit = next(d for d in a.adapter.deliveries if d.body == {"text": "after the restart"})
+    assert hit.addressed_to_me is False  # a is neither the moderator nor the holder
+    # An older grant from b, held back by the relay, is ignored after the restart.
+    inner = b.daemon.inner("control.floor", {"holder": a.me, "counter": 0}, ["*"])
+    b.daemon._enqueue("app", gid, {"inner": inner, "msg_id": engine_mod.new_msg_id()})
+    b.daemon.send_message(gid, {"text": "marker"})
+    await a.adapter.wait_for(lambda: "marker" in a.adapter.texts(gid), WAIT)
+    assert holder_of(a, gid) == c.me
+
+
+@pytest.mark.hosts("daemon")
+async def test_an_own_grant_survives_a_crash_after_the_relay_took_it(group: GroupFixture) -> None:
+    """b's grant is taken when it is sealed, in the same transaction as
+    the envelope. b dies after the relay took it and before it is marked
+    sent; the group moves on two epochs while b is down. On restart the
+    resend is a duplicate the relay takes in its old epoch: b's floor
+    agrees with everyone's."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    fired: list[str] = []
+
+    def crashing(_group_id: str, msg_id: str) -> None:
+        fired.append(msg_id)
+        raise SimulatedCrash
+
+    b.daemon.floor.confirmed = crashing  # ty: ignore[invalid-assignment]
+    b.daemon.grant_floor(gid, a.me)
+    await until(lambda: bool(fired) and holder_of(a, gid) == holder_of(c, gid) == a.me)
+    await b.stop()
+    for turns in (10, 11):
+        assert a.daemon.change_policy(gid, {"max_agent_turns": turns}) == "committing"
+        await until(lambda: a.daemon.store.outbox() == [])
+        await until(lambda: c.epoch(gid) == a.epoch(gid))
+    await b.start()
+    await b.connected()
+    await until(lambda: b.epoch(gid) == a.epoch(gid) and not b.daemon.store.outbox())
+    await settled([a, b, c], gid)
+    assert {holder_of(n, gid) for n in (a, b, c)} == {a.me}
+    _, state = b.daemon.store.floor(gid) or (None, {})
+    assert state["pending"] == {}
+
+
+async def _floor_of(node: Node, gid: str) -> dict[str, Any]:
+    row = node.daemon.store.floor(gid)
+    assert row is not None
+    return row[1]
+
+
+@pytest.mark.hosts("daemon")
+async def test_a_failed_grant_is_taken_back_with_its_row_after_a_crash(group: GroupFixture) -> None:
+    """The row of b's refused grant is marked failed and the grant taken
+    back in one transaction: a crash in between leaves both as they were,
+    so b sends it again after the restart and every member agrees. Old
+    epochs then fold away as usual."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, a.me)
+    await until(lambda: holder_of(a, gid) == holder_of(b, gid) == holder_of(c, gid) == a.me)
+    fired: list[str] = []
+
+    def crashing(_group_id: str, msg_id: str) -> None:
+        fired.append(msg_id)
+        raise SimulatedCrash
+
+    b.daemon.floor.unsent = crashing  # ty: ignore[invalid-assignment]
+    b.proxy.fail_next("send", "not_member", kind="application")
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: bool(fired))
+    await b.restart()
+    await b.connected()
+    for turns in (10, 11, 12):
+        assert a.daemon.change_policy(gid, {"max_agent_turns": turns}) == "committing"
+        await until(lambda: a.daemon.store.outbox() == [])
+    await settled([a, b, c], gid)
+    assert {holder_of(n, gid) for n in (a, b, c)} == {c.me}
+    state = await _floor_of(b, gid)
+    assert state["pending"] == {}
+    epoch = b.epoch(gid)
+    assert sorted(int(e) for e in state["facts"]) == [epoch - 1, epoch]
+
+
+@pytest.mark.hosts("daemon")
+async def test_a_pending_grant_whose_send_failed_is_taken_back_at_start(
+    group: GroupFixture,
+) -> None:
+    """A database an earlier build left with a failed row and its grant
+    still pending: at start the grant is taken back, and old epochs fold."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    b.daemon.grant_floor(gid, a.me)
+    await until(lambda: holder_of(a, gid) == holder_of(b, gid) == holder_of(c, gid) == a.me)
+    b.daemon.floor.unsent = lambda _gid, _msg_id: None  # ty: ignore[invalid-assignment]
+    b.proxy.fail_next("send", "not_member", kind="application")
+    b.daemon.grant_floor(gid, c.me)
+    await until(lambda: bool(b.adapter.of_type("send_failed")))
+    assert holder_of(b, gid) == c.me  # the earlier build's state
+    await b.restart()
+    await b.connected()
+    assert holder_of(b, gid) == a.me
+    for turns in (10, 11, 12):
+        assert a.daemon.change_policy(gid, {"max_agent_turns": turns}) == "committing"
+        await until(lambda: a.daemon.store.outbox() == [])
+    await settled([a, b, c], gid)
+    assert {holder_of(n, gid) for n in (a, b, c)} == {a.me}
+    state = await _floor_of(b, gid)
+    assert state["pending"] == {}
+    epoch = b.epoch(gid)
+    assert sorted(int(e) for e in state["facts"]) == [epoch - 1, epoch]

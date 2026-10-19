@@ -199,6 +199,21 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS floor_state (
+    group_id TEXT PRIMARY KEY,
+    holder TEXT,
+    state TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS floor_writes (
+    group_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    counter INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    instance TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    holder TEXT,
+    PRIMARY KEY (group_id, epoch, counter, sender, instance)
+);
 CREATE TABLE IF NOT EXISTS group_safety (
     group_id TEXT PRIMARY KEY,
     settings TEXT NOT NULL
@@ -843,6 +858,58 @@ class Store:
         rows = self._all("SELECT identity, card FROM agent_cards WHERE group_id = ?", group_id)
         return {r[0]: json.loads(r[1]) for r in rows}
 
+    # -- floor control (agentconnect.runtime.floor) --------------------------------
+
+    def floor(self, group_id: str) -> tuple[str | None, dict[str, Any]] | None:
+        """The group's floor holder and register state (``None``: no row)."""
+        row = self._one("SELECT holder, state FROM floor_state WHERE group_id = ?", group_id)
+        return None if row is None else (row[0], dict(json.loads(row[1])))
+
+    def set_floor(self, group_id: str, holder: str | None, state: dict[str, Any]) -> None:
+        self._db.execute(
+            "INSERT INTO floor_state (group_id, holder, state) VALUES (?, ?, ?) "
+            "ON CONFLICT(group_id) DO UPDATE SET holder = excluded.holder, state = excluded.state",
+            (group_id, holder, json.dumps(state, sort_keys=True)),
+        )
+
+    def floor_writes(self, group_id: str) -> list[tuple[int, int, str, str, str, str | None]]:
+        """The writes kept for the group's floor register, in key order:
+        ``(epoch, counter, sender, instance, kind, holder)``."""
+        rows = self._all(
+            "SELECT epoch, counter, sender, instance, kind, holder FROM floor_writes "
+            "WHERE group_id = ?",
+            group_id,
+        )
+        return sorted((int(r[0]), int(r[1]), str(r[2]), str(r[3]), str(r[4]), r[5]) for r in rows)
+
+    def add_floor_write(
+        self,
+        group_id: str,
+        key: tuple[int, int, str, str],
+        kind: str,
+        holder: str | None,
+    ) -> bool:
+        """Keep a write; ``False`` if one with that key is kept already."""
+        cur = self._db.execute(
+            "INSERT OR IGNORE INTO floor_writes "
+            "(group_id, epoch, counter, sender, instance, kind, holder) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (group_id, *key, kind, holder),
+        )
+        return cur.rowcount == 1
+
+    def delete_floor_write(self, group_id: str, key: tuple[int, int, str, str]) -> None:
+        self._db.execute(
+            "DELETE FROM floor_writes WHERE group_id = ? AND epoch = ? AND counter = ? "
+            "AND sender = ? AND instance = ?",
+            (group_id, *key),
+        )
+
+    def drop_floor_writes(self, group_id: str, before_epoch: int) -> None:
+        self._db.execute(
+            "DELETE FROM floor_writes WHERE group_id = ? AND epoch < ?", (group_id, before_epoch)
+        )
+
     def delete_group_data(self, group_id: str) -> None:
         """Forget a group's members, cards and safety settings; its held
         messages are dropped. Audit rows and transcript entries stay until
@@ -854,6 +921,8 @@ class Store:
                 "group_safety",
                 "task_decisions",
                 "listed_peers",
+                "floor_state",
+                "floor_writes",
             ):
                 db.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))  # noqa: S608
             db.execute(
@@ -1831,6 +1900,15 @@ class Store:
             state,
         )
         return [OutboxRow(r[0], r[1], r[2], json.loads(r[3]), r[4]) for r in rows]
+
+    def outbox_state_of(self, msg_id: str) -> str | None:
+        """The state of the outbox row that sends ``msg_id``, if one is kept."""
+        row = self._one(
+            "SELECT state FROM outbox WHERE json_extract(payload, '$.msg_id') = ? "
+            "ORDER BY seq DESC LIMIT 1",
+            msg_id,
+        )
+        return None if row is None else str(row[0])
 
     def update_outbox(
         self, seq: int, payload: dict[str, Any] | None = None, state: str | None = None

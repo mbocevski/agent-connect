@@ -368,16 +368,34 @@ def _same_relay(a: str, b: str) -> bool:
         return False
 
 
+def _floor_inner(event: dict[str, Any]) -> dict[str, Any] | None:
+    """A received application event's inner message if it is a
+    ``control.floor``."""
+    try:
+        inner = json.loads(event["plaintext"])
+    except ValueError:
+        return None
+    return inner if isinstance(inner, dict) and inner.get("kind") == "control.floor" else None
+
+
 def _max_turns(policy: dict[str, Any]) -> int:
     guard = policy.get("loop_guard")
     turns = guard.get("max_agent_turns") if isinstance(guard, dict) else None
     return turns if isinstance(turns, int) and not isinstance(turns, bool) else 20
 
 
-def addressed_to_me(
-    floor: str, inner: dict[str, Any], me: str, my_instance: str, moderator: str | None
+def addressed_to_me(  # noqa: PLR0913, PLR0917
+    floor: str,
+    inner: dict[str, Any],
+    me: str,
+    my_instance: str,
+    moderator: str | None,
+    holder: str | None = None,
 ) -> bool:
-    """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?"""
+    """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?
+
+    ``moderator`` is the effective moderator and ``holder`` the floor
+    holder (``agentconnect.runtime.floor``); only ``moderated`` reads them."""
     to = inner.get("to") or ["*"]
     addressee = inner.get("addressee")
     if addressee is not None and floor in ("free", "mention"):
@@ -388,8 +406,8 @@ def addressed_to_me(
         hit = True
     elif floor == "mention":
         hit = me in to or (to == ["*"] and inner.get("origin") == "human")
-    else:  # moderated: floor control is a later task; only the moderator
-        hit = moderator == me
+    else:  # moderated: the effective moderator and the floor holder
+        hit = me in (moderator, holder)
     if not hit:
         return False
     body = inner.get("body")
@@ -518,12 +536,15 @@ class Engine:
         self._gave_up = 0
         self.running = False
         self._closed = False
+        from agentconnect.runtime.floor import FloorService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.groups import GroupService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.knocks import KnockService  # noqa: PLC0415 - import cycle
         from agentconnect.runtime.listing import ListingManager  # noqa: PLC0415 - import cycle
 
         # Membership: member state, commits' events, leaves and removals (docs/groups.md).
         self.groups = GroupService(self)
+        # Floor control in moderated groups: the holder and its grants (SPEC 9.3).
+        self.floor = FloorService(self)
         # The listing, its doors and the discovery worker (docs/discovery.md).
         self.listings = ListingManager(self)
         # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
@@ -659,6 +680,9 @@ class Engine:
                     self.client.discard_pending_commit(gid)
                     LOG.info("discarded_unsent_commit", group=log.hid(group.group_id))
             self.groups.recover(group)
+        # Own floor grants a crash left pending although their send is over;
+        # their events are recorded, and the renotify after the replay tells them.
+        self.floor.reconcile()
         # A join recorded as done whose secret a crash left in the keystore.
         self._forget_join_secrets()
 
@@ -743,7 +767,14 @@ class Engine:
         g = self.store.group(group_id)
         if g is None:
             return None
-        return GroupView(g.group_id, g.name, g.purpose, g.epoch, str(g.policy.get("floor", "free")))
+        return GroupView(
+            g.group_id,
+            g.name,
+            g.purpose,
+            g.epoch,
+            str(g.policy.get("floor", "free")),
+            self.floor.holder(g.group_id),
+        )
 
     def _adapter_for(self, group_id: str | None) -> Adapter | None:
         name = self.config.default_adapter
@@ -908,6 +939,7 @@ class Engine:
     def _refresh(self, group_id: str) -> None:
         """Re-read members, roles, policy and epoch from the core."""
         self.groups.refresh(group_id)
+        self.floor.ensure(group_id)
 
     def _core_epoch(self, gid: bytes) -> int:
         try:
@@ -1317,6 +1349,18 @@ class Engine:
             # its probes passed (SPEC 10.2).
             if hop is not None and hop > _max_turns(group.policy):
                 await self._loop_guard(group, msg_id, identity, hop)
+            floor = _floor_inner(event)
+            if floor is not None:
+                # SPEC 9.3: a valid grant moves the floor register on every
+                # member, whatever this member's own delivery policy (rates,
+                # sizes, the drain) decided for the message.
+                await self.floor.accept(
+                    group_id,
+                    int(event["epoch"]),
+                    identity,
+                    str(event["sender"]["instance_id_hex"]),
+                    floor,
+                )
             if delivery is None:
                 self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
                 alert = (
@@ -1372,25 +1416,41 @@ class Engine:
         before the daemon recorded the result (ADR-004)."""
         for entry in self.client.journal_pending():
             try:
-                ctx = json.loads(entry["context"])
-                env = ctx["env"]
-                if not isinstance(env, dict) or _envelope_problem({**env, "ct": ""}) is not None:
-                    raise ValueError("context")
-            except (ValueError, KeyError, TypeError):
-                # Not something this daemon wrote: drop it.
-                self.client.journal_consume(
-                    str(entry["key"]), None if entry["welcome"] else entry["group_id"]
+                await self._replay_entry(entry)
+            except TransientFailure:
+                raise  # the inbound worker retries the replay after a backoff
+            except Exception as err:
+                # One entry that fails for good must not stop the others, nor
+                # the renotify after them. It stays pending: the next replay,
+                # on the next start or reconnect, tries it once more.
+                LOG.warning(
+                    "journal_replay_failed",
+                    error=type(err).__name__,
+                    entry=log.hid(str(entry.get("key"))),
                 )
-                continue
-            LOG.info("journal_replay", kind=env.get("kind"), msg=log.hid(str(env.get("msg_id"))))
-            if entry["welcome"] and isinstance(ctx.get("knock_id"), str):
-                await self.knocks.finish_welcome(env, ctx["knock_id"], entry["group_id"])
-            elif entry["welcome"]:
-                await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
-            else:
-                event = {**entry["event"], "replayed": True}
-                path = "receive" if ctx.get("from_relay", True) else "confirm"
-                await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
+
+    async def _replay_entry(self, entry: dict[str, Any]) -> None:
+        """Finish one pending journal entry (:meth:`_replay_journal`)."""
+        try:
+            ctx = json.loads(entry["context"])
+            env = ctx["env"]
+            if not isinstance(env, dict) or _envelope_problem({**env, "ct": ""}) is not None:
+                raise ValueError("context")
+        except (ValueError, KeyError, TypeError):
+            # Not something this daemon wrote: drop it.
+            self.client.journal_consume(
+                str(entry["key"]), None if entry["welcome"] else entry["group_id"]
+            )
+            return
+        LOG.info("journal_replay", kind=env.get("kind"), msg=log.hid(str(env.get("msg_id"))))
+        if entry["welcome"] and isinstance(ctx.get("knock_id"), str):
+            await self.knocks.finish_welcome(env, ctx["knock_id"], entry["group_id"])
+        elif entry["welcome"]:
+            await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
+        else:
+            event = {**entry["event"], "replayed": True}
+            path = "receive" if ctx.get("from_relay", True) else "confirm"
+            await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
 
     def _journalled_by_an_older_daemon(self, key: str) -> bool:
         """Whether the journal entry being finished was written by a daemon
@@ -1474,12 +1534,14 @@ class Engine:
         hop = self._received_hop(group.group_id, inner)
         # The hop the loop guard acts on (None: a human's message, SPEC 10.3).
         guard_hop = None if inner.get("origin") == "human" else hop
+        moderator, holder = self.floor.triggers(group.group_id, policy)
         addressed = addressed_to_me(
             str(policy.get("floor", "free")),
             inner,
             self.me,
             self.instance.instance_id_hex,
-            policy.get("floor_moderator"),
+            moderator,
+            holder,
         )
         # One decision: SPEC 7.2 (unknown kinds are ignored), 7.3, 9.3, 10.2
         # (size, parts, rates; a replayed journal entry was counted when the
@@ -1501,6 +1563,21 @@ class Engine:
                 card_problem=self._card_problem(inner),
             )
         )
+        if (
+            decision.verdict is not Verdict.DROP
+            and inner["kind"] == "control.floor"
+            and self.floor.judge(
+                group.group_id,
+                int(event["epoch"]),
+                identity,
+                str(sender["instance_id_hex"]),
+                inner,
+            )
+            is None
+        ):
+            # SPEC 9.3: a grant the facts of its epoch don't allow is
+            # ignored, silently, after the rates counted it.
+            decision = drop("floor_ignored")
         if decision.verdict is Verdict.DROP:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=decision.reason)
             return None, decision, kind, guard_hop
@@ -2455,7 +2532,15 @@ class Engine:
                 state = "failed"
             backoff.reset()
             msg_id = row.payload.get("msg_id")
-            self.store.update_outbox(row.seq, state=state)
+            event = None
+            with self.store.tx():
+                self.store.update_outbox(row.seq, state=state)
+                if state == "failed" and row.kind == "app" and row.payload.get("floor"):
+                    # Its write was taken when it was sealed: take it back,
+                    # in the same transaction (FloorService.reconcile).
+                    event = self.floor.unsent(str(row.group_id), str(msg_id))
+            if event is not None:
+                await self._notify(event)
             code = self._fail_codes.pop(row.seq, "failed")
             if state == "failed" and row.group_id is not None:
                 # Tell the caller: it holds a msg_id (or an intent) that will
@@ -2543,17 +2628,25 @@ class Engine:
                 if self.groups.update_due(group):
                     # SPEC §3.1: renew keys just before the next send.
                     group = await self._cadence_update(row, payload, group)
-                inner = canonical(payload["inner"])
-                payload["env"] = {
-                    "v": 0,
-                    "kind": "application",
-                    "group_id": group.group_id,
-                    "epoch": self.client.epoch(gid),
-                    "msg_id": payload["msg_id"],
-                    "sender": self.mailbox,
-                    "ct": b64(self.client.seal(gid, inner)),
-                }
-                self.store.update_outbox(row.seq, payload=payload)
+                epoch = self.client.epoch(gid)
+                event = None
+                with self.store.tx():
+                    if payload.get("floor"):
+                        # Taken as it is sealed, in this epoch (FloorService.seal).
+                        event = self.floor.seal(group.group_id, payload, epoch)
+                    inner = canonical(payload["inner"])
+                    payload["env"] = {
+                        "v": 0,
+                        "kind": "application",
+                        "group_id": group.group_id,
+                        "epoch": epoch,
+                        "msg_id": payload["msg_id"],
+                        "sender": self.mailbox,
+                        "ct": b64(self.client.seal(gid, inner)),
+                    }
+                    self.store.update_outbox(row.seq, payload=payload)
+                if event is not None:
+                    await self._notify(event)
             try:
                 await self._request({"t": "send", "env": payload["env"]}, payload["msg_id"])
             except RelayError as e:
@@ -2567,6 +2660,8 @@ class Engine:
                 self._fail_codes[row.seq] = e.code
                 return "failed"
             self.store.bump_messages(group.group_id)
+            if payload.get("floor"):
+                self.floor.confirmed(group.group_id, str(payload["msg_id"]))
             return "done"
         self._fail_codes[row.seq] = "attempts_exhausted"
         return "failed"
@@ -3199,7 +3294,7 @@ class Engine:
             addressee=addressee,
         )[0]
 
-    def queue_message(  # noqa: PLR0913
+    def queue_message(  # noqa: PLR0912, PLR0913
         self,
         group_id: str,
         body: dict[str, Any],
@@ -3210,6 +3305,8 @@ class Engine:
         reply_to: list[str] | None = None,
         internal: bool = False,
         addressee: list[str] | None = None,
+        floor_grant: bool = False,
+        daemon_control: bool = False,
     ) -> tuple[str, str]:
         """Queue an application message; returns ``(msg_id, status)`` where
         ``status`` is ``queued``, or ``held`` when the group's
@@ -3225,8 +3322,14 @@ class Engine:
         count against the rate and are never held.
 
         ``addressee`` (SPEC 9.3): with ``to: ["*"]`` every member sees the
-        message, and only the members listed are triggered."""
+        message, and only the members listed are triggered.
+
+        ``floor_grant``: a ``control.floor`` that ``FloorService.grant``
+        checked; the agent's count against its send rate. ``daemon_control``:
+        a control the daemon sends on its own, not on anyone's behalf (the
+        floor copy for newcomers): internal, hop 0, replying to nothing."""
         group = self._group_or_raise(group_id)
+        internal = internal or daemon_control
         if addressee is not None and not (
             _str_list(addressee) and 0 < len(addressee) <= MAX_ADDRESSEE
         ):
@@ -3237,7 +3340,12 @@ class Engine:
             raise DaemonError("bad_request", "origin must be agent or human")
         if kind in HUMAN_ONLY_KINDS and origin != "human":
             raise DaemonError("forbidden", f"{kind} must come from the human")
-        if origin == "human":
+        if kind == "control.floor" and not (internal or floor_grant):
+            # The grant checks the role first (FloorService.grant).
+            raise DaemonError("bad_request", "grant the floor with POST /v0/groups/{gid}/floor")
+        if daemon_control:
+            hop, refs = 0, []
+        elif origin == "human":
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
             hop, refs = self._reply_hop(group.group_id, reply_to)
@@ -3258,6 +3366,7 @@ class Engine:
                 inner,
                 size,
                 internal=internal,
+                grant=floor_grant,
             )
         )
         if decision.verdict is Verdict.DROP:
@@ -3274,7 +3383,9 @@ class Engine:
             code, text = OUTBOUND_PROBLEMS.get(decision.reason, ("bad_request", "malformed"))
             raise DaemonError(code, text)
         msg_id = new_msg_id()
-        payload = {"inner": inner, "msg_id": msg_id}
+        payload: dict[str, Any] = {"inner": inner, "msg_id": msg_id}
+        if kind == "control.floor":
+            payload["floor"] = True  # this instance's own: taken when sealed
         with self.store.tx():
             self.store.record_hop(group.group_id, msg_id, hop, self.now())
             self.safety.audit(
@@ -3364,6 +3475,14 @@ class Engine:
         """**Human-only** beyond raising ``require_verified``: the fields of
         ``POST /v0/groups/{gid}/policy`` (``groups.policy_changes``)."""
         return self.set_policy(group_id, **self.groups.policy_changes_of(fields))
+
+    def grant_floor(
+        self, group_id: str, holder: str | None, *, origin: str = "agent"
+    ) -> dict[str, Any]:
+        """Grant the floor of a ``moderated`` group to a member, or release
+        it (``None``): :meth:`FloorService.grant`. Either token: only the
+        effective moderator or the owner may, and a grant triggers nobody."""
+        return self.floor.grant(group_id, holder, origin=origin)
 
     def set_role(self, group_id: str, identity: str, role: str) -> str:
         """**Human-only.** Make a member an admin or a plain member."""

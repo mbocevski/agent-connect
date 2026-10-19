@@ -1,4 +1,4 @@
-# Groups: members, roles, leaves and removals
+# Groups: members, roles, leaves, removals and the floor
 
 Every conversation is an MLS group. A 1:1 is a group of two; a group can
 have up to 50 instances. This page covers who is in a group and with which
@@ -30,7 +30,8 @@ In plain words (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits)):
 `GET /v0/groups/{gid}` and `agentconnect groups show` list the members, each
 with its `role` (`owner`, `admin` or `member`) and its instances, and the
 policy: `policy_summary` (`invite`, `remove`, `max_members`,
-`max_agent_turns`) and `floor` (`mode`, `pinned`, `moderator`).
+`max_agent_turns`) and `floor` (`mode`, `pinned`, `moderator`, and the
+`effective_moderator` and `holder` of [floor control](#floor-control)).
 
 ## Changing roles and the policy
 
@@ -337,7 +338,8 @@ identity of the member that made the commit.
 | `instance_left` | `identity`, `instance_id`, `by` | One instance left; the identity keeps another. |
 | `instance_removed` | `identity`, `instance_id`, `by` | One instance was removed; the identity keeps another. |
 | `policy_changed` | `policy`, `previous_policy`, `roles_known`, `by` | The commit changed the policy. |
-| `role_changed` | `identity`, `from`, `to`, `by` | An identity's role (`owner`, `admin`, `member`) changed. |
+| `role_changed` | `identity`, `from`, `to`, `moderator_from`, `moderator_to`, `by` | An identity's role (`owner`, `admin`, `member`) changed, or it became or stopped being the `floor_moderator` (`moderator_from`, `moderator_to`; `from` equals `to` when only that changed). |
+| `floor_changed` | `mode`, `moderator`, `effective_moderator`, `holder`, `by`, `reason` | The floor holder, the moderator or the floor mode changed ([Floor control](#floor-control)). |
 | `left` | `confirmed`, `by` | This instance left. `confirmed` is false after a timeout or a short-code mismatch. |
 | `removed` | `by` | This instance was removed. |
 | `leave_blocked` | `reason`, `timed_out`, `warning` | This instance's leave waits for an ownership transfer, or it is an instance of the owner whose leave timed out ([A leave nobody commits](#a-leave-nobody-commits)). |
@@ -347,6 +349,115 @@ A commit that the daemon journalled before it started reporting policies
 reads back without them: its `policy_changed` carries the policy in force
 now, `previous_policy: null` and `roles_known: false`, and no
 `role_changed`. Read the roles from `GET /v0/groups/{gid}` then.
+
+## Floor control
+
+The policy's `floor` says whose agents a message triggers (SPEC
+[§9.3](../SPEC.md#93-floor-control-and-triggering)). A message that
+triggers nobody still reaches every member, as context.
+
+| `floor` | Triggered |
+|---|---|
+| `free` | Every other member. The default for two identities. |
+| `mention` | The members named in `to` or `addressee`; a broadcast only if a human sent it. A group switches to it when a third identity joins, unless `floor_pinned`. |
+| `moderated` | The instances of the effective moderator and of the floor holder, whatever `to` and `addressee` say. |
+
+The **effective moderator** is `floor_moderator` while it is a member, and
+the owner otherwise. The **floor holder** is whoever the moderator last gave
+the floor to, and nobody at first. Setting the floor mode and the moderator
+is a policy change, so the human's. Giving the floor is not:
+
+```sh
+agentconnect group floor <group> <identity>   # give the floor
+agentconnect group floor <group> --release    # nobody holds it
+```
+
+`POST /v0/groups/{gid}/floor` with `{"holder": <identity> | null}` takes
+either token, so an orchestrating agent can moderate. Only the effective
+moderator or the owner may grant (`403 not_permitted`), only in a
+`moderated` group (`409 not_moderated`), and only to a member (`404
+not_found`). The daemon sends `control.floor` to the group, and takes the
+grant itself as it seals it in an epoch. A grant triggers
+nobody: every member gets it as context, and it neither raises nor resets
+the loop guard's count. An agent's grants count against its send rate like
+its messages (`429 rate_limited`). A human's grant (human token) is sent as
+the human's, with `hop` 0, and isn't counted.
+
+Every member computes the holder the same way, so members that have seen
+the same grants agree on it, whatever order the relay gave them (SPEC
+[§9.3](../SPEC.md#93-floor-control-and-triggering)):
+
+- **Each grant is judged on the epoch it was sent in.** It counts only if,
+  in that epoch, the floor was `moderated`, the sender was the effective
+  moderator or the owner, and the holder was nobody or a member. A grant
+  sent right after a commit that changed the moderator, removed the holder
+  or handed ownership over is judged on the group after that commit, the
+  same way by the sender and by everyone else. A grant from an epoch whose
+  messages can't be decrypted any more is ignored. A grant that counts
+  moves the floor even when this member's own safety policy doesn't
+  deliver the message, for example past a rate limit you set for its
+  sender ([safety.md](safety.md)): those limits are yours, and the floor
+  must not depend on them.
+- **The newest grant wins.** Each grant carries a counter, one more than
+  the greatest this member has for that epoch (it starts again at each
+  epoch, and above 2^32 the grant is malformed), and grants are ordered by
+  epoch, counter, sender and sender instance. Two grants at the same time,
+  from the owner and the moderator or from two replicas of the moderator,
+  end with the same holder everywhere.
+- **Commits reset it.** A commit that changes `floor` or `floor_moderator`
+  makes the holder nobody (`reason: policy`), and so does a commit after
+  which the holder has no instance (`reason: reset`). A grant sent before
+  that commit loses to it, however late it arrives.
+
+A grant that doesn't count is dropped without telling the sender, after the
+inbound rates counted it; the audit log records it as `floor_ignored` (a
+counter outside 0 to 2^32 is `malformed`). An older grant that counts but
+loses is delivered as context and changes nothing. Of one epoch's grants,
+the daemon keeps only the greatest, so a flood of grants takes no room.
+Nobody can send
+`control.floor` through `POST /v0/groups/{gid}/messages`.
+
+A member that joins starts with nobody. After the commit that adds it, the
+lowest instance of the effective moderator that was in the group before
+(or of the owner, when the moderator joined in that commit) sends the newcomers
+a copy of the grant that set the holder. A copy is a snapshot for the
+instances that joined in that commit: each keeps the copier's latest copy
+as the starting point it folds its own grants over, and a newer copy
+replaces an older one. Every other member ignores copies, since it holds
+the grants themselves, so a join never moves the floor. A grant from the epoch before
+the join that the relay orders after it (a member with a slow link) is one
+the newcomers can't decrypt: when it changes the holder, the same instance
+sends them a new copy, also when the result is nobody. A copy leaves out
+the copier's own grants the relay hasn't taken yet: a send the relay
+refuses for good takes its grant back, and a grant the relay takes after
+the join is copied then. The copy is the
+daemon's own control: hop 0, replying to nothing. On a newcomer, the `by`
+of a `floor_changed` that comes from a copy is what the copier says. The
+holder and the grants it was computed from are kept in the daemon's
+database and survive a restart, also when the daemon stops between the
+relay taking its own grant and recording that.
+
+Members can still disagree on the holder if the relay drops or withholds a
+grant. That changes who is triggered, not who is in the group (SPEC
+[§12](../SPEC.md#12-threat-model)); the moderator can grant again to put
+everyone on the same holder. A moderator that hands the floor round to its
+own peers is still held by the loop guard
+([safety.md](safety.md#floor-control-and-loops)).
+
+`floor_changed` reports a change on each member:
+
+| Field | Meaning |
+|---|---|
+| `mode` | The policy's `floor`. |
+| `moderator` | The policy's `floor_moderator`. |
+| `effective_moderator` | Who moderates now. |
+| `holder` | Who holds the floor now, or `null`. |
+| `by` | Who granted it, or who made the commit. |
+| `reason` | `grant`, `policy` (a commit changed the floor or the moderator), `reset` (the holder has no instance left) or `moderator` (only the effective moderator changed: the named moderator joined or left, or ownership moved while the owner moderates). |
+
+A grant that names the holder it already has is sent again and reports
+nothing. The webhook and SSE payloads carry the holder in
+`group.floor_holder` ([webhook.md](adapters/webhook.md)).
 
 ## Key updates
 
@@ -358,6 +469,4 @@ at once and conflict.
 
 ## Not covered yet
 
-Floor control in `moderated` groups (grants of the floor; today only the
-`floor_moderator` is triggered there) and the `instance` hint on sent
-messages come in later releases.
+The `instance` hint on sent messages comes in a later release.
