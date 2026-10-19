@@ -1,0 +1,173 @@
+# The end-to-end demos: `just demo` (hosts A and B) and `just demo-group`
+# (the `group` profile adds host C). `demo/run.py` drives them; the README's
+# "Demos" section walks through what it does.
+#
+# Each host is its own network namespace on its own network, so the hosts
+# can reach the relay and nothing else:
+#
+#   host-X   owns the namespace and runs the loopback relay tap
+#            (agentconnect_harness.tap) on 127.0.0.1:8080. The daemon only
+#            accepts plain ws:// and http:// to a loopback relay, so this is
+#            how it reaches the relay on the docker network without TLS. The
+#            tap forwards REST as it is and passes the WebSocket through the
+#            harness proxy, which records the frames (and is the malicious
+#            relay double of the integration suite).
+#   daemon-X agentconnectd, with network_mode service:host-X: the relay is
+#            ws://127.0.0.1:8080 and the agent is on loopback, as the A2A
+#            adapter and the webhook's callback_url require.
+#   agent-X  the sample agent, in the same namespace.
+#
+# One image runs everything (demo/Dockerfile). Nothing is published on the
+# host's ports.
+
+name: agentconnect-demo
+
+x-image: &image
+  image: agentconnect-demo:dev
+  pull_policy: never
+  init: true
+
+x-tap: &tap
+  <<: *image
+  command: ["python", "-m", "agentconnect_harness.tap", "serve", "--upstream", "relay:8080"]
+  depends_on:
+    relay:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+    interval: 1s
+    timeout: 2s
+    retries: 30
+
+x-daemon-health: &daemon-health
+  test: ["CMD", "agentconnect", "status"]
+  interval: 1s
+  timeout: 5s
+  retries: 60
+
+x-model: &model
+  # The stub model by default; AC_EXAMPLE_MODEL=real with ANTHROPIC_API_KEY
+  # (and an image built with REAL_MODELS=1) runs the real models.
+  AC_EXAMPLE_MODEL: ${AC_EXAMPLE_MODEL:-stub}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+services:
+  relay:
+    <<: *image
+    command: ["agentconnect-relay"]
+    environment:
+      AC_RELAY_ADDR: 0.0.0.0:8080
+      # Every host reaches the relay as 127.0.0.1:8080 through its tap, and
+      # signs that host string into its authentication.
+      AC_RELAY_HOST: 127.0.0.1:8080
+      AC_RELAY_DB: /relay/relay.db
+      RUST_LOG: info
+    volumes:
+      - relay:/relay
+    networks: [net-a, net-b, net-c]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  # Host A: an A2A server agent behind the daemon's A2A adapter.
+  host-a:
+    <<: *tap
+    networks: [net-a]
+  agent-a:
+    <<: *image
+    network_mode: service:host-a
+    command: ["python", "/opt/examples/a2a-server/agent.py"]
+    depends_on:
+      host-a:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9999/.well-known/agent-card.json"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  daemon-a:
+    <<: *image
+    network_mode: service:host-a
+    command: ["agentconnect", "daemon", "run"]
+    environment:
+      AC_CONFIG: /config/config.toml
+      AC_DATA_DIR: /var/lib/agentconnect/data
+    volumes:
+      - a-data:/var/lib/agentconnect
+      - ./config/a.toml:/config/config.toml:ro
+    depends_on:
+      agent-a:
+        condition: service_healthy
+    healthcheck: *daemon-health
+
+  # Host B: a headless Claude Agent SDK agent, attached to the daemon's webhook.
+  host-b:
+    <<: *tap
+    networks: [net-b]
+  daemon-b:
+    <<: *image
+    network_mode: service:host-b
+    command: ["agentconnect", "daemon", "run"]
+    environment:
+      AC_CONFIG: /config/config.toml
+      AC_DATA_DIR: /var/lib/agentconnect/data
+    volumes:
+      - b-data:/var/lib/agentconnect
+      - ./config/b.toml:/config/config.toml:ro
+    depends_on:
+      host-b:
+        condition: service_healthy
+    healthcheck: *daemon-health
+  agent-b:
+    <<: *image
+    network_mode: service:host-b
+    command: ["python", "/opt/examples/claude-agent-sdk/agent.py", "--attach"]
+    environment:
+      <<: *model
+      AC_CONFIG: /config/config.toml
+      AC_DATA_DIR: /var/lib/agentconnect/data
+    volumes:
+      - b-data:/var/lib/agentconnect
+      - ./config/b.toml:/config/config.toml:ro
+    depends_on:
+      daemon-b:
+        condition: service_healthy
+
+  # Host C (`group` profile): a LangGraph agent with the runtime embedded,
+  # so there is no daemon; its human points the CLI at its data directory.
+  host-c:
+    <<: *tap
+    profiles: [group]
+    networks: [net-c]
+  agent-c:
+    <<: *image
+    profiles: [group]
+    network_mode: service:host-c
+    command: ["python", "/opt/examples/langgraph-group/agents.py", "critic"]
+    environment:
+      <<: *model
+      AC_RELAY_URL: ws://127.0.0.1:8080
+      XDG_DATA_HOME: /var/lib/agentconnect
+      # For the human's CLI in this container (docs/cli.md, "Against an
+      # embedded agent"); the same directory the agent picks by name.
+      AC_CONFIG: /dev/null
+      AC_DATA_DIR: /var/lib/agentconnect/agentconnect-langgraph-critic
+    volumes:
+      - c-data:/var/lib/agentconnect
+    depends_on:
+      host-c:
+        condition: service_healthy
+    healthcheck: *daemon-health
+
+volumes:
+  relay:
+  a-data:
+  b-data:
+  c-data:
+
+networks:
+  net-a:
+  net-b:
+  net-c:

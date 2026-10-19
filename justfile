@@ -74,11 +74,32 @@ vectors:
 contract:
     uv run --no-project python scripts/check_manifest.py
 
-# Integration tier (docker compose); populated as components land
-# Postgres for the directory's store comes from compose.test.yaml (loopback only).
-test-int:
+# Postgres for the directory's store comes from compose.test.yaml (loopback only);
+# the demos and the malicious relay double run in demo/compose.yaml.
+# Integration tier: the directory's Postgres store, the docker demos, the malicious relay
+test-int: demo-image
     docker compose -f compose.test.yaml up -d --wait
     status=0; AC_DIRECTORY_TEST_DB=postgres://directory@127.0.0.1:55432/directory?sslmode=disable cargo nextest run -p agentconnect-directory --locked --run-ignored only || status=$?; docker compose -f compose.test.yaml down; exit "$status"
+    uv run --all-packages --frozen pytest -q integration/tests
+
+# The image every demo service runs (demo/Dockerfile); never pushed
+demo-image:
+    docker build -f demo/Dockerfile -t agentconnect-demo:dev {{ if env("AC_EXAMPLE_MODEL", "stub") == "real" { "--build-arg REAL_MODELS=1" } else { "" } }} .
+
+# Demo 1 in docker compose: an A2A agent and a Claude Agent SDK agent, 1:1 (README, "Demos")
+demo: demo-image
+    uv run --no-project python demo/run.py one-to-one --no-build
+
+# Demo 2 in docker compose: an A2A, a Claude Agent SDK and a LangGraph agent in one group
+demo-group: demo-image
+    uv run --no-project python demo/run.py group --no-build
+
+# Record both demos with asciinema into docs/demos/ (needs asciinema on PATH)
+demo-record: demo-image
+    @command -v asciinema >/dev/null || { echo "demo-record needs asciinema (https://asciinema.org)" >&2; exit 1; }
+    mkdir -p docs/demos
+    asciinema rec --overwrite -q -c "uv run --no-project python demo/run.py one-to-one --no-build" docs/demos/one-to-one.cast
+    asciinema rec --overwrite -q -c "uv run --no-project python demo/run.py group --no-build" docs/demos/group.cast
 
 # Nightly tier: mutation testing, quarantined tests, long property runs
 # (fuzzing and benchmarks are added with the core)

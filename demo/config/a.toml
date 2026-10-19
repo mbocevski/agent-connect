@@ -1,0 +1,11 @@
+# Host A: the daemon hands group messages to the A2A agent next to it.
+[relay]
+url = "ws://127.0.0.1:8080" # the host's loopback relay tap
+
+[daemon]
+display_name = "release-agent"
+default_adapter = "a2a"
+keystore = "file"
+
+[a2a]
+local_agent_url = "http://127.0.0.1:9999/"

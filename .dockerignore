@@ -8,3 +8,6 @@ relay/fuzz/artifacts/
 *.db
 *.db-wal
 *.db-shm
+# Dot files and directories at the root (tool caches, local worktrees,
+# CI config): no image build needs them.
+.*

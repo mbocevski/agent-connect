@@ -298,6 +298,105 @@ async with AgentConnect.embedded(name="release-bot", relay="ws://127.0.0.1:8080"
     await ac.serve()
 ```
 
+## Demos
+
+Two demos run whole deployments in docker compose: a relay and one host per
+agent, each host on its own network, so the hosts reach the relay and
+nothing else. They need docker, `just` and `uv`; the first run builds the
+image (`demo/Dockerfile`), which takes a few minutes. `demo/run.py` drives
+each step with `docker compose exec`, prints the commands and what they
+printed, and stops with an error when a step doesn't do what it should.
+`just test-int` runs both demos as tests.
+
+| Command | What runs |
+|---|---|
+| `just demo` | Host A: a sample A2A server agent ([examples/a2a-server](examples/a2a-server/README.md)) behind the daemon's A2A adapter. Host B: a headless Claude Agent SDK agent ([examples/claude-agent-sdk](examples/claude-agent-sdk/README.md)) attached to the daemon's webhook. |
+| `just demo-group` | Hosts A and B, and host C: a LangGraph agent ([examples/langgraph-group](examples/langgraph-group/README.md)) with the runtime embedded. |
+
+The agents use stub models with fixed answers by default, so the demos need
+no API key. To run the real Claude Agent SDK and LangGraph agents, set
+`AC_EXAMPLE_MODEL=real` and `ANTHROPIC_API_KEY`; the image is then built
+with both packages, and only the agent containers get the key. The driver
+doesn't print it. With real models the steps that check exact answers can
+fail, since the replies are the model's.
+
+Inside each host the daemon and its agent share one network namespace, so
+the relay is `ws://127.0.0.1:8080` and the agent's address is on loopback:
+plain `ws://` and `http://` are accepted for loopback addresses only. A
+small tap forwards that port to the relay container and records the
+WebSocket frames; the integration suite uses the recording, and the same tap
+acts as a malicious relay ([demo/compose.yaml](demo/compose.yaml)).
+
+### Demo 1: two agents, one to one
+
+The adapter is not a flag of `invite create` or `accept`: each daemon's
+`config.toml` names it (`default_adapter = "a2a"` with `[a2a]
+local_agent_url` on host A, `default_adapter = "webhook"` with `[webhook]
+callback_url` on host B; [demo/config](demo/config)).
+
+1. A's human creates an invite, and B's human accepts it. `accept` waits
+   while A's human approves the request:
+
+   ```sh
+   docker compose exec daemon-a agentconnect invite create --purpose "Plan the v0.1 release"
+   docker compose exec daemon-b agentconnect accept '<url>' --yes
+   docker compose exec daemon-a agentconnect approvals
+   docker compose exec daemon-a agentconnect approvals approve <request_id> --yes
+   ```
+
+2. Both humans read the short code from `agentconnect verify <group>`,
+   compare it out of band and answer `y`.
+3. B's agent asks A's agent for the release notes. A's agent streams a
+   task (`working`, two artifact chunks, `completed`), and B's agent prints
+   each update. The demo sends B's requests with `agentconnect send`, which
+   sends as the agent.
+4. B's agent asks for a deploy. A's task stops in `input-required` ("staging
+   or production?"); B's agent answers with `Group.reply`, which continues
+   the task, and A's agent completes it.
+5. Host B stops (`docker compose stop agent-b daemon-b`), A's agent sends a
+   question, and B starts again. The relay kept the message; B's agent
+   answers it.
+6. A's human closes the group. There is no CLI command for that: the human
+   sends `control.close` through the local API with the human token. B's
+   daemon raises `close_requested` and doesn't leave on its own; B's human
+   runs `agentconnect leave <group>`, and A sees `member_left`.
+
+   ```sh
+   curl --unix-socket "$AC_DATA_DIR/agentconnectd.sock" \
+     -H "Authorization: Bearer $(cat "$AC_DATA_DIR/human-token")" \
+     -d '{"kind": "control.close", "body": {"reason": "release planned"}}' \
+     http://agentconnectd/v0/groups/<group>/messages
+   ```
+
+### Demo 2: three agents in a group
+
+1. A's human creates one invite with `--max-uses 2`; B's and C's humans
+   accept it, and A's human approves each request. C's runtime is embedded,
+   so C's human runs the CLI in the agent's container, on its data
+   directory.
+2. A's human sets the loop guard (`agentconnect group policy <group>
+   --max-agent-turns 4`). All three see the same short code and verify it.
+   With three members the floor is `mention`.
+3. A's human asks the LangGraph agent a question. A message from the human
+   goes through the local API with the human token, since `agentconnect
+   send` sends as the agent, and an agent's message to everyone triggers
+   nobody in `mention` mode. Only the LangGraph agent answers; the Agent SDK
+   agent's audit log records the question as context. A question to both
+   gets both answers.
+4. A's human removes the LangGraph agent (`agentconnect remove <group>
+   <identity>`). Its runtime reports `removed` and stays at the old epoch;
+   A's and B's short code changes, and the next message never reaches C.
+5. A's human tells the Agent SDK agent to keep debating with the release
+   agent. They answer each other until the loop guard stops the exchange,
+   and both humans get a `loop_guard` event.
+
+The sample agents answer questions (text that ends with `?`) addressed to
+them and take everything else as context, so a debate is the only way two
+of them keep talking.
+
+`just demo-record` records both demos with [asciinema](https://asciinema.org)
+into `docs/demos/one-to-one.cast` and `docs/demos/group.cast`.
+
 ## Security model
 
 > The relay can't read or silently alter your agents' conversation. If

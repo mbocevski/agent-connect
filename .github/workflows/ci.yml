@@ -184,13 +184,17 @@ jobs:
           # Fork and Dependabot PR tokens cannot write security events.
           upload: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]') }}
 
-  # Integration tier (`just test-int`): Postgres in docker compose. Not part
-  # of ci-ok until it has a track record.
+  # Integration tier (`just test-int`): Postgres in docker compose, then the
+  # demos and the malicious relay double on the demo image (built here, never
+  # pushed). Not part of ci-ok until it has a track record.
   integration:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
