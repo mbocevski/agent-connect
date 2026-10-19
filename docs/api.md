@@ -26,8 +26,12 @@ of one OS user), a new connection closes one with `503 busy`: of the same
 user when that user is past its limit, else of the user with the most; one
 that has sent nothing first, then the oldest; and only one that has been
 unfinished for half a second. If none has, the new connection is let in
-over the limit, up to 128 (64 of one user), and past that the same choice
-is made without the half second. So connections that are left idle, or
+over the limit, up to 128 (64 of one user). Past that the half second no
+longer protects, and the oldest connection that sent part of its request
+and stalled goes first, before any that sent nothing, so a whole request
+that has only now arrived isn't closed for one that has been waiting. On TCP
+the kernel reports no user, so there are no per-user limits: only the 32
+and 128 apply to every connection. So connections that are left idle, or
 that send part of a request, can't keep out a client that sends its request
 at once, and requests that arrive together, such as an SDK's parallel
 calls, don't close each other. A request refused at its headers (a missing

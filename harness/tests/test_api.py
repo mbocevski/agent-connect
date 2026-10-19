@@ -23,7 +23,7 @@ from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import app
 from agentconnect.config import Config
-from agentconnect.runtime.api import MAX_PENDING, ApiServer
+from agentconnect.runtime.api import MAX_PENDING, MAX_PENDING_HARD, ApiServer
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token
 from agentconnect_harness.relay import on_free_port
@@ -633,6 +633,41 @@ async def test_a_connection_that_sent_nothing_gives_way_first(
         assert await status_of(held[1]) == b"503"  # the oldest that sent nothing
         partial.sendall(f"authorization: Bearer {api_token(server, 'human')}\r\n\r\n".encode())
         assert await status_of(partial) == b"200"
+    finally:
+        for s in held:
+            s.close()
+        await server.stop()
+
+
+@pytest.mark.parametrize("burst", [1, 2, 8])
+async def test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one(
+    cluster: Cluster, sockdir: Path, burst: int
+) -> None:
+    """Loopback TCP with the pool at its hard limit, every connection having
+    sent a byte and stalled. The human's whole request arrives with bare
+    connects right behind it: each new connection closes the oldest
+    stalled one, never the fresh request whose first byte isn't read yet."""
+    server, connect, host = await listener(cluster, sockdir, "tcp")
+    held: list[socket.socket] = []
+    try:
+        for i in range(MAX_PENDING_HARD):
+            s = connect()
+            s.sendall(b"G")
+            held.append(s)
+            if i % 32 == 31:
+                await until(lambda n=i + 1: len(server._pending) >= n)
+        await until(
+            lambda: (
+                len(server._pending) == MAX_PENDING_HARD and all(p.started for p in server._pending)
+            )
+        )
+        human = connect()
+        human.sendall(whole_request(host, api_token(server, "human")))
+        for _ in range(burst):  # the kernel completes them before the loop runs
+            held.append(connect())
+        assert await status_of(human) == b"200"
+        for s in held[: burst + 1]:  # the oldest stalled ones gave way
+            assert await status_of(s) == b"503"
     finally:
         for s in held:
             s.close()

@@ -246,25 +246,31 @@ async def test_one_users_requests_that_arrive_together_all_get_through(
         await server.stop()
 
 
-async def test_one_user_past_the_hard_limit_closes_its_own_quiet_ones(
+async def test_one_user_past_the_hard_limit_closes_its_own_stalled_one_first(
     cluster: Cluster, agent_dir: Path, rng: random.Random
 ) -> None:
     """Past the hard limit, waiting doesn't protect an unfinished
-    connection: the user's oldest that sent nothing goes, at once."""
+    connection: the user's oldest one that sent part of a request and
+    stalled goes at once, before any that sent nothing (one of those may be
+    a request whose bytes aren't read yet); with none stalled, its oldest."""
     server, _peer = await isolated(cluster, agent_dir, (_uid(rng),))
     held = []
     try:
+        for _ in range(MAX_PENDING_PER_PEER_HARD - 1):
+            held.append(connect(server))
         partial = connect(server)
         partial.sendall(b"GET /v0/status HTTP/1.1\r\n")
         held.append(partial)
-        await until(lambda: len(server._pending) == 1 and server._pending[0].started)
-        for _ in range(MAX_PENDING_PER_PEER_HARD - 1):
-            held.append(connect(server))
+        await until(
+            lambda: (
+                len(server._pending) == MAX_PENDING_PER_PEER_HARD and server._pending[-1].started
+            )
+        )
+        held.append(connect(server))
+        assert await status_of(partial) == b"503"
         await until(lambda: len(server._pending) == MAX_PENDING_PER_PEER_HARD)
         held.append(connect(server))
-        assert await status_of(held[1]) == b"503"
-        await until(lambda: len(server._pending) == MAX_PENDING_PER_PEER_HARD)
-        assert server._pending[0].started  # the one that sent part of its request stays
+        assert await status_of(held[0]) == b"503"
     finally:
         for s in held:
             s.close()

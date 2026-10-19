@@ -1193,7 +1193,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   of the same user at its limit, else of the user holding the most; one
   that has sent nothing first, then the oldest. None has waited that long:
   the new one is let in, up to 128 (64 per user), past which waiting
-  doesn't count. A connection whose headers arrived is never closed, so
+  doesn't count and the oldest connection that sent part of its request
+  and stalled goes first. On TCP there are no per-user limits, only the
+  totals. A connection whose headers arrived is never closed, so
   requests that arrive together, such as an SDK's parallel calls, don't
   close each other. Once the headers are read, at most 48 agent-token and
   16 human-token requests are in progress at once, and in the

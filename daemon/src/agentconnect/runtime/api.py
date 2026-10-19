@@ -72,7 +72,8 @@ READ_TIMEOUT = 10.0  # seconds to send a whole request
 # then the oldest (503 busy). So idle or half-sent connections can't keep
 # out a request that has a token, and requests that arrive together (an
 # SDK's parallel calls) don't push each other out. Past a hard limit,
-# waiting doesn't count: the same choice is made among all of them.
+# waiting doesn't count, and the oldest one that sent part of a request
+# and stalled goes first. On TCP there is no UID: only the totals apply.
 MAX_PENDING = 32
 MAX_PENDING_PER_PEER = 8
 MAX_PENDING_HARD = 128
@@ -1672,13 +1673,18 @@ class ApiServer:
 
     @staticmethod
     def _victim(pool: list[Pending], hard: bool) -> Pending | None:
-        """The one of ``pool`` (oldest first) to close: one that has sent
-        nothing, else the oldest, among those pending for ``EVICT_AFTER``
-        (all of them past a hard limit). ``None``: none may go yet, and the
-        new connection is let in over the limit."""
-        if not hard:
-            now = asyncio.get_running_loop().time()
-            pool = [p for p in pool if now - p.since >= EVICT_AFTER]
+        """The one of ``pool`` (oldest first) to close. Below a hard limit:
+        among those pending for ``EVICT_AFTER``, one that has sent nothing,
+        else the oldest; ``None`` when none has waited that long, and the
+        new connection is let in over the limit. Past a hard limit, waiting
+        doesn't protect: the oldest that sent part of a request and stalled
+        goes first, before any that sent nothing, since one of those may be
+        a whole request that just arrived and isn't read yet."""
+        if hard:
+            stalled = [p for p in pool if p.started]
+            return (stalled or pool)[0]
+        now = asyncio.get_running_loop().time()
+        pool = [p for p in pool if now - p.since >= EVICT_AFTER]
         quiet = [p for p in pool if not p.started]
         return (quiet or pool or [None])[0]
 
