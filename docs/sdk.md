@@ -54,7 +54,7 @@ async with AgentConnect.embedded(name="my-agent", relay="wss://relay.example.org
 | `name` | Picks the data directory, `$XDG_DATA_HOME/agentconnect-<name>` (`~/.local/share/agentconnect-<name>`). One data directory is one identity. |
 | `data_dir` | Another directory instead. One of `name` and `data_dir` is required, so two agents on one machine never share an identity by accident. Without either, `AC_DATA_DIR` isn't enough; with `name`, an `AC_DATA_DIR` that points elsewhere is refused (`bad_config`) rather than giving the agent another agent's identity. |
 | `relay` | The relay's `wss://` URL. Required; there is no built-in relay. |
-| `config` | A TOML file in the daemon's format ([config.md](config.md)), for the `[policy]` defaults and the like. The embedded runtime never reads the separate daemon's `config.toml` unless you pass it here. |
+| `config` | A TOML file in the daemon's format ([config.md](config.md)), for the `[policy]` defaults and the like. The embedded runtime never reads the separate daemon's `config.toml` unless you pass it here. Its groups deliver to its own handlers, whatever the file's `daemon.adapters` lists. |
 | `display_name` | What peers see. Default: `name`. |
 | `dedupe` | Your own `Deduper` (see [Delivery semantics](#delivery-semantics)). |
 
