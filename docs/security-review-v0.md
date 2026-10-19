@@ -66,7 +66,7 @@ the protocol changes. Everything else is measured against
 
 | Severity | Count | Status |
 |---|---|---|
-| High | 1 | Open: needs a protocol change |
+| High | 1 | Fixed in #67 |
 | Medium | 11 | Open, follow-up task |
 | Low | 28 | Open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
@@ -104,8 +104,7 @@ the protocol changes. Everything else is measured against
 These must be fixed, or explicitly accepted by the maintainer, before a
 relay is offered to the public:
 
-1. SR-01, or a SPEC §1 and §12 change that states the residual until it is
-   fixed.
+1. SR-01 (fixed in #67).
 2. SR-02 (one client locks every user out of revoking invites and closing
    doors).
 3. SR-03, SR-04 and SR-07 (disk exhaustion and forced re-syncs by a
@@ -124,8 +123,11 @@ relay is offered to the public:
   relay.
 - **Component:** protocol (SPEC §3.5, §11), `core/src/sas.rs`,
   `core/src/group.rs` (`Group::sas`).
-- **Status:** open, needs a protocol decision (follow-up T-01). Not fixed in
-  this review: any fix changes SPEC §11 and the verification flow.
+- **Status:** fixed in #67. Short codes now come from pairwise
+  commit-then-reveal runs (SPEC §11): each run mixes a fresh nonce from
+  both humans' daemons into the code, and neither side reveals its nonce
+  before it holds the other's commitment, so an attacker in the middle
+  gets one guess per run instead of an offline search.
 - **Confirmed.**
 
 `sas_bytes` = HKDF(`epoch_authenticator`, `group_id`, label ‖ epoch), and
@@ -512,11 +514,11 @@ there is a negative test (the attack fails).
 | | Own commit confirmed only by `msg_id` or exact bytes | `group.rs` (`confirm_pending_commit_inner`, `merge_own`) | `core/tests/group.rs::accepted_confirms_only_its_own_msg_id_and_later_echo_is_harmless`, `::stale_own_commit_is_not_taken_for_the_pending_one`; `core/src/group/tests.rs::forged_own_commit_echo_neither_confirms_nor_discards` | Covered |
 | | Routing-hint check | `daemon/.../runtime/groups.py` (`after_commit`) | `harness/tests/test_scenarios.py::test_routing_hint_mismatch_raises_relay_misbehaviour` | Covered for `add`; a rewritten `remove` hint isn't tested |
 | | Envelope shape, epoch and group against the header (§7.1) | `engine.py` (`_envelope_problem`, `_header_mismatch`), `group.rs` (`peek_header`) | `harness/tests/test_envelope_validation.py::test_envelope_shapes`, `::test_an_application_epoch_mismatch_is_dropped_before_processing`, `::test_a_commit_for_another_group_is_flagged_and_rejected` | Covered |
-| | SAS detects forks | `core/src/sas.rs`, `group.rs` (`sas`) | `core/tests/group.rs::forked_group_view_gives_different_sas`; `harness/tests/test_scenarios.py::test_fork_shows_as_differing_sas` | **Broken by SR-01**: the tests cover an honest fork, not an attacker who grinds commits |
+| | SAS detects forks | `core/src/sas.rs`, `group.rs` (`sas`) | `core/tests/group.rs::forked_group_view_gives_different_sas`; `harness/tests/test_scenarios.py::test_fork_shows_as_differing_sas` | Was broken by SR-01 (grinding); fixed in #67, see `core/src/group/sas_grind_tests.rs` |
 | Link leaked before use | Use limits, atomic consume | `relay/src/relay.rs` (`invite.consume`), `sqlite.rs` | `relay/tests/invites.rs::two_concurrent_consumes_of_a_single_use_invite_have_one_winner`; `harness/tests/test_invite_uses.py::test_two_concurrent_redemptions_of_a_single_use_link` | Covered |
 | | "Already used" warning | `engine.py`, `cli_support.py` | `harness/tests/test_cli_lifecycle.py::test_a_used_invite_raises_the_interception_warning`, `::test_a_revoked_invite_raises_the_same_warning` | Covered |
 | | Inviter approval, 1 h timeout, no automatic approval by default | `engine.py`, `config.py` | `harness/tests/test_daemon_flows.py::test_expired_approvals_disappear_from_the_list`; `daemon/tests/test_no_auto_approve.py::test_every_route_that_decides_needs_the_human_token` | Covered |
-| | SAS | as above | as above | **Broken by SR-01** |
+| | SAS | as above | as above | Was broken by SR-01; fixed in #67 |
 | Link leaked after exhaustion | The secret authenticates joins only; closed invites refused; secrets deleted | `engine.py` (`_on_join_request`, `_forget_invite_requests`) | `harness/tests/test_daemon_flows.py::test_an_exhausted_invite_is_not_reused`; `harness/tests/test_expiry.py::test_expired_invites_and_joins_lose_their_secrets` | Covered |
 | Malicious member | Roles and policy checked by every receiver | `core/src/policy.rs`, `group.rs` (`inspect_commit`) | `core/src/group/tests.rs::member_removing_another_member_is_rejected`, `::non_owner_policy_change_is_rejected`; `core/src/group/group_mode_tests.rs::unauthorized_commits_are_rejected_and_fork_only_the_committer`; `harness/tests/test_group_roles.py::test_a_policy_change_beyond_the_committers_role_is_rejected_by_every_member` | Covered |
 | | Removal starts a new epoch | `group.rs` (`remove`, `remove_instances`) | `core/tests/group.rs::removed_member_cannot_decrypt_next_epoch`; `relay/tests/delivery.rs::a_removed_member_gets_the_removing_commit_then_nothing` | Covered |
@@ -546,7 +548,7 @@ there is a negative test (the attack fails).
 | | Names are ASCII slugs | `core/src/listing/mod.rs` (`is_listing_name`) | `core/src/listing/mod.rs::listing_names_are_ascii_slugs` | Covered for the slug; the display name is Unicode (SPEC mismatch 6) |
 | | "Key changed" banner for 30 days | `directory.rs` (`view`) | `directory/tests/pages.rs::owner_states_and_the_key_changed_banner_show` | Covered at the directory only |
 | | The knocker fetches the owner file itself | `runtime/knocks.py` (`_owner`), `ownerfile.py` | `daemon/tests/test_knocks.py::test_the_owner_domain_is_checked_by_this_runtime`; `daemon/tests/test_ownerfile.py::test_special_use_addresses_are_never_dialled` | Covered |
-| | Then the SAS | knock groups start unverified | `core/src/group/knock_tests.rs::a_forked_knock_group_shows_a_different_short_code` | **Broken by SR-01** |
+| | Then the SAS | knock groups start unverified | `core/src/group/knock_tests.rs::a_forked_knock_group_shows_a_different_short_code` | Was broken by SR-01; fixed in #67 |
 | Scraper | Rate limits | `ratelimit.rs` | `directory/tests/limits_logs.rs::reads_are_limited_per_address_and_recover` | Covered |
 | | No mailbox id or secret in listings | `card.rs` (closed schema) | `core/src/listing/card.rs::closed_schema_rejects_extra_fields` | Covered |
 | | Doors rotate | `runtime/listing.py` | `daemon/tests/test_listing.py::test_renewal_at_exactly_half_life` | Covered (rotation is every 3.5 days, SPEC mismatch 5) |
@@ -643,7 +645,7 @@ The five crypto negative tests AGENTS.md requires all exist:
   pending approvals and the daemon-wide record (PR #45 review F1, fixed);
   a link holder can still make new requests with fresh KeyPackages, which
   the human sees and can revoke (accepted in that review, F6).
-- **Fork detection through SAS:** weakened by SR-01.
+- **Fork detection through SAS:** weakened by SR-01 (fixed in #67).
 - **Replicas and the floor.** Replica provisioning moves only `IK`, as a
   human operation (PR #55 review). The floor register was examined over
   five rounds in the PR #54 review, with no findings left. SR-35 is the
