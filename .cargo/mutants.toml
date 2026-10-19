@@ -9,3 +9,16 @@ additional_cargo_test_args = ["--profile=mutants"]
 # The nightly job runs the mutants in shards (`--shard k/n`). Round-robin
 # spreads every file over all shards, so they take about as long.
 sharding = "round-robin"
+
+# Mutants that can't change behaviour, each with the reason. Never list one
+# that a test could catch.
+exclude_re = [
+    # Any seed is a valid one; a run can't tell which one it was given.
+    'core/src/rng\.rs:.*: replace test_seed -> u64 with ',
+    # `hi << 4` has a zero low nibble and `lo` is below 16: `|` and `^` agree.
+    'core/src/encoding\.rs:.*: replace \| with \^ in hex_decode$',
+    # A port with a `:` fails the all-digits check that follows.
+    'core/src/identity\.rs:.*: replace match guard !p\.contains\(.:.\) with true in canonical_relay_host$',
+    # A port never starts with `0`, so the number is never 0.
+    'core/src/identity\.rs:.*: replace > with >= in canonical_relay_host$',
+]

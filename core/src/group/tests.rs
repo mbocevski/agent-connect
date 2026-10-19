@@ -938,3 +938,45 @@ fn welcome_policy_must_list_an_owner_who_need_not_be_a_member() {
         }
     }
 }
+
+/// A decrypted message prints its sender, epoch and length, never its body
+/// (AGENTS.md: no message bodies in logs).
+#[test]
+fn an_application_message_prints_no_body() {
+    let (cs, mut gs) = trio();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "v": 0,
+        "sender": cs[0].instance().identity(),
+        "instance_id": cs[0].instance().cert().instance_id_hex(),
+        "body": {"text": "BODY-MARKER-not-for-logs"},
+    }))
+    .unwrap();
+    let ct = gs[0].seal(&cs[0], &body).unwrap();
+    let m = gs[1].open(&cs[1], &ct).unwrap();
+    let dbg = format!("{m:?}");
+    assert!(dbg.starts_with("ApplicationMessage {"), "{dbg}");
+    assert!(dbg.contains(cs[0].instance().identity()), "{dbg}");
+    assert!(dbg.contains(&format!("epoch: {}", m.epoch)), "{dbg}");
+    assert!(dbg.contains(&format!("len: {}", body.len())), "{dbg}");
+    assert!(!dbg.contains("BODY-MARKER"), "{dbg}");
+}
+
+/// SPEC §7.1: only application messages are padded to a bucket. A leave
+/// proposal sent after a large message is not padded to that message's
+/// bucket.
+#[test]
+fn a_leave_after_a_large_message_is_not_padded() {
+    let (cs, mut gs) = trio();
+    let fresh = gs[2].propose_leave(&cs[2]).unwrap();
+    let large = serde_json::to_vec(&serde_json::json!({
+        "v": 0,
+        "sender": cs[1].instance().identity(),
+        "instance_id": cs[1].instance().cert().instance_id_hex(),
+        "body": {"text": "x".repeat(5000)},
+    }))
+    .unwrap();
+    assert!(gs[1].seal(&cs[1], &large).unwrap().len() > crate::padding::BUCKETS[3]);
+    let after = gs[1].propose_leave(&cs[1]).unwrap();
+    assert!(fresh.len() < crate::padding::BUCKETS[1], "{}", fresh.len());
+    assert_eq!(after.len(), fresh.len());
+}

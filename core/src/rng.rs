@@ -174,4 +174,18 @@ mod tests {
         assert_eq!(r.random_array::<3>().unwrap().len(), 3);
         assert_eq!(format!("{r:?}"), "Rng(os)");
     }
+
+    #[test]
+    fn openmls_draws_are_random() {
+        // OpenMLS takes group ids, key seeds and nonces from `random_array`:
+        // a broken source that repeats itself or returns a constant would
+        // make them all the same.
+        for r in [Rng::os().unwrap(), Rng::for_test("openmls-draws")] {
+            let a: [u8; 32] = r.random_array().unwrap();
+            let b: [u8; 32] = r.random_array().unwrap();
+            assert_ne!(a, b, "{r:?}: two draws");
+            assert!(a.iter().any(|&x| x != a[0]), "{r:?}: constant output");
+            assert_ne!(r.random_vec(32).unwrap(), b.to_vec(), "{r:?}");
+        }
+    }
 }
