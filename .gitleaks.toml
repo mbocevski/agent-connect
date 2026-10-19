@@ -18,5 +18,5 @@ paths = ['''^testdata/hpke-pq-test-vectors\.json$''']
 [[allowlists]]
 description = "generated test vectors"
 paths = [
-    '''^testdata/(instance-cert|invite-kdf|invite-urls|padding-vectors|relay-auth|sas-vectors|listings|listing-tokens|withdrawals|owner-files|knocks)\.json$''',
+    '''^testdata/(instance-cert|invite-kdf|invite-urls|padding-vectors|relay-auth|sas-vectors|listings|listing-tokens|withdrawals|owner-files|knocks|identity-export)\.json$''',
 ]

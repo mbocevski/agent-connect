@@ -17,6 +17,7 @@ extend-exclude = [
     "testdata/owner-files.json",
     "testdata/knocks.json",
     "testdata/group-policy.json",
+    "testdata/identity-export.json",
     "core/fuzz/Cargo.lock",
 ]
 
