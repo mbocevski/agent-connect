@@ -1821,7 +1821,8 @@ these steps:
 - An `error` frame for X's `control.sas_commit` ends the run (`send_failed`).
   An `error` for its reveal also ends the run, after the reveal, since the
   relay may have delivered it anyway.
-- A run doesn't survive a restart of its daemon. It aborts (`restarted`).
+- A run doesn't survive a restart of its daemon: it ends, and its human
+  starts again.
 
 **Commitments before the run.** Y's human may start first. A commitment
 addressed to X (§11.2) that X receives while it has no run with Y is
@@ -1942,7 +1943,8 @@ sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6)
   - after 60 s unpaired: "If <name> says they have started, your daemons
     don't see the same group. Treat this as different codes." The human
     can wait, take the mismatch action, or say that the peer has started
-    (§11.3, warnings);
+    (§11.3, warnings). A run that ends without ever pairing shows the same
+    text and offers the mismatch action;
   - once the run is paired: that the codes are being exchanged;
   - at step 5: the code with both instance labels (§11.4), and the
     question whether the other human reads exactly the same code, with the
@@ -2150,13 +2152,15 @@ Implementations in this repository MUST have:
     receive carries a code;
   - the one-time reset of verified flags happens once, across a crash, and
     a verify body that names an epoch is refused.
-- **The grinding attack as a harness test.** An attacker in both views of
-  a fork (the harness's malicious relay) grinds its commits until each
-  view's authenticator gives a code of its choice under the earlier v0
-  derivation, then runs a comparison with A and one with B. Over a seeded
+- **The grinding attack.** An attacker in both views of a fork grinds its
+  commits on copies of its MLS state, as the review's probe did, until
+  each view's authenticator gives a code of its choice under the earlier v0
+  derivation; then it runs comparisons with A and with B. Over a seeded
   series of runs, with the code cut to 12 bits for the test, the codes
-  shown to A and B match no more often than 2^-12 predicts. With the real
-  lengths, no run in the series matches.
+  shown to A and B match no more often than 2^-12 predicts, and with the
+  real lengths no run in the series matches. Grinding needs the copied
+  state, so this test runs in `core`; the harness's malicious relay forks
+  a group of real daemons and shows the fork as runs that never pair.
 
 ### 11.8 Compatibility
 
