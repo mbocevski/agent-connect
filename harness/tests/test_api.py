@@ -252,7 +252,7 @@ async def test_api_checks_the_instance_hint(cluster: Cluster, sockdir: Path) -> 
     path = f"/v0/groups/{gid}/messages"
     mine = api.node.daemon.instance.instance_id_hex
     for scope in ("agent", "human"):
-        for bad in (5, "XYZ", mine.upper(), mine[:15], mine + "\n"):
+        for bad in (5, "XYZ", "A" + mine[1:], mine[:15], mine + "\n"):
             status, err = await api.call("POST", path, {"text": "t", "instance": bad}, scope)
             assert (status, err["code"]) == (400, "bad_request"), bad
         body = {"messageId": "m", "parts": [{"text": "t"}], "metadata": {"instance": "XYZ"}}
