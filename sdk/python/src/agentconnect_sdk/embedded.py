@@ -148,6 +148,7 @@ class _Operations:
                 kind=message.get("kind", "a2a.message"),
                 reply_to=message.get("reply_to"),
                 addressee=message.get("addressee"),
+                instance=message.get("instance"),
             )
         )
 

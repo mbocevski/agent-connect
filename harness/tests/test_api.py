@@ -218,6 +218,30 @@ async def test_api_errors(  # noqa: PLR0913, PLR0917
     await api.server.stop()
 
 
+async def test_api_checks_the_instance_hint(cluster: Cluster, sockdir: Path) -> None:
+    """SPEC 9.4: an instance id, 16 lowercase hex, on a kind that triggers;
+    either token. An id the group doesn't have is sent anyway."""
+    api = await serve(cluster, "h", sockdir, auto_approve=False)
+    gid = api.node.daemon.create_group("Hints", "Instance hints")
+    await api.node.idle()
+    path = f"/v0/groups/{gid}/messages"
+    mine = api.node.daemon.instance.instance_id_hex
+    for scope in ("agent", "human"):
+        for bad in (5, "XYZ", mine.upper(), mine[:15], mine + "\n"):
+            status, err = await api.call("POST", path, {"text": "t", "instance": bad}, scope)
+            assert (status, err["code"]) == (400, "bad_request"), bad
+        body = {"messageId": "m", "parts": [{"text": "t"}], "metadata": {"instance": "XYZ"}}
+        status, err = await api.call("POST", path, {"body": body}, scope)
+        assert (status, err["code"]) == (400, "bad_request")
+        pause = {"body": {"reason": "human"}, "kind": "control.pause", "instance": mine}
+        status, err = await api.call("POST", path, pause, scope)
+        assert (status, err["code"]) == (400, "bad_request")
+        nobody = "0" * 16 if mine != "0" * 16 else "1" * 16
+        status, sent = await api.call("POST", path, {"text": "t", "instance": nobody}, scope)
+        assert (status, sent["status"]) == (200, "queued")
+    await api.server.stop()
+
+
 async def test_api_rejects_malformed_http(cluster: Cluster, sockdir: Path) -> None:
     api = await serve(cluster, "m", sockdir, auto_approve=False)
     assert (await api.call("POST", "/v0/groups", raw=b"{not json"))[0] == 400

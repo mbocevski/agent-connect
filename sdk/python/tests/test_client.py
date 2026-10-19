@@ -132,12 +132,19 @@ async def test_send_and_reply_build_a2a_messages(
     assert sent["body"]["parts"] == [{"data": {"k": 1}}]
     assert sent["to"] == ["ac:v0:a"]
     assert sent["reply_to"] == ["m1"]
+    assert "instance" not in sent
+
+    # SPEC 9.4: one instance of the recipients.
+    await group.send("just you", to=["ac:v0:a"], instance="0123456789abcdef")
+    assert daemon.last_body()["instance"] == "0123456789abcdef"
 
     msg = make_message(make_payload, msg_id="m5")
     await group.reply(msg, "answer")
     sent = daemon.last_body()
-    # SPEC 9.3: to the group, addressed to the sender.
+    # SPEC 9.3: to the group, addressed to the sender, and SPEC 9.4: to the
+    # instance that sent it.
     assert (sent["to"], sent["addressee"]) == (["*"], ["ac:v0:peer"])
+    assert sent["instance"] == msg.sender.instance_id
     assert sent["reply_to"] == ["m5"]
     assert sent["body"]["parts"] == [{"text": "answer"}]
 
@@ -154,6 +161,7 @@ async def test_task_replies(
     assert sent["kind"] == "a2a.task_status"
     assert sent["reply_to"] == ["m5"]
     assert (sent["to"], sent["addressee"]) == (["*"], ["ac:v0:peer"])
+    assert sent["instance"] == msg.sender.instance_id
     assert sent["body"]["taskId"] == "t1"
     assert sent["body"]["status"]["state"] == "TASK_STATE_WORKING"
     assert sent["body"]["status"]["message"]["parts"] == [{"text": "on it"}]
@@ -169,6 +177,7 @@ async def test_task_replies(
     await group.reply_artifact(msg, "the plan", name="plan", last_chunk=False, append=True)
     sent = daemon.last_body()
     assert sent["kind"] == "a2a.task_artifact"
+    assert sent["instance"] == msg.sender.instance_id
     assert sent["body"]["taskId"] == "t1"
     assert sent["body"]["artifact"]["name"] == "plan"
     assert sent["body"]["artifact"]["parts"] == [{"text": "the plan"}]

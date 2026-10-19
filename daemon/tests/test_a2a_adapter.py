@@ -258,6 +258,8 @@ async def test_context_is_batched_and_bounded(hello: AgentServer, tmp_path: Path
     assert sent.calls[0]["to"] == ["*"]
     assert sent.calls[0]["addressee"] == [PEER]
     assert sent.calls[0]["reply_to"] == ["t1"]
+    # SPEC 7.2/9.4: and to the requesting instance only.
+    assert sent.calls[0]["instance"] == d.sender.instance_id
     d3 = delivery("t3", text("just me"), to=[PEER])
     await adapter.deliver(view(), d3.sender, d3.to, d3)
     calls = await sent.wait_for(3)

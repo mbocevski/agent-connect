@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -675,6 +676,19 @@ def test_send_with_recipients_and_hint(fake: Fake) -> None:
     assert conforms(out, SCHEMAS["send"])
     assert fake.posts("/messages")[0] == (False, {"text": "hello", "to": [BOB]})
     assert "Note: ask your human" in fake.run("send", GID, "hi").stdout
+
+
+def test_send_to_one_instance(fake: Fake, rng: random.Random) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/messages"] = {"msg_id": "m1"}
+    instance = f"{rng.getrandbits(64):016x}"
+    assert fake.run("send", GID, "hello", "--to", BOB, "--instance", instance).exit_code == 0
+    # The agent token: the hint only narrows who is triggered (SPEC 9.4).
+    assert fake.posts("/messages")[0] == (
+        False,
+        {"text": "hello", "to": [BOB], "instance": instance},
+    )
+    fake.routes[f"POST /v0/groups/{GID}/messages"] = ApiClientError(400, "bad_request", "instance")
+    assert fake.run("send", GID, "hello", "--instance", "XYZ").exit_code != 0
 
 
 def test_events_list_follow_and_interrupt(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> None:

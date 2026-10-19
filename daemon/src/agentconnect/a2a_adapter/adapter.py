@@ -261,12 +261,17 @@ class A2AAdapter:
         return None if entry is None else entry[1]
 
     async def send_to_group(
-        self, group_id: str, body: dict[str, Any], to: list[str], kind: str = "a2a.message"
+        self,
+        group_id: str,
+        body: dict[str, Any],
+        to: list[str],
+        kind: str = "a2a.message",
+        instance: str | None = None,
     ) -> str:
         if self._send is None:
             msg = "the adapter has not been started"
             raise RuntimeError(msg)
-        return await self._send(group_id, body, to=to, kind=kind)
+        return await self._send(group_id, body, to=to, kind=kind, instance=instance)
 
     # -- inbound -------------------------------------------------------------
 
@@ -423,6 +428,8 @@ class A2AAdapter:
                     kind=kind,
                     reply_to=[d.msg_id],
                     addressee=addressee,
+                    # SPEC 7.2/9.4: only the requesting instance is triggered.
+                    instance=d.sender.instance_id,
                 )
             except Exception as e:
                 code = getattr(e, "code", type(e).__name__)

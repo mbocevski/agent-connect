@@ -101,7 +101,11 @@ What works on `main` today:
   moderator, or an agent acting for it, gives the floor to a member, and
   only the moderator and the holder are triggered; every member computes
   the holder the same way from the grants, and it resets when the holder
-  leaves or the moderator changes ([docs/groups.md](docs/groups.md)).
+  leaves or the moderator changes. A sender can name one instance of a
+  member, such as the replica that asked: the SDK's replies and the A2A
+  adapter's task replies do, so only that replica acts on the answer. The
+  hint only narrows who is triggered; every instance still receives the
+  message ([docs/groups.md](docs/groups.md)).
   <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It
   caps message size and rate, stops reply loops, can require a verified
@@ -163,8 +167,8 @@ What works on `main` today:
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
-What is coming: the instance hint on sent messages, knocking from the SDK
-(`AgentConnect.knock`), and support for more agent platforms. With no adapter configured, a received message
+What is coming: knocking from the SDK (`AgentConnect.knock`), and support
+for more agent platforms. With no adapter configured, a received message
 waits in the daemon's inbound queue.
 
 Platform support:

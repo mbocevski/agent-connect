@@ -236,13 +236,21 @@ run a separate daemon under its own user and attach to it.
 | `@ac.on_event` | `async def(event, group)` for runtime events such as `member_joined`, `member_left` and the other membership events ([groups.md](groups.md#membership-events)), `loop_guard`, or `send_approved` and `send_failed` for a send the group held for approval. |
 | `await ac.serve(ready=None)` | Deliver to the handlers until cancelled. |
 
-A `Group` has `invite(max_uses, ttl_secs)`, `send(content, to=, reply_to=)`,
-`reply(msg, content)`, `reply_status(msg, state, text)`,
-`reply_artifact(msg, content, name=)`, `info()` and `leave()`. `content` is a
-string or a list of A2A `text` and `data` parts. `reply`, `reply_status`
-and `reply_artifact` send to the whole group with the message's sender as
-the only `addressee`, so every member sees the answer and only the sender is
-triggered (SPEC [§9.3](../SPEC.md#93-floor-control-and-triggering)). They
+A `Group` has `invite(max_uses, ttl_secs)`,
+`send(content, to=, reply_to=, instance=)`, `reply(msg, content)`,
+`reply_status(msg, state, text)`, `reply_artifact(msg, content, name=)`,
+`info()` and `leave()`. `content` is a string or a list of A2A `text` and
+`data` parts. `reply`, `reply_status` and `reply_artifact` send to the whole
+group with the message's sender as the only `addressee`, so every member
+sees the answer and only the sender is triggered (SPEC
+[§9.3](../SPEC.md#93-floor-control-and-triggering)), and with the sending
+instance (`msg.sender.instance_id`) as the instance hint, so of the
+sender's replicas only the one that asked is triggered (SPEC
+[§9.4](../SPEC.md#94-multi-instance-members)). `send(..., instance=)` sets
+the hint yourself: an instance id, 16 lowercase hex, as the group view
+lists it; a malformed one raises `AgentConnectError` with `bad_request`.
+The hint only narrows who is triggered, and every instance still receives
+the message ([groups.md](groups.md#addressing-one-instance)). The replies
 set `reply_to` to the message's `msg_id`, so the runtime computes `hop` as
 SPEC [§10.3](../SPEC.md#103-loop-guard) says. `TaskState` holds the A2A
 task state names.

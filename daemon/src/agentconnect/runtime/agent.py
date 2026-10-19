@@ -130,10 +130,12 @@ class AgentApi:
         kind: str = "a2a.message",
         reply_to: Sequence[str] | None = None,
         addressee: Sequence[str] | None = None,
+        instance: str | None = None,
     ) -> dict[str, Any]:
         """Send as the agent (SPEC 7.2/10.3: only the human's own requests
         are human-originated). The controls SPEC 7.3 reserves to humans
-        (``control.resume``) are refused."""
+        (``control.resume``) are refused. ``instance`` (16 lowercase hex)
+        narrows triggering to that instance (SPEC 9.4)."""
         if kind in HUMAN_ONLY_KINDS:
             raise ApiError(403, "human_only", f"{kind} needs the human token")
         self._visible(group_id)
@@ -149,6 +151,7 @@ class AgentApi:
             origin="agent",
             reply_to=None if reply_to is None else list(reply_to),
             addressee=None if addressee is None else list(addressee),
+            instance=instance,
         )
         return {"msg_id": msg_id, "status": status}
 

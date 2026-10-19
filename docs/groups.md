@@ -459,6 +459,54 @@ A grant that names the holder it already has is sent again and reports
 nothing. The webhook and SSE payloads carry the holder in
 `group.floor_holder` ([webhook.md](adapters/webhook.md)).
 
+## Addressing one instance
+
+A message to a member triggers all of its instances. The **instance hint**
+narrows that to one instance, such as the replica that asked a question
+(SPEC [§9.4](../SPEC.md#94-multi-instance-members)). The sender sets it:
+
+- `instance` on `POST /v0/groups/{gid}/messages` (either token), on the
+  runtime's `AgentApi.send` and on the SDK's `Group.send`;
+- `agentconnect send <group> <text> --to <identity> --instance <id>`;
+- the SDK's `reply`, `reply_status` and `reply_artifact` and the A2A
+  adapter's task replies set it to the instance that sent the message they
+  answer, so the requester's other instances get the answer as context
+  (SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext));
+- the A2A facade sends a task's follow-ups and its cancel to the instance
+  that answered first ([a2a.md](adapters/a2a.md#tasks)).
+
+The daemon writes it as `body.metadata.instance`, replacing any value the
+body had. The id is the one `groups show` lists: 16 lowercase hex
+characters. A malformed id answers `400 bad_request`, and so does a
+malformed `body.metadata.instance` in a body you build yourself, or a hint
+on a kind that triggers nobody (controls and Agent Cards): the hint goes on
+`a2a.message`, `a2a.task_status`, `a2a.task_artifact` and
+`a2a.task_cancel`.
+
+The daemon checks only the shape. An id that isn't an instance of a member
+the message triggers is sent anyway and triggers nobody: the instance may
+have left, or may have joined in a commit this runtime hasn't processed
+yet, and each receiver decides on its own view. So a reply to an instance
+that has left reaches the requester's other instances as context only, and
+nothing tells the sender. Send without a hint to reach all of them.
+
+**A hint narrows, it never widens.** Each receiver first decides by the
+floor whether the message triggers its member (the table in [Floor
+control](#floor-control)), and only then reads the hint: if the hint names
+another instance, this one is not triggered. A hint therefore can't trigger
+an instance that the floor, `to`, `addressee` or the loop guard leave out.
+In a `moderated` group it picks among the instances of the moderator and
+of the holder only. A peer's hint is untrusted input like the rest of its
+message, and a value that isn't this instance's id, malformed or not, only
+leaves this instance untriggered.
+
+**A hint is not a boundary.** Every instance of every member still receives
+and decrypts the message, and gets it as context with `addressed_to_me:
+false`. It decides which agent acts on a message, not who can read it
+(SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext):
+addressing is not secrecy). A conversation that some instances must not
+read belongs in a group of its own.
+
 ## Key updates
 
 Each instance renews its leaf key a day, or about 1000 messages, after its
@@ -466,7 +514,3 @@ own last commit (SPEC [§3.1](../SPEC.md#31-mls)). The message count is
 drawn per instance and per epoch between 900 and 1000, so the members of a
 busy group, which all count the same messages, don't all commit an update
 at once and conflict.
-
-## Not covered yet
-
-The `instance` hint on sent messages comes in a later release.
