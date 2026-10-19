@@ -737,9 +737,10 @@ class GroupService:
             group_id,
             "epoch_changed",
             epoch=summary["epoch"],
-            sas=e._sas(gid),
             verified=f"{trust['verified_members']} of {trust['members'] - 1} verified",
         )
+        # SPEC 11.3: runs of the earlier epoch end.
+        e.sas.on_epoch_changed(group_id, str(summary["committer"]["identity"]))
         if self.leaving(group_id):
             await self._propose_again(group_id)
         e._defer(self.wake)
@@ -1132,10 +1133,12 @@ class GroupService:
 
     # -- SAS mismatch (SPEC 11) -------------------------------------------------
 
-    async def sas_mismatch(self, group_id: str, epoch: int | None = None) -> str:
-        """**Human-only.** The human compared the SAS of the current epoch and
-        the codes differ (SPEC 11): the group view may be forked. Leave at
-        once and raise ``sas_mismatch``.
+    async def sas_mismatch(self, group_id: str, run: str | None = None) -> str:
+        """**Human-only.** The human compared the code of a SAS run and the
+        codes differ, or took the mismatch action of a run that never paired
+        or of the stop (SPEC 11.5): the group view may be forked. Always
+        accepted, whatever happened since. Leave at once and raise
+        ``sas_mismatch``.
 
         * The owner's last instance first makes a best-effort ownership
           transfer (SPEC 9.2): a policy commit naming the lowest-index admin,
@@ -1146,16 +1149,10 @@ class GroupService:
         * A sole member just deletes.
 
         The local group state is deleted in every case, since nothing more
-        from this view can be trusted. ``epoch`` guards against answering
-        for a code from an earlier epoch."""
+        from this view can be trusted."""
         e = self._engine
         group = e._group_or_raise(group_id)
-        gid = unb64(group_id)
-        current = e._core_epoch(gid)
-        if epoch is not None and epoch != current:
-            msg = f"the SAS shown was for epoch {epoch}; the group is at epoch {current}"
-            raise DaemonError("stale_epoch", msg)
-        sas = e._sas(gid)
+        current = e._core_epoch(unb64(group_id))
         transfer: dict[str, Any] | None = None
         if self._is_last_owner_instance(group):
             transfer = await self.transfer_ownership(group)
@@ -1163,7 +1160,9 @@ class GroupService:
             self._propose_own_leave(group)
         await self.gone(group_id, "left", confirmed=False)
         e.store.update_group(group_id, out_of_sync=True, out_of_sync_reason="sas_mismatch")
-        data: dict[str, Any] = {"epoch": current, "sas": sas}
+        data: dict[str, Any] = {"epoch": current}
+        if run is not None:
+            data["run"] = run
         if transfer is not None:
             data["transfer"] = transfer
         await e.emit(group_id, "sas_mismatch", **data)
@@ -1342,7 +1341,5 @@ class GroupService:
                 for identity, card in e.store.cards(group_id).items()
             },
         }
-        if group.status == "active":
-            info["sas"] = e._sas(unb64(group_id))
         e._knock_origin(group_id, info)
         return info

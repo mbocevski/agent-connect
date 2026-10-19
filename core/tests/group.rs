@@ -13,7 +13,7 @@ use common::*;
 fn one_to_one_create_join_talk() {
     let clock = clock();
     let (peers, mut groups) = group_of(2, &clock);
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
     assert_eq!(groups[0].epoch(), 1);
     assert_eq!(groups[1].meta().unwrap().purpose, PURPOSE);
     let members = groups[1].members().unwrap();
@@ -55,7 +55,7 @@ fn one_to_one_create_join_talk() {
 fn third_member_switches_floor_and_converges() {
     let clock = clock();
     let (peers, groups) = group_of(3, &clock);
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
     for g in &groups {
         assert_eq!(g.policy().unwrap().floor, Floor::Mention);
         assert_eq!(g.members().unwrap().len(), 3);
@@ -79,7 +79,7 @@ fn commit_summary_and_routing_match() {
     assert!(summary.policy_changed);
     assert!(!summary.discarded_own_pending);
     groups.push(gc);
-    assert_converged(&groups);
+    assert_converged(&[&peers[0], &peers[1], &c], &groups);
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn wrong_invite_secret_fails_mac_and_welcome() {
         .client
         .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), &wrapped)
         .unwrap();
-    assert_eq!(gb.sas(), ga.sas());
+    assert!(same_view(&b.client, &gb, &a.client, &ga));
 }
 
 #[test]
@@ -403,7 +403,7 @@ fn verified_join_request_survives_a_failed_add() {
         .join_from_wrapped_welcome(inv.secret(), &meta_for(&inv), out.welcome.as_ref().unwrap())
         .unwrap();
     groups.push(gc);
-    assert_converged(&groups);
+    assert_converged(&[&peers[0], &peers[1], &c], &groups);
 }
 
 /// The MAC covers `display_name` (SPEC §6.1): the relay can't rename the
@@ -575,7 +575,7 @@ fn owner_policy_change_round_trips() {
     let s = expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
     assert!(s.policy_changed);
     assert_eq!(groups[1].policy().unwrap(), p);
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
 
     // Admin may change the floor only.
     let mut floor = p.clone();
@@ -586,7 +586,7 @@ fn owner_policy_change_round_trips() {
         .confirm_pending_commit(&peers[1].client, &out.msg_id)
         .unwrap();
     expect_commit(groups[0].process(&peers[0].client, &out.commit).unwrap());
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
 
     // Now a member may invite: B adds C.
     let c = peer(50, &clock);
@@ -597,7 +597,7 @@ fn owner_policy_change_round_trips() {
         r
     };
     groups.push(gc);
-    assert_converged(&groups);
+    assert_converged(&[&peers[0], &peers[1], &c], &groups);
     drop(out);
 }
 
@@ -605,7 +605,7 @@ fn owner_policy_change_round_trips() {
 fn update_commits_converge_and_change_sas() {
     let clock = clock();
     let (peers, mut groups) = group_of(3, &clock);
-    let before = groups[0].sas();
+    let before = run_codes(&peers[0].client, &groups[0], &peers[1].client, &groups[1]).0;
     let out = groups[1].update(&peers[1].client).unwrap();
     groups[1]
         .confirm_pending_commit(&peers[1].client, &out.msg_id)
@@ -613,8 +613,9 @@ fn update_commits_converge_and_change_sas() {
     for i in [0, 2] {
         expect_commit(groups[i].process(&peers[i].client, &out.commit).unwrap());
     }
-    assert_converged(&groups);
-    assert_ne!(groups[0].sas(), before);
+    assert_converged(&peers, &groups);
+    let after = run_codes(&peers[0].client, &groups[0], &peers[1].client, &groups[1]).0;
+    assert_ne!(after, before);
 }
 
 #[test]
@@ -646,7 +647,7 @@ fn epoch_conflict_discard_process_rebuild() {
     for i in [0, 2] {
         expect_commit(groups[i].process(&peers[i].client, &b.commit).unwrap());
     }
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
 }
 
 #[test]
@@ -661,7 +662,7 @@ fn winner_commit_drops_pending_commit() {
     let s = expect_commit(groups[1].process(&peers[1].client, &a.commit).unwrap());
     assert!(s.discarded_own_pending);
     assert!(!groups[1].has_pending_commit());
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
 }
 
 #[test]
@@ -676,7 +677,7 @@ fn own_commit_echo_confirms() {
     assert_eq!(s.epoch, 2);
     assert!(!groups[0].has_pending_commit());
     expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
     // A second echo after confirmation is an old-epoch echo, nothing more.
     assert_eq!(
         groups[0].process(&peers[0].client, &out.commit),
@@ -716,7 +717,7 @@ fn accepted_confirms_only_its_own_msg_id_and_later_echo_is_harmless() {
         Ok(Event::OwnEcho)
     );
     expect_commit(groups[1].process(&peers[1].client, &out.commit).unwrap());
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
 }
 
 /// Review F1, honest relay: A's commit X was accepted but A timed out,
@@ -769,18 +770,24 @@ fn forked_group_view_gives_different_sas() {
         .unwrap();
     expect_commit(groups[2].process(&peers[2].client, &a.commit).unwrap());
     assert!(groups.iter().all(|g| g.epoch() == groups[0].epoch()));
-    assert_eq!(groups[0].sas(), groups[2].sas());
-    assert_ne!(groups[0].sas(), groups[1].sas());
-    assert_ne!(groups[0].sas().decimal(), groups[1].sas().decimal());
+    let (p, g) = (&peers, &groups);
+    assert!(same_view(&p[0].client, &g[0], &p[2].client, &g[2]));
+    let (a, b) = run_codes(&p[0].client, &g[0], &p[1].client, &g[1]);
+    assert_ne!(a, b);
+    assert_ne!(a.decimal(), b.decimal());
 }
 
 #[test]
 fn two_parallel_groups_have_different_sas() {
     // SPEC §14.4: the attacker runs one group with A and another with B.
     let clock = clock();
-    let (_, g1) = group_of(2, &clock);
-    let (_, g2) = group_of_seeded(2, 100, &clock);
-    assert_ne!(g1[0].sas(), g2[0].sas());
+    let (p1, g1) = group_of(2, &clock);
+    let (p2, g2) = group_of_seeded(2, 100, &clock);
+    let one = run_codes(&p1[0].client, &g1[0], &p1[1].client, &g1[1]);
+    let two = run_codes(&p2[0].client, &g2[0], &p2[1].client, &g2[1]);
+    assert_eq!(one.0, one.1);
+    assert_eq!(two.0, two.1);
+    assert_ne!(one.0, two.0);
 }
 
 #[test]
@@ -811,7 +818,7 @@ fn leave_via_remove_proposal() {
         panic!("expected removal");
     };
     groups.truncate(2);
-    assert_converged(&groups);
+    assert_converged(&peers[..2], &groups);
     assert_eq!(
         groups[0]
             .commit_pending_proposals(&peers[0].client)
@@ -875,7 +882,7 @@ fn owner_may_leave_after_transferring_ownership() {
         panic!("expected removal");
     };
     groups.remove(0);
-    assert_converged(&groups);
+    assert_converged(&[&peers[1], &peers[2]], &groups);
     assert_eq!(groups[0].policy().unwrap().owner, peers[1].identity.id());
 }
 
@@ -904,7 +911,7 @@ fn one_of_several_owner_instances_may_leave() {
     let Event::Removed(_) = ga2.process(&a2.client, &out.commit).unwrap() else {
         panic!("expected removal");
     };
-    assert_converged(&groups);
+    assert_converged(&peers, &groups);
 }
 
 #[test]
@@ -918,7 +925,7 @@ fn multi_replica_identity_joins_and_is_removed_together() {
         expect_commit(groups[i].process(&peers[i].client, &out.commit).unwrap());
     }
     groups.push(gb2);
-    assert_converged(&groups);
+    assert_converged(&[&peers[0], &peers[1], &peers[2], &b2], &groups);
     assert_eq!(groups[2].members().unwrap().len(), 4);
     // Removing B's identity removes both instances, for every member.
     let out = groups[0]
@@ -960,7 +967,12 @@ fn multi_replica_identity_joins_and_is_removed_together() {
             .collect();
         assert_eq!(ids, remaining);
     }
-    assert_eq!(groups[0].sas(), groups[2].sas());
+    assert!(same_view(
+        &peers[0].client,
+        &groups[0],
+        &peers[2].client,
+        &groups[2]
+    ));
 }
 
 #[test]
@@ -1078,7 +1090,7 @@ fn sqlite_store_persists_across_reopen() {
 
     let b = open(agentconnect_core::Instance::from_secret_bytes(&saved_instance).unwrap());
     let mut gb = b.load_group(&gid).unwrap().unwrap();
-    assert_eq!(gb.sas(), ga.sas());
+    assert!(same_view(&b, &gb, &a.client, &ga));
     let ct = ga.seal(&a.client, &inner(&a, "persisted")).unwrap();
     gb.open(&b, &ct).unwrap();
     assert!(b.load_group(&[0; 16]).unwrap().is_none());

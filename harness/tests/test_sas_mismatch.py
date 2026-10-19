@@ -25,13 +25,13 @@ async def test_a_mismatch_leaves_and_alerts(group: GroupFixture, malicious_relay
     malicious_relay(c).fork_own_commits()
     c.daemon.update(gid)
     await c.wait(lambda: c.epoch(gid) == a.epoch(gid) + 1)
-    assert c.sas(gid) != a.sas(gid)
+    assert c.state(gid) != a.state(gid)
     epoch = c.epoch(gid)
-    with pytest.raises(DaemonError, match="was for epoch"):
-        await c.daemon.sas_mismatch(gid, epoch - 1)
-    assert await c.daemon.sas_mismatch(gid, epoch) == "left"
+    # "Differ" is always accepted (SPEC 11.5), for an unknown run too.
+    assert await c.daemon.sas_mismatch(gid, "no-such-run") == "left"
     (alert,) = c.adapter.of_type("sas_mismatch")
-    assert alert.data["epoch"] == epoch
+    assert alert.data == {"epoch": epoch, "run": "no-such-run"}
+    assert "sas" not in alert.data
     assert status(c, gid) == "left"
     assert c.daemon.group_info(gid)["out_of_sync_reason"] == "sas_mismatch"
     with pytest.raises(DaemonError):
@@ -106,6 +106,8 @@ async def test_the_api_operation_is_human_only(group: GroupFixture) -> None:
     path = f"/v0/groups/{gid}/sas/mismatch"
     with pytest.raises(ApiError, match="human token"):
         await server.handle("POST", path, agent, b"{}")
-    with pytest.raises(ApiError, match="integer"):
-        await server.handle("POST", path, human, b'{"epoch": "1"}')
-    assert await server.handle("POST", path, human, b"{}") == (200, {"status": "left"})
+    # Never refused for its body: an old `epoch` is ignored (SPEC 11.5).
+    assert await server.handle("POST", path, human, b'{"epoch": "1"}') == (
+        200,
+        {"status": "left"},
+    )

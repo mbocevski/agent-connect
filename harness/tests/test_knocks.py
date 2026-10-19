@@ -151,7 +151,7 @@ async def test_knock_approve_and_talk(
     gid = approved["group_id"]
     assert await joined(k, knock_id) == gid
     await cluster.settle(gid, 1)
-    assert owner.sas(gid) == k.sas(gid)
+    assert owner.state(gid) == k.state(gid)
     name = ref.rsplit("/", 1)[1]
     info = k.daemon.group_info(gid)
     assert info["origin"] == {"kind": "knock", "directory": directory.host, "name": name}
@@ -485,7 +485,7 @@ async def test_a_knock_welcome_joins_once(
     assert len(events(k, "joined")) == 1
     assert k.daemon.client.journal_pending() == []
     assert k.daemon.store.knock_secret(sent["knock_id"]) is None
-    assert owner.sas(gid) == k.sas(gid)
+    assert owner.state(gid) == k.state(gid)
 
 
 @pytest.mark.parametrize("mode", MODES)

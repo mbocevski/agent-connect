@@ -23,7 +23,16 @@ from agentconnect.cli import app
 from agentconnect.relay import b64, unb64
 from agentconnect.runtime.engine import new_msg_id
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor, a2a_node
-from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, group_state, status
+from agentconnect_harness.cluster import (
+    WAIT,
+    Cluster,
+    Node,
+    converged,
+    group_state,
+    status,
+    unpaired,
+    verify,
+)
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_sdk import AgentConnect, Message
 
@@ -144,19 +153,21 @@ async def test_mention_mode_unaddressed_does_not_trigger_and_a_two_agent_loop_pa
 # -- scenario 13 -------------------------------------------------------------------------------
 
 
-async def test_fork_in_a_five_member_group_shows_in_the_sas(
+async def test_fork_in_a_five_member_group_shows_in_sas_runs(
     group: GroupFixture, malicious_relay: Proxy
 ) -> None:
     """The relay forks a group of five: b's commit reaches only a, and the
-    others' commits never reach a and b. Each side agrees on its own short
-    code and the two sides' codes differ, also once both are at the same
-    epoch number: the humans comparing codes catch it (SPEC 11)."""
+    others' commits never reach a and b. Each side agrees on its own view,
+    and the two sides' views differ, also once both are at the same epoch
+    number. A SAS run within a side gives both humans the same code; a run
+    across the fork never pairs: the humans comparing codes catch it (SPEC
+    11, 12)."""
     nodes, gid = await group(5)
     a, b, c, d, e = nodes
     minority, majority = [a, b], [c, d, e]
     await converged(nodes, gid)
     epoch = a.epoch(gid)
-    shared = a.sas(gid)
+    shared = a.state(gid)
 
     for n in minority:
         malicious_relay(n).drop_deliveries(lambda env: env.get("kind") == "commit")
@@ -168,7 +179,7 @@ async def test_fork_in_a_five_member_group_shows_in_the_sas(
     await converged(minority, gid)
     await converged(majority, gid)
     assert [n.epoch(gid) for n in nodes] == [epoch + 1, epoch + 1, epoch, epoch, epoch]
-    assert a.sas(gid) == b.sas(gid) != shared == c.sas(gid) == d.sas(gid) == e.sas(gid)
+    assert a.state(gid) == b.state(gid) != shared == c.state(gid) == d.state(gid) == e.state(gid)
 
     # The majority moves on through the real relay: the same epoch number on
     # both sides now, and still two codes.
@@ -176,12 +187,17 @@ async def test_fork_in_a_five_member_group_shows_in_the_sas(
     await converged(majority, gid)
     assert {n.epoch(gid) for n in nodes} == {epoch + 1}
     assert group_state(a, gid) != group_state(c, gid)
-    assert a.sas(gid) == b.sas(gid) != c.sas(gid) == d.sas(gid) == e.sas(gid)
-    # What each side's agents were told: the new epoch with its own code.
+    assert a.state(gid) == b.state(gid) != c.state(gid) == d.state(gid) == e.state(gid)
+    # What each side's agents were told: the new epoch, and no code.
     for side in (minority, majority):
         for n in side:
             changed = data(n, "epoch_changed")[-1]
-            assert (changed["epoch"], changed["sas"]["decimal"]) == (epoch + 1, side[0].sas(gid))
+            assert changed["epoch"] == epoch + 1
+            assert "sas" not in changed
+    # Within a side the codes agree; across the fork the runs never pair.
+    await verify(a, b, gid)
+    await verify(c, d, gid)
+    await unpaired(a, c, gid)
     for n in nodes:
         assert not data(n, "unauthorized_commit")
 
@@ -567,20 +583,25 @@ async def lifecycle(  # noqa: PLR0915
         True,
     ]
 
-    # 4. The humans compare the short code. b's human confirms it for
-    # everyone (`agentconnect verify`); a's verifies c alone, at the epoch
-    # whose code it was shown, and an answer for an older epoch is refused.
-    verified = await b.cli("verify", gid, input="y\n")
-    assert (verified["outcome"], sorted(verified["verified"])) == (
-        "verified",
-        sorted(m.me for m in (a, c, d, e)),
-    )
+    # 4. The humans compare short codes, a pair at a time (SPEC 11): b's
+    # human runs `agentconnect verify` with each other member while that
+    # member's human starts the other side; a's verifies c alone, through the
+    # API, where the old answer naming an epoch is refused.
+    for other in (a, c, d, e):
+        verifying = asyncio.ensure_future(b.cli("verify", gid, other.me, input="y\ny\n"))
+        await b.node.wait(lambda: bool(b.node.daemon.sas._active))
+        other.node.daemon.sas_start(gid, b.me)
+        verified = await verifying
+        assert (verified["outcome"], verified["verified"]) == ("verified", [other.me])
     shown = await a.cli("groups", "show", gid)
+    run = await a.api("POST", f"/v0/groups/{gid}/members/{c.me}/sas", {}, human=True)
+    c.node.daemon.sas_start(gid, a.me)
+    await a.node.wait(lambda: a.node.daemon.sas_run(gid, run["run"])["state"] == "done")
     path = f"/v0/groups/{gid}/members/{c.me}/verify"
     with pytest.raises(ApiClientError) as refused:
-        await a.api("POST", path, {"epoch": shown["epoch"] - 1}, human=True)
-    assert (refused.value.status, refused.value.code) == (409, "stale_epoch")
-    assert await a.api("POST", path, {"epoch": shown["epoch"]}, human=True) == {"verified": True}
+        await a.api("POST", path, {"epoch": shown["epoch"]}, human=True)
+    assert (refused.value.status, refused.value.code) == (400, "bad_request")
+    assert await a.api("POST", path, {"run": run["run"]}, human=True) == {"verified": True}
     shown = await a.cli("groups", "show", gid)
     assert shown["verified_summary"] == "1 of 4 verified"
     assert {m["identity"] for m in shown["members"] if m["verified"]} == {c.me}
@@ -798,7 +819,8 @@ async def lifecycle(  # noqa: PLR0915
     # 13. Every member left agrees on everything.
     await converged([m.node for m in rest], gid)
     views = [await m.cli("groups", "show", gid) for m in rest]
-    assert len({(v["epoch"], v["sas"]["decimal"]) for v in views}) == 1
+    assert len({v["epoch"] for v in views}) == 1
+    assert all("sas" not in v for v in views)
     for v in views:
         assert sorted((x["identity"], x["role"]) for x in v["members"]) == sorted(
             [(b.me, "admin"), (c.me, "member"), (d.me, "owner")]

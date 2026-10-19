@@ -45,7 +45,7 @@ use crate::invite::{InviteLink, InviteSecret, derive_join_key, derive_welcome_ke
 use crate::join::{MacInput, join_request_mac};
 use crate::padding::{BUCKETS, bucket_for, max_plaintext_len};
 use crate::rng::Rng;
-use crate::sas::Sas;
+use crate::sas::{self, Participant, Sas};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
@@ -170,35 +170,70 @@ fn emoji_table() -> Vec<Value> {
 }
 
 #[test]
-fn sas_vectors() {
+fn sas_commit_reveal_vectors() {
     let table = emoji_table();
-    let (seed, rng) = vector_rng("sas-vectors.json");
+    let (seed, rng) = vector_rng("sas-commit-reveal.json");
     let mut cases = Vec::new();
-    for epoch in [0u64, 1, 2, 255, 1 << 40] {
+    for epoch in [0u64, 1, 255, 1 << 40, sas::MAX_EPOCH] {
         let ea: [u8; 32] = rng.array().unwrap();
         let group_id: [u8; 16] = rng.array().unwrap();
-        let sas = Sas::derive(&ea, &group_id, epoch);
-        let indices = sas.emoji_indices();
+        let ids = [0; 2].map(|_| Identity::generate(&rng).unwrap().id());
+        let instances = [0; 2].map(|_| u64::from_be_bytes(rng.array().unwrap()));
+        let nonces = [0; 2].map(|_| rng.array::<32>().unwrap());
+        let p = |i: usize| Participant {
+            identity: &ids[i],
+            instance_id: instances[i],
+            nonce: &nonces[i],
+        };
+        let commit = |i: usize| {
+            let j = 1 - i;
+            let input =
+                sas::commitment_input(&group_id, epoch, &ids[i], instances[i], &ids[j], &nonces[i]);
+            json!({
+                "input": hex(&input),
+                "commitment": hex(&sas::commitment(
+                    &group_id, epoch, &ids[i], instances[i], &ids[j], &nonces[i],
+                )),
+            })
+        };
+        let code = Sas::derive(&ea, &group_id, epoch, &p(0), &p(1)).unwrap();
+        assert_eq!(
+            code,
+            Sas::derive(&ea, &group_id, epoch, &p(1), &p(0)).unwrap()
+        );
+        let indices = code.emoji_indices();
         let emoji: Vec<Value> = indices
             .iter()
             .map(|i| table[usize::from(*i)]["emoji"].clone())
             .collect();
+        let participant = |i: usize| {
+            json!({
+                "identity": ids[i],
+                "instance_id": hex(&instances[i].to_be_bytes()),
+                "nonce": hex(&nonces[i]),
+            })
+        };
         cases.push(json!({
-            "epoch_authenticator": hex(&ea),
             "group_id": hex(&group_id),
             "epoch": epoch,
-            "sas_bytes": hex(&sas.bytes()),
+            "epoch_authenticator": hex(&ea),
+            "a": participant(0),
+            "b": participant(1),
+            "commitment_a": commit(0),
+            "commitment_b": commit(1),
+            "info": hex(&sas::code_info(epoch, &p(0), &p(1)).unwrap()),
+            "sas_bytes": hex(&code.bytes()),
             "emoji_indices": indices,
             "emoji": emoji,
-            "decimal": sas.decimal(),
+            "decimal": code.decimal(),
         }));
     }
     let mut v = header(
-        "SPEC 3.5/11 SAS: sas_bytes = HKDF(ikm = epoch_authenticator, salt = group_id, info = 'agentconnect/v0/sas' || u64be(epoch), L = 6); 7 x 6-bit emoji indices into sas-emoji.json; three 13-bit numbers + 1000.",
+        "SPEC 11.2 and 11.4 SAS run: commitment_x = SHA-256('agentconnect/v0/sas-commit' || lp(group_id) || u64be(epoch) || lp(sender identity) || lp(sender instance_id, 8 bytes) || lp(peer identity) || lp(nonce)), where the sender is x and the peer the other participant; sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6) with info = 'agentconnect/v0/sas-code' || u64be(epoch) || P_lo || P_hi, P = lp(identity) || lp(instance_id) || lp(nonce), the participants ordered by identity; 7 x 6-bit emoji indices into sas-emoji.json; three 13-bit numbers + 1000. lp(x) = u32be(len(x)) || x. Hex unless noted.",
         &seed,
     );
     v["cases"] = cases.into();
-    check_or_write("sas-vectors.json", &v);
+    check_or_write("sas-commit-reveal.json", &v);
 }
 
 #[test]

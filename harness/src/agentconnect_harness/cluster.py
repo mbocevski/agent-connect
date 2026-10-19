@@ -269,8 +269,12 @@ class Node:
     def me(self) -> str:
         return self.daemon.me
 
-    def sas(self, group_id: str) -> str:
-        return str(self.daemon.group_info(group_id)["sas"]["decimal"])
+    def state(self, group_id: str) -> str:
+        """A fingerprint of this node's view of the group (its epoch
+        authenticator, through a test-only hook): equal on two nodes that
+        share a view. Never a short code; those come from SAS runs
+        (:func:`compare`)."""
+        return bytes(self.daemon.client._state_fingerprint_for_testing(unb64(group_id))).hex()
 
     def epoch(self, group_id: str) -> int:
         return int(self.daemon.group_info(group_id)["epoch"])
@@ -340,8 +344,9 @@ def status(node: Node, group_id: str) -> str | None:
 
 
 def group_state(node: Node, group_id: str) -> tuple[Any, ...]:
-    """What every member of a converged group agrees on: epoch, short code,
-    members with their roles and instances, the policy and the floor holder."""
+    """What every member of a converged group agrees on: epoch, view
+    (:meth:`Node.state`), members with their roles and instances, the policy
+    and the floor holder."""
     info = node.daemon.group_info(group_id)
     members = sorted(
         (m["identity"], m["role"], tuple(sorted(i["instance_id"] for i in m["instances"])))
@@ -349,11 +354,62 @@ def group_state(node: Node, group_id: str) -> tuple[Any, ...]:
     )
     return (
         info["epoch"],
-        info["sas"]["decimal"],
+        node.state(group_id),
         tuple(members),
         sorted(info["policy"].items()),
         info["floor"]["holder"],
     )
+
+
+async def unpaired(a: Node, b: Node, group_id: str) -> tuple[str, str]:
+    """Both humans start a SAS run and every commitment went out, yet
+    neither run paired: how a fork shows when the views differ in their
+    epoch (SPEC 12). Returns the two run ids."""
+    run_a = str(a.daemon.sas_start(group_id, b.me)["run"])
+    run_b = str(b.daemon.sas_start(group_id, a.me)["run"])
+    await a.idle()
+    await b.idle()
+    await a.wait(lambda: not a.daemon.status()["inbox_pending"])
+    await b.wait(lambda: not b.daemon.status()["inbox_pending"])
+    for node, run in ((a, run_a), (b, run_b)):
+        view = node.daemon.sas_run(group_id, run)
+        # Still waiting, or ended without pairing (an out-of-sync group sends nothing).
+        if view["state"] not in ("waiting", "aborted") or "peer_instance" in view:
+            raise AssertionError(view)
+    return run_a, run_b
+
+
+async def compare(a: Node, b: Node, group_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A SAS run between ``a`` and ``b`` (SPEC 11.3), both humans starting
+    their side through the human API at once; returns both final views
+    (``done`` with a code, or ``aborted``)."""
+    run_a = a.daemon.sas_start(group_id, b.me)["run"]
+    run_b = b.daemon.sas_start(group_id, a.me)["run"]
+
+    def ended(node: Node, run: str) -> bool:
+        return node.daemon.sas_run(group_id, run)["state"] in ("done", "aborted")
+
+    await a.wait(lambda: ended(a, run_a) and ended(b, run_b))
+    return a.daemon.sas_run(group_id, run_a), b.daemon.sas_run(group_id, run_b)
+
+
+async def verify(a: Node, b: Node, group_id: str) -> dict[str, Any]:
+    """``a``'s human verifies ``b`` the way SPEC 11 has it: a SAS run with
+    both humans taking part, the same code on both sides, and ``a``'s answer
+    "same" for its run. Returns ``a``'s run."""
+    run_a, run_b = await compare(a, b, group_id)
+    mirrored = {
+        "self": run_b.get("labels", {}).get("peer"),
+        "peer": run_b.get("labels", {}).get("self"),
+    }
+    if not (
+        run_a["state"] == run_b["state"] == "done"
+        and run_a["sas"] == run_b["sas"]
+        and run_a["labels"] == mirrored
+    ):
+        raise AssertionError((run_a, run_b))
+    a.daemon.mark_verified(group_id, b.me, True, run_a["run"])
+    return run_a
 
 
 async def converged(nodes: list[Node], group_id: str) -> None:

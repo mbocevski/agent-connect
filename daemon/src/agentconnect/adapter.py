@@ -145,7 +145,7 @@ class Delivery:
 @dataclass(frozen=True)
 class Event:
     """A daemon event: ``member_joined``, ``member_left``, ``member_removed``,
-    ``epoch_changed`` (with the new SAS), ``policy_changed``, ``out_of_sync``,
+    ``epoch_changed``, ``policy_changed``, ``out_of_sync``,
     ``relay_misbehaviour``, ``unauthorized_commit``, ``pending_approval``,
     ``joined``, ``removed``, ``send_approved`` (the human approved the
     adapter's held send, ``msg_id`` and ``hold_id``; it goes out now),

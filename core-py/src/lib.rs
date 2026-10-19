@@ -442,6 +442,31 @@ impl Sas {
     }
 }
 
+/// This instance's nonce for one SAS run (SPEC §11.2). The bytes stay in
+/// Rust, are wiped when the object is dropped and never show in `repr`;
+/// `reveal()` hands them out once, for the reveal message.
+#[pyclass(frozen, module = "agentconnect_core._native")]
+struct SasNonce(core::SasNonce);
+
+#[pymethods]
+impl SasNonce {
+    /// The nonce bytes, for the reveal (SPEC §11.3 step 3). After the
+    /// reveal the nonce is spent.
+    fn reveal<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        guarded(|| Ok(PyBytes::new(py, self.0.expose())))
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "SasNonce(..)"
+    }
+}
+
+fn nonce32(nonce: &[u8]) -> PyResult<[u8; 32]> {
+    nonce
+        .try_into()
+        .map_err(|_| bad_arg("a SAS nonce is 32 bytes"))
+}
+
 /// A JoinRequest that passed verification, for `Client.add_member` (which
 /// may be retried with it, e.g. after an `epoch_conflict`).
 #[pyclass(frozen, module = "agentconnect_core._native")]
@@ -1269,10 +1294,59 @@ impl Client {
         application(py, &m)
     }
 
-    fn sas(&self, group_id: &[u8]) -> PyResult<Sas> {
-        with_client!(self, |c, groups| group(c, groups, group_id)
-            .map(|g| g.sas()))
+    /// A fresh nonce for a SAS run, from this client's RNG (SPEC §11.2).
+    fn sas_nonce(&self) -> PyResult<SasNonce> {
+        with_client!(self, |c, _g| core::SasNonce::generate(c.rng())).map(SasNonce)
+    }
+
+    /// This instance's commitment for a run with `peer` in the group's
+    /// current epoch (SPEC §11.2).
+    fn sas_commitment<'py>(
+        &self,
+        py: Python<'py>,
+        group_id: &[u8],
+        peer: &str,
+        nonce: &SasNonce,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let c = with_client!(self, |c, groups| group(c, groups, group_id)
+            .map(|g| g.sas_commitment(c, peer, &nonce.0)))?;
+        Ok(PyBytes::new(py, &c))
+    }
+
+    /// The code of a completed SAS run in `epoch` (SPEC §11.4): refused
+    /// unless `epoch` is the group's current epoch.
+    fn sas_code(
+        &self,
+        group_id: &[u8],
+        epoch: u64,
+        own: &SasNonce,
+        peer_identity: &str,
+        peer_instance: u64,
+        peer_nonce: &[u8],
+    ) -> PyResult<Sas> {
+        let peer_nonce = nonce32(peer_nonce)?;
+        with_client!(self, |c, groups| group(c, groups, group_id)?.sas_code(
+            c,
+            epoch,
+            &own.0,
+            peer_identity,
+            peer_instance,
+            &peer_nonce
+        ))
         .map(Sas)
+    }
+
+    /// **Tests only**: a fingerprint of the group state (its epoch
+    /// authenticator), for checking that members converged. Never a code.
+    #[cfg(feature = "test-hooks")]
+    fn _state_fingerprint_for_testing<'py>(
+        &self,
+        py: Python<'py>,
+        group_id: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let f = with_client!(self, |c, groups| group(c, groups, group_id)
+            .map(|g| g.state_fingerprint_for_testing()))?;
+        Ok(PyBytes::new(py, &f))
     }
 
     fn epoch(&self, group_id: &[u8]) -> PyResult<u64> {
@@ -1600,10 +1674,58 @@ fn peek_header<'py>(py: Python<'py>, message: &[u8]) -> PyResult<Bound<'py, PyDi
     })
 }
 
-/// The SAS for given epoch authenticator, group id and epoch (SPEC §3.5).
+/// A SAS commitment (SPEC §11.2): a peer's, to check its reveal, or a
+/// vector's.
 #[pyfunction]
-fn derive_sas(epoch_authenticator: &[u8], group_id: &[u8], epoch: u64) -> PyResult<Sas> {
-    guarded(|| Ok(Sas(core::Sas::derive(epoch_authenticator, group_id, epoch))))
+fn sas_commitment<'py>(
+    py: Python<'py>,
+    group_id: &[u8],
+    epoch: u64,
+    sender: &str,
+    sender_instance: u64,
+    peer: &str,
+    nonce: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let nonce = nonce32(nonce)?;
+    guarded(|| {
+        Ok(PyBytes::new(
+            py,
+            &core::sas::commitment(group_id, epoch, sender, sender_instance, peer, &nonce),
+        ))
+    })
+}
+
+/// The code of a run from a given epoch authenticator (SPEC §11.4).
+/// **Vectors**: a group derives codes with `Client.sas_code`.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn derive_sas(
+    epoch_authenticator: &[u8],
+    group_id: &[u8],
+    epoch: u64,
+    a_identity: &str,
+    a_instance: u64,
+    a_nonce: &[u8],
+    b_identity: &str,
+    b_instance: u64,
+    b_nonce: &[u8],
+) -> PyResult<Sas> {
+    let (na, nb) = (nonce32(a_nonce)?, nonce32(b_nonce)?);
+    guarded(|| {
+        let a = core::Participant {
+            identity: a_identity,
+            instance_id: a_instance,
+            nonce: &na,
+        };
+        let b = core::Participant {
+            identity: b_identity,
+            instance_id: b_instance,
+            nonce: &nb,
+        };
+        core::Sas::derive(epoch_authenticator, group_id, epoch, &a, &b)
+            .map(Sas)
+            .map_err(err)
+    })
 }
 
 fn sql_value(v: &Bound<'_, PyAny>) -> PyResult<SqlValue> {
@@ -1808,6 +1930,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Invite>()?;
     m.add_class::<InviteLink>()?;
     m.add_class::<Sas>()?;
+    m.add_class::<SasNonce>()?;
     m.add_class::<VerifiedJoinRequest>()?;
     m.add_class::<ReplayLedger>()?;
     m.add_class::<Client>()?;
@@ -1822,6 +1945,7 @@ fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(unwrap_identity_export, m)?,
         wrap_pyfunction!(identity_export_identity, m)?,
         wrap_pyfunction!(derive_sas, m)?,
+        wrap_pyfunction!(sas_commitment, m)?,
         wrap_pyfunction!(peek_header, m)?,
         wrap_pyfunction!(padding_bucket, m)?,
         wrap_pyfunction!(rekey_store, m)?,

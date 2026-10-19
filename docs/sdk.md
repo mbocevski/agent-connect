@@ -116,7 +116,12 @@ one identity are separate instances (SPEC
 ### The human's part
 
 Approving joins, comparing the short code and changing the safety policy
-are decisions for a person. The embedded runtime serves the same local API
+are decisions for a person. The SDK has no call that starts a comparison,
+shows a code or records an answer, and no event the agent receives carries
+one (SPEC [§11.5](../SPEC.md#115-verification-is-a-human-action)). In the
+embedded runtime that holds by the scope of the API your code is given, not
+by a process boundary: code that reads the runtime's memory is a
+compromised host. The embedded runtime serves the same local API
 socket as a daemon, in its data directory, with the same two tokens, so the
 human runs the CLI against it from another terminal while the agent runs.
 Point each command at the agent's data directory, and at no config file, so
@@ -127,7 +132,7 @@ that a separate daemon's `~/.config/agentconnect/config.toml` (an
 AGENT="AC_CONFIG=/dev/null AC_DATA_DIR=$HOME/.local/share/agentconnect-my-agent"
 env $AGENT agentconnect approvals            # join requests and held messages
 env $AGENT agentconnect approvals approve <request_id>
-env $AGENT agentconnect verify <group>       # compare the short code
+env $AGENT agentconnect verify <group>       # compare the short code, both humans at once
 env $AGENT agentconnect safety set <group> require_approval=inbound
 ```
 

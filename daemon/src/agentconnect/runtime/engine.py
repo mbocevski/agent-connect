@@ -98,8 +98,9 @@ from agentconnect.relay import (
 )
 from agentconnect.runtime import ledger as replay
 from agentconnect.runtime.registry import AdapterRegistry
+from agentconnect.runtime.sas import SAS_EVENTS, SAS_KINDS, SasError, SasService
 from agentconnect.schemas import normalize
-from agentconnect.store import GroupRow, OutboxRow, Store
+from agentconnect.store import SAS_RESET_NOTICE, GroupRow, OutboxRow, Store
 from agentconnect.tasks import cancel_and_wait
 
 LOG = log.get("agentconnect.engine")
@@ -167,6 +168,15 @@ HUMAN_EVENTS = (
         }
     )
     | KNOCK_OWNER_EVENTS
+    # SPEC 11.5: a code, a run's progress and a held commitment are the
+    # human's, by event type.
+    | SAS_EVENTS
+)
+VERIFICATIONS_RESET = (
+    "This version derives the short code from a comparison run between two daemons "
+    "(SPEC 11). Earlier verifications used a code an attacker in the middle could choose, "
+    "so every member is unverified again: run `agentconnect verify <group> <member>` with "
+    "each of them."
 )
 INVITE_FLOOD_WARNING = (
     "This invite gets more join requests than it can hold, and new ones are "
@@ -403,6 +413,15 @@ def _same_relay(a: str, b: str) -> bool:
         return False
 
 
+def _ceremony_inner(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The inner message of a received SAS ceremony message (SPEC 11.2)."""
+    try:
+        inner = json.loads(event["plaintext"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return inner if isinstance(inner, dict) and inner.get("kind") in SAS_KINDS else None
+
+
 def _floor_inner(event: dict[str, Any]) -> dict[str, Any] | None:
     """A received application event's inner message if it is a
     ``control.floor``."""
@@ -628,6 +647,8 @@ class Engine:
         self.listings = ListingManager(self)
         # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
         self.knocks = KnockService(self)
+        # SAS runs: the commit-then-reveal exchange behind the short code (SPEC 11).
+        self.sas = SasService(self)
         # The inviter's JoinRequest replay ledger (SPEC 6.2, "Replays").
         self._join_capacity = ac.DEFAULT_LEDGER_CAPACITY
         self._join_ledger = self._load_join_ledger()
@@ -660,6 +681,7 @@ class Engine:
             "discovery": self.listings.run,
             "knock_timer": self.knocks.run,
             "group_timer": self.groups.run,
+            "sas_timer": self.sas.run,
             "relay_link": self.link.run,
         }
         for name, worker in workers.items():
@@ -670,6 +692,10 @@ class Engine:
                 bind(self.store)  # optional hook: adapters that keep a durable feed
             await adapter.on_outbound(self.adapter_send)
         self.running = True
+        if bool(self.store.kv_get(SAS_RESET_NOTICE)):
+            # SPEC 11.8: tell the human, once, why its members are unverified.
+            await self.emit(None, "verifications_reset", reason=VERIFICATIONS_RESET)
+            self.store.kv_set(SAS_RESET_NOTICE, "")
         LOG.info("daemon_started", identity=log.hid(self.me), keystore=self.keystore.kind)
 
     async def _supervised(self, name: str, worker: Callable[[], Awaitable[None]]) -> None:
@@ -764,6 +790,8 @@ class Engine:
         self.floor.reconcile()
         # A join recorded as done whose secret a crash left in the keystore.
         self._forget_join_secrets()
+        # SAS runs don't survive a restart: their queued messages never go out.
+        self.sas.recover()
 
     def _pulse(self) -> None:
         self._changed.set()
@@ -1010,10 +1038,6 @@ class Engine:
         await self.emit(group_id, "out_of_sync", reason=reason, **data)
 
     # -- group state ----------------------------------------------------------
-
-    def _sas(self, gid: bytes) -> dict[str, Any]:
-        sas = self.client.sas(gid)
-        return {"decimal": sas.decimal, "emoji_indices": sas.emoji_indices}
 
     def _refresh(self, group_id: str) -> None:
         """Re-read members, roles, policy and epoch from the core."""
@@ -1393,7 +1417,7 @@ class Engine:
             await self._ack(msg_id)
         self._pulse()
 
-    async def _effects(
+    async def _effects(  # noqa: PLR0912
         self, group: GroupRow, env: dict[str, Any], event: dict[str, Any], *, from_relay: bool
     ) -> str:
         """The daemon-side effects of one group event (inside :meth:`_apply`);
@@ -1408,6 +1432,14 @@ class Engine:
                 await self.emit(group_id, "relay_misbehaviour", reason="epoch_mismatch")
                 return "dropped"
             self.store.bump_messages(group_id)
+            ceremony = _ceremony_inner(event)
+            if ceremony is not None:
+                # SPEC 11.5: handled here and never delivered, not even as
+                # context; outside the safety policy's rates (SPEC 11.3).
+                if not event.get("replayed"):
+                    self.sas.on_message(group, event, ceremony)
+                self.store.record_inbox(sender, msg_id, group_id, "done", now)
+                return "done"
             replayed = bool(event.get("replayed"))
             delivery, decision, kind, hop = self._make_delivery(
                 group, msg_id, event, replayed=replayed
@@ -2150,7 +2182,7 @@ class Engine:
             self.store.record_inbox(sender, msg_id, group_id, "done", self.now())
             # SPEC §6.3: the invite secret goes once the join succeeded.
             self._defer(lambda: self.keystore.delete(f"join/{invite_id}"))
-            await self.emit(group_id, "joined", invite_id=invite_id, sas=self._sas(gid))
+            await self.emit(group_id, "joined", invite_id=invite_id)
             await self._send_card(group_id, ["*"])
             return "done"
 
@@ -2711,7 +2743,10 @@ class Engine:
             if event is not None:
                 await self._notify(event)
             code = self._fail_codes.pop(row.seq, "failed")
-            if state == "failed" and row.group_id is not None:
+            if state == "failed" and row.kind == "app" and row.payload.get("sas"):
+                # A ceremony message: the run's, never the agent's to hear.
+                self.sas.on_send_failed(row.payload["sas"], code)
+            elif state == "failed" and row.group_id is not None:
                 # Tell the caller: it holds a msg_id (or an intent) that will
                 # never be delivered.
                 if row.kind == "app":
@@ -2789,7 +2824,7 @@ class Engine:
                     self._forget_invite_requests(str(invite["invite_id"]))
         return "done"
 
-    async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:
+    async def _run_app(self, row: OutboxRow, group: GroupRow) -> str:  # noqa: PLR0912
         if group.out_of_sync:
             self._fail_codes[row.seq] = "out_of_sync"
             return "failed"
@@ -2797,10 +2832,20 @@ class Engine:
         payload = dict(row.payload)
         for _ in range(MAX_COMMIT_ATTEMPTS):
             if "env" not in payload:
-                if self.groups.update_due(group):
-                    # SPEC §3.1: renew keys just before the next send.
+                sas = payload.get("sas")
+                if not self.groups.update_due(group):
+                    self.sas.update_not_due(group.group_id)
+                elif sas is None and not self.sas.defer_update(group.group_id):
+                    # SPEC §3.1: renew keys just before the next send. Not for
+                    # a ceremony message, and deferred (at most 600 s) while
+                    # a SAS run is under way (SPEC 11.3).
                     group = await self._cadence_update(row, payload, group)
+                    self.sas.update_not_due(group.group_id)
                 epoch = self.client.epoch(gid)
+                if sas is not None and self.sas.stale(sas, epoch):
+                    # Dropped across an epoch change, never sealed in a new one.
+                    self._fail_codes[row.seq] = "sas_stale"
+                    return "failed"
                 event = None
                 with self.store.tx():
                     if payload.get("floor"):
@@ -2836,6 +2881,8 @@ class Engine:
             self.store.bump_messages(group.group_id)
             if payload.get("floor"):
                 self.floor.confirmed(group.group_id, str(payload["msg_id"]))
+            if payload.get("sas"):
+                self.sas.on_sent(payload["sas"])
             return "done"
         self._fail_codes[row.seq] = "attempts_exhausted"
         return "failed"
@@ -3739,32 +3786,67 @@ class Engine:
         return await self.groups.leave(group_id)
 
     def mark_verified(
-        self, group_id: str, identity: str, verified: bool = True, epoch: int | None = None
+        self, group_id: str, identity: str, verified: bool = True, run: str | None = None
     ) -> None:
-        """**Human-only.** Records that the human compared the SAS with this
-        member over an independent channel. Never reachable by agents: an
-        agent that could mark verification would defeat the SAS check, which
-        exists precisely to catch a relay or link thief in the middle.
+        """**Human-only.** Records that the human compared the code of SAS
+        run ``run`` with this member over an independent channel, and read
+        the same code (SPEC 11.5). Never reachable by agents: an agent that
+        could mark verification would defeat the SAS check, which exists
+        precisely to catch a relay or link thief in the middle.
 
-        ``epoch`` is the epoch whose code the human was shown (SPEC 11): an
-        answer for an earlier one is refused (``stale_epoch``), and the
-        member's instances that join after it are shown as new."""
+        ``verified=False`` clears the flag and needs no run."""
         self._group_or_raise(group_id)
-        current = self._core_epoch(unb64(group_id))
-        if epoch is not None and epoch != current:
-            msg = f"the short code changed since epoch {epoch} (now {current}): compare again"
-            raise DaemonError("stale_epoch", msg)
-        if identity == self.me or not self.store.set_verified(
-            group_id, identity, verified, current
-        ):
+        if identity == self.me:
+            raise DaemonError("not_found", "no such member")
+        if verified:
+            if run is None:
+                raise DaemonError("bad_request", "marking verified needs the run compared")
+            try:
+                peer = self.sas.confirm(group_id, run)
+            except SasError as e:
+                raise DaemonError(e.code, str(e)) from e
+            if peer != identity:
+                raise DaemonError("bad_request", "that comparison was with another member")
+        elif not self.store.set_verified(group_id, identity, False):
             raise DaemonError("not_found", "no such member")
         self._delivery_wake.set()
         self._pulse()
 
-    async def sas_mismatch(self, group_id: str, epoch: int | None = None) -> str:
-        """**Human-only.** The codes differ (SPEC 11): see
+    def sas_start(
+        self,
+        group_id: str,
+        identity: str,
+        instance: str | None = None,
+        acknowledge: bool = False,
+    ) -> dict[str, Any]:
+        """**Human-only.** Start a SAS run with ``identity`` (SPEC 11.3)."""
+        if instance is not None and not _instance_id(instance):
+            raise DaemonError("bad_request", f"instance {INSTANCE_ID_RULE}")
+        try:
+            return self.sas.start(group_id, identity, instance=instance, acknowledge=acknowledge)
+        except SasError as e:
+            raise DaemonError(e.code, str(e)) from e
+
+    def sas_run(self, group_id: str, run: str) -> dict[str, Any]:
+        """**Human-only.** A SAS run as its human sees it (SPEC 11.5)."""
+        try:
+            return self.sas.view(group_id, run)
+        except SasError as e:
+            raise DaemonError(e.code, str(e)) from e
+
+    def sas_peer_started(self, group_id: str, run: str) -> dict[str, Any]:
+        """**Human-only.** The human says the peer started its side."""
+        try:
+            return self.sas.peer_started(group_id, run)
+        except SasError as e:
+            raise DaemonError(e.code, str(e)) from e
+
+    async def sas_mismatch(self, group_id: str, run: str | None = None) -> str:
+        """**Human-only.** The codes differ, or the human takes the mismatch
+        action (SPEC 11.5): always accepted. See
         :meth:`GroupService.sas_mismatch`."""
-        return await self.groups.sas_mismatch(group_id, epoch)
+        self.sas.mismatch(group_id, run)
+        return await self.groups.sas_mismatch(group_id, run)
 
     async def _transfer_ownership(self, group: GroupRow) -> dict[str, Any] | None:
         return await self.groups.transfer_ownership(group)

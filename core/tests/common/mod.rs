@@ -3,13 +3,14 @@
 
 #![allow(dead_code)]
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agentconnect_core::clock::FakeClock;
 use agentconnect_core::group::{CommitOut, Event};
 use agentconnect_core::{
-    Client, Group, Identity, Invite, InviteLink, InviteMeta, MemoryStore, Rng,
+    Client, Group, Identity, Invite, InviteLink, InviteMeta, MemoryStore, Rng, Sas, SasNonce, Store,
 };
 
 pub const RELAY: &str = "relay.example";
@@ -132,9 +133,75 @@ pub fn expect_commit(event: Event) -> agentconnect_core::CommitSummary {
     }
 }
 
-pub fn assert_converged(groups: &[Group]) {
-    let first = (groups[0].epoch(), groups[0].sas());
-    for g in groups {
-        assert_eq!((g.epoch(), g.sas()), first);
+/// Both sides' codes of a SAS run between `ca` in `ga` and `cb` in `gb`
+/// (SPEC §11.4). The nonces come from a fixed test RNG, so two calls with
+/// unchanged groups give the same codes.
+pub fn run_codes<S1: Store, S2: Store>(
+    ca: &Client<S1>,
+    ga: &Group,
+    cb: &Client<S2>,
+    gb: &Group,
+) -> (Sas, Sas) {
+    let rng = Rng::for_test("sas-run");
+    let (na, nb) = (
+        SasNonce::generate(&rng).unwrap(),
+        SasNonce::generate(&rng).unwrap(),
+    );
+    let (a, b) = (ca.instance(), cb.instance());
+    let code_a = ga
+        .sas_code(
+            ca,
+            ga.epoch(),
+            &na,
+            b.identity(),
+            b.instance_id(),
+            nb.expose(),
+        )
+        .unwrap();
+    let code_b = gb
+        .sas_code(
+            cb,
+            gb.epoch(),
+            &nb,
+            a.identity(),
+            a.instance_id(),
+            na.expose(),
+        )
+        .unwrap();
+    (code_a, code_b)
+}
+
+/// Whether a SAS run between the two instances shows both humans the same
+/// code: the same view of the group, except with probability 2^-48.
+pub fn same_view<S1: Store, S2: Store>(
+    ca: &Client<S1>,
+    ga: &Group,
+    cb: &Client<S2>,
+    gb: &Group,
+) -> bool {
+    let (x, y) = run_codes(ca, ga, cb, gb);
+    x == y
+}
+
+/// Every member at the same epoch and with the same view: a SAS run
+/// between each member and one of another identity gives equal codes.
+pub fn assert_converged<P: std::borrow::Borrow<Peer>>(peers: &[P], groups: &[Group]) {
+    assert_eq!(peers.len(), groups.len(), "one peer per group");
+    let peers: Vec<&Peer> = peers.iter().map(Borrow::borrow).collect();
+    let epoch = groups[0].epoch();
+    for (i, g) in groups.iter().enumerate() {
+        assert_eq!(g.epoch(), epoch, "member {i}");
+        let id = peers[i].client.instance().identity();
+        let Some(k) = (0..groups.len()).find(|&k| peers[k].client.instance().identity() != id)
+        else {
+            continue;
+        };
+        assert!(
+            same_view(&peers[i].client, g, &peers[k].client, &groups[k]),
+            "members {i} and {k}"
+        );
+        if k != 0 && peers[0].client.instance().identity() != id {
+            assert!(same_view(&peers[i].client, g, &peers[0].client, &groups[0]));
+        }
     }
 }

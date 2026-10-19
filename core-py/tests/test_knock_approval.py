@@ -18,6 +18,20 @@ PURPOSE = "Plans release trains"
 T0 = 1_792_497_600
 
 
+def run_codes(a: ac.Client, b: ac.Client, gid: bytes) -> tuple[ac.Sas, ac.Sas]:
+    """Both sides' codes of a SAS run between `a` and `b` (SPEC 11.4), each
+    in its own current epoch."""
+    na, nb = a.sas_nonce(), b.sas_nonce()
+    code_a = a.sas_code(gid, a.epoch(gid), na, b.identity, int(b.instance_id_hex, 16), nb.reveal())
+    code_b = b.sas_code(gid, b.epoch(gid), nb, a.identity, int(a.instance_id_hex, 16), na.reveal())
+    return code_a, code_b
+
+
+def same_view(a: ac.Client, b: ac.Client, gid: bytes) -> bool:
+    code_a, code_b = run_codes(a, b, gid)
+    return code_a == code_b
+
+
 def make_client(rng: random.Random, identity: ac.Identity | None = None) -> ac.Client:
     ik = identity or ac.Identity._generate_for_testing(rng.getrandbits(64))
     instance = ik._create_instance_for_testing(seed=rng.getrandbits(64), now=T0)
@@ -62,7 +76,7 @@ def test_an_approved_knock_joins_after_a_restart(rng: random.Random) -> None:
     gid, out = p.approve(restored)
     assert out["routing"]["add"] == [p.knocker.mailbox_id]
     assert p.join(out["welcome"]) == gid
-    assert p.owner.sas(gid) == p.knocker.sas(gid)
+    assert same_view(p.owner, p.knocker, gid)
     meta = json.loads(p.knocker.meta(gid))
     assert (meta["name"], meta["created_by"]) == (NAME, p.owner.identity)
     # Nothing secret in the reprs.

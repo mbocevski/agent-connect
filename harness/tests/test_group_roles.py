@@ -18,7 +18,15 @@ import agentconnect_core as ac
 from agentconnect.relay import RelayError
 from agentconnect.runtime.engine import DaemonError
 from agentconnect.runtime.groups import membership_events
-from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
+from agentconnect_harness.cluster import (
+    WAIT,
+    Cluster,
+    Node,
+    converged,
+    status,
+    unpaired,
+    verify,
+)
 from agentconnect_harness.proxy import Frame, RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -292,7 +300,7 @@ async def test_a_policy_change_beyond_the_committers_role_is_rejected_by_every_m
         assert a.daemon.set_role(gid, m.me, "admin") == "committing"
         await converged([a, b, m], gid)
     before = policy(a, gid)
-    epoch, sas = a.epoch(gid), a.sas(gid)
+    epoch, state = a.epoch(gid), a.state(gid)
     bad = {
         "owner": {**before, "owner": m.me},
         "admin": {**before, "admins": [m.me]},
@@ -302,12 +310,15 @@ async def test_a_policy_change_beyond_the_committers_role_is_rejected_by_every_m
     for honest in (a, b):
         await honest.wait(lambda h=honest: bool(data(h, "unauthorized_commit")))
         info = honest.daemon.group_info(gid)
-        assert (info["epoch"], info["sas"]["decimal"]) == (epoch, sas)
+        assert (info["epoch"], honest.state(gid)) == (epoch, state)
+        assert "sas" not in info
         assert info["out_of_sync_reason"] == "commit_rejected"
         assert policy(honest, gid) == before
         assert data(honest, "role_changed")[len(data(honest, "role_changed")) :] == []
-    # The committer alone moved on: its short code shows the fork.
-    assert m.daemon.client.sas(raw(gid)).decimal != sas
+    # The committer alone moved on: a SAS run with it shows the fork, as
+    # codes that differ or a run that never pairs (SPEC 12).
+    assert m.state(gid) != state
+    await unpaired(a, m, gid)
 
 
 # -- concurrent changes (G2) -----------------------------------------------------------------
@@ -510,7 +521,7 @@ async def test_the_view_shows_the_policy_the_floor_and_new_instances(cluster: Cl
     await a.idle()
     b = await cluster.node()
     await cluster.invite(a, b, gid)
-    a.daemon.mark_verified(gid, b.me)
+    await verify(a, b, gid)
     b2 = await cluster.node(identity_of=b)
     await cluster.invite(a, b2, gid)
     info = a.daemon.group_info(gid)
@@ -535,7 +546,7 @@ async def test_the_view_shows_the_policy_the_floor_and_new_instances(cluster: Cl
     assert epochs == {first: 1, second: 2}
     assert bob["instances_since_verified"] == [second]
     # The verification is per epoch: verifying again covers the new instance.
-    a.daemon.mark_verified(gid, b.me)
+    await verify(a, b, gid)
     bob = next(m for m in a.daemon.group_info(gid)["members"] if m["identity"] == b.me)
     assert bob["instances_since_verified"] == []
     assert info["pending_leaves"] == []
@@ -564,7 +575,7 @@ async def test_a_leaf_repeating_an_instance_id_never_passes_for_that_instance(
     await a.idle()
     b, c = await cluster.node(), await cluster.node()
     await cluster.invite(a, b, gid)
-    a.daemon.mark_verified(gid, b.me)
+    await verify(a, b, gid)
     await cluster.invite(a, c, gid)  # a later epoch
     real = a.daemon.client
     src = next(m for m in real.members(raw(gid)) if m["identity"] == b.me)
@@ -601,14 +612,14 @@ async def test_a_verification_from_before_the_upgrade_is_unknown(cluster: Cluste
     await a.idle()
     b = await cluster.node()
     await cluster.invite(a, b, gid)
-    a.daemon.mark_verified(gid, b.me)
+    await verify(a, b, gid)
     # What the store's migration leaves for a row an older daemon verified.
     a.daemon.store._db.execute("UPDATE members SET verified_epoch = NULL")
     b2 = await cluster.node(identity_of=b)
     await cluster.invite(a, b2, gid)
     bob = member_view(a, gid, b.me)
     assert (bob["verified"], bob["instances_since_verified"]) == (True, None)
-    a.daemon.mark_verified(gid, b.me, epoch=a.epoch(gid))
+    await verify(a, b, gid)
     assert member_view(a, gid, b.me)["instances_since_verified"] == []
 
 

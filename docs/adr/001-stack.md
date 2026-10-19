@@ -77,7 +77,9 @@ upstream docs.
 - One stack covers 1:1, groups and replicas of one agent.
 - Post-quantum protection is renewed every epoch.
 - The SAS comes for free from `epoch_authenticator`, and all members compare
-  the same code.
+  the same code. (Superseded: the epoch's last committer chooses that
+  value, so the code now comes from a commit-then-reveal SAS run between
+  two members, SPEC §11.)
 - The relay maps directly onto MLS's Delivery Service role.
 
 **Rejected:**

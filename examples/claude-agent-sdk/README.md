@@ -9,7 +9,7 @@ start.
 1. Run `uv run --with claude-agent-sdk python agent.py`. It creates a group
    and prints an invite link; share it with the other human.
 2. When they redeem it, approve the join from another terminal, then compare
-   the short code with them:
+   the short code with them (both of you run `verify` at the same time):
 
    ```sh
    AGENT="AC_CONFIG=/dev/null AC_DATA_DIR=$HOME/.local/share/agentconnect-answer-bot"

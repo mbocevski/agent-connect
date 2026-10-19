@@ -74,14 +74,62 @@ def test_invite_kdf_vectors() -> None:
             ac.unwrap_welcome(invite_id, secret, bytes(tampered))
 
 
-def test_sas_vectors() -> None:
+def sas_participant(p: dict[str, str]) -> tuple[str, int, bytes]:
+    return p["identity"], int(p["instance_id"], 16), h(p["nonce"])
+
+
+def test_sas_commit_reveal_vectors() -> None:
+    """SPEC 11.2 and 11.4, recomputed here from the formulas and through the
+    bindings."""
     table = json.loads((TESTDATA / "sas-emoji.json").read_text(encoding="utf-8"))
-    for case in load("sas-vectors.json")["cases"]:
-        sas = ac.derive_sas(h(case["epoch_authenticator"]), h(case["group_id"]), case["epoch"])
+    cases = load("sas-commit-reveal.json")["cases"]
+    assert cases
+    for case in cases:
+        gid, epoch, ea = h(case["group_id"]), case["epoch"], h(case["epoch_authenticator"])
+        a, b = sas_participant(case["a"]), sas_participant(case["b"])
+        for (me, peer), key in (((a, b), "commitment_a"), ((b, a), "commitment_b")):
+            data = (
+                b"agentconnect/v0/sas-commit"
+                + lp(gid)
+                + epoch.to_bytes(8, "big")
+                + lp(me[0].encode())
+                + lp(me[1].to_bytes(8, "big"))
+                + lp(peer[0].encode())
+                + lp(me[2])
+            )
+            assert len(data) == 208
+            assert data.hex() == case[key]["input"]
+            assert hashlib.sha256(data).hexdigest() == case[key]["commitment"]
+            assert (
+                ac.sas_commitment(gid, epoch, me[0], me[1], peer[0], me[2]).hex()
+                == (case[key]["commitment"])
+            )
+        lo, hi = sorted((a, b), key=lambda x: x[0].encode())
+        info = b"agentconnect/v0/sas-code" + epoch.to_bytes(8, "big")
+        for x in (lo, hi):
+            info += lp(x[0].encode()) + lp(x[1].to_bytes(8, "big")) + lp(x[2])
+        assert len(info) == 234
+        assert info.hex() == case["info"]
+        assert hkdf_sha256(ea, gid, info)[:6].hex() == case["sas_bytes"]
+        sas = ac.derive_sas(ea, gid, epoch, *a, *b)
+        assert sas == ac.derive_sas(ea, gid, epoch, *b, *a)
         assert sas.bytes.hex() == case["sas_bytes"]
         assert sas.emoji_indices == case["emoji_indices"]
         assert [table[i]["emoji"] for i in sas.emoji_indices] == case["emoji"]
         assert sas.decimal == case["decimal"]
+        # Any one input changed changes the code.
+        flipped = bytes([a[2][0] ^ 1]) + a[2][1:]
+        for other in (
+            ac.derive_sas(bytes([ea[0] ^ 1]) + ea[1:], gid, epoch, *a, *b),
+            ac.derive_sas(ea, bytes([gid[0] ^ 1]) + gid[1:], epoch, *a, *b),
+            ac.derive_sas(ea, gid, epoch ^ 1, *a, *b),
+            ac.derive_sas(ea, gid, epoch, a[0], a[1] ^ 1, a[2], *b),
+            ac.derive_sas(ea, gid, epoch, a[0], a[1], flipped, *b),
+            ac.derive_sas(ea, gid, epoch, a[0], a[1], b[2], b[0], b[1], a[2]),
+        ):
+            assert other != sas
+        with pytest.raises(ac.AgentConnectError, match="oneself"):
+            ac.derive_sas(ea, gid, epoch, *a, a[0], b[1], b[2])
 
 
 def test_padding_vectors() -> None:

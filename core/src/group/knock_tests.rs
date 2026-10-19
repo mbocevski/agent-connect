@@ -140,7 +140,7 @@ fn an_approved_knock_becomes_a_two_member_group() {
         .map(|m| m.identity)
         .collect();
     assert_eq!(ids.len(), 2);
-    assert_eq!(ga.sas(), gb.sas());
+    assert_eq!(ga.state_fingerprint(), gb.state_fingerprint());
     // Messages both ways.
     let ct = ga.seal(&s.owner, &inner(&s.owner, "hi")).unwrap();
     assert_eq!(
@@ -665,14 +665,14 @@ fn a_forked_knock_group_shows_a_different_short_code() {
         .knocker
         .join_from_knock_welcome(&k, &s.expect(), out.welcome.as_ref().unwrap())
         .unwrap();
-    assert_eq!(ga.sas(), gb.sas());
+    assert_eq!(ga.state_fingerprint(), gb.state_fingerprint());
     let a = ga.update(&s.owner).unwrap();
     let b = gb.update(&s.knocker).unwrap();
     ga.confirm_pending_commit(&s.owner, &a.msg_id).unwrap();
     gb.confirm_pending_commit(&s.knocker, &b.msg_id).unwrap();
     assert_eq!(ga.epoch(), gb.epoch());
-    assert_ne!(ga.sas(), gb.sas());
-    assert_ne!(ga.sas().decimal(), gb.sas().decimal());
+    assert_ne!(ga.state_fingerprint(), gb.state_fingerprint());
+    assert_ne!(ga.state_fingerprint(), gb.state_fingerprint());
 }
 
 // ---- Review regressions (L1-L3) ----

@@ -1,4 +1,4 @@
-"""Round trips through the bindings: identity, invite, join, messages, SAS."""
+"""Round trips through the bindings: identity, invite, join, messages, SAS runs."""
 
 from __future__ import annotations
 
@@ -78,13 +78,42 @@ def join(inviter: ac.Client, gid: bytes, joiner: ac.Client) -> dict[str, Any]:
     return out
 
 
+def run_codes(a: ac.Client, b: ac.Client, gid: bytes) -> tuple[ac.Sas, ac.Sas]:
+    """Both sides' codes of a SAS run between `a` and `b` (SPEC 11.4), each
+    in its own current epoch."""
+    na, nb = a.sas_nonce(), b.sas_nonce()
+    code_a = a.sas_code(gid, a.epoch(gid), na, b.identity, int(b.instance_id_hex, 16), nb.reveal())
+    code_b = b.sas_code(gid, b.epoch(gid), nb, a.identity, int(a.instance_id_hex, 16), na.reveal())
+    return code_a, code_b
+
+
+def same_view(a: ac.Client, b: ac.Client, gid: bytes) -> bool:
+    code_a, code_b = run_codes(a, b, gid)
+    return code_a == code_b
+
+
 def test_one_to_one_round_trip(rng: random.Random) -> None:
     a, b = make_client(rng), make_client(rng)
     gid = a.create_group(NAME, PURPOSE)
     join(a, gid, b)
     assert a.epoch(gid) == b.epoch(gid) == 1
-    assert a.sas(gid) == b.sas(gid)
-    assert len(a.sas(gid).emoji_indices) == 7
+    code_a, code_b = run_codes(a, b, gid)
+    assert code_a == code_b
+    assert len(code_a.emoji_indices) == 7
+    assert repr(a.sas_nonce()) == "SasNonce(..)"
+    nonce = a.sas_nonce()
+    with pytest.raises(ac.AgentConnectError, match="different epoch"):
+        a.sas_code(gid, 0, nonce, b.identity, int(b.instance_id_hex, 16), nonce.reveal())
+    with pytest.raises(ac.AgentConnectError, match="oneself"):
+        a.sas_code(gid, 1, nonce, a.identity, int(a.instance_id_hex, 16), nonce.reveal())
+    with pytest.raises(ac.AgentConnectError, match="unknown member"):
+        a.sas_code(gid, 1, nonce, b.identity, 7, nonce.reveal())
+    with pytest.raises(ac.AgentConnectError, match="32 bytes"):
+        a.sas_code(gid, 1, nonce, b.identity, int(b.instance_id_hex, 16), b"short")
+    own = a.sas_commitment(gid, b.identity, nonce)
+    assert own == ac.sas_commitment(
+        gid, 1, a.identity, int(a.instance_id_hex, 16), b.identity, nonce.reveal()
+    )
     assert json.loads(b.meta(gid))["purpose"] == PURPOSE
     assert json.loads(a.policy(gid))["owner"] == a.identity
 
@@ -109,7 +138,8 @@ def test_group_commits_converge(rng: random.Random) -> None:
     assert event["type"] == "commit"
     assert event["routing"] == out["routing"]
     assert json.loads(b.policy(gid))["floor"] == "mention"
-    assert a.sas(gid) == b.sas(gid) == c.sas(gid)
+    assert same_view(a, b, gid)
+    assert same_view(a, c, gid)
 
     upd = b.update(gid)
     assert b.has_pending_commit(gid)
@@ -118,7 +148,8 @@ def test_group_commits_converge(rng: random.Random) -> None:
     assert b.process(gid, upd["commit"])["type"] == "own_commit_confirmed"
     for client in (a, c):
         client.process(gid, upd["commit"])
-    assert len({x.sas(gid) for x in (a, b, c)}) == 1
+    assert same_view(a, b, gid)
+    assert same_view(b, c, gid)
 
     leave = c.propose_leave(gid)
     assert a.process(gid, leave)["type"] == "leave_proposed"
@@ -206,7 +237,7 @@ def test_persistence_and_invite_parts(rng: random.Random, tmp_path: Path) -> Non
     join(a, gid, b)
     del b
     b = ac.Client(str(db), ac.Instance.from_secret_bytes(saved).to_secret_bytes(), db_key)
-    assert b.sas(gid) == a.sas(gid)
+    assert same_view(a, b, gid)
     assert b.open(gid, a.seal(gid, inner(a, "persisted")))["epoch"] == 1
 
     invite = a.create_invite("relay.example")
@@ -581,7 +612,7 @@ def test_an_unchecked_commit_is_rejected_by_honest_members(rng: random.Random) -
     members = [a]
     grow(a, gid, members, b)
     grow(a, gid, members, c)
-    epoch, sas = a.epoch(gid), a.sas(gid)
+    epoch, state = a.epoch(gid), a._state_fingerprint_for_testing(gid)
     leaf_c = next(m["leaf_index"] for m in a.members(gid) if m["identity"] == c.identity)
     bad = b._commit_unchecked_for_testing(gid, remove_leaves=[leaf_c])
     assert bad["epoch"] == epoch
@@ -589,9 +620,9 @@ def test_an_unchecked_commit_is_rejected_by_honest_members(rng: random.Random) -
     for honest in (a, c):
         with pytest.raises(ac.AgentConnectError, match="may not remove members"):
             honest.process(gid, bad["commit"])
-        assert (honest.epoch(gid), honest.sas(gid)) == (epoch, sas)
-    # The committer alone moved on: its SAS shows the fork.
-    assert b.sas(gid) != sas
+        assert (honest.epoch(gid), honest._state_fingerprint_for_testing(gid)) == (epoch, state)
+    # The committer alone moved on: a SAS run with it shows the fork.
+    assert not same_view(a, b, gid)
     assert b.process(gid, bad["commit"])["type"] == "own_echo"
 
     policy = json.loads(a.policy(gid))

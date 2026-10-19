@@ -11,7 +11,7 @@ import pytest
 import agentconnect.runtime.engine as engine_mod
 from agentconnect.relay import b64
 from agentconnect.runtime.engine import UPDATE_AFTER_MESSAGES, UPDATE_AFTER_SECS, DaemonError
-from agentconnect_harness.cluster import Cluster, Node, status
+from agentconnect_harness.cluster import Cluster, Node, status, verify
 from agentconnect_harness.proxy import RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -62,7 +62,7 @@ async def test_require_verified_holds_deliveries(group: GroupFixture) -> None:
         b.daemon.mark_verified(gid, b.me)  # not for oneself
     with pytest.raises(DaemonError):
         b.daemon.mark_verified(gid, "ac:v0:nobody")
-    b.daemon.mark_verified(gid, a.me)
+    await verify(b, a, gid)
     assert await b.wait_texts(gid, 1) == ["held"]
     (d,) = b.adapter.deliveries
     assert d.trust_state == {"self": "verified", "verified_members": 1, "members": 2}
@@ -102,7 +102,7 @@ async def test_cards_wait_for_the_verification_gate(cluster: Cluster) -> None:
     assert a.daemon.store.cards(gid) == {}
     names = {m["identity"]: m["display_name"] for m in a.daemon.group_info(gid)["members"]}
     assert names[b.me] == "b"
-    a.daemon.mark_verified(gid, b.me)
+    await verify(a, b, gid)
     await a.wait(lambda: b.me in a.daemon.store.cards(gid))
     assert a.daemon.group_info(gid)["agent_cards"][b.me]["untrusted"] is True
 

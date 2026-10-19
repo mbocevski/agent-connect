@@ -52,8 +52,9 @@ DAEMON = "agentconnect daemon run"
 README_ENV = {"AC_RELAY_URL", "AC_DATA_DIR"}
 # CLI commands the quickstart may use (docs/cli.md).
 KNOWN = {"daemon", "invite", "accept", "approvals", "groups", "verify", "send", "status"}
-# Commands that block until another actor acts.
-BACKGROUND = {"accept"}
+# Commands that block until another actor acts: accept waits for the
+# approval, and verify for the other human's side of the SAS run.
+BACKGROUND = {"accept", "verify"}
 # Answers for any confirmation prompt (accept, approve, verify).
 YES = b"y\n" * 8
 # The whole quickstart spawns about ten CLI processes.

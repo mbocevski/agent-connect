@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -118,7 +119,7 @@ async def test_two_daemons_create_accept_approve_verify_send_leave(  # noqa: PLR
         (req,) = json.loads(listed)["approvals"]
         assert req["display_name"] == "bob"
         assert req["fingerprint"]
-        assert req["group_sas"]["decimal"]
+        assert "group_sas" not in req  # no group-wide code (SPEC 11)
         code, _ = alice.run_sync("approvals", "approve", req["request_id"], "--yes")
         assert code == 0
         asyncio.run_coroutine_threadsafe(
@@ -135,21 +136,31 @@ async def test_two_daemons_create_accept_approve_verify_send_leave(  # noqa: PLR
     assert joined["group_id"] == gid
     assert joined["name"] == "Deploys"
     assert joined["hint"].startswith("ask your human to compare the short code ")
-    assert joined["sas"]["decimal"] == bob.node.sas(gid)
+    assert "sas" not in joined
     await cluster.settle(gid, 1)
+    monkeypatch.setattr(cli_support, "pause", time.sleep)
 
-    # Both sides see the same code; verifying is a human, interactive step.
+    # Verifying is a human, interactive step on both sides at once (SPEC 11):
+    # a SAS run, the same code and mirrored labels, and each human's answer.
     code, shown = await alice.json("groups", "show", gid)
     assert code == 0
-    assert shown["sas"]["decimal"] == joined["sas"]["decimal"]
+    assert "sas" not in shown
     assert shown["verified_summary"] == "0 of 1 verified"
     assert {m["role"] for m in shown["members"]} == {"owner", "member"}
-    code, out = await alice.run("verify", gid, input="y\n")
+    # (One CLI at a time in this process: bob's human takes the API's side.)
+    verifying = asyncio.ensure_future(alice.run("verify", gid, input="y\ny\n"))
+    await alice.node.wait(lambda: bool(alice.node.daemon.sas._active))
+    run_b = bob.node.daemon.sas_start(gid, alice.node.me)["run"]
+    code, out = await verifying
     assert code == 0, out
-    assert "Do the other members see exactly this code? [y/N]" in out
+    assert "read the same two instance labels? [y/N]" in out
+    assert "read exactly this code? [y/N]" in out
+    seen_b = bob.node.daemon.sas_run(gid, run_b)
+    assert seen_b["sas"]["decimal"] in out  # the same code on both screens
+    assert f"yours {seen_b['labels']['peer']}, theirs {seen_b['labels']['self']}" in out
+    bob.node.daemon.mark_verified(gid, alice.node.me, True, run_b)
     code, shown = await alice.json("groups", "show", gid)
     assert (shown["verified_summary"], shown["hint"]) == ("1 of 1 verified", None)
-    assert (await bob.run("verify", gid[:8], input="y\n"))[0] == 0
 
     code, _sent = await alice.json("send", gid, "hello bob")
     assert code == 0
@@ -250,7 +261,10 @@ async def test_verify_no_leaves_and_reports_the_owner_handover(
 ) -> None:
     (a, b, _c), gid = await group(3)
     alice = await serve(a)
-    code, out = await alice.json("verify", gid, input="n\n")
+    verifying = asyncio.ensure_future(alice.json("verify", gid, b.me, input="y\nn\n"))
+    await a.wait(lambda: bool(a.daemon.sas._active))
+    b.daemon.sas_start(gid, a.me)  # b's human starts the other side
+    code, out = await verifying
     assert code == 6
     assert out["outcome"] == "mismatch"
     assert out["ownership_transfer"] == {
@@ -266,13 +280,18 @@ async def test_verify_no_after_a_fork_for_a_plain_member(
     serve: Callable[[Node], Awaitable[Cli]],
     malicious_relay: Callable[[Node], RelayProxy],
 ) -> None:
+    """A forked view shows as a run that never pairs (SPEC 12): here the
+    relay refuses the forked member's messages, the run ends unpaired, and
+    the human, told the daemons may not see the same group, treats it as
+    different codes."""
     (a, _b, c), gid = await group(3)
     cli_c = await serve(c)
     malicious_relay(c).fork_own_commits()
     c.daemon.update(gid)
     await c.wait(lambda: c.epoch(gid) == a.epoch(gid) + 1)
-    assert c.sas(gid) != a.sas(gid)
-    code, out = await cli_c.json("verify", gid, input="n\n")
+    assert c.state(gid) != a.state(gid)
+    a.daemon.sas_start(gid, c.me)
+    code, out = await cli_c.json("verify", gid, a.me, input="y\n")
     assert (code, out["status"], out["ownership_transfer"]) == (6, "left", None)
     assert status(c, gid) == "left"
     code, listed = await cli_c.json("groups")

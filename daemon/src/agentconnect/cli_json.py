@@ -25,7 +25,6 @@ GROUP_VIEW: dict[str, Any] = {
     "require_verified": "bool",
     "trust_state": {"self": "str", "verified_members": "int", "members": "int"},
     "verified_summary": "str",
-    "sas": Opt(SAS),
     "leaving": Opt({"since": "int", "blocked": "bool"}),
     "policy_summary": {
         "invite": Opt("str"),
@@ -250,7 +249,6 @@ SCHEMAS: dict[str, Any] = {
                 "identity": "str",
                 "fingerprint": "str",
                 "received_at": "int",
-                "group_sas": Opt(SAS),
                 "identity_requests?": "int",
                 "instance_id?": Opt("str"),
                 "mailbox_id?": "str",
@@ -318,7 +316,14 @@ SCHEMAS: dict[str, Any] = {
         ],
         "untrusted": "bool",
     },
-    "verify (verified)": {"outcome": "str", "group_id": "str", "verified": ["str"]},
+    "verify (verified)": {
+        "outcome": "str",
+        "group_id": "str",
+        "verified": ["str"],
+        "run": "str",
+        "sas": SAS,
+        "labels": {"self": "str", "peer": "str"},
+    },
     "verify (mismatch)": {
         "outcome": "str",
         "group_id": "str",
@@ -360,7 +365,6 @@ SCHEMAS: dict[str, Any] = {
         "group_id": "str",
         "listing": KNOCK_LISTING,
         "owner": KNOCK_OWNER,
-        "sas": SAS,
         "hint": "str",
     },
     "knock (sent)": {
@@ -385,18 +389,19 @@ SCHEMAS: dict[str, Any] = {
 # What the less obvious values mean, rendered under the shape.
 NOTES: dict[str, str] = {
     "accept (approved)": (
-        "`status` is `joined`. The rest is the `groups show` object, so the short code is there."
+        "`status` is `joined`. The rest is the `groups show` object. There is no short code "
+        "here: compare it with `agentconnect verify` (SPEC 11)."
     ),
     "accept (still pending)": "`status` is `pending`: the wait ended before the inviter approved.",
     "groups show": (
-        "`sas` is `null` once the group is no longer active. `hint` is set "
+        "There is no group-wide short code: each pair of members compares its own with "
+        "`agentconnect verify` (SPEC 11). `hint` is set "
         "while the group is unverified: relay it to the human, don't act on it. "
         "`leaving` is set while this instance leaves the group; `blocked` means it is the "
         "owner's last instance, which must hand ownership over first. Each member lists "
         "its `instances`; `self` marks this one."
     ),
     "approvals list": (
-        "`group_sas` is the group's code now; it changes once the joiner is added. "
         "`messages` are the messages the safety policy holds: `direction` is `in` "
         "(from `sender`) or `out` (your agent's)."
     ),
@@ -421,7 +426,10 @@ NOTES: dict[str, str] = {
         "`suppressed` counts, per group, sender and decision, the security rows that "
         "fell between a sender's oldest and newest half of its share: they are not kept."
     ),
-    "verify (verified)": "`outcome` is `verified`; `verified` lists the identities marked.",
+    "verify (verified)": (
+        "`outcome` is `verified`; `verified` lists the identity marked, `run` the SAS run "
+        "whose code (`sas`) and instance labels (`labels`) both humans read."
+    ),
     "verify (mismatch)": (
         "`outcome` is `mismatch` and `status` is `left`. When `confirmed` is "
         "false, or the view was forked, the members must recreate the group "
@@ -444,9 +452,9 @@ NOTES: dict[str, str] = {
         "token it adds `pending_knocks` and `knocks_dropped` (since the runtime started)."
     ),
     "knock (joined)": (
-        "The owner's human approved: `group_id` is the new group and `sas` its short "
-        "code. `owner.state` is this daemon's own check of the owner domain. Compare the "
-        "code with the owner before trusting the group."
+        "The owner's human approved: `group_id` is the new group. `owner.state` is this "
+        "daemon's own check of the owner domain. Compare the short code with the owner "
+        "(`agentconnect verify`) before trusting the group."
     ),
     "knock (sent)": (
         "`--wait 0`, or the wait ended first: the knock waits until `gives_up_at`. With "
