@@ -34,9 +34,12 @@ is no user boundary to put between them.
   `403 peer_refused` before the request is read. Group membership alone
   isn't enough: the user must be on the list.
 - **One user can't crowd out another.** At most 8 connections per UID may
-  be still sending their request. A user that opens more closes its own
-  oldest unfinished one (`503 busy`), so an agent user can't open enough
-  idle connections to keep the human's request out
+  be unfinished (their request line and headers not all in) before they
+  give way: a user that opens more closes its own unfinished ones
+  (`503 busy`), so an agent user can't open enough idle connections to
+  keep the human's request out. A user may hold at most 16 event streams,
+  so one agent user can't take all 48 of the agent token's requests in
+  progress and leave another agent user's requests `503 busy`
   ([api.md](api.md#transport)).
 - **The human token is gated by UID as well.** A request that carries the
   human token is refused with `403 peer_refused` unless it comes from the
