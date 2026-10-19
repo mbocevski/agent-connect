@@ -149,8 +149,8 @@ what it does not protect against.
   commit, whichever comes first. The instance does this
   immediately before its next send. This renews post-quantum forward secrecy and
   post-compromise security. A ceremony message (§11.2) is not a send that
-  triggers it, and while the instance takes part in a SAS run, or holds a
-  commitment for one, it defers the Update for at most 600 s (§11.3).
+  triggers it. While the instance takes part in a SAS run it defers a due
+  Update, but for at most 600 s in total (§11.3).
 
 ### 3.2 Extension codepoints
 
@@ -1786,7 +1786,8 @@ these steps:
   neither with the nonce it may already have revealed nor with any other
   in this run.
 - X keeps the commitments it has answered, for the rest of their epoch,
-  in its encrypted store, so that a restart doesn't forget them. This is
+  in its encrypted store, so that a restart doesn't forget them. It writes
+  the answered commitment to the store before it sends the reveal. This is
   defence in depth: answering a commitment again with a fresh nonce would
   give the attacker another uniform code, not a better chance.
 
@@ -1806,10 +1807,13 @@ these steps:
 
 **Interaction with X's own commits.**
 
-- While X takes part in a run, or holds a commitment addressed to it, it
-  defers its §3.1 cadence Update, for at most 600 s. It SHOULD defer other
-  commits that can wait, such as the departed-role clean-up of §9.2. A
-  commit its human asks for goes out at once and aborts the run.
+- While X takes part in a run (from step 1 until its human answers, or
+  the run aborts), it defers its §3.1 cadence Update once the Update is
+  due. All deferrals of one due Update together last at most 600 s; then
+  the Update goes out, and aborts any run under way. A held commitment
+  doesn't defer it. X SHOULD defer other commits that can wait, such as
+  the departed-role clean-up of §9.2. A commit its human asks for goes out
+  at once and aborts the run.
 - A ceremony message is not a send that triggers the cadence Update.
 - A ceremony message queued behind a pending commit (§8.3) is dropped when
   that commit is confirmed, never sent in the new epoch. It is sent if the
@@ -1849,9 +1853,11 @@ and only the human's own start answers it.
 - X keeps a count of warnings per group and peer identity in its encrypted
   store. A run whose codes the human confirmed resets it.
 - When the count reaches 2, X stops: it starts no further run with Y on
-  its own, shows the human that this pattern is what an attacker in the
-  middle produces, and offers the mismatch action (§11.5). The human may
-  start another run after acknowledging this.
+  its own and offers the mismatch action (§11.5). The stop message names
+  the member that committed, for each `epoch_changed` warning, and says
+  that this pattern is what an attacker in the middle produces, but also
+  what a relay that drops messages or an ordinary commit by another member
+  produces. The human may start another run after acknowledging this.
 - X doesn't leave on its own: a malicious relay alone can cause these
   aborts, by dropping a reveal.
 - Precedent: neither ZRTP nor Matrix fails hard on repeated aborts. ZRTP
@@ -1864,8 +1870,9 @@ and only the human's own start answers it.
 
 - Ceremony messages don't count against the §10.2 rates. A receiver
   accepts at most 12 per minute from each sending instance, separately
-  from the per-identity and group caps, and drops the rest. A command with
-  its 3 restarts sends at most 8.
+  from the per-identity and group caps, and drops the rest. Only ceremony
+  messages addressed to the receiver (§11.2) count; the others are ignored
+  anyway. A command with its 3 restarts sends at most 8.
 - In each group an instance keeps at most one held commitment per sending
   instance and one run per peer identity, so its state is bounded by the
   group size.
@@ -1954,7 +1961,10 @@ sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6)
 - **"Same code"** applies to the run whose code the human was shown, to
   its peer identity. An implementation MUST accept it only for a completed
   run, answered within 600 s of step 5, also when the epoch changed
-  meanwhile. Later, it refuses and a new run is needed. The match shows
+  meanwhile. Later, it refuses and a new run is needed. Starting a new
+  run with Y, or a warning about Y, also ends this window for every earlier
+  run with Y, so a "same" never applies to a code the humans didn't
+  compare last. "Differ" stays accepted (above). The match shows
   that both instances agreed on the group in epoch e; verified flags
   persist across epochs anyway (trust states, below), and a fork that
   starts after e can split the two members but not put someone between
@@ -2114,17 +2124,24 @@ Implementations in this repository MUST have:
     to another member is not held and doesn't replace a held one;
   - "codes differ" after an epoch change, after an abort and after a
     timeout still leaves the group and raises `sas_mismatch`; "same" after
-    an epoch change is accepted within 600 s of step 5 and refused later;
+    an epoch change is accepted within 600 s of step 5 and refused later,
+    and refused for an earlier run once a new run with that peer started
+    or a warning about it was raised;
   - two warnings with one peer stop further runs and offer the mismatch
     action, the count survives a restart, and a confirmed run resets it;
   - an unpaired run reports a possible fork after 60 s;
   - a second run with the same peer from another instance of one's
     identity is refused, and the labels are shown with the code;
-  - a ceremony send doesn't trigger the cadence Update, the Update is
-    deferred during a run, a queued ceremony message is dropped across an
-    epoch change, and an `error` on `control.sas_commit` ends the run;
+  - a ceremony send doesn't trigger the cadence Update; a due Update is
+    deferred during a run for at most 600 s in total, also across
+    back-to-back runs, and a held commitment doesn't defer it; a queued
+    ceremony message is dropped across an epoch change; and an `error` on
+    `control.sas_commit` ends the run;
   - the ceremony budget: messages over 12 a minute from one instance are
-    dropped, and ordinary traffic doesn't use up the budget;
+    dropped, ordinary traffic doesn't use up the budget, and neither do
+    ceremony messages addressed to other members;
+  - an answered commitment is in the store before its reveal is sent, so
+    a crash between the two never lets it be answered again;
   - both timeouts, on the fake clock;
   - a forked view (one attacker in two groups): the codes differ, or the
     runs never pair;
@@ -2242,7 +2259,11 @@ views, so it can only lose a run, abort it, or leave it unpaired. A "codes
 differ" answer is always acted on, an abort after a reveal is a warning,
 and a run unpaired for 60 s is reported as a possible fork (§11.3, §11.5).
 None of these makes the instance leave on its own: a malicious relay can
-cause aborts and unpaired runs too, so the human decides. The earlier v0
+cause aborts and unpaired runs too, so the human decides. A relay, or a
+member that commits during runs, can still push the humans towards the
+mismatch action, and so towards leaving and recreating the group. That is
+denial of service, which the relay can cause anyway; it doesn't let anyone
+into the middle. The earlier v0
 code, derived from the `epoch_authenticator` alone, could be ground offline
 by the epoch's last committer; the SAS run replaced it (§11.8).
 
