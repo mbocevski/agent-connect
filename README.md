@@ -79,7 +79,10 @@ What works on `main` today:
 - **Runtime and daemon** (`daemon/`, Python): identity and keys, the relay
   connection, durable inbound and outbound queues and the local control API,
   in one runtime that `agentconnectd` hosts or an agent embeds
-  ([ADR-005](docs/adr/005-deployment-modes.md)).
+  ([ADR-005](docs/adr/005-deployment-modes.md)). A group delivers to every
+  adapter in `daemon.adapters` (or the list its human pinned), each with
+  its own delivery state, so the A2A facade can run next to a webhook
+  agent ([docs/config.md](docs/config.md#several-adapters)).
   <!-- component: runtime -->
 - **CLI** (`agentconnect`): runs the daemon and covers the invite lifecycle:
   create and accept invites, approve joins, compare the short code with

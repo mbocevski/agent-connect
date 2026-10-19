@@ -37,6 +37,7 @@ HUMAN = {
     "POST /v0/groups/{gid}/sas/runs/{run}/labels",
     "POST /v0/groups/{gid}/members/{identity}/remove",
     "POST /v0/groups/{gid}/safety",
+    "PUT /v0/groups/{gid}/adapters",
     "GET /v0/audit",
     "GET /v0/groups/{gid}/transcript",
     "POST /v0/groups/{gid}/sas/mismatch",
@@ -162,3 +163,15 @@ def test_provisioning_a_replica_is_the_clis_alone() -> None:
     for tool in TOOLS:
         assert not any(w in tool.name for w in PROVISIONING), tool.name
         assert "replica" not in json.dumps(tool.schema), tool.name
+
+
+def test_which_adapters_a_group_delivers_to_is_the_humans() -> None:
+    """Pinning a group's adapters decides which endpoint receives its
+    plaintext: no agent method, SDK call or MCP tool sets it."""
+    names = [n for n, _ in inspect.getmembers(AgentApi) if not n.startswith("__")]
+    assert not [n for n in names if "adapters" in n]
+    public = [getattr(agentconnect_sdk, n) for n in agentconnect_sdk.__all__]
+    for obj in (*public, agentconnect_sdk.Group, embedded.EmbeddedHost):
+        names = [n for n, _ in inspect.getmembers(obj) if not n.startswith("_")]
+        assert not [n for n in names if "set_adapters" in n or "pin" in n], obj
+    assert not [t.name for t in TOOLS if "adapter" in t.name]

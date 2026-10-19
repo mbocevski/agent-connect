@@ -10,6 +10,25 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Runtime, daemon and CLI: a group delivers its messages and events to
+  several adapters (docs/config.md, "Several adapters"), such as the A2A
+  facade next to a webhook agent, whose replies the facade never saw
+  before. `daemon.adapters = ["a2a", "webhook"]` lists them, in order;
+  `daemon.default_adapter` stays as its one-element form (set one of the
+  two). The human pins a group's own list, or unpins it, with `PUT
+  /v0/groups/{gid}/adapters` (`{"adapters": [...] | null}`, human token
+  only: it decides which endpoints receive the group's plaintext) or
+  `agentconnect group adapters <group> <name>... | --follow-config`. Group
+  info reports `adapters` (the pinned list, or `null`) and `delivers_to`.
+  Each adapter has its own delivery state: it gets every message in order
+  and is marked once it took it, a `RETRY` backs off only that group's
+  deliveries to that adapter, and a message is done (its plaintext
+  deleted) once every adapter of the group has it. Events go to every
+  adapter, each told once; one that fails hears of it again on the next
+  reconnect. The first adapter with an Agent Card sends it. A listed
+  adapter the runtime doesn't run is skipped with a warning
+  (`adapter_not_registered`), and what waited only for it is done. The
+  embedded SDK and the MCP-spawned runtime keep their one adapter.
 - Demos: `just demo` and `just demo-group` run whole deployments in docker
   compose (`demo/`), a relay and one host per agent on its own network,
   with stub models by default (`AC_EXAMPLE_MODEL=real` and
@@ -853,6 +872,16 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`sas`, `group_sas`); the run events (`sas_requested`, `sas_paired`,
   `sas_code`, `sas_aborted`, `sas_unpaired`, `sas_stopped`,
   `verifications_reset`) are the human's only.
+- Runtime: the relay is acked once a message is recorded in the inbox,
+  not once an adapter took it (ADR-004 amendment), so an adapter that is
+  down no longer keeps frames unacked at the relay until its mailbox
+  overflows. Groups created before `daemon.adapters` follow the config
+  (the adapter a group was bound to at creation is no longer read), and
+  group info's `adapter` is replaced by `adapters` and `delivers_to`.
+  `daemon.default_adapter` now refuses a name that isn't an adapter
+  (`webhook`, `sse`, `mcp`, `a2a` or `none`), and `a2a` in the list needs
+  `a2a.local_agent_url` or `a2a.facade_port`. ADR-005 is amended: a group
+  no longer delivers to exactly one adapter.
 - Examples: the Claude Agent SDK and LangGraph examples use a stub model by
   default and the real one with `AC_EXAMPLE_MODEL=real`, answer only
   questions addressed to them (text that ends with `?`) so two agents

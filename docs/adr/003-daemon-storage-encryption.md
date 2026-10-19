@@ -79,8 +79,8 @@ encrypts the whole file, and adds no dependency.
   (encrypted) file rather than left in free pages.
 - **Retention on top of encryption.** An outbox row keeps only its ids
   (`msg_id`, frame type) once the relay has answered it or the daemon gave
-  up; an inbox row drops its delivery once the adapter accepted it (or it
-  was dropped); a decided JoinRequest drops its body. The SSE adapter's feed
+  up; an inbox row drops its delivery once every adapter of its group
+  accepted it (or it was dropped); a decided JoinRequest drops its body. The SSE adapter's feed
   (the only place delivered payloads stay) is written only when that adapter
   is enabled and is purged `sse.retention_secs` (default one hour) after each
   item was written. This limits what a

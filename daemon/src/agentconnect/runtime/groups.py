@@ -1304,7 +1304,8 @@ class GroupService:
             "policy": group.policy,
             "out_of_sync": group.out_of_sync,
             "out_of_sync_reason": group.out_of_sync_reason,
-            "adapter": group.adapter,
+            "adapters": group.adapters,
+            "delivers_to": self._engine.adapter_names(group_id),
             "trust_state": self.trust_state(group_id),
             "leaving": self.leave_state(group_id),
             "policy_summary": {

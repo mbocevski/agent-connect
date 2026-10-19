@@ -322,3 +322,83 @@ def test_a_verification_from_before_its_epoch_was_recorded_reads_as_unknown(
     assert s.set_verified("g1", "b", True, 7)
     assert s.members("g1")[0].verified_epoch == 7
     s.close()
+
+
+# -- per-adapter delivery (several adapters per group) ---------------------------
+
+
+def test_existing_groups_follow_the_config_after_the_upgrade(
+    tmp_path: Path, opened: Opener
+) -> None:
+    """A database from before per-group adapter lists: every group was bound
+    to the adapter `default_adapter` named when it was created, and nothing
+    else could set it. After the upgrade every group follows the config, and
+    a message still pending goes to every adapter it delivers to."""
+    db = tmp_path / "d.sqlite3"
+    s = opened(db)
+    s.add_group(group())
+    s.record_inbox("ac:v0:bob", "m1", "g1", "pending", 5, delivery={"x": 1})
+    s.add_event("g1", "member_joined", {}, 5, "ev-1")
+    s.add_event("g1", "epoch_changed", {}, 5, "ev-2")
+    s.mark_notified("ev-1")
+    with s.tx() as raw:
+        raw.execute("ALTER TABLE groups DROP COLUMN adapters")
+        raw.execute("DROP TABLE inbox_acks")
+        raw.execute("DROP TABLE event_acks")
+    s.close()
+    s = opened(db)
+    g = s.group("g1")
+    assert g is not None
+    assert g.adapters is None
+    for name in ("a2a", "webhook"):
+        assert [r.msg_id for r in s.pending_deliveries("g1", adapter=name)] == ["m1"]
+    # A notified event counts as notified to every adapter; the other to none.
+    assert [e["event_id"] for e in s.unnotified_events()] == ["ev-2"]
+    assert not s.event_marked("ev-2", "a2a")
+
+
+def test_a_delivery_is_done_once_every_target_has_it(tmp_path: Path, opened: Opener) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+    s.add_group(group())
+    s.record_inbox("ac:v0:bob", "m1", "g1", "pending", 5, delivery={"x": 1})
+    (row,) = s.pending_deliveries("g1")
+    targets = ["a2a", "webhook"]
+    assert not s.mark_delivered(row.seq, "a2a", targets)
+    assert s.pending_deliveries("g1", adapter="a2a") == []
+    assert [r.msg_id for r in s.pending_deliveries("g1", adapter="webhook")] == ["m1"]
+    assert s.inbox_state("ac:v0:bob", "m1") == "pending"
+    # The webhook leaves the group's list: what the others had is done.
+    assert s.settle_deliveries("g1", ["a2a"]) == 1
+    assert s.inbox_state("ac:v0:bob", "m1") == "done"
+    assert s.pending_deliveries() == []
+    s.record_inbox("ac:v0:bob", "m2", "g1", "pending", 6, delivery={"x": 2})
+    (row,) = s.pending_deliveries("g1")
+    assert s.settle_deliveries("g1", []) == 0, "no target: nothing is done"
+    assert not s.mark_delivered(row.seq, "webhook", targets)
+    assert s.mark_delivered(row.seq, "a2a", targets)
+    assert s.inbox_state("ac:v0:bob", "m2") == "done"
+
+
+def test_groups_pin_their_adapters(tmp_path: Path, opened: Opener) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+    s.add_group(group())
+    s.set_group_adapters("g1", ["webhook", "a2a"])
+    g = s.group("g1")
+    assert g is not None
+    assert g.adapters == ["webhook", "a2a"]
+    s.set_group_adapters("g1", None)
+    g = s.group("g1")
+    assert g is not None
+    assert g.adapters is None
+
+
+def test_events_are_notified_per_adapter(tmp_path: Path, opened: Opener) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+    s.add_event("g1", "member_joined", {}, 5, "ev-1")
+    s.mark_event("ev-1", "a2a")
+    assert s.event_marked("ev-1", "a2a")
+    assert not s.event_marked("ev-1", "webhook")
+    assert not s.event_notified("ev-1")
+    s.mark_notified("ev-1")
+    assert s.event_notified("ev-1")
+    assert s.unnotified_events() == []

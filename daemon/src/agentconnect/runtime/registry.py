@@ -1,9 +1,10 @@
 """The runtime's adapters, by name.
 
-Each group is bound to one adapter by name (the ``adapter`` column of the
-groups table, ``daemon.default_adapter`` when the group was created). A
-group whose adapter isn't registered delivers to the first one registered.
-Registration closes when the runtime starts.
+A group delivers to the adapters of its list, by name: the list the human
+pinned (the ``adapters`` column of the groups table), else the config's
+(``daemon.adapters``). A group none of whose adapters is registered delivers
+to the first one registered (:meth:`AdapterRegistry.first`). Registration
+closes when the runtime starts.
 """
 
 from __future__ import annotations
@@ -35,10 +36,9 @@ class AdapterRegistry(Mapping[str, Adapter]):
         """No more registrations (the runtime is starting)."""
         self._closed = True
 
-    def bound(self, name: str) -> Adapter | None:
-        """The adapter for a group bound to ``name``: that one, else the
-        first registered, else ``None``."""
-        return self._by_name.get(name) or next(iter(self._by_name.values()), None)
+    def first(self) -> Adapter | None:
+        """The first adapter registered, if any."""
+        return next(iter(self._by_name.values()), None)
 
     @override
     def __getitem__(self, name: str) -> Adapter:

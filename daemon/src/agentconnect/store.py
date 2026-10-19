@@ -169,7 +169,8 @@ CREATE TABLE IF NOT EXISTS groups (
     last_own_commit_at INTEGER NOT NULL,
     msgs_since_commit INTEGER NOT NULL DEFAULT 0,
     hidden INTEGER NOT NULL DEFAULT 0,
-    origin TEXT
+    origin TEXT,
+    adapters TEXT
 );
 CREATE TABLE IF NOT EXISTS members (
     group_id TEXT NOT NULL,
@@ -236,6 +237,16 @@ CREATE TABLE IF NOT EXISTS inbox (
     received_at INTEGER NOT NULL,
     hop INTEGER,
     UNIQUE (sender, msg_id)
+);
+CREATE TABLE IF NOT EXISTS inbox_acks (
+    inbox_seq INTEGER NOT NULL,
+    adapter TEXT NOT NULL,
+    PRIMARY KEY (inbox_seq, adapter)
+);
+CREATE TABLE IF NOT EXISTS event_acks (
+    event_id TEXT NOT NULL,
+    adapter TEXT NOT NULL,
+    PRIMARY KEY (event_id, adapter)
 );
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -517,6 +528,7 @@ GROUP_COLUMNS = (
     "msgs_since_commit",
     "hidden",
     "origin",
+    "adapters",
 )
 
 
@@ -637,6 +649,9 @@ class GroupRow:
     hidden: bool = False
     # Where the group came from, kept with it: {"kind": "knock", "directory", "name"}.
     origin: dict[str, Any] | None = None
+    # The adapters the human pinned it to; None: the config's (daemon.adapters).
+    # (``adapter``, the one adapter a group was bound to before, is no longer read.)
+    adapters: list[str] | None = None
 
 
 @dataclass
@@ -712,7 +727,14 @@ class Store:
             if column not in columns:
                 self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {decl}")
         group_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('groups')")}
-        for column, decl in (("hidden", "INTEGER NOT NULL DEFAULT 0"), ("origin", "TEXT")):
+        # `adapters` (a pinned list, NULL: follow the config) replaced the one
+        # adapter a group was bound to when it was created: every group from
+        # before follows the config.
+        for column, decl in (
+            ("hidden", "INTEGER NOT NULL DEFAULT 0"),
+            ("origin", "TEXT"),
+            ("adapters", "TEXT"),
+        ):
             if column not in group_columns:
                 self._db.execute(f"ALTER TABLE groups ADD COLUMN {column} {decl}")
         member_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('members')")}
@@ -847,6 +869,7 @@ class Store:
         values[6] = int(row.out_of_sync)
         values[12] = int(row.hidden)
         values[13] = None if row.origin is None else json.dumps(row.origin)
+        values[14] = None if row.adapters is None else json.dumps(row.adapters)
         self._db.execute(
             f"INSERT OR REPLACE INTO groups ({', '.join(GROUP_COLUMNS)}) "  # noqa: S608
             f"VALUES ({', '.join('?' * len(GROUP_COLUMNS))})",
@@ -860,6 +883,7 @@ class Store:
         d["out_of_sync"] = bool(d["out_of_sync"])
         d["hidden"] = bool(d["hidden"])
         d["origin"] = None if d["origin"] is None else json.loads(d["origin"])
+        d["adapters"] = None if d["adapters"] is None else json.loads(d["adapters"])
         return GroupRow(**d)
 
     def group(self, group_id: str) -> GroupRow | None:
@@ -882,7 +906,7 @@ class Store:
                 raise ValueError(msg)
         values = [
             json.dumps(v)
-            if k == "policy" or (k == "origin" and v is not None)
+            if k == "policy" or (k in ("origin", "adapters") and v is not None)
             else int(v)
             if isinstance(v, bool)
             else v
@@ -2305,15 +2329,22 @@ class Store:
     def forget_hops(self, before: int) -> None:
         self._db.execute("DELETE FROM hops WHERE at < ?", (before,))
 
-    def pending_deliveries(self, group_id: str | None = None, limit: int = -1) -> list[InboxRow]:
+    def pending_deliveries(
+        self, group_id: str | None = None, limit: int = -1, *, adapter: str | None = None
+    ) -> list[InboxRow]:
         """Pending inbox rows, oldest first; with ``group_id`` only that
-        group's that can be handed over, at most ``limit`` of them (-1: all)."""
+        group's that can be handed over, at most ``limit`` of them (-1: all),
+        and with ``adapter`` only those that adapter hasn't taken yet."""
         rows = self._all(
             "SELECT seq, sender, msg_id, group_id, delivery, state FROM inbox "
             "WHERE state = 'pending' AND (? IS NULL OR (group_id = ? AND delivery IS NOT NULL)) "
+            "AND (? IS NULL OR NOT EXISTS (SELECT 1 FROM inbox_acks a "
+            "WHERE a.inbox_seq = inbox.seq AND a.adapter = ?)) "
             "ORDER BY seq LIMIT ?",
             group_id,
             group_id,
+            adapter,
+            adapter,
             limit,
         )
         return [
@@ -2329,12 +2360,53 @@ class Store:
         )
         return [str(r[0]) for r in rows]
 
+    def mark_delivered(self, seq: int, adapter: str, targets: Sequence[str]) -> bool:
+        """``adapter`` accepted inbox row ``seq``. Once every adapter of
+        ``targets`` has, the row is done (and its plaintext goes); True then."""
+        with self.tx():
+            self._db.execute(
+                "INSERT OR IGNORE INTO inbox_acks (inbox_seq, adapter) VALUES (?, ?)",
+                (seq, adapter),
+            )
+            if self._missing_acks(seq, targets):
+                return False
+            self.set_inbox_state(seq, "done")
+            return True
+
+    def _missing_acks(self, seq: int, targets: Sequence[str]) -> bool:
+        row = self._one(
+            "SELECT COUNT(*) FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM inbox_acks a "
+            "WHERE a.inbox_seq = ? AND a.adapter = j.value)",
+            json.dumps(list(targets)),
+            seq,
+        )
+        return row is not None and int(row[0]) > 0
+
+    def settle_deliveries(self, group_id: str, targets: Sequence[str]) -> int:
+        """Mark done the group's pending rows every one of ``targets`` has
+        taken (the group's adapters changed since). None with no target."""
+        if not targets:
+            return 0
+        done = 0
+        with self.tx():
+            for row in self._all(
+                "SELECT DISTINCT a.inbox_seq FROM inbox_acks a JOIN inbox i ON i.seq = a.inbox_seq "
+                "WHERE i.group_id = ? AND i.state = 'pending'",
+                group_id,
+            ):
+                if not self._missing_acks(int(row[0]), targets):
+                    self.set_inbox_state(int(row[0]), "done")
+                    done += 1
+        return done
+
     def set_inbox_state(self, seq: int, state: str) -> None:
-        # A delivered row no longer needs its plaintext.
+        # A delivered row no longer needs its plaintext, nor its adapters'
+        # markers.
         if state in ("done", "dropped"):
             self._db.execute(
                 "UPDATE inbox SET state = ?, delivery = NULL WHERE seq = ?", (state, seq)
             )
+            self._db.execute("DELETE FROM inbox_acks WHERE inbox_seq = ?", (seq,))
         else:
             self._db.execute("UPDATE inbox SET state = ? WHERE seq = ?", (state, seq))
 
@@ -2396,6 +2468,11 @@ class Store:
             self._db.execute(
                 "UPDATE events SET notified = 0, agent_seq = "
                 "(SELECT COALESCE(MAX(agent_seq), 0) + 1 FROM events) WHERE seq = ?",
+                (seq,),
+            )
+            self._db.execute(
+                "DELETE FROM event_acks WHERE event_id = (SELECT event_id FROM events "
+                "WHERE seq = ?)",
                 (seq,),
             )
         out = self._all(
@@ -2597,7 +2674,27 @@ class Store:
         return row is not None and bool(row[0])
 
     def mark_notified(self, event_id: str) -> None:
-        self._db.execute("UPDATE events SET notified = 1 WHERE event_id = ?", (event_id,))
+        """Every adapter has the event: its per-adapter markers go."""
+        with self.tx():
+            self._db.execute("UPDATE events SET notified = 1 WHERE event_id = ?", (event_id,))
+            self._db.execute("DELETE FROM event_acks WHERE event_id = ?", (event_id,))
+
+    def event_marked(self, event_id: str, adapter: str) -> bool:
+        """Whether ``adapter`` accepted this event already."""
+        row = self._one(
+            "SELECT 1 FROM event_acks WHERE event_id = ? AND adapter = ?", event_id, adapter
+        )
+        return row is not None
+
+    def mark_event(self, event_id: str, adapter: str) -> None:
+        self._db.execute(
+            "INSERT OR IGNORE INTO event_acks (event_id, adapter) VALUES (?, ?)",
+            (event_id, adapter),
+        )
+
+    def set_group_adapters(self, group_id: str, adapters: list[str] | None) -> None:
+        """Pin the group's adapters (``None``: follow the config)."""
+        self.update_group(group_id, adapters=adapters)
 
     @staticmethod
     def _event(r: tuple[Any, ...]) -> dict[str, Any]:

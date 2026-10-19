@@ -32,6 +32,10 @@ with its `role` (`owner`, `admin` or `member`) and its instances, and the
 policy: `policy_summary` (`invite`, `remove`, `max_members`,
 `max_agent_turns`) and `floor` (`mode`, `pinned`, `moderator`, and the
 `effective_moderator` and `holder` of [floor control](#floor-control)).
+They also show where this runtime delivers the group's messages and
+events: `adapters`, the list the human pinned with `agentconnect group
+adapters` (or `null`: the config's `daemon.adapters`), and `delivers_to`,
+the adapters that receive them now ([config.md](config.md#several-adapters)).
 
 ## Changing roles and the policy
 

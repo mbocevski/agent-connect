@@ -143,6 +143,7 @@ def test_real_cli_reference_lists_every_command() -> None:
         "group policy",
         "group role",
         "group transfer",
+        "group adapters",
         "approvals approve",
         "approvals reject",
         "safety set",

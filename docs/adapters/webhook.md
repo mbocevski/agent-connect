@@ -15,7 +15,7 @@ order (the handler timeout is `sdk.handler_timeout_secs`).
 
 ```toml
 [daemon]
-default_adapter = "webhook"
+adapters = ["webhook"]          # with others too, see config.md
 
 [webhook]
 callback_url = "http://127.0.0.1:8808/"
@@ -184,7 +184,7 @@ agents that answer each other forever. Task updates use `a2a.task_status` and
 
 An agent that cannot accept inbound requests can pull the same payloads from
 `GET /v0/events` as a [Server-Sent Events stream](../api.md#event-stream)
-with `default_adapter = "sse"`. Messages that arrive while nothing is
+with `"sse"` in `daemon.adapters`. Messages that arrive while nothing is
 connected wait in the daemon's queue. With the SSE adapter (and only
 then; the webhook adapter writes nothing of this kind) every message and event
 is also appended to a feed in the daemon's encrypted database, and the SSE `id`
@@ -207,7 +207,7 @@ re-sync from your own source of truth. Ordering is as for the webhook.
 ## Alternative: MCP sessions
 
 An agent tool that speaks MCP pulls the same payloads through
-`agentconnect mcp` ([mcp.md](mcp.md)). With `default_adapter = "mcp"` the
+`agentconnect mcp` ([mcp.md](mcp.md)). With `"mcp"` in `daemon.adapters` the
 daemon keeps messages in a queue in its encrypted database until a session
 attached to it takes them (`GET /v0/deliveries`, [api.md](../api.md)) and
 acknowledges them.

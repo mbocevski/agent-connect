@@ -15,8 +15,8 @@ Three workers run on one event loop:
   row for the winning commit (``Engine._await_epoch``, up to
   ``REBUILD_WAIT_SECS``), and a request the relay doesn't answer waits
   ``relay.REQUEST_TIMEOUT`` before the link is treated as down;
-* **delivery**: hands pending inbox rows to the adapter and acks the relay
-  frame only once the adapter accepted it.
+* **delivery**: hands pending inbox rows to each adapter of their group, with
+  a marker per adapter (the relay frame was acked once the row was recorded).
 
 Commit handling follows SPEC §8.3 and the core's semantics exactly: a
 commit is sent under its ``msg_id`` and merged on ``accepted`` (or when the
@@ -629,6 +629,7 @@ class Engine:
         self._card_keys = cards.load_jwks(config.a2a_card_keys_file)
         self._held_wake = asyncio.Event()
         self._fail_codes: dict[int, str] = {}
+        self._unregistered: set[str] = set()  # listed adapters warned about
         self._drain_frame = False
         self._drain = DrainBudget()
         # The relay connection (RelayLink.connections) whose reconnect drain
@@ -889,13 +890,57 @@ class Engine:
             self.floor.holder(g.group_id),
         )
 
-    def _adapter_for(self, group_id: str | None) -> Adapter | None:
-        name = self.config.default_adapter
+    def adapter_names(self, group_id: str | None) -> list[str]:
+        """The adapters the group delivers to, by name, in order: its pinned
+        list, else the config's (``daemon.adapters``), keeping those this
+        runtime has. A listed adapter it doesn't have is skipped with a
+        warning: what waited for it alone is done. With none, the first
+        adapter registered (``AdapterRegistry.bound``)."""
+        names: list[str] | tuple[str, ...] = self.config.adapter_names
         if group_id is not None:
             g = self.store.group(group_id)
-            if g is not None:
-                name = g.adapter
-        return self.adapters.bound(name)
+            if g is not None and g.adapters is not None:
+                names = g.adapters
+        found = [n for n in names if n in self.adapters]
+        for name in set(names) - set(found) - self._unregistered:
+            self._unregistered.add(name)
+            LOG.warning("adapter_not_registered", adapter=name)
+        if found:
+            return found
+        first = self.adapters.first()
+        return [] if first is None else [first.name]
+
+    def targets(self, group_id: str | None) -> list[Adapter]:
+        """The adapters the group delivers its messages and events to."""
+        return [self.adapters[n] for n in self.adapter_names(group_id)]
+
+    def _adapter_for(self, group_id: str | None) -> Adapter | None:
+        """The group's first adapter."""
+        targets = self.targets(group_id)
+        return targets[0] if targets else None
+
+    def set_adapters(self, group_id: str, names: list[str] | None) -> dict[str, Any]:
+        """**Human-only.** Pin the adapters a group delivers to (``None``:
+        follow the config). Each must be an adapter of this runtime, once."""
+        group = self._group_or_raise(group_id)
+        if names is not None:
+            if not names or not all(isinstance(n, str) for n in names):
+                raise DaemonError("bad_request", "adapters must list adapter names, or be null")
+            for name in names:
+                if name not in self.adapters:
+                    have = ", ".join(self.adapters) or "none"
+                    msg = f"{name} is not an adapter of this runtime (it has: {have})"
+                    raise DaemonError("bad_request", msg)
+                if names.count(name) > 1:
+                    raise DaemonError("bad_request", f"{name} is listed more than once")
+        self.store.set_group_adapters(group.group_id, None if names is None else list(names))
+        LOG.info("group_adapters_set", group=log.hid(group.group_id), pinned=names is not None)
+        self._delivery_wake.set()
+        return {
+            "group_id": group.group_id,
+            "adapters": names,
+            "delivers_to": self.adapter_names(group.group_id),
+        }
 
     async def emit(
         self, group_id: str | None, kind: str, *, cause: str | None = None, **data: Any
@@ -1010,26 +1055,44 @@ class Engine:
         return result
 
     async def _notify(self, event: Event) -> None:
-        """Tell the adapter about a recorded event; mark it notified once
-        the adapter accepted it. A failure leaves it for :meth:`_renotify`."""
-        adapter = self._adapter_for(event.group_id)
+        """Tell every adapter of the event's group about a recorded event,
+        each once: an adapter that accepted it is marked, and the event is
+        notified once all are. A failing adapter leaves it for
+        :meth:`_renotify`, which tells that adapter only."""
         try:
             self.failpoints.hit("event.after_record")
             # The policy's own events are for the human only: an agent that
             # heard of a hold could tell the sender (SPEC 10.2). So are the
             # knocks and an approved knock's group until the knocker is in.
-            if (
-                adapter is not None
-                and event.type not in HUMAN_EVENTS
-                and self.store.agent_visible(event.event_id)
-            ):
-                view = None if event.group_id is None else self._view(event.group_id)
-                await adapter.on_event(view, event)
-            self.failpoints.hit("event.after_notify")
-            self.store.mark_notified(event.event_id)
+            targets = []
+            if event.type not in HUMAN_EVENTS and self.store.agent_visible(event.event_id):
+                targets = [
+                    a
+                    for a in self.targets(event.group_id)
+                    if not self.store.event_marked(event.event_id, a.name)
+                ]
+            view = None
+            if targets and event.group_id is not None:
+                view = self._view(event.group_id)
+            # One after the other, in list order: an adapter that fails is
+            # told again later, and the others have it meanwhile.
+            told = [await self._notify_one(a, view, event) for a in targets]
+            if all(told):
+                self.store.mark_notified(event.event_id)
         except Exception:
             LOG.warning("adapter_event_failed", type=event.type)
         self._pulse()
+
+    async def _notify_one(self, adapter: Adapter, view: GroupView | None, event: Event) -> bool:
+        """One adapter: tell it, then mark it. False if it failed."""
+        try:
+            await adapter.on_event(view, event)
+            self.failpoints.hit("event.after_notify")
+        except Exception:
+            LOG.warning("adapter_event_failed", type=event.type, adapter=adapter.name)
+            return False
+        self.store.mark_event(event.event_id, adapter.name)
+        return True
 
     async def _renotify(self) -> None:
         """Send again every recorded event the adapter has not accepted
@@ -1226,13 +1289,13 @@ class Engine:
             return
         state = self.store.inbox_state(sender, msg_id)
         if state is not None:
-            # A replay or a redelivery after reconnect. Pending rows belong to
-            # the delivery worker, which acks them once the adapter has them.
-            # A failure after its effects were recorded may have left the
-            # rest undone: the journal entry, the secret, the wake-up.
+            # A replay or a redelivery after reconnect: recorded already, so
+            # acked (ADR-004), pending rows too; the delivery workers hand
+            # those to each adapter. A failure after its effects were
+            # recorded may have left the rest undone: the journal entry, the
+            # secret, the wake-up.
             self._settle_recorded(env)
-            if state != "pending":
-                await self._ack(msg_id)
+            await self._ack(msg_id)
             LOG.debug("duplicate_ignored", msg=log.hid(msg_id))
             return
         group_id = env.get("group_id")
@@ -1419,7 +1482,10 @@ class Engine:
         self.failpoints.hit(f"{path}.after_consume")
         if state == "pending":
             self._delivery_wake.set()
-        elif from_relay:
+        if from_relay:
+            # Recorded in the inbox: the relay's copy can go. Each adapter's
+            # delivery is tracked here (ADR-004), so one that is down holds
+            # nothing up at the relay.
             await self._ack(msg_id)
         self._pulse()
 
@@ -2529,19 +2595,20 @@ class Engine:
             self.store.set_display_name(delivery.group_id, identity, name[:80])
 
     async def _delivery(self) -> None:
-        """Hand pending inbox rows to the adapters: one worker per group with
-        deliverable rows, so a slow or failing adapter call holds up its own
-        group only, and strict order within each group. A worker's crash or
-        failure ends this worker too (the supervisor restarts it)."""
-        workers: dict[str, asyncio.Task[None]] = {}
+        """Hand pending inbox rows to the adapters: one worker per group and
+        adapter with deliverable rows, so a slow or failing adapter holds up
+        its own deliveries in its own group only, and strict order within
+        each. A worker's crash or failure ends this worker too (the
+        supervisor restarts it)."""
+        workers: dict[tuple[str, str], asyncio.Task[None]] = {}
         woken = True
         try:
             while True:
                 # Reap first: a worker that just found its group empty must not
                 # keep a row that arrived since from getting a new worker.
-                for group_id, worker in list(workers.items()):
+                for key, worker in list(workers.items()):
                     if worker.done():
-                        del workers[group_id]
+                        del workers[key]
                         if worker.cancelled():
                             # Not by us (we'd be cancelled too): restart it.
                             LOG.error("delivery_worker_died", reason="CancelledError")
@@ -2552,9 +2619,7 @@ class Engine:
                     # Clear before reading, so a row recorded after the
                     # read wakes us again.
                     self._delivery_wake.clear()
-                    for group_id in self.store.pending_groups():
-                        if group_id not in workers and not self._gated(group_id):
-                            workers[group_id] = asyncio.ensure_future(self._deliver_group(group_id))
+                    self._start_deliveries(workers)
                 wake = asyncio.ensure_future(self._delivery_wake.wait())
                 try:
                     done, _ = await asyncio.wait(
@@ -2566,14 +2631,33 @@ class Engine:
         finally:
             await cancel_and_wait(*workers.values(), ignore=(Exception, SimulatedCrash))
 
-    async def _deliver_group(self, group_id: str) -> None:
-        """One group's pending deliveries, in order, until none is left that
-        can be delivered now; a ``RETRY`` waits out the group's backoff."""
+    def _start_deliveries(self, workers: dict[tuple[str, str], asyncio.Task[None]]) -> None:
+        """A worker for every group and adapter with rows it can take that
+        has none yet."""
+        for group_id in self.store.pending_groups():
+            names = self.adapter_names(group_id)
+            # Taken by every adapter it still goes to (its list changed): done.
+            if self.store.settle_deliveries(group_id, names):
+                self._pulse()
+            if self._gated(group_id):
+                continue
+            for name in names:
+                if (group_id, name) not in workers:
+                    workers[group_id, name] = asyncio.ensure_future(
+                        self._deliver_group(group_id, self.adapters[name])
+                    )
+
+    async def _deliver_group(self, group_id: str, adapter: Adapter) -> None:
+        """One group's pending deliveries to one adapter, in order, until
+        none is left that it can take now; a ``RETRY`` waits out this
+        group and adapter's backoff."""
         backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         while True:
-            if self._gated(group_id):
+            if self._gated(group_id) or adapter.name not in self.adapter_names(group_id):
                 return
-            rows = self.store.pending_deliveries(group_id, limit=DELIVERY_BATCH)
+            rows = self.store.pending_deliveries(
+                group_id, limit=DELIVERY_BATCH, adapter=adapter.name
+            )
             delivered, retry = 0, False
             for row in rows:
                 if row.delivery is None:
@@ -2594,8 +2678,7 @@ class Engine:
                     stored, sender=sender, trust_state=self._trust_state(stored.group_id)
                 )
                 view = self._view(delivery.group_id)
-                adapter = self._adapter_for(delivery.group_id)
-                if view is None or adapter is None:
+                if view is None:
                     continue
                 self._keep_card(delivery)
                 try:
@@ -2605,9 +2688,9 @@ class Engine:
                     result = DeliveryResult.RETRY
                 if result is DeliveryResult.ACK:
                     self.failpoints.hit("delivery.after_adapter")
-                    self.store.set_inbox_state(row.seq, "done")
+                    # Recorded per adapter; done once every adapter has it.
+                    self.store.mark_delivered(row.seq, adapter.name, self.adapter_names(group_id))
                     backoff.reset()
-                    await self._ack(row.msg_id)
                     delivered += 1
                     self._pulse()
                 else:
@@ -3232,8 +3315,9 @@ class Engine:
                 )
 
     async def _send_card(self, group_id: str, to: list[str]) -> None:
-        adapter = self._adapter_for(group_id)
-        card = adapter.capabilities().agent_card if adapter is not None else None
+        # The first of the group's adapters that has an Agent Card speaks for it.
+        cards_ = (a.capabilities().agent_card for a in self.targets(group_id))
+        card = next((c for c in cards_ if c is not None), None)
         if card is not None and convert.parse_card(card) is None:
             LOG.warning("own_card_refused", code="malformed")
             return

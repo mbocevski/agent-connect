@@ -125,6 +125,8 @@ async def test_safety_routes_match_the_declared_shapes(cluster: Cluster, sockdir
     await alice.node.idle()
     await cluster.invite(alice.node, bob.node, gid)
     await alice.call("GET", f"/v0/groups/{gid}/safety")
+    await alice.call("PUT", f"/v0/groups/{gid}/adapters", {"adapters": ["recording"]}, "human")
+    await alice.call("PUT", f"/v0/groups/{gid}/adapters", {"adapters": None}, "human")
     changes = {"set": {"require_approval": "both", "transcript": True}}
     await alice.call("POST", f"/v0/groups/{gid}/safety", changes, "human")
     limit = {"set": {"sender_per_minute": 10}, "sender": bob.node.me}
@@ -142,7 +144,7 @@ async def test_safety_routes_match_the_declared_shapes(cluster: Cluster, sockdir
     await alice.call("GET", f"/v0/audit?group={gid}&after=0", scope="human")
     await alice.call("GET", f"/v0/groups/{gid}/transcript", scope="human")
     await alice.call("POST", f"/v0/groups/{gid}/members/{bob.node.me}/remove", scope="human")
-    assert len(alice.seen) == 11
+    assert len(alice.seen) == 12
     await alice.server.stop()
     await bob.server.stop()
 
