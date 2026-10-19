@@ -142,7 +142,9 @@ Once an approved Add is committed, the runtime sends the joiner its
 Welcome. A Welcome the relay can't take yet (`rate_limited`, `internal`,
 `quota_exceeded`) is sent again under the same `msg_id` after a backoff,
 until the joiner stops waiting (the invite's expiry, plus a minute for a
-Welcome in flight). If it still can't go out then, or the relay refuses it,
+Welcome in flight). The deadline is checked before every try, and the last
+try goes 30 seconds before it, so no Welcome reaches a joiner that has
+given up. If it still can't go out by then, or the relay refuses it,
 the approval fails, the human hears of it (`commit_failed`, code
 `welcome_not_sent`) and the instance the Add put in the group is removed
 again.
@@ -360,7 +362,8 @@ your handler sees each message and each event once.
   relay refuses for now is sent again after a backoff. After `internal`
   the rest of its group waits behind it while other groups' sends go on;
   `rate_limited` means the relay's send budget for your mailbox, which all
-  your groups share, is used up, so every send waits out one pause and the
+  your groups share, is used up, so every send (creating a group and
+  joining one included) waits out one pause, of at least a second, and the
   oldest goes first. A send answered `internal` 8 times fails
   (`send_failed` or `commit_failed`, code `attempts_exhausted`);
   `rate_limited` answers don't count toward that.

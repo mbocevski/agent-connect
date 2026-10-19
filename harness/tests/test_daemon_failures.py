@@ -22,8 +22,11 @@ from agentconnect.adapter import (
 from agentconnect.keystore import FileKeystore
 from agentconnect.relay import RelayError
 from agentconnect.runtime.engine import (
+    JOIN_CLOSED_GRACE_SECS,
     MAX_COMMIT_ATTEMPTS,
+    RATE_WINDOW_SECS,
     UPDATE_AFTER_MESSAGES,
+    WELCOME_MARGIN_SECS,
     DaemonError,
     Engine,
     new_msg_id,
@@ -191,7 +194,7 @@ async def test_a_cadence_updates_refusals_count_toward_its_own_row(
 # whose groups together want three times that.
 BUDGET = 5
 BUSY_GROUPS = 8
-STEP = 0.5  # each busy group: one message a step, two a second
+STEP = 0.1  # the daemon clock moves in short steps, as a busy agent does
 SECONDS = 150  # past the 8 backoffs a row's own retries would take
 
 
@@ -244,9 +247,10 @@ async def test_busy_groups_share_the_relays_send_budget(
     accepted = send_budget(a, malicious_relay(a), BUDGET)
     q = a.daemon.send_message(quiet, {"text": "quiet"})
     steps = int(SECONDS / STEP)
-    for _ in range(steps):
-        for gid in busy:
-            a.daemon.send_message(gid, {"text": "busy"}, internal=True)
+    for step in range(steps):
+        if step % 5 == 0:  # each busy group: two messages a second
+            for gid in busy:
+                a.daemon.send_message(gid, {"text": "busy"}, internal=True)
         await a.wait(lambda: a.daemon._next_row() is None)
         await advance(STEP)
     await a.wait(lambda: a.daemon._next_row() is None)
@@ -404,6 +408,73 @@ async def test_a_welcome_the_relay_refuses_for_now_is_sent_again(
     assert approval_of(a, invite["invite_id"])["status"] == "approved"
     assert not a.adapter.of_type("commit_failed")
     assert len(c.adapter.of_type("joined")) == 1
+
+
+async def test_no_welcome_goes_out_after_the_joiner_gave_up(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """The relay refuses the Welcome (`rate_limited`) until the joiner stops
+    waiting, then would take it. The inviter checks the deadline before
+    every try, so no Welcome goes out that late: the approval fails with
+    `welcome_not_sent` and the instance the Add put in is removed again,
+    instead of a member nobody holds."""
+    (a,), gid = await group(1)
+    c = await cluster.node("c")
+    proxy = malicious_relay(a)
+    invite = await a.daemon.create_invite(gid, ttl_secs=300)
+    gives_up = int(invite["expires_at"]) + JOIN_CLOSED_GRACE_SECS
+    tries: list[float] = []
+
+    def refuse(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "send" and env.get("kind") == "welcome_wrapped":
+            now = a.clock.unix_millis() / 1000
+            tries.append(now)
+            if now < gives_up:
+                proxy._forged.append(
+                    {"t": "error", "msg_id": env["msg_id"], "code": "rate_limited"}
+                )
+                return []
+        return [frame]
+
+    proxy.client_filters.append(refuse)
+    await c.daemon.accept_invite(invite["url"])
+    await a.wait(lambda: bool(tries))
+    while a.clock.unix_millis() / 1000 < gives_up + 120:
+        await advance(5)
+        await a.wait(lambda: not a.daemon.store.outbox() or a.daemon._next_row() is None)
+    await a.idle()
+    assert tries
+    assert max(tries) < gives_up - WELCOME_MARGIN_SECS
+    (failed,) = a.adapter.of_type("commit_failed")
+    assert (failed.data["intent"], failed.data["code"]) == ("add", "welcome_not_sent")
+    assert {m.identity for m in a.daemon.store.members(gid)} == {a.me}
+    assert c.daemon.store.group(gid) is None
+
+
+async def test_a_rate_limited_frame_is_sent_again(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """`group.create` and `join` count against the same per-mailbox budget
+    as sends: one answered `rate_limited` waits out the shared pause and
+    goes again, instead of failing for good."""
+    (a, b), _ = await group(2)
+    malicious_relay(a).fail_next("group.create", "rate_limited")
+    gid = a.daemon.create_group("New", "x")
+    await a.wait(lambda: a.daemon._next_row() is None)
+    await advance(RATE_WINDOW_SECS)
+    await a.idle()
+    assert not a.daemon.store.outbox("failed")
+    await cluster.invite(a, b, gid)
+    c = await cluster.node("c")
+    malicious_relay(c).fail_next("join", "rate_limited")
+    invite = await a.daemon.create_invite(gid)
+    await c.daemon.accept_invite(invite["url"])
+    await c.wait(lambda: c.daemon._next_row() is None)
+    assert not c.adapter.of_type("join_failed")
+    await advance(RATE_WINDOW_SECS)
+    await c.wait(lambda: c.daemon.store.group(gid) is not None)
+    assert not c.adapter.of_type("join_failed")
 
 
 async def test_a_welcome_that_cant_go_out_in_time_removes_the_joiner_again(

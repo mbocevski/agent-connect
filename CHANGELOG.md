@@ -1091,11 +1091,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   now waits out its own backoff while the rows of other groups go out; a
   group's own rows still go out in the order they were queued, behind it.
   `rate_limited` is the relay's send budget for the mailbox, shared by
-  every group, so it pauses the whole outbox for one shared backoff, after
-  which the oldest row goes first; it no longer counts toward a row's
-  tries. A message or commit fails after 8 `internal` answers to its own
+  every group, so it pauses the whole outbox for one shared backoff, of at
+  least the relay's one-second window, after which the oldest row goes
+  first; it no longer counts toward a row's tries. This covers creating a
+  group and joining one, which failed for good on `rate_limited` before. A message or commit fails after 8 `internal` answers to its own
   send; storage errors and a cadence Update's answers don't count toward
   it.
+- Runtime: an approved join's Welcome refused until after the joiner had
+  stopped waiting could still go out then, leaving the inviter with a
+  member nobody held. The deadline is now checked before every try, and the
+  last try goes 30 seconds before the joiner gives up; past it the approval
+  fails (`welcome_not_sent`) and the added instance is removed again.
 - Runtime: a policy change that lost an epoch conflict was rebuilt from the
   whole policy cached when it was queued, which could undo a change another
   member committed meanwhile. Changes are queued as what they change and

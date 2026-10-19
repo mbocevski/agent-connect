@@ -124,6 +124,11 @@ def instance_hex(instance_id: int) -> str:
 
 
 JOIN_CLOSED_GRACE_SECS = 60
+# The last Welcome to a joiner goes out this long before it stops waiting
+# (its invite's expiry plus JOIN_CLOSED_GRACE_SECS), so it still arrives.
+WELCOME_MARGIN_SECS = 30
+# The relay's send window per mailbox (relay.rs: sends_per_sec over 1 s).
+RATE_WINDOW_SECS = 1.0
 MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
 MAX_REPLY_TO = 16  # SPEC 7.2
@@ -2638,8 +2643,11 @@ class Engine:
 
     def _pause_outbox(self) -> None:
         """Pause the whole outbox: the next try waits out the shared
-        backoff, which a send that goes through resets."""
-        self._throttled_until = self.clock.unix_millis() / 1000 + self._throttle.next()
+        backoff, which a send that goes through resets. Never less than the
+        relay's rate window, so the first try after a pause finds room
+        instead of doubling the next pause."""
+        pause = max(RATE_WINDOW_SECS, self._throttle.next())
+        self._throttled_until = self.clock.unix_millis() / 1000 + pause
 
     async def _outbox_idle(self) -> None:
         """Wait for a new row, for the end of a pause (``RateLimitedError``),
@@ -2756,6 +2764,9 @@ class Engine:
             await self._request(frame, msg_id)
         except RelayError as e:
             LOG.info("relay_request_failed", t=frame.get("t"), code=e.code)
+            if e.code == "rate_limited":
+                # The mailbox's send budget (group.create, join): not now.
+                raise RateLimitedError(None, e.code) from None
             if frame.get("t") == "join":
                 invite_id = str(frame.get("invite_id"))
                 self.store.finish_join(invite_id, "failed")
@@ -3055,6 +3066,12 @@ class Engine:
         if approval is None:
             return True
         if "welcome" in payload and not payload.get("welcome_sent"):
+            if self.now() >= self._welcome_deadline(approval):
+                # Checked before every try: a Welcome sent this late could
+                # reach a joiner that has stopped waiting.
+                LOG.info("welcome_not_sent", code="too_late")
+                self._welcome_failed(row, group, intent, approval)
+                return False
             if "welcome_msg_id" not in payload:
                 payload["welcome_msg_id"] = new_msg_id()
                 self.store.update_outbox(row.seq, payload=payload)
@@ -3070,9 +3087,10 @@ class Engine:
             try:
                 await self._request({"t": "send", "env": welcome}, str(welcome["msg_id"]))
             except RelayError as e:
-                if e.code in RETRY_WELCOME and self.now() < self._welcome_deadline(approval):
+                if e.code in RETRY_WELCOME:
                     # Not now: the same Welcome again after a backoff (the
-                    # whole outbox's, for the mailbox's rate_limited).
+                    # whole outbox's, for the mailbox's rate_limited), until
+                    # the deadline above.
                     LOG.info("welcome_retry", code=e.code)
                     if e.code == "rate_limited":
                         raise RateLimitedError(group.group_id, e.code) from None
@@ -3105,10 +3123,14 @@ class Engine:
         return True
 
     def _welcome_deadline(self, approval: dict[str, Any]) -> int:
-        """When the joiner stops waiting for its Welcome: its invite's
-        expiry plus the grace for a Welcome in flight (:meth:`expire`)."""
+        """The last moment to send the joiner its Welcome: the joiner stops
+        waiting at its invite's expiry plus the grace for a Welcome in flight
+        (:meth:`expire`), and the last one goes ``WELCOME_MARGIN_SECS``
+        before that."""
         invite = self.store.invite(str(approval["invite_id"]))
-        return 0 if invite is None else int(invite["expires_at"]) + JOIN_CLOSED_GRACE_SECS
+        if invite is None:
+            return 0
+        return int(invite["expires_at"]) + JOIN_CLOSED_GRACE_SECS - WELCOME_MARGIN_SECS
 
     def _welcome_failed(
         self, row: OutboxRow, group: GroupRow, intent: dict[str, Any], approval: dict[str, Any]
