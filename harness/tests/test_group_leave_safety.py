@@ -5,6 +5,7 @@ member, the leaver included, reports what the commit says."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import Awaitable, Callable
@@ -12,7 +13,7 @@ from typing import Any
 
 from agentconnect.runtime.engine import MAX_TRANSIENT_RETRIES
 from agentconnect.runtime.groups import LEAVE_COMMIT_GRACE_SECS, update_threshold
-from agentconnect_harness.cluster import Cluster, Node, converged, status
+from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
 from agentconnect_harness.proxy import Frame, RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -21,6 +22,17 @@ Cut = Callable[[Node], Awaitable[None]]
 Proxy = Callable[[Node], RelayProxy]
 
 LEAVE_TIMEOUT = 3600  # the lowest groups.leave_timeout_secs
+
+
+async def until(predicate: Callable[[], bool]) -> None:
+    """Poll what no runtime announces (a proxy filter's record), yielding
+    to the loop: a node's wait wakes only on the runtimes' change pulses."""
+
+    async def loop() -> None:
+        while not predicate():  # noqa: ASYNC110 - nothing to wait on
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(loop(), WAIT)
 
 
 def raw(gid: str) -> bytes:
@@ -108,7 +120,7 @@ async def test_an_offline_kept_owner_instance_never_times_out(
     malicious_relay(b).server_filters.append(hold_first_proposal(held))
     assert await a1.daemon.leave(gid) == "leaving"
     await a1.idle()
-    await b.wait(lambda: bool(held))
+    await until(lambda: bool(held))
     await partition(a1)
     assert await a2.daemon.leave(gid) == "leaving"
     await b.wait(lambda: len(b.daemon.client.pending_leaves(raw(gid))) == 1)
@@ -235,7 +247,7 @@ async def test_a_leaver_is_never_the_one_to_commit_leaves(
     held: list[Frame] = []
     malicious_relay(a).server_filters.append(hold_first_proposal(held))
     await c.daemon.leave(gid)
-    await a.wait(lambda: bool(held))
+    await until(lambda: bool(held))
     await a.daemon.leave(gid)
     await malicious_relay(a).inject(held[0])
     await a.idle()
@@ -243,6 +255,19 @@ async def test_a_leaver_is_never_the_one_to_commit_leaves(
     await a.wait(lambda: status(a, gid) == "left" and status(c, gid) == "left")
     assert data(a, "commit_failed") == []
     assert {"identity": c.me, "by": a.me} in data(a2, "member_left")
+
+
+async def until_owner(node: Node, gid: str, advance: Advance) -> None:
+    """Drive the retries and the reconnect on the fake clock, one pause at
+    a time, until the redelivered commit makes ``node`` the owner; the group
+    stays active all along."""
+    for _ in range(40):
+        await node.wait(lambda: owner(node, gid) == node.me or node.clock.sleepers > 0)
+        if owner(node, gid) == node.me:
+            return
+        assert status(node, gid) == "active"
+        await advance(300)
+    raise AssertionError("the commit was never redelivered")
 
 
 def give_up_next_frame(node: Node) -> None:
@@ -269,11 +294,7 @@ async def test_a_frame_given_up_in_the_drain_is_not_caught_up(
     await advance(LEAVE_TIMEOUT + 60)
     give_up_next_frame(b)
     await heal(b)
-    for _ in range(20):
-        if owner(b, gid) == b.me:
-            break
-        assert status(b, gid) == "active"
-        await advance(60)
+    await until_owner(b, gid, advance)
     await b.wait(lambda: any(d["timed_out"] for d in data(b, "leave_blocked")))
     assert data(b, "processing_failed")
     assert status(b, gid) == "active"
@@ -294,12 +315,8 @@ async def test_a_live_frame_given_up_after_catching_up_is_not_caught_up(
     give_up_next_frame(b)
     a.daemon.set_policy(gid, owner=b.me, admins=[])
     await a.wait(lambda: owner(a, gid) == b.me)
-    await b.wait(lambda: "receive.before_core" in b.daemon.failpoints.fired)
-    for _ in range(40):
-        if owner(b, gid) == b.me:
-            break
-        assert status(b, gid) == "active"
-        await advance(300)
+    await until(lambda: "receive.before_core" in b.daemon.failpoints.fired)
+    await until_owner(b, gid, advance)
     await advance(LEAVE_TIMEOUT)
     await b.wait(lambda: any(d["timed_out"] for d in data(b, "leave_blocked")))
     assert data(b, "processing_failed")
@@ -344,7 +361,7 @@ async def test_a_commit_during_the_proposal_send_still_ends_the_leave(
     malicious_relay(c).client_filters.append(watch)
     malicious_relay(c).server_filters.append(hold_accept)
     await c.daemon.leave(gid)
-    await c.wait(lambda: bool(held))
+    await until(lambda: bool(held))
     epoch = c.epoch(gid)
     b.daemon.update(gid)
     await c.wait(lambda: c.epoch(gid) == epoch + 1)

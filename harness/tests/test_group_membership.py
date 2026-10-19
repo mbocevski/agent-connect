@@ -5,6 +5,7 @@ cadence's threshold."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -14,7 +15,7 @@ import pytest
 from agentconnect.runtime.engine import DaemonError
 from agentconnect.runtime.groups import LEAVE_COMMIT_GRACE_SECS, update_threshold
 from agentconnect.store import OutboxRow
-from agentconnect_harness.cluster import Cluster, Node, converged, status
+from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
 from agentconnect_harness.proxy import Frame, RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -23,6 +24,17 @@ Cut = Callable[[Node], Awaitable[None]]
 Proxy = Callable[[Node], RelayProxy]
 
 LEAVE_TIMEOUT = 3600  # the lowest groups.leave_timeout_secs
+
+
+async def until(predicate: Callable[[], bool]) -> None:
+    """Poll what no runtime announces (a proxy filter's record), yielding
+    to the loop: a node's wait wakes only on the runtimes' change pulses."""
+
+    async def loop() -> None:
+        while not predicate():  # noqa: ASYNC110 - nothing to wait on
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(loop(), WAIT)
 
 
 def raw(gid: str) -> bytes:
@@ -152,7 +164,7 @@ async def test_owner_instances_leaving_at_once_keep_one_whose_leave_waits_for_a_
         malicious_relay(node).server_filters.append(hold)
     assert await a.daemon.leave(gid) == "leaving"
     assert await a2.daemon.leave(gid) == "leaving"
-    await a.wait(lambda: len(sent) == 2)
+    await until(lambda: len(sent) == 2)
     for node in (a, a2):
         for frame in held[node.name]:
             await malicious_relay(node).inject(frame)
