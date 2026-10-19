@@ -714,9 +714,9 @@ mod tests {
                 vec![id.id(), instance_id.clone()],
             ),
         ] {
-            assert!(dbg.starts_with(&format!("{name} {{")), "{dbg}");
+            assert!(dbg.starts_with(&format!("{name} {{")), "{name}");
             for s in shown {
-                assert!(dbg.contains(&s), "{name}: {s} missing from {dbg}");
+                assert!(dbg.contains(&s), "{name}");
             }
             for secret in [&secret, &sk, &sig] {
                 assert!(!dbg.contains(secret.as_str()), "{name} prints a secret");

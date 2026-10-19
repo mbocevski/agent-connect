@@ -954,11 +954,11 @@ fn an_application_message_prints_no_body() {
     let ct = gs[0].seal(&cs[0], &body).unwrap();
     let m = gs[1].open(&cs[1], &ct).unwrap();
     let dbg = format!("{m:?}");
-    assert!(dbg.starts_with("ApplicationMessage {"), "{dbg}");
-    assert!(dbg.contains(cs[0].instance().identity()), "{dbg}");
-    assert!(dbg.contains(&format!("epoch: {}", m.epoch)), "{dbg}");
-    assert!(dbg.contains(&format!("len: {}", body.len())), "{dbg}");
-    assert!(!dbg.contains("BODY-MARKER"), "{dbg}");
+    assert!(dbg.starts_with("ApplicationMessage {"));
+    assert!(dbg.contains(cs[0].instance().identity()));
+    assert!(dbg.contains(&format!("epoch: {}", m.epoch)));
+    assert!(dbg.contains(&format!("len: {}", body.len())));
+    assert!(!dbg.contains("BODY-MARKER"));
 }
 
 /// SPEC §7.1: only application messages are padded to a bucket. A leave
