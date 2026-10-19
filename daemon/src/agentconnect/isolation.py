@@ -316,6 +316,12 @@ class PeerGate:
         _PEER.set(cred)
         return True
 
+    def peer_uid(self) -> int | None:
+        """The current connection's peer UID, read at :meth:`admit`; ``None``
+        unless the mode is on (every peer is the daemon's own user then)."""
+        cred = _PEER.get() if self.enabled else None
+        return None if cred is None else cred.uid
+
     def human_allowed(self) -> bool:
         """Whether the current connection's peer may use the human token."""
         if not self.enabled:

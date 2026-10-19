@@ -33,6 +33,11 @@ is no user boundary to put between them.
   is logged (`api_peer_refused`, with the UID) and refused with
   `403 peer_refused` before the request is read. Group membership alone
   isn't enough: the user must be on the list.
+- **One user can't crowd out another.** At most 8 connections per UID may
+  be still sending their request. A user that opens more closes its own
+  oldest unfinished one (`503 busy`), so an agent user can't open enough
+  idle connections to keep the human's request out
+  ([api.md](api.md#transport)).
 - **The human token is gated by UID as well.** A request that carries the
   human token is refused with `403 peer_refused` unless it comes from the
   daemon's own UID or an `isolation.human_users` entry. This is on top of the

@@ -9,7 +9,7 @@ import shutil
 import signal
 import stat
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +22,9 @@ from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import app
 from agentconnect.config import Config
-from agentconnect.runtime.api import ApiServer
+from agentconnect.runtime.api import MAX_PENDING, ApiServer
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
-from agentconnect_harness.cluster import Cluster, Node, api_token
+from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token
 from agentconnect_harness.relay import on_free_port
 
 
@@ -55,6 +55,17 @@ async def sockdir() -> AsyncIterator[Path]:
     d = Path(tempfile.mkdtemp(prefix="ac-"))
     yield d
     shutil.rmtree(d, ignore_errors=True)
+
+
+async def until(predicate: Callable[[], bool]) -> None:
+    """Poll (yielding to the loop): the server's connection handlers run
+    on this loop and announce nothing."""
+
+    async def loop() -> None:
+        while not predicate():  # noqa: ASYNC110 - nothing to wait on
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(loop(), WAIT)
 
 
 async def serve(cluster: Cluster, name: str, sockdir: Path, auto_approve: bool) -> Api:
@@ -413,18 +424,22 @@ async def test_api_hardening(
 ) -> None:
     api = await serve(cluster, "h", sockdir, auto_approve=False)
     addr = str(api.server.address)
-    monkeypatch.setattr("agentconnect.runtime.api.READ_TIMEOUT", 0.3)
-    monkeypatch.setattr("agentconnect.runtime.api.MAX_CONNECTIONS", 1)
-    # A client that never finishes its request is cut off (408)...
+    monkeypatch.setattr("agentconnect.runtime.api.HEADER_TIMEOUT", 0.3)
+    monkeypatch.setattr("agentconnect.runtime.api.MAX_PENDING", 1)
     reader, writer = await asyncio.open_unix_connection(addr)
     writer.write(b"GET /v0/status HTTP/1.1\r\n")
     await writer.drain()
-    # ...and while it holds the only slot, others get 503.
+    await until(lambda: len(api.server._pending) == 1)
+    # A connection that hasn't sent its request yet gives way to a new one
+    # when no room is left (503)...
     r2, w2 = await asyncio.open_unix_connection(addr)
-    assert b" 503 " in await r2.read()
-    w2.close()
-    assert b" 408 " in await reader.read()
+    w2.write(b"GET /v0/status HTTP/1.1\r\n")
+    await w2.drain()
+    assert b" 503 " in await reader.read()
     writer.close()
+    # ...and one that doesn't send its headers in time is cut off (408).
+    assert b" 408 " in await r2.read()
+    w2.close()
     await api.server.stop()
     # The socket path must not be some other file.
     other = sockdir / "not-a-socket"
@@ -451,3 +466,55 @@ async def test_tcp_api_refuses_browser_requests(cluster: Cluster) -> None:
         rebound = {**auth, "host": "evil.example"}
         assert (await c.get("/v0/status", headers=rebound)).status_code == 403
     await server.stop()
+
+
+# More half-sent connections than any limit: more than MAX_CONNECTIONS was.
+HALF_OPEN = 80
+
+
+@pytest.mark.parametrize("over", ["unix", "tcp"])
+async def test_half_sent_connections_dont_keep_the_human_out(
+    cluster: Cluster, sockdir: Path, over: str
+) -> None:
+    """Connections that never finish their request (no token yet) can't
+    take the capacity a request with a token needs: a human-token request
+    and an agent-token request still get through, on the Unix socket and
+    on loopback TCP."""
+    if over == "tcp":
+        node = await cluster.node("half-tcp")
+        server = await on_free_port(lambda port: _tcp_api(node, port))
+        port = int(str(server.address).rsplit(":", 1)[1])
+        transport = httpx.AsyncHTTPTransport()
+        base, host = str(server.address), f"127.0.0.1:{port}"
+
+        async def connect() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            return await asyncio.open_connection("127.0.0.1", port)
+
+    else:
+        api = await serve(cluster, "half", sockdir, auto_approve=False)
+        server = api.server
+        transport, base, host = api.transport, "http://ac", "ac"
+
+        async def connect() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            return await asyncio.open_unix_connection(str(server.address))
+
+    held = []
+    try:
+        for _ in range(HALF_OPEN):
+            reader, writer = await connect()
+            writer.write(f"GET /v0/status HTTP/1.1\r\nhost: {host}\r\n".encode())
+            await writer.drain()
+            held.append((reader, writer))
+        await until(lambda: server._connections == min(HALF_OPEN, MAX_PENDING))
+        async with httpx.AsyncClient(transport=transport, base_url=base) as c:
+            for scope in ("human", "agent", "human"):
+                auth = {"authorization": f"Bearer {api_token(server, scope)}"}
+                resp = await c.get("/v0/status", headers=auth)
+                assert resp.status_code == 200, (scope, resp.text)
+        # The oldest unfinished ones were closed to make room, with a 503.
+        reader, _ = held[0]
+        assert b" 503 " in await reader.read()
+    finally:
+        for _, writer in held:
+            writer.close()
+        await server.stop()

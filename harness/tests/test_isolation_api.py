@@ -7,12 +7,13 @@ gate on top of the human token, and the socket and agent directory modes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +21,8 @@ import httpx
 import pytest
 
 from agentconnect.isolation import AGENT_DIR_MODE, PeerCred, PeerGate
-from agentconnect.runtime.api import ApiServer
-from agentconnect_harness.cluster import Cluster, api_token
+from agentconnect.runtime.api import MAX_PENDING, ApiServer
+from agentconnect_harness.cluster import WAIT, Cluster, api_token
 
 pytestmark = pytest.mark.skipif(os.geteuid() == 0, reason="the mode refuses to run as root")
 
@@ -33,6 +34,14 @@ def agent_dir() -> Iterator[Path]:
     d.chmod(AGENT_DIR_MODE)
     yield d
     shutil.rmtree(d, ignore_errors=True)
+
+
+async def until(predicate: Callable[[], bool]) -> None:
+    async def loop() -> None:
+        while not predicate():  # noqa: ASYNC110 - the server announces nothing
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(loop(), WAIT)
 
 
 def _uid(rng: random.Random) -> int:
@@ -98,4 +107,60 @@ async def test_peer_uid_and_human_uid_gates(
         status, err = await call(stranger, "agent", "GET", "/v0/status")
         assert (status, err["code"]) == (403, "peer_refused")
     finally:
+        await server.stop()
+
+
+async def test_an_agent_user_cant_crowd_out_the_human_user(
+    cluster: Cluster, agent_dir: Path, rng: random.Random
+) -> None:
+    """Connections still sending their request are limited per peer UID: an
+    agent user that opens far more of them than that closes only its own
+    oldest, so the human user's unfinished request survives and completes."""
+    node = await cluster.node("iso-flood")
+    agent_uid = _uid(rng)
+    cfg = node.config.with_overrides(
+        isolation=True,
+        isolation_agent_dir=agent_dir,
+        isolation_group=str(os.getgid()),
+        isolation_agent_users=(str(agent_uid),),
+    )
+    node.config = node.daemon.config = cfg
+    peer = {"uid": os.geteuid()}
+    admitted: list[int] = []
+
+    def credentials(_sock: object) -> PeerCred:
+        admitted.append(peer["uid"])
+        return PeerCred(peer["uid"], os.getgid())
+
+    gate = PeerGate.from_config(cfg, credentials=credentials)
+    server = ApiServer(node.daemon, gate)
+    await server.start()
+    sock = str(server.address)
+    held: list[asyncio.StreamWriter] = []
+
+    async def half_sent() -> asyncio.StreamReader:
+        before = len(admitted)
+        reader, writer = await asyncio.open_unix_connection(sock)
+        writer.write(b"GET /v0/status HTTP/1.1\r\nhost: ac\r\n")
+        await writer.drain()
+        held.append(writer)
+        # Admitted (its UID read) before the next one changes it.
+        await until(lambda: len(admitted) > before)
+        return reader
+
+    try:
+        human = await half_sent()
+        peer["uid"] = agent_uid
+        first = await half_sent()
+        for _ in range(3 * MAX_PENDING):
+            await half_sent()
+        assert b" 503 " in await first.read()
+        # The human's request was never closed: it finishes now.
+        token = api_token(server, "human")
+        held[0].write(f"authorization: Bearer {token}\r\n\r\n".encode())
+        await held[0].drain()
+        assert b" 200 " in await human.read()
+    finally:
+        for writer in held:
+            writer.close()
         await server.stop()

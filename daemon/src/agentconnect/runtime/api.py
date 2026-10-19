@@ -38,6 +38,7 @@ import json
 import os
 import re
 import stat
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,14 +61,19 @@ LOG = log.get("agentconnect.api")
 
 MAX_BODY = 1 << 20
 MAX_HEADER = 16 << 10
+HEADER_TIMEOUT = 2.0  # seconds to send the request line and the headers
 READ_TIMEOUT = 10.0  # seconds to send a whole request
-MAX_CONNECTIONS = 64
-# Agent-token requests in progress at most: the rest of MAX_CONNECTIONS is
-# kept for the human token, so authenticated agent requests (long polls
-# included) can't take every connection. The cap applies after
-# authentication: connections that never send a whole request still count
-# against MAX_CONNECTIONS until READ_TIMEOUT.
+# Connections still sending their request (no token checked yet) at most,
+# and per peer UID where the socket reports one (the separate-OS-user mode).
+# A new connection over either limit closes the oldest unfinished one, of
+# its own UID, else of the UID holding the most (503 busy), so idle or
+# half-sent connections can't keep out a request that has a token.
+MAX_PENDING = 32
+MAX_PENDING_PER_PEER = 8
+# Requests in progress at most once their token is checked, per token: the
+# agent token's (long polls included) can't take the human token's.
 MAX_AGENT_REQUESTS = 48
+MAX_HUMAN_REQUESTS = 16
 SCOPE = "_scope"  # handler parameter carrying the request's token scope
 ACCEPT = "_accept"  # ... the Accept header
 LAST_EVENT_ID = "_last_event_id"  # ... the Last-Event-ID header
@@ -184,9 +190,19 @@ class DeliveryPoll:
 
 @dataclass
 class Connection:
-    """One connection's request: whether it counts as an agent request."""
+    """One connection's request: which token's requests it counts as."""
 
     agent: bool = False
+    human: bool = False
+
+
+@dataclass(eq=False)
+class Pending:
+    """A connection still sending its request."""
+
+    peer: int | None  # its UID, where the socket reports one
+    task: asyncio.Task[Any] | None  # the task serving it
+    writer: asyncio.StreamWriter
 
 
 Handler = Callable[[dict[str, str], dict[str, Any]], Awaitable[Any]]
@@ -979,7 +995,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     ),
     (404, "not_found", "No such endpoint, group, invite or request."),
     (405, "method_not_allowed", "The path exists but not for this method."),
-    (408, "timeout", "The request was not received within 10 seconds."),
+    (
+        408,
+        "timeout",
+        "The request line and headers were not received within 2 seconds, or the whole "
+        "request within 10.",
+    ),
     (
         409,
         "stale_epoch",
@@ -1056,9 +1077,10 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (
         503,
         "busy",
-        "Too many open connections, or too many agent-token requests at once (part of the "
-        "capacity is kept for the human token). Deliveries: `429` when 4 polls of the "
-        "token wait already.",
+        "A connection that hadn't sent its whole request was closed to make room for a "
+        "newer one (at most 32 at once, 8 per OS user in the separate-OS-user mode), or "
+        "too many requests with one token are in progress (48 with the agent token, 16 "
+        "with the human token). Deliveries: `429` when 4 polls of the token wait already.",
     ),
 )
 
@@ -1120,6 +1142,8 @@ class ApiServer:
         self._stopping = asyncio.Event()  # long polls answer at once
         self._polls: dict[str, int] = {}  # long polls waiting, per token scope
         self._agent_requests = 0  # agent-token requests in progress
+        self._human_requests = 0  # human-token requests in progress
+        self._pending: list[Pending] = []  # still sending, oldest first
         self._idle = asyncio.Event()
         self._idle.set()
         self._port: int | None = None
@@ -1522,6 +1546,11 @@ class ApiServer:
                     raise ApiError(503, "busy", "too many agent requests")
                 self._agent_requests += 1
                 conn.agent = True
+            elif scope == "human" and conn is not None:
+                if self._human_requests >= MAX_HUMAN_REQUESTS:
+                    raise ApiError(503, "busy", "too many human requests")
+                self._human_requests += 1
+                conn.human = True
             try:
                 data = json.loads(body) if body else {}
             except ValueError:
@@ -1552,14 +1581,12 @@ class ApiServer:
         if not self.gate.admit(writer):
             await self._reply(writer, 403, {"code": "peer_refused", "message": "user refused"})
             return
-        if self._connections >= MAX_CONNECTIONS:
-            await self._reply(writer, 503, {"code": "busy", "message": "too many connections"})
-            return
+        pending = self._admit(writer)
         self._connections += 1
         self._idle.clear()
         conn = Connection()
         try:
-            status, payload = await self._request(reader, conn)
+            status, payload = await self._request(reader, conn, pending)
             if isinstance(payload, DeliveryPoll):
                 answer = await payload.run(reader)
                 if answer is None:
@@ -1576,9 +1603,45 @@ class ApiServer:
         finally:
             if conn.agent:
                 self._agent_requests -= 1
+            if conn.human:
+                self._human_requests -= 1
+            self._unpend(pending)
             self._connections -= 1
             if self._connections == 0:
                 self._idle.set()
+
+    def _admit(self, writer: asyncio.StreamWriter) -> Pending:
+        """Count a new connection as pending until its request is read,
+        closing the oldest pending one first when there is no room: of the
+        same peer at its limit, else of the peer with the most."""
+        peer = self.gate.peer_uid()
+        mine = [p for p in self._pending if p.peer == peer]
+        if peer is not None and len(mine) >= MAX_PENDING_PER_PEER:
+            self._evict(mine[0])
+        elif len(self._pending) >= MAX_PENDING:
+            counts = Counter(p.peer for p in self._pending)
+            most = max(counts.values())
+            self._evict(next(p for p in self._pending if counts[p.peer] == most))
+        pending = Pending(peer, asyncio.current_task(), writer)
+        self._pending.append(pending)
+        return pending
+
+    def _unpend(self, pending: Pending) -> None:
+        with contextlib.suppress(ValueError):
+            self._pending.remove(pending)
+
+    def _evict(self, pending: Pending) -> None:
+        """Close a connection that hasn't sent its request (``busy``)."""
+        self._unpend(pending)
+        LOG.info("api_connection_evicted")
+        data = json.dumps({"code": "busy", "message": "too many unfinished requests"}).encode()
+        pending.writer.write(
+            f"HTTP/1.1 503 {STATUS_TEXT[503]}\r\ncontent-type: application/json\r\n"
+            f"content-length: {len(data)}\r\nconnection: close\r\n\r\n".encode()
+            + data
+        )
+        if pending.task is not None:
+            pending.task.cancel()  # its handler closes the connection
 
     def _check_origin(self, headers: dict[str, str]) -> None:
         """Loopback TCP: no browser requests (no ``Origin``), and a ``Host``
@@ -1593,12 +1656,19 @@ class ApiServer:
             raise ApiError(403, "forbidden", "unexpected Host header")
 
     async def _request(
-        self, reader: asyncio.StreamReader, conn: Connection | None = None
+        self,
+        reader: asyncio.StreamReader,
+        conn: Connection | None = None,
+        pending: Pending | None = None,
     ) -> tuple[int, Any]:
         status, payload = 500, {"code": "internal", "message": "internal error"}
         try:
-            async with asyncio.timeout(READ_TIMEOUT):
-                method, target, headers, body = await self._read(reader)
+            try:
+                async with asyncio.timeout(READ_TIMEOUT):
+                    method, target, headers, body = await self._read(reader)
+            finally:
+                if pending is not None:
+                    self._unpend(pending)  # read: it no longer gives way
             self._check_origin(headers)
             status, payload = await self.handle(method, target, headers, body, conn)
         except TimeoutError:
@@ -1616,7 +1686,8 @@ class ApiServer:
 
     @staticmethod
     async def _read(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str], bytes]:
-        head = await reader.readuntil(b"\r\n\r\n")
+        async with asyncio.timeout(HEADER_TIMEOUT):
+            head = await reader.readuntil(b"\r\n\r\n")
         if len(head) > MAX_HEADER:
             raise ApiError(413, "too_large", "headers too large")
         lines = head.decode("latin-1").split("\r\n")

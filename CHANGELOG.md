@@ -1181,6 +1181,16 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`ac-` and 22 base64url characters) instead of `ac-<msg_id>`. A message
   handled before the upgrade and delivered again after it reaches the agent
   once more.
+- Local API: connections that hadn't sent a whole request counted toward
+  the 64-connection limit until the 10-second read timeout. A process of
+  the same user, or any local user when `api.tcp_port` is set, could hold
+  64 idle connections and keep the human token's requests out with `503
+  busy`, again and again. Now a client has 2 seconds for its headers
+  (`408 timeout`). At most 32 connections may be still sending their
+  request (8 per OS user in the separate-OS-user mode). A new connection
+  beyond that closes the oldest unfinished one with `503 busy`, of the same
+  user at its limit, else of the user holding the most. Once read, at most
+  48 agent-token and 16 human-token requests are in progress at once.
 - Core and protocol: a commit after which two leaves of one identity have
   the same `instance_id` is refused by its committer and rejected by every
   member (SPEC §9.2, "One leaf per instance"), and so is a commit whose
