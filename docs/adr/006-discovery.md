@@ -43,8 +43,11 @@ below ([docs/discovery.md](../discovery.md#knocking)):
   both tokens see) is a different type.
 - **Knock request ids are derived** from the knock's id
   (`"kn-" + b64(sha256("agentconnect/knock-request" ‖ knock_id)[:12])`),
-  never the peer's `knock_id` or the relay's `msg_id`; a join request whose
-  `msg_id` starts with `kn-` is dropped, so the two kinds can't collide.
+  never the peer's `knock_id` or the relay's `msg_id`. A join request's id
+  is its `msg_id`, which must be canonical base64url of 16 bytes
+  (22 characters, SPEC §7.1); a knock request id has 19, so the two kinds
+  can't collide. (Dropping joins whose `msg_id` starts with `kn-` instead
+  lost one random id in 64³.)
 - **Approvals wait across a restart.** The owner keeps the verified knock
   (with its `welcome_secret`) in its encrypted database, and the core
   checks it again (`restore_knock`: the KeyPackage still unused, the

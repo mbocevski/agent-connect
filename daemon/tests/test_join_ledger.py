@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import random
+import string
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -164,15 +165,43 @@ async def test_a_failed_record_leaves_no_ledger_entry(owner: Owner, rng: random.
     url = await owner.invite()
     bob = Joiner(rng, owner.now)
     request = bob.request(url)
+    first = b64(rng.randbytes(16))
     owner.engine.failpoints.arm("join_request.in_tx")
     with pytest.raises(FailpointError):
-        await owner.deliver(request, bob.mailbox, msg_id="first")
+        await owner.deliver(request, bob.mailbox, msg_id=first)
     assert owner.ledger() == 0
     assert owner.engine.join_approvals() == []
-    await owner.deliver(request, bob.mailbox, msg_id="first")
+    await owner.deliver(request, bob.mailbox, msg_id=first)
     assert len(owner.engine.join_approvals()) == 1
     assert owner.audit() == []
     assert owner.ledger() == 1
+
+
+@pytest.mark.parametrize("shape", ["kn-prefixed", "knock_id", "short", "not_canonical"])
+async def test_the_request_id_is_a_16_byte_msg_id(
+    owner: Owner, rng: random.Random, shape: str
+) -> None:
+    """A join's request id is its msg_id, which SPEC 7.1 makes 16 bytes. Any
+    such id is accepted, "kn-" at the start included (one random id in 64**3
+    starts so); anything else is dropped, which keeps the 19-character knock
+    request ids out of reach."""
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    request = bob.request(url)
+    good = b64(rng.randbytes(16))
+    # The last of 22 characters carries 4 bits and 2 zero bits: the next
+    # character of the alphabet decodes to the same bytes.
+    alphabet = string.ascii_uppercase + string.ascii_lowercase + string.digits + "-_"
+    msg_id = {
+        "kn-prefixed": "kn-" + good[3:],
+        "knock_id": "kn-" + b64(rng.randbytes(12)),
+        "short": good[:-1],
+        "not_canonical": good[:-1] + alphabet[alphabet.index(good[-1]) + 1],
+    }[shape]
+    await owner.deliver(request, bob.mailbox, msg_id=msg_id)
+    approvals = [a["request_id"] for a in owner.engine.join_approvals()]
+    assert approvals == ([msg_id] if shape == "kn-prefixed" else [])
+    assert owner.engine.store.inbox_state(bob.mailbox, msg_id) is not None
 
 
 async def test_a_request_id_or_key_package_taken_is_dropped_past_the_ledger(
@@ -440,17 +469,18 @@ async def test_auto_approve_survives_a_failure_after_the_record(
     url = await owner.invite()
     bob = Joiner(rng, owner.now)
     request = bob.request(url)
+    first = b64(rng.randbytes(16))
     owner.engine.failpoints.arm("join_request.after_tx", action)  # ty: ignore[invalid-argument-type]
     with pytest.raises((FailpointError, SimulatedCrash)):
-        await owner.deliver(request, bob.mailbox, msg_id="first")
+        await owner.deliver(request, bob.mailbox, msg_id=first)
     if action == "crash":
         await owner.restart()
     (approval,) = owner.engine.store.approvals("approving")
-    assert approval["request_id"] == "first"
+    assert approval["request_id"] == first
     intents = [r.payload.get("intent") for r in owner.engine.store.outbox()]
-    assert {"type": "add", "request_id": "first"} in intents
+    assert {"type": "add", "request_id": first} in intents
     assert owner.ledger() == 1
-    await owner.deliver(request, bob.mailbox, msg_id="first")  # the relay's redelivery
+    await owner.deliver(request, bob.mailbox, msg_id=first)  # the relay's redelivery
     await owner.deliver(request, bob.mailbox)
     assert owner.audit() == ["join_replay"]
     assert len(owner.engine.store.approvals("approving")) == 1
@@ -462,11 +492,12 @@ async def test_a_crash_after_the_record_keeps_the_approval_once(
     url = await owner.invite()
     bob = Joiner(rng, owner.now)
     request = bob.request(url)
+    first = b64(rng.randbytes(16))
     owner.engine.failpoints.arm("join_request.after_tx", "crash")
     with pytest.raises(SimulatedCrash):
-        await owner.deliver(request, bob.mailbox, msg_id="first")
+        await owner.deliver(request, bob.mailbox, msg_id=first)
     await owner.restart()
-    await owner.deliver(request, bob.mailbox, msg_id="first")
+    await owner.deliver(request, bob.mailbox, msg_id=first)
     await owner.deliver(request, bob.mailbox)
     assert len(owner.engine.join_approvals()) == 1
     assert owner.audit() == ["join_replay"]
