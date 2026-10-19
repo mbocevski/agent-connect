@@ -33,8 +33,10 @@ CONTENT_KINDS = frozenset({"a2a.message", "a2a.task_status", "a2a.task_artifact"
 CONTENT_MEMBERS = frozenset({"parts", "text", "data", "file", "raw"})
 MAX_REASON = 200
 MAX_ID = 256
-# Floor counters and epochs: what a signed 64-bit SQLite integer holds.
+# Floor epochs: what a signed 64-bit SQLite integer holds. Floor counters
+# start again at each epoch, so no honest one comes near 2**32 (SPEC 9.3).
 MAX_COUNTER = 2**63 - 1
+MAX_FLOOR_COUNTER = 2**32
 INSTANCE_ID = re.compile(r"[0-9a-f]{16}")
 MAX_WORD = 64  # a pause reason, an adapter name, an accepted part kind
 MAX_ADAPTERS = 16
@@ -154,33 +156,41 @@ def _identity(value: Any) -> str:
     return value
 
 
-def _counter(value: Any) -> int:
-    """A floor counter or epoch: an integer SQLite can hold (SPEC 9.3)."""
-    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_COUNTER:
+def _counter(value: Any, most: int = MAX_COUNTER) -> int:
+    """A floor counter (at most ``MAX_FLOOR_COUNTER``) or epoch (SPEC 9.3)."""
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= most:
         raise MalformedError
     return value
 
 
+def _copy_key(copy: Any, counter: int) -> dict[str, Any]:
+    """The key a copy names: a grant's (an identity and its instance) or a
+    commit's reset (``""``, ``""``) or drop (``""``, the identity dropped),
+    which have counter 0."""
+    if not isinstance(copy, dict):
+        raise MalformedError
+    sender, instance = copy.get("sender"), copy.get("instance")
+    if sender == "":
+        if counter != 0 or not (instance == "" or _identity(instance)):
+            raise MalformedError
+    else:
+        _identity(sender)
+        if not (isinstance(instance, str) and INSTANCE_ID.fullmatch(instance)):
+            raise MalformedError
+    return {"epoch": _counter(copy.get("epoch")), "sender": sender, "instance": instance}
+
+
 def _floor(body: dict[str, Any]) -> dict[str, Any]:
-    """``{holder, counter}``, and for the copy of a grant sent to members
-    that join, ``copy: {epoch, sender, instance}`` naming the grant copied
+    """``{holder, counter}``, and for the copy of the floor sent to members
+    that join, ``copy: {epoch, sender, instance}`` naming the write copied
     (SPEC 9.3)."""
     holder = body.get("holder", ...)
     if holder is not None:
         holder = _identity(holder)
-    out: dict[str, Any] = {"holder": holder, "counter": _counter(body.get("counter"))}
+    counter = _counter(body.get("counter"), MAX_FLOOR_COUNTER)
+    out: dict[str, Any] = {"holder": holder, "counter": counter}
     if "copy" in body:
-        copy = body["copy"]
-        if not isinstance(copy, dict) or holder is None:
-            raise MalformedError
-        instance = copy.get("instance")
-        if not (isinstance(instance, str) and INSTANCE_ID.fullmatch(instance)):
-            raise MalformedError
-        out["copy"] = {
-            "epoch": _counter(copy.get("epoch")),
-            "sender": _identity(copy.get("sender")),
-            "instance": instance,
-        }
+        out["copy"] = _copy_key(body["copy"], counter)
     return out
 
 

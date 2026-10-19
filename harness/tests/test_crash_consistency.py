@@ -615,3 +615,35 @@ async def test_the_floor_holder_survives_a_restart(group: GroupFixture) -> None:
     b.daemon.send_message(gid, {"text": "marker"})
     await a.adapter.wait_for(lambda: "marker" in a.adapter.texts(gid), WAIT)
     assert holder_of(a, gid) == c.me
+
+
+@pytest.mark.hosts("daemon")
+async def test_an_own_grant_survives_a_crash_after_the_relay_took_it(group: GroupFixture) -> None:
+    """b's grant is taken when it is sealed, in the same transaction as
+    the envelope. b dies after the relay took it and before it is marked
+    sent; the group moves on two epochs while b is down. On restart the
+    resend is a duplicate the relay takes in its old epoch: b's floor
+    agrees with everyone's."""
+    (a, b, c), gid = await group(3)
+    await moderated_by([a, b, c], gid, b)
+    fired: list[str] = []
+
+    def crashing(_group_id: str, msg_id: str) -> None:
+        fired.append(msg_id)
+        raise SimulatedCrash
+
+    b.daemon.floor.confirmed = crashing  # ty: ignore[invalid-assignment]
+    b.daemon.grant_floor(gid, a.me)
+    await until(lambda: bool(fired) and holder_of(a, gid) == holder_of(c, gid) == a.me)
+    await b.stop()
+    for turns in (10, 11):
+        assert a.daemon.change_policy(gid, {"max_agent_turns": turns}) == "committing"
+        await until(lambda: a.daemon.store.outbox() == [])
+        await until(lambda: c.epoch(gid) == a.epoch(gid))
+    await b.start()
+    await b.connected()
+    await until(lambda: b.epoch(gid) == a.epoch(gid) and not b.daemon.store.outbox())
+    await settled([a, b, c], gid)
+    assert {holder_of(n, gid) for n in (a, b, c)} == {a.me}
+    _, state = b.daemon.store.floor(gid) or (None, {})
+    assert state["pending"] == {}

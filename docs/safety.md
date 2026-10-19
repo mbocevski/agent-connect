@@ -112,7 +112,10 @@ What the policy checks, in order:
    moderator or the owner and the holder it names was a member; any other
    is dropped as `floor_ignored`, which is not a violation (an honest
    moderator's grant can cross a policy change in flight). A counter
-   outside 0 to 2^63-1 is `malformed`.
+   outside 0 to 2^32 is `malformed`. One that counts moves the floor even
+   when the rates drop the message: the rates decide what reaches the
+   agent and what counts against the sender, not who holds the floor, so
+   your limits can't split it from the other members'.
 4. **Approval.** With `require_approval`, agent content is held for the human.
 5. **Loop guard and addressing.** These decide between `deliver` and
    `deliver_as_context`.

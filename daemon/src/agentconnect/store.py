@@ -898,6 +898,13 @@ class Store:
         )
         return cur.rowcount == 1
 
+    def delete_floor_write(self, group_id: str, key: tuple[int, int, str, str]) -> None:
+        self._db.execute(
+            "DELETE FROM floor_writes WHERE group_id = ? AND epoch = ? AND counter = ? "
+            "AND sender = ? AND instance = ?",
+            (group_id, *key),
+        )
+
     def drop_floor_writes(self, group_id: str, before_epoch: int) -> None:
         self._db.execute(
             "DELETE FROM floor_writes WHERE group_id = ? AND epoch < ?", (group_id, before_epoch)

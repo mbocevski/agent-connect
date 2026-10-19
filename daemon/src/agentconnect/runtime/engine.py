@@ -368,6 +368,16 @@ def _same_relay(a: str, b: str) -> bool:
         return False
 
 
+def _floor_inner(event: dict[str, Any]) -> dict[str, Any] | None:
+    """A received application event's inner message if it is a
+    ``control.floor``."""
+    try:
+        inner = json.loads(event["plaintext"])
+    except ValueError:
+        return None
+    return inner if isinstance(inner, dict) and inner.get("kind") == "control.floor" else None
+
+
 def _max_turns(policy: dict[str, Any]) -> int:
     guard = policy.get("loop_guard")
     turns = guard.get("max_agent_turns") if isinstance(guard, dict) else None
@@ -1336,6 +1346,18 @@ class Engine:
             # its probes passed (SPEC 10.2).
             if hop is not None and hop > _max_turns(group.policy):
                 await self._loop_guard(group, msg_id, identity, hop)
+            floor = _floor_inner(event)
+            if floor is not None:
+                # SPEC 9.3: a valid grant moves the floor register on every
+                # member, whatever this member's own delivery policy (rates,
+                # sizes, the drain) decided for the message.
+                await self.floor.accept(
+                    group_id,
+                    int(event["epoch"]),
+                    identity,
+                    str(event["sender"]["instance_id_hex"]),
+                    floor,
+                )
             if delivery is None:
                 self.store.record_inbox(sender, msg_id, group_id, "dropped", now)
                 alert = (
@@ -1359,15 +1381,6 @@ class Engine:
             else:
                 self.safety.transcribe(group_id, "in", identity, msg_id, delivery.inner)
                 self._defer(self._delivery_wake.set)
-            if delivery.kind == "control.floor":
-                # Judged in _make_delivery (floor.judge): it may move the floor.
-                await self.floor.accept(
-                    group_id,
-                    int(event["epoch"]),
-                    identity,
-                    delivery.sender.instance_id,
-                    delivery.inner,
-                )
             if delivery.kind == "control.close":
                 # SPEC 7.3: the owner asks everyone to leave. Leaving is the
                 # human's decision; the daemon never leaves on its own.
@@ -2519,6 +2532,12 @@ class Engine:
             self.store.update_outbox(row.seq, state=state)
             code = self._fail_codes.pop(row.seq, "failed")
             if state == "failed" and row.group_id is not None:
+                if row.kind == "app" and row.payload.get("floor"):
+                    # Its write was taken when it was sealed: take it back.
+                    with self.store.tx():
+                        event = self.floor.unsent(row.group_id, str(msg_id))
+                    if event is not None:
+                        await self._notify(event)
                 # Tell the caller: it holds a msg_id (or an intent) that will
                 # never be delivered.
                 if row.kind == "app":
@@ -2604,17 +2623,25 @@ class Engine:
                 if self.groups.update_due(group):
                     # SPEC §3.1: renew keys just before the next send.
                     group = await self._cadence_update(row, payload, group)
-                inner = canonical(payload["inner"])
-                payload["env"] = {
-                    "v": 0,
-                    "kind": "application",
-                    "group_id": group.group_id,
-                    "epoch": self.client.epoch(gid),
-                    "msg_id": payload["msg_id"],
-                    "sender": self.mailbox,
-                    "ct": b64(self.client.seal(gid, inner)),
-                }
-                self.store.update_outbox(row.seq, payload=payload)
+                epoch = self.client.epoch(gid)
+                event = None
+                with self.store.tx():
+                    if payload.get("floor"):
+                        # Taken as it is sealed, in this epoch (FloorService.seal).
+                        event = self.floor.seal(group.group_id, payload, epoch)
+                    inner = canonical(payload["inner"])
+                    payload["env"] = {
+                        "v": 0,
+                        "kind": "application",
+                        "group_id": group.group_id,
+                        "epoch": epoch,
+                        "msg_id": payload["msg_id"],
+                        "sender": self.mailbox,
+                        "ct": b64(self.client.seal(gid, inner)),
+                    }
+                    self.store.update_outbox(row.seq, payload=payload)
+                if event is not None:
+                    await self._notify(event)
             try:
                 await self._request({"t": "send", "env": payload["env"]}, payload["msg_id"])
             except RelayError as e:
@@ -2628,14 +2655,8 @@ class Engine:
                 self._fail_codes[row.seq] = e.code
                 return "failed"
             self.store.bump_messages(group.group_id)
-            if payload["inner"].get("kind") == "control.floor":
-                # Taken in the epoch the relay took it in, as receivers do.
-                await self.floor.sent(
-                    group.group_id,
-                    payload["inner"],
-                    int(payload["env"]["epoch"]),
-                    payload["msg_id"],
-                )
+            if payload.get("floor"):
+                self.floor.confirmed(group.group_id, str(payload["msg_id"]))
             return "done"
         self._fail_codes[row.seq] = "attempts_exhausted"
         return "failed"
@@ -3357,7 +3378,9 @@ class Engine:
             code, text = OUTBOUND_PROBLEMS.get(decision.reason, ("bad_request", "malformed"))
             raise DaemonError(code, text)
         msg_id = new_msg_id()
-        payload = {"inner": inner, "msg_id": msg_id}
+        payload: dict[str, Any] = {"inner": inner, "msg_id": msg_id}
+        if kind == "control.floor":
+            payload["floor"] = True  # this instance's own: taken when sealed
         with self.store.tx():
             self.store.record_hop(group.group_id, msg_id, hop, self.now())
             self.safety.audit(

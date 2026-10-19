@@ -25,7 +25,7 @@ from agentconnect.runtime.floor import (
     may_grant,
 )
 from agentconnect.runtime.groups import policy_events
-from agentconnect.schemas import MAX_COUNTER, normalize
+from agentconnect.schemas import MAX_COUNTER, MAX_FLOOR_COUNTER, normalize
 from agentconnect.store import GroupRow, Store
 
 
@@ -148,6 +148,9 @@ def test_a_grant_is_judged_on_the_facts_of_its_epoch(ids: Ids) -> None:
     assert floor_write(facts, 7, mod, inst, copy) == ((6, 5, owner, inst), other)
     later = {**body, "copy": {"epoch": 8, "sender": owner, "instance": inst}}
     assert floor_write(facts, 7, mod, inst, later) is None
+    # A copy of "nobody", with the key of the reset or drop that made it.
+    empty = {"holder": None, "counter": 0, "copy": {"epoch": 7, "sender": "", "instance": other}}
+    assert floor_write(facts, 7, mod, inst, empty) == ((7, 0, "", other), None)
 
 
 def test_the_register_folds_writes_in_key_order_whatever_order_they_came_in(
@@ -165,8 +168,9 @@ def test_the_register_folds_writes_in_key_order_whatever_order_they_came_in(
     for _ in range(20):
         shuffled = rng.sample(writes, len(writes))
         assert fold(None, None, sorted(shuffled)) == (x, (5, 1, mod, inst))
-    # A grant from before a reset loses to it, however late it arrives.
-    assert fold(None, None, sorted(writes[:2])) == (None, None)
+    # A grant from before a reset loses to it, however late it arrives; the
+    # source is then the reset, so a copy of "nobody" can name it.
+    assert fold(None, None, sorted(writes[:2])) == (None, (4, 0, "", ""))
     # A drop clears only the identity it names.
     assert fold(None, None, sorted([writes[0], (5, 0, "", y, "drop", y)])) == (
         x,
@@ -175,15 +179,17 @@ def test_the_register_folds_writes_in_key_order_whatever_order_they_came_in(
     assert fold(x, (2, 1, mod, inst), []) == (x, (2, 1, mod, inst))
 
 
-def test_a_floor_counter_must_fit_a_signed_64_bit_integer(ids: Ids) -> None:
+def test_a_floor_counter_starts_again_each_epoch_and_stays_below_2_to_the_32(ids: Ids) -> None:
+    """Counters order grants within an epoch only, so none needs more than
+    2**32: a jump past it is malformed. Epochs may go up to what SQLite holds."""
     who = ids.identity()
-    assert normalize("control.floor", {"holder": who, "counter": MAX_COUNTER}) == {
+    assert normalize("control.floor", {"holder": who, "counter": MAX_FLOOR_COUNTER}) == {
         "holder": who,
-        "counter": MAX_COUNTER,
+        "counter": MAX_FLOOR_COUNTER,
     }
-    for counter in (MAX_COUNTER + 1, -1, True, "1", None):
+    for counter in (MAX_FLOOR_COUNTER + 1, MAX_COUNTER, -1, True, "1", None):
         assert normalize("control.floor", {"holder": who, "counter": counter}) is None
-    copy = {"epoch": 1, "sender": who, "instance": ids.instance()}
+    copy = {"epoch": MAX_COUNTER, "sender": who, "instance": ids.instance()}
     assert normalize("control.floor", {"holder": who, "counter": 1, "copy": copy}) is not None
     for bad in (
         {**copy, "epoch": MAX_COUNTER + 1},
@@ -192,8 +198,14 @@ def test_a_floor_counter_must_fit_a_signed_64_bit_integer(ids: Ids) -> None:
         "copy",
     ):
         assert normalize("control.floor", {"holder": who, "counter": 1, "copy": bad}) is None
-    # A copy always names a holder.
-    assert normalize("control.floor", {"holder": None, "counter": 1, "copy": copy}) is None
+    # The key of a commit's reset or drop: no sender, counter 0.
+    for instance in ("", who):
+        reset = {"epoch": 3, "sender": "", "instance": instance}
+        body = {"holder": None, "counter": 0, "copy": reset}
+        assert normalize("control.floor", body) == body
+        assert normalize("control.floor", {**body, "counter": 1}) is None
+    bad_drop = {"epoch": 3, "sender": "", "instance": "x"}
+    assert normalize("control.floor", {"holder": None, "counter": 0, "copy": bad_drop}) is None
 
 
 async def test_one_failing_journal_entry_does_not_stop_the_replay() -> None:
@@ -282,6 +294,6 @@ def test_a_legacy_summary_tells_a_floor_change_from_the_kept_facts(ids: Ids) -> 
     assert not FloorService._floor_changed({"policy_changed": False}, before, after)
 
 
-async def test_a_grant_the_relay_took_after_the_group_went_changes_nothing() -> None:
+def test_a_send_that_fails_after_the_group_went_changes_nothing() -> None:
     engine = SimpleNamespace(store=SimpleNamespace(group=lambda _gid: None))
-    await FloorService(engine).sent("g1", {}, 1, "m1")  # ty: ignore[invalid-argument-type]
+    assert FloorService(engine).unsent("g1", "m1") is None  # ty: ignore[invalid-argument-type]

@@ -852,7 +852,7 @@ Inner = {
 |---|---|---|
 | `control.leave` | `{}` | Any member, about itself. Sent immediately before its leave proposal (§9.2); receivers MUST NOT change membership because of it. |
 | `control.close` | `{"reason": "..."}` | Owner. All members SHOULD leave. |
-| `control.floor` | `{"holder": "ac:v0:…" \| null, "counter": <0..2^63-1>, "copy"?: {"epoch", "sender", "instance"}}` | The effective moderator or the owner (§9.3) |
+| `control.floor` | `{"holder": "ac:v0:…" \| null, "counter": <0..2^32>, "copy"?: {"epoch", "sender", "instance"}}` | The effective moderator or the owner (§9.3) |
 | `control.pause` | `{"reason": "loop_guard" \| "human"}` | Any member |
 | `control.resume` | `{}` | Any member, with a human-originated message (`origin: "human"`) |
 | `control.capabilities` | `{"adapters": [...], "accepts": [...part kinds]}` | Any member |
@@ -1313,17 +1313,22 @@ writes in key order, starting from null:
 
 - **Grant.** A `control.floor{holder, counter}` sent in MLS epoch `e` by
   instance `i` of identity `s` writes `holder` at key `(e, counter, s, i)`.
-  `counter` is a Lamport counter of the group: the sender uses one more
-  than the greatest counter it has seen in a grant, at most 2^63-1. A
-  member judges a grant against the **floor facts of epoch `e`** (the
-  floor mode, the owner, the effective moderator and the member
-  identities), never against its own later view: the grant is valid only
-  if the floor was `moderated`, `s` was the effective moderator or the
+  `counter` orders the grants of one epoch: the sender uses one more than
+  the greatest counter of a valid write it holds for epoch `e`, so counters
+  start again at each epoch. A `counter` outside 0 to 2^32 makes the
+  message malformed. A member judges a grant against the **floor facts of
+  epoch `e`** (the floor mode, the owner, the effective moderator and the
+  member identities), never against its own later view: the grant is valid
+  only if the floor was `moderated`, `s` was the effective moderator or the
   owner, and `holder` is null or was a member. A member keeps the facts of
   the epochs whose application messages it can still decrypt, and ignores
-  a grant from any other epoch. A `counter` outside 0 to 2^63-1 makes the
-  message malformed. The sender applies its own grant by the same rule,
-  in the epoch the relay accepted it in.
+  a grant from any other epoch. A valid grant is a write whatever the
+  receiver's own delivery policy (§10.2, §10.6: rates, sizes, approvals)
+  does with the message: that policy is each member's own, and the
+  register must not depend on it. The sender takes its own grant when it
+  seals it, in the epoch it seals it in, by the same rule, and replaces it
+  if it seals it again in a later epoch; it keeps the facts of that epoch
+  until the relay has taken the grant.
 - **Reset.** A commit that starts epoch `e` and changes `floor` or
   `floor_moderator` writes null at `(e, 0, "", "")`. A commit after which an
   identity `z` has no instance writes "drop `z`" at `(e, 0, "", z)`, which
@@ -1331,18 +1336,27 @@ writes in key order, starting from null:
   sent before the commit therefore loses to the reset however late it is
   processed.
 - **Copy.** A new member starts with null. After a commit that adds
-  instances, the lowest instance of the effective moderator that was in the
-  group before the commit (if it has none, of the owner) SHOULD send the
-  new instances `control.floor{holder, counter, copy: {epoch, sender,
-  instance}}`: the current holder with the key of the grant that set it.
-  It is judged as a grant from its own sender and epoch, names a holder,
-  and is written at the copied key, which can't be from a later epoch than
-  the copy's; a member that has that write already changes nothing.
+  instances and starts epoch `e`, the **copier**, the lowest instance of the
+  effective moderator that was in the group before the commit (if it has
+  none, of the owner), SHOULD send the new instances
+  `control.floor{holder, counter, copy: {epoch, sender, instance}}`: the
+  current holder with the key of the write that set it. While it can still
+  receive writes keyed before `e` (a grant from the epoch before, ordered
+  by the relay after the commit), the copier SHOULD send the new instances
+  a fresh copy each time such a write changes its holder, null included:
+  they can't decrypt those writes. A copy of null names the key of the
+  reset or drop that made it (`sender` `""`, `counter` 0). A copy is judged
+  as a grant from its own sender and epoch, and is written at the copied
+  key, which can't be from a later epoch than the copy's; a member that
+  has that write already changes nothing. A copy's key is not checked
+  against any write: a new member's holder, and the `by` it reports for
+  it, are only as trustworthy as the copier, which could grant anyway.
 
 Writes from epochs that can no longer be decrypted MAY be folded into a
-base value. A relay that drops or withholds a grant can still make members
-disagree on who holds the floor, which changes only who is triggered
-(§12).
+base value, and of the grants of one epoch only the greatest MAY be kept:
+neither changes the result. A relay that drops or withholds a grant can
+still make members disagree on who holds the floor, which changes only who
+is triggered (§12).
 
 **`addressee`.** An inner message MAY carry `addressee`, a list of 1 to 50
 identities. In `free` and `mention` mode, a message with `addressee`

@@ -587,3 +587,165 @@ async def test_a_group_without_floor_state_takes_grants(group: GroupFixture) -> 
     a.daemon.store.set_floor(gid, row[0], {**row[1], "facts": {}})
     await AgentApi(b.daemon).grant_floor(gid, c.me)
     await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == c.me)
+
+
+# -- convergence whatever each member's own policy and links ----------------------------------
+
+
+def views(nodes: list[Node], gid: str) -> dict[str, str | None]:
+    return {n.name: holder(n, gid) for n in nodes}
+
+
+def hold_deliveries(node: Node) -> tuple[list[dict[str, Any]], dict[str, bool]]:
+    """Hold what the relay sends ``node``: an honest but slow link. Returns
+    the held frames and the switch."""
+    held: list[dict[str, Any]] = []
+    holding = {"on": True}
+
+    def slow(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        if holding["on"] and frame.get("t") == "deliver":
+            held.append(frame)
+            return []
+        return [frame]
+
+    node.proxy.server_filters.append(slow)
+    return held, holding
+
+
+async def release(node: Node, held: list[dict[str, Any]], holding: dict[str, bool]) -> None:
+    holding["on"] = False
+    for frame in held:
+        await node.proxy.inject(frame)
+
+
+async def test_a_receivers_own_rate_limit_doesnt_change_its_floor(group: GroupFixture) -> None:
+    """c limits b to 2 messages a minute (its own policy, SPEC 10.2): the
+    third grant is not delivered at c, but it still moves c's floor, so c
+    agrees with everyone else."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me)
+    c.daemon.safety.update(gid, {"sender_per_minute": 2}, sender=b.me)
+    api = AgentApi(b.daemon)
+    for who in (a, c, a):
+        await api.grant_floor(gid, who.me)
+
+    def audited() -> list[str]:
+        return [r["reason"] for r in c.daemon.store.audit(gid, 0) if r["kind"] == "control.floor"]
+
+    await c.wait(lambda: len(audited()) == 3)
+    assert "rate_limited" in audited()
+    assert await agreed([a, b, c], gid) == a.me
+    # Storage: of one epoch's grants only the greatest is kept.
+    grants = [w for w in c.daemon.store.floor_writes(gid) if w[4] == "grant"]
+    assert [(w[1], w[5]) for w in grants] == [(3, a.me)]
+
+
+async def test_a_late_grant_from_before_a_join_reaches_the_newcomer(
+    cluster: Cluster, group: GroupFixture
+) -> None:
+    """a's link is slow. d joins (epoch E+1) while a is still in E, and a
+    gives c the floor in E; the relay orders it after the join. d can't
+    decrypt E, so the moderator's daemon, which copied the floor to d,
+    copies the new value to it."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me, invite="members")
+    await AgentApi(b.daemon).grant_floor(gid, a.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == a.me)
+    held, holding = hold_deliveries(a)
+    epoch = a.epoch(gid)
+    url = (await c.daemon.create_invite(gid))["url"]
+    d = await cluster.node("d")
+    await d.daemon.accept_invite(url)
+    await d.wait(lambda: d.daemon.store.group(gid) is not None)
+    await b.wait(lambda: b.epoch(gid) == c.epoch(gid) == d.epoch(gid) == epoch + 1)
+    await d.wait(lambda: holder(d, gid) == a.me)
+    assert a.epoch(gid) == epoch
+    a.daemon.grant_floor(gid, c.me, origin="human")
+    await a.idle()
+    await b.wait(lambda: holder(b, gid) == holder(c, gid) == c.me)
+    await release(a, held, holding)
+    await a.wait(lambda: a.epoch(gid) == epoch + 1)
+    await d.wait(lambda: holder(d, gid) == c.me)
+    assert await agreed([a, b, c, d], gid) == c.me
+    await converged([a, b, c, d], gid)
+
+
+async def test_a_late_grant_folded_with_a_drop_reaches_the_newcomer_as_nobody(
+    cluster: Cluster, group: GroupFixture
+) -> None:
+    """One commit adds d and carries c's leave. a, whose link is slow,
+    gave c the floor in the epoch before; the relay orders that grant after
+    the commit. Old members fold it with c's drop: nobody. The moderator's
+    daemon copies "nobody", with the drop's key, to d."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me, invite="members")
+    await AgentApi(b.daemon).grant_floor(gid, b.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == b.me)
+    held, holding = hold_deliveries(a)
+    epoch = a.epoch(gid)
+    a.daemon.grant_floor(gid, c.me, origin="human")
+    await a.idle()
+    await b.wait(lambda: holder(b, gid) == c.me)
+    # c proposes its leave; b's Add of d carries it (a, the lowest leaf,
+    # would commit it, but a is slow and the grace period hasn't passed).
+    assert await c.daemon.leave(gid) == "leaving"
+    await b.wait(lambda: len(b.daemon.client.pending_leaves(raw(gid))) == 1)
+    url = (await b.daemon.create_invite(gid))["url"]
+    d = await cluster.node("d")
+    await d.daemon.accept_invite(url)
+    await d.wait(lambda: d.daemon.store.group(gid) is not None)
+    await c.wait(lambda: status(c, gid) == "left")
+    assert b.epoch(gid) == d.epoch(gid) == epoch + 1
+    assert holder(b, gid) is None
+    await release(a, held, holding)
+    await a.wait(lambda: a.epoch(gid) == epoch + 1)
+    assert await agreed([a, b, d], gid) is None
+    await converged([a, b, d], gid)
+
+
+async def test_a_saturating_counter_is_refused_and_counters_start_again_each_epoch(
+    group: GroupFixture,
+) -> None:
+    """A counter is ordered within its epoch only. A jump past 2**32 is
+    malformed; the largest allowed one lasts until the next commit, after
+    which the new moderator's grants order by time again."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me)
+    forge(b, gid, a.me, counter=2**63 - 1)
+    forge(b, gid, a.me, counter=2**32 + 1)
+    forge(b, gid, c.me, counter=2**32)
+    await mark(b, [a, c], gid, "n2")
+    # (b's modified daemon doesn't take what it forged.)
+    assert await agreed([a, c], gid) == c.me
+    audited = [r["reason"] for r in a.daemon.store.audit(gid, 0) if r["kind"] == "control.floor"]
+    assert audited.count("malformed") == 2
+    assert a.daemon.change_policy(gid, {"floor_moderator": c.me}) == "committing"
+    await converged([a, b, c], gid)
+    await AgentApi(c.daemon).grant_floor(gid, a.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == a.me)
+    await AgentApi(c.daemon).grant_floor(gid, b.me)
+    await a.wait(lambda: holder(a, gid) == holder(b, gid) == holder(c, gid) == b.me)
+    assert await agreed([a, b, c], gid) == b.me
+
+
+async def test_a_resealed_grant_replaces_its_write_and_a_failed_one_is_taken_back(
+    group: GroupFixture,
+) -> None:
+    """The sender takes its grant as it seals it. Sealed again after an
+    epoch conflict, the new write replaces the old one; refused for good by
+    the relay, the grant never went out, and the sender takes it back."""
+    (a, b, c), gid = await group(3)
+    await moderated([a, b, c], gid, floor_moderator=b.me)
+    b.proxy.fail_next("send", "epoch_conflict", kind="application")
+    await AgentApi(b.daemon).grant_floor(gid, a.me)
+    assert await agreed([a, b, c], gid) == a.me
+    grants = [w for w in b.daemon.store.floor_writes(gid) if w[4] == "grant"]
+    assert len(grants) == 1
+    row = b.daemon.store.floor(gid)
+    assert row is not None
+    assert row[1]["pending"] == {}
+    b.proxy.fail_next("send", "not_member", kind="application")
+    await AgentApi(b.daemon).grant_floor(gid, c.me)
+    await b.adapter.wait_for(lambda: bool(b.adapter.of_type("send_failed")), WAIT)
+    assert await agreed([a, b, c], gid) == a.me
+    assert [e["holder"] for e in data(b, "floor_changed")][-2:] == [c.me, a.me]
