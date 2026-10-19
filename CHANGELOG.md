@@ -1219,6 +1219,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   capabilities) and drops keep the group's cap each, the senders holding
   the most giving way first, and 100000 rows each daemon-wide. A changed
   card that isn't held is delivered with reason `card_changed`.
+- SPEC §11: the short code comes from a SAS run, a commit-then-reveal
+  exchange of random nonces between two members' instances inside the
+  group (`control.sas_commit`, `control.sas_reveal`), derived from the
+  epoch authenticator and both nonces. The earlier code was derived from
+  the epoch authenticator alone, which the epoch's last committer chooses,
+  so an attacker in the middle of two forked views could try commits
+  offline until both views showed the same code. A run is pairwise, starts
+  only from a human's verify command, is bound to one epoch and times out
+  after 600 s; codes keep their lengths. Verifications recorded under the
+  earlier code are reset. The protocol is specified; the implementation
+  follows.
 - Core and protocol: a commit after which two leaves of one identity have
   the same `instance_id` is refused by its committer and rejected by every
   member (SPEC §9.2, "One leaf per instance"), and so is a commit whose
