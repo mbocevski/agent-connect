@@ -66,6 +66,8 @@ struct Spec<'a> {
     credential_identity: String,
     caps: Capabilities,
     leaf_exts: Extensions<LeafNode>,
+    kp_exts: Extensions<KeyPackage>,
+    last_resort: bool,
     signer: &'a Instance,
 }
 
@@ -76,9 +78,14 @@ fn build(spec: &Spec) -> Vec<u8> {
         credential: BasicCredential::new(spec.credential_identity.as_bytes().to_vec()).into(),
         signature_key: spec.signer.public_key().to_vec().into(),
     };
-    KeyPackage::builder()
+    let mut builder = KeyPackage::builder()
         .leaf_node_capabilities(spec.caps.clone())
         .leaf_node_extensions(spec.leaf_exts.clone())
+        .key_package_extensions(spec.kp_exts.clone());
+    if spec.last_resort {
+        builder = builder.mark_as_last_resort();
+    }
+    builder
         .build(spec.cs, &p, &signer, credential)
         .unwrap()
         .key_package()
@@ -92,6 +99,8 @@ fn honest(instance: &Instance) -> Spec<'_> {
         credential_identity: instance.identity().to_owned(),
         caps: ac_caps(CS),
         leaf_exts: cert_ext(instance),
+        kp_exts: Extensions::empty(),
+        last_resort: false,
         signer: instance,
     }
 }
@@ -309,6 +318,40 @@ fn extra_leaf_extension_is_rejected() {
         submit(build(&spec), &m),
         Err(Error::InvalidKeyPackage("unexpected leaf extension"))
     );
+}
+
+#[test]
+fn key_package_extensions_are_rejected() {
+    // SPEC §6.2: a KeyPackage carries no extensions of its own, last-resort
+    // or any other.
+    let (_, m) = mallory(22);
+    let other = Spec {
+        kp_exts: Extensions::single(Extension::Unknown(0xF0A1, UnknownExtension(vec![1]))).unwrap(),
+        ..honest(&m)
+    };
+    // OpenMLS accepts the last-resort extension only if the leaf lists it.
+    let last_resort = Spec {
+        last_resort: true,
+        caps: Capabilities::builder()
+            .ciphersuites(vec![CS])
+            .extensions(
+                ac_caps(CS)
+                    .extensions()
+                    .iter()
+                    .copied()
+                    .chain([ExtensionType::LastResort])
+                    .collect(),
+            )
+            .credentials(vec![CredentialType::Basic])
+            .build(),
+        ..honest(&m)
+    };
+    for spec in [other, last_resort] {
+        assert_eq!(
+            submit(build(&spec), &m),
+            Err(Error::InvalidKeyPackage("unexpected key package extension"))
+        );
+    }
 }
 
 #[test]
