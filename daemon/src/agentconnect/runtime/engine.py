@@ -210,6 +210,9 @@ class TransientError(Exception):
 MAX_TRANSIENT_RETRIES = 8
 # Relay errors that say "not now" rather than "no" (SPEC 8.4).
 RETRYABLE_RELAY_ERRORS = frozenset({"rate_limited", "internal"})
+# Answers to a Welcome that say "not now": it is sent again, as a knock's is.
+RETRY_WELCOME = RETRYABLE_RELAY_ERRORS | {"quota_exceeded"}
+WELCOME_NOT_SENT = "welcome_not_sent"
 BENIGN = "benign"  # a failed outbox row nobody needs to hear about
 # Commit intents that change the policy, each built against the policy in
 # force when it is built (agentconnect.runtime.groups.planned_policy).
@@ -2802,8 +2805,10 @@ class Engine:
                 await self._confirm_own(gid, group.group_id, env)
                 payload["confirmed"] = True
                 self.store.update_outbox(row.seq, payload=payload)
-            if not payload.get("consume_queued"):
-                await self._commit_followups(row, group, intent, payload)
+            if not payload.get("consume_queued") and not await self._commit_followups(
+                row, group, intent, payload
+            ):
+                return "failed"
             return "done"
         if "env" in payload and not payload.get("confirmed"):
             # Still unconfirmed after every attempt: give it up.
@@ -2911,19 +2916,20 @@ class Engine:
 
     async def _commit_followups(
         self, row: OutboxRow, group: GroupRow, intent: dict[str, Any], payload: dict[str, Any]
-    ) -> None:
+    ) -> bool:
         """After an Add is confirmed: send the Welcome, then consume the
         invite. Each step is recorded in the row, so a retry after a dropped
         connection neither sends a second Welcome nor consumes a second use.
-        An approved knock's Add has a Welcome and no use to consume."""
+        An approved knock's Add has a Welcome and no use to consume. False:
+        the Welcome can't go out, and the joiner is removed again."""
         if intent["type"] == "knock_add":
             await self.knocks.after_add(row.seq, group, intent, payload)
-            return
+            return True
         if intent["type"] != "add":
-            return
+            return True
         approval = self.store.approval(intent["request_id"])
         if approval is None:
-            return
+            return True
         if "welcome" in payload and not payload.get("welcome_sent"):
             if "welcome_msg_id" not in payload:
                 payload["welcome_msg_id"] = new_msg_id()
@@ -2937,7 +2943,16 @@ class Engine:
                 "to": [approval["mailbox_id"]],
                 "ct": payload["welcome"],
             }
-            await self._request({"t": "send", "env": welcome}, str(welcome["msg_id"]))
+            try:
+                await self._request({"t": "send", "env": welcome}, str(welcome["msg_id"]))
+            except RelayError as e:
+                if e.code in RETRY_WELCOME and self.now() < self._welcome_deadline(approval):
+                    # Not now: the same Welcome again after a backoff.
+                    LOG.info("welcome_retry", code=e.code)
+                    raise TransientError(group.group_id, e.code) from None
+                LOG.info("welcome_not_sent", code=e.code)
+                self._welcome_failed(row, group, intent, approval)
+                return False
             payload["welcome_sent"] = True
             self.store.update_outbox(row.seq, payload=payload)
         self.store.set_approval_status(intent["request_id"], "approved")
@@ -2960,6 +2975,36 @@ class Engine:
             payload["consume_queued"] = True
             self.store.update_outbox(row.seq, payload=payload)
         self._outbox_wake.set()
+        return True
+
+    def _welcome_deadline(self, approval: dict[str, Any]) -> int:
+        """When the joiner stops waiting for its Welcome: its invite's
+        expiry plus the grace for a Welcome in flight (:meth:`expire`)."""
+        invite = self.store.invite(str(approval["invite_id"]))
+        return 0 if invite is None else int(invite["expires_at"]) + JOIN_CLOSED_GRACE_SECS
+
+    def _welcome_failed(
+        self, row: OutboxRow, group: GroupRow, intent: dict[str, Any], approval: dict[str, Any]
+    ) -> None:
+        """The Add is in, but its Welcome can't reach the joiner: the
+        approval fails (releasing its use of the invite) and the instance the
+        Add put in the group is removed again."""
+        self._fail_codes[row.seq] = WELCOME_NOT_SENT
+        with self.store.tx():
+            self._fail_intent(intent, WELCOME_NOT_SENT)
+            instance = approval.get("instance_id")
+            if instance:
+                self._enqueue(
+                    "commit",
+                    group.group_id,
+                    {
+                        "intent": {
+                            "type": "remove_instances",
+                            "identity": str(approval["identity"]),
+                            "instances": [str(instance)],
+                        }
+                    },
+                )
 
     async def _send_card(self, group_id: str, to: list[str]) -> None:
         adapter = self._adapter_for(group_id)

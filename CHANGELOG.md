@@ -1065,6 +1065,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Runtime: after an approved join's Add, a Welcome the relay answered
+  `rate_limited` or `internal` failed the commit's outbox row, so the
+  joiner was in the MLS group but never got its Welcome. Such a Welcome
+  (and `quota_exceeded`) is now sent again under the same `msg_id` after a
+  backoff, as a knock's is, until the joiner stops waiting (its invite's
+  expiry plus a minute). If it still can't go out, or the relay refuses
+  it, the approval fails (`commit_failed`, code `welcome_not_sent`) and the
+  added instance is removed again.
 - Examples: the Claude Agent SDK and LangGraph examples passed
   `allowed_tools=[]` to run the model "with no tools", but that list only
   pre-approves tools and removes none. They pass `tools=[]`, which removes
