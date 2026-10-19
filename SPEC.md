@@ -865,11 +865,12 @@ Inner = {
 | `control.capabilities` | `{"adapters": [...], "accepts": [...part kinds]}` | Any member |
 | `control.sas_commit` | `{"commitment", "epoch", "peer"}` (§11.2) | Any member, only in a SAS run its human started (§11.3) |
 | `control.sas_reveal` | `{"answers", "epoch", "nonce"}` (§11.2) | Any member, only in a SAS run its human started (§11.3) |
+| `control.sas_cancel` | `{"commitment", "epoch"}` (§11.2) | Any member, about its own commitment, before its reveal (§11.3) |
 
 - `control.close`: a receiver MUST NOT leave on its own. It prompts its human
   (the reference daemon raises a `close_requested` event), who decides.
-- `control.sas_commit` and `control.sas_reveal` are handled by the daemon
-  alone (§11.5): they are never delivered to an adapter, not even as
+- `control.sas_commit`, `control.sas_reveal` and `control.sas_cancel` are
+  handled by the daemon alone (§11.5): they are never delivered to an adapter, not even as
   context, and they never trigger anyone.
 
 A receiver MUST ignore a control message from a sender the table doesn't
@@ -1668,12 +1669,13 @@ warnings, and a run that never pairs is reported as a possible fork.
 
 ### 11.2 Messages
 
-A run uses two control messages (§7.2, §7.3), the **ceremony messages**,
-sent as MLS application messages in the group:
+A run uses three control messages (§7.2, §7.3), the **ceremony
+messages**, sent as MLS application messages in the group:
 
 ```text
 control.sas_commit  body = {"commitment": "<b64url, 32 bytes>", "epoch": <u64>, "peer": "ac:v0:…"}
 control.sas_reveal  body = {"answers": "<b64url, 32 bytes>", "epoch": <u64>, "nonce": "<b64url, 32 bytes>"}
+control.sas_cancel  body = {"commitment": "<b64url, 32 bytes>", "epoch": <u64>}
 ```
 
 - `epoch` is the MLS epoch of the run (§11.3), an integer in the I-JSON
@@ -1683,6 +1685,8 @@ control.sas_reveal  body = {"answers": "<b64url, 32 bytes>", "epoch": <u64>, "no
   canonical identity identifier (§2: `ac:v0:` and the canonical base64url
   of the 32-byte key).
 - `answers` is the peer's commitment that this reveal pairs with (§11.3).
+- In a cancel, `commitment` is the sender's own commitment, which it gives
+  up before its reveal (§11.3).
 - `nonce` is the sender's own nonce, the one its commitment hides: 32 bytes
   from a CSPRNG, fresh for each run, and never used again, in another run
   or with another peer.
@@ -1690,23 +1694,27 @@ control.sas_reveal  body = {"answers": "<b64url, 32 bytes>", "epoch": <u64>, "no
   characters). Unknown body fields are ignored, as in every control (§7.2).
 - The Inner message (§7.2) of a `control.sas_commit` carries
   `to: [peer]`. That of a `control.sas_reveal` carries in `to` the identity
-  of the instance whose commitment it answers. In both, `origin` is
-  `"human"`, `hop` is 0, and `reply_to` and `addressee` are absent.
+  of the instance whose commitment it answers, and that of a
+  `control.sas_cancel` the identity its commitment named. In all three,
+  `origin` is `"human"`, `hop` is 0, and `reply_to` and `addressee` are
+  absent.
 - A receiver MUST ignore a ceremony message:
   - whose Inner fields differ from these;
   - whose body `epoch` differs from the MLS epoch it was sent in;
   - whose body fields don't have exactly the forms above.
 - **Addressing.** A receiver X MUST ignore a `control.sas_commit` whose
   `peer` isn't X's own identity identifier, compared byte for byte, and a
-  `control.sas_reveal` whose `to` isn't `[X's identity]` or whose `answers`
-  isn't X's current commitment. An ignored message is not held, prompts
+  `control.sas_reveal` or `control.sas_cancel` whose `to` isn't
+  `[X's identity]`, and a reveal whose `answers` isn't X's current
+  commitment. An ignored message is not held, prompts
   nobody, and doesn't count as a restart (§11.3). The one exception is the
   check of step 1 in §11.3, which looks at commitments sent by the other
   instances of X's own identity.
 - Sizes: in JCS form (§3.2) a `control.sas_commit` body is 129 bytes at
-  epoch 0 and at most 144 bytes, and a `control.sas_reveal` body is 121 to
-  136 bytes. Either Inner message is under 400 bytes, so it goes out in the
-  1 KiB padding bucket (§7.1), like other short messages.
+  epoch 0 and at most 144 bytes, a `control.sas_reveal` body 121 to 136
+  bytes, and a `control.sas_cancel` body 70 to 85 bytes. Each Inner message
+  is under 400 bytes, so it goes out in the 1 KiB padding bucket (§7.1),
+  like other short messages.
 
 The commitment:
 
@@ -1808,12 +1816,16 @@ these steps:
 **Interaction with X's own commits.**
 
 - While X takes part in a run (from step 1 until its human answers, or
-  the run aborts), it defers its §3.1 cadence Update once the Update is
-  due. All deferrals of one due Update together last at most 600 s; then
+  the run aborts), it defers its §3.1 cadence Update once it is due. All
+  these deferrals together last at most 600 s until X's next commit; then
   the Update goes out, and aborts any run under way. A held commitment
-  doesn't defer it. X SHOULD defer other commits that can wait, such as
-  the departed-role clean-up of §9.2. A commit its human asks for goes out
-  at once and aborts the run.
+  doesn't defer it. X SHOULD defer the departed-role clean-up of §9.2 too.
+  A commit its human asks for goes out at once and aborts the run.
+- A commit of pending proposals, such as another member's leave (§9.2),
+  can't wait: while a proposal is pending, the MLS library sends no
+  application message, the ceremony messages included. It goes out as
+  §9.2 says. When X's own commit that ends a run carries another member's
+  leave, the warning names that member, not X.
 - A ceremony message is not a send that triggers the cadence Update.
 - A ceremony message queued behind a pending commit (§8.3) is dropped when
   that commit is confirmed, never sent in the new epoch. It is sent if the
@@ -1822,7 +1834,9 @@ these steps:
   An `error` for its reveal also ends the run, after the reveal, since the
   relay may have delivered it anyway.
 - A run doesn't survive a restart of its daemon: it ends, and its human
-  starts again.
+  starts again. X keeps its commitments that are not revealed yet in its
+  encrypted store, and on a restart cancels each one sent in its current
+  epoch less than 600 s ago.
 
 **Commitments before the run.** Y's human may start first. A commitment
 addressed to X (§11.2) that X receives while it has no run with Y is
@@ -1838,17 +1852,34 @@ and only the human's own start answers it.
 - A run that is still unpaired 60 s after its start tells its human that
   the daemons may not see the same group (§11.5).
 - Timeouts are measured on X's own clock.
-- There is no cancel message. A peer that stops is noticed by the timeout,
-  which is also what an attacker that withholds its reveal produces.
+- When X's run times out before X's reveal, X cancels its commitment.
+
+**Cancelling.** `control.sas_cancel` gives up the sender's own commitment,
+and only before the sender revealed its nonce: on a restart, on a timeout,
+or when the human gives the run up. A receiver honours it only for a
+commitment from that same sending instance (identity and instance) that it
+holds, or that a run of its own is paired with and hasn't revealed against:
+the held commitment is dropped, or the run aborts (`peer_cancelled`). Every
+other cancel is ignored, in particular one that arrives after the
+receiver's reveal: that run goes on and ends as a warning, as a withheld
+reveal does. A cancel before the receiver's reveal counts no warning, since
+an abort there tells nobody anything about a nonce (§11.6, item 5). Without
+it, a commitment its sender gave up would stay held for 600 s, and a run
+that paired with it would end as a warning after its reveal. A run the
+human gives up after X's reveal sends no cancel; the peer's run ends as a
+warning. Cancels count against the ceremony budget below.
 
 **Warnings and the abort count.**
 
 - These aborts are **warnings**:
   - every abort after X sent its reveal, whatever its reason, including
-    `epoch_changed`, `timed_out`, `peer_restarted` and `send_failed`;
+    `epoch_changed`, `timed_out`, `peer_restarted` and `send_failed`, but
+    not an end the human asked for (the mismatch action, giving the run
+    up);
   - `bad_reveal` and `out_of_order`, whenever they happen;
   - a run that times out unpaired after the human said that the peer had
-    started (§11.5).
+    started (§11.5);
+  - instance labels that don't mirror (§11.5).
 - An `epoch_changed` warning names the member whose MLS commit ended the
   run.
 - X keeps a count of warnings per group and peer identity in its encrypted
@@ -1871,9 +1902,15 @@ and only the human's own start answers it.
 
 - Ceremony messages don't count against the §10.2 rates. A receiver
   accepts at most 12 per minute from each sending instance, separately
-  from the per-identity and group caps, and drops the rest. Only ceremony
-  messages addressed to the receiver (§11.2) count; the others are ignored
-  anyway. A command with its 3 restarts sends at most 8.
+  from the per-identity and group caps, and drops the rest. The instance is
+  named with its identity: an `instance_id` is unique only within an
+  identity (§9.2), so another member can't use up a peer's budget by
+  certifying an instance with the same id. Only ceremony messages
+  addressed to the receiver (§11.2) count; the others are ignored anyway.
+  A command with its 3 restarts sends at most 8, and a cancel each.
+- Every state an instance keeps per sending instance, the held commitment
+  and the budget, is keyed by the instance's identity and `instance_id`
+  together.
 - In each group an instance keeps at most one held commitment per sending
   instance and one run per peer identity, so its state is bounded by the
   group size.
@@ -1900,9 +1937,10 @@ sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6)
     shown as `NNNN-NNNN-NNNN`.
 - **Instance labels.** The code is shown with two labels: the first 8 hex
   characters of X's own `instance_id` and of `i`'s. They aren't part of
-  the code and add no strength against an attacker in the middle, which
-  chooses its own `instance_id`s. They let two humans see that they are
-  reading the codes of the same run when replicas take part.
+  the code. An attacker in the middle chooses its own `instance_id`s: with
+  them, the labels of the two views don't mirror; with copies of the real
+  ones, they mirror and the codes differ. Either way the humans see it,
+  since labels that don't mirror count as codes that differ (§11.5).
 - **Length.** The codes keep these lengths. An attacker in the middle wins
   one run with probability 2^-42 (about 2.3 × 10^-13) when the humans
   compare emoji, and 2^-39 (about 1.8 × 10^-12) when they compare the
@@ -1953,9 +1991,16 @@ sas_bytes = HKDF-SHA256(ikm = epoch_authenticator, salt = group_id, info, L = 6)
     the way an attacker in the middle ends a run it can't win, with the
     member whose commit ended it;
   - at a warning count of 2: the stop of §11.3 and the mismatch action.
-- **Labels that don't match.** If the labels read out don't match, the two
-  humans are comparing different runs. Neither answer applies, and they
-  start again.
+- **Both questions, always.** The implementation asks whether the other
+  human reads the same code and whether they read the same two labels the
+  other way round. Neither question ends the comparison without a result.
+- **Labels that don't mirror** count as a warning (§11.3). The
+  implementation asks for the two labels the other human reads. They are
+  treated as codes that differ, unless both name instances in X's view:
+  the other human's own label one of Y's instances, and their peer label
+  one of X's own identity's instances. Only then are they two runs of
+  replicas paired crosswise: no answer is recorded, and the humans start
+  again, naming the instance to compare with.
 - **"Codes differ" is always acted on.** For any run whose code was shown,
   an implementation MUST accept the answer "the codes differ" and act on
   it, whatever has happened since: an epoch change, an abort, or a timeout.
@@ -2049,8 +2094,9 @@ run pairs only with M in view 1 and B's only with M in view 2.
    identity key.
 5. **A lost run is seen.** M knows both codes before it reveals, so it
    knows which runs it loses. Every way out is visible:
-   - letting both runs finish shows two different codes, and the "differ"
-     answer is acted on even if M then commits (§11.5);
+   - letting both runs finish shows two different codes, or, with M's own
+     instance ids, labels that don't mirror; both are acted on as codes
+     that differ, even if M then commits (§11.5);
    - aborting after the honest instance's reveal (withholding, committing,
      restarting) is a warning, and two of them with one peer stop further
      runs and offer the mismatch action (§11.3);
@@ -2145,8 +2191,20 @@ Implementations in this repository MUST have:
   - an answered commitment is in the store before its reveal is sent, so
     a crash between the two never lets it be answered again;
   - both timeouts, on the fake clock;
-  - a forked view (one attacker in two groups): the codes differ, or the
-    runs never pair;
+  - a forked view (one attacker in two groups), end to end through the
+    CLI on both hosts: it ends with codes that differ or labels that don't
+    mirror, so with the mismatch, never with a silent retry; and a fork of
+    one group by the relay: the runs never pair;
+  - labels that don't mirror: a warning, and the mismatch unless both
+    labels name instances in the local view (replicas paired crosswise);
+  - cancels: a held commitment dropped, a paired run before its reveal
+    aborted with no warning, a cancel after the reveal or from another
+    instance ignored (the run still ends as a warning), and the cancels
+    sent on a restart and on a timeout;
+  - a member that certifies an instance under another member's
+    `instance_id` doesn't use up that member's budget;
+  - a commit of another member's leave that ends a run names that
+    member in the warning;
   - the agent token can't start a run, see a code or receive a run event,
     no ceremony message reaches an adapter, and no event type that agents
     receive carries a code;
@@ -2161,6 +2219,15 @@ Implementations in this repository MUST have:
   real lengths no run in the series matches. Grinding needs the copied
   state, so this test runs in `core`; the harness's malicious relay forks
   a group of real daemons and shows the fork as runs that never pair.
+- **The run's ordering against Mallory's strategies.** A model of the run
+  rules over the real groups (reveal only once paired, check the reveal
+  against the commitment, derive the code only under the run's epoch)
+  plays Mallory's strategies: committing before the honest nonce, choosing
+  its view-2 nonce after Alice's code (the delay race), a reveal that
+  doesn't open its commitment, and committing ahead, then re-deriving from
+  the revealed nonces under the new epoch it ground. The last one would
+  choose the code if a daemon re-derived; the run gives no code. Codes cut
+  to 12 bits match at chance.
 
 ### 11.8 Compatibility
 
