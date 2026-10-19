@@ -369,15 +369,17 @@ class SasService:
             and not run.answered
         )
 
-    def confirm(self, group_id: str, run_id: str) -> str:
+    def confirm(self, group_id: str, run_id: str, peer: str) -> None:
         """**Human-only.** The human read the same code (SPEC 11.5): the peer
         identity is verified at this instance, also after an epoch change
-        within the window. Returns the peer identity."""
+        within the window. ``peer`` must be the run's."""
         e = self._e
         e._group_or_raise(group_id)
         run = self._runs.get(run_id)
         if run is None or run.group_id != group_id:
             raise SasError("not_found", "no such comparison")
+        if run.peer != peer:
+            raise SasError("bad_request", "that comparison was with another member")
         if run.state != "done":
             raise SasError("not_done", "this comparison has no code yet, or it ended without one")
         if not self._answerable(run, self._now()):
@@ -391,7 +393,6 @@ class SasService:
                 raise SasError("not_found", "no such member")
             e.store.set_sas_warnings(group_id, run.peer, 0, [])
         run.answered = True
-        return run.peer
 
     def peer_started(self, group_id: str, run_id: str) -> dict[str, Any]:
         """**Human-only.** The human says the peer started its side: if the

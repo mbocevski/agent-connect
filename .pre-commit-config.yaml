@@ -146,8 +146,9 @@ repos:
         language: system
         entry: uv run --frozen python scripts/hygiene.py files
         types: [text]
-        # Upstream data (it contains a robot emoji entry), kept byte-for-byte.
-        exclude: ^testdata/sas-emoji\.json$
+        # Upstream data (it contains a robot emoji entry), kept byte-for-byte,
+        # and the SAS vectors that render codes with that table's emoji.
+        exclude: ^testdata/(sas-emoji|sas-commit-reveal)\.json$
       - id: no-tool-refs-msg
         name: commit message has no AI-tool attribution
         language: system

@@ -3802,11 +3802,9 @@ class Engine:
             if run is None:
                 raise DaemonError("bad_request", "marking verified needs the run compared")
             try:
-                peer = self.sas.confirm(group_id, run)
+                self.sas.confirm(group_id, run, identity)
             except SasError as e:
                 raise DaemonError(e.code, str(e)) from e
-            if peer != identity:
-                raise DaemonError("bad_request", "that comparison was with another member")
         elif not self.store.set_verified(group_id, identity, False):
             raise DaemonError("not_found", "no such member")
         self._delivery_wake.set()
