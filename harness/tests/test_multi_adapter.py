@@ -30,7 +30,7 @@ from agentconnect.clock import Clock
 from agentconnect.config import Config
 from agentconnect.identity import load_db_key
 from agentconnect.keystore import FileKeystore
-from agentconnect.runtime.engine import DaemonError
+from agentconnect.runtime.engine import HUMAN_EVENTS, DaemonError
 from agentconnect.store import Store
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 
@@ -96,6 +96,8 @@ async def pair(cluster: Cluster, other: RecordingAdapter, **kw: Any) -> tuple[No
     a = await cluster.node(
         "a", adapters=("recording", other.name), make_adapters=extra(other), **kw
     )
+    # An adapter that fails, or never returns, keeps its events.
+    a.events_may_fail = isinstance(other, Stuck | Blackhole)
     b = await cluster.node("b")
     gid = a.daemon.create_group("Team", "Plan the release")
     await a.idle()
@@ -240,6 +242,7 @@ async def test_a_crash_after_one_adapter_heard_of_an_event(
         return [seconds[-1]]
 
     a = await cluster.node("a", adapters=("recording", "second"), make_adapters=make)
+    a.events_may_fail = True  # the failpoint
     b = await cluster.node("b")
     gid = a.daemon.create_group("Team", "Plan the release")
     await a.idle()
@@ -575,6 +578,7 @@ async def test_an_adapter_that_never_returns_from_an_event_holds_up_nothing_else
     ``on_event`` stalls neither the inbound worker nor the other adapters."""
     hole = Blackhole("hole")
     a = await cluster.node("a", adapters=("hole", "recording"), make_adapters=extra(hole))
+    a.events_may_fail = True
     b = await cluster.node("b")
     gid = a.daemon.create_group("Team", "Plan the release")
     await a.idle()
@@ -606,3 +610,68 @@ async def test_settling_runs_when_a_groups_list_changes_not_on_every_wake(
     a.daemon.set_adapters(gid, ["recording"])
     await a.wait(lambda: not a.daemon.store.pending_deliveries())
     assert len(calls) <= 2
+
+
+# -- held messages and the human's events, whatever crashes ------------------------
+
+
+async def test_an_approved_held_message_reaches_an_adapter_that_was_mid_delivery(
+    cluster: Cluster,
+) -> None:
+    """Approving a held message makes an older row pending: an adapter busy
+    with a later message when it is approved still gets it."""
+    gated = Gated()
+    gated.go.set()
+    a, b, gid = await pair(cluster, gated)
+    a.daemon.update_safety(gid, {"require_approval": "inbound"})
+    b.daemon.send_message(gid, {"text": "held"})
+    await a.wait(lambda: len(a.daemon.held_messages()) == 1)
+    (item,) = a.daemon.held_messages()
+    a.daemon.update_safety(gid, {"require_approval": "off"})
+    gated.go.clear()
+    b.daemon.send_message(gid, {"text": "x1"})
+    await gated.wait_for(lambda: gated.waiting == 1, WAIT)  # in flight on x1
+    a.daemon.approve_message(item["hold_id"])
+    gated.go.set()
+    assert await a.wait_texts(gid, 2) == ["x1", "held"]
+    b.daemon.send_message(gid, {"text": "x2"})
+    await gated.wait_for(lambda: len(gated.texts(gid)) == 3, WAIT)
+    assert sorted(gated.texts(gid)) == ["held", "x1", "x2"]
+    await a.wait(lambda: not a.daemon.store.pending_deliveries())
+
+
+RECEIVE_POINTS = ("receive.in_tx", "receive.after_tx", "receive.after_consume")
+
+
+@pytest.mark.parametrize("point", [*RECEIVE_POINTS, "event.after_record", "event.after_notify"])
+async def test_no_human_event_reaches_an_adapter_whatever_crashes(
+    cluster: Cluster, point: str
+) -> None:
+    """SPEC 10.2: the human's events (HUMAN_EVENTS) never reach an adapter,
+    also when the runtime crashes between recording an event and handing it
+    over, at any step."""
+    seconds: list[RecordingAdapter] = []
+
+    def make(_config: Config, _clock: Clock) -> list[Adapter]:
+        seconds.append(RecordingAdapter("second"))
+        return [seconds[-1]]
+
+    a = await cluster.node("a", adapters=("recording", "second"), make_adapters=make)
+    b = await cluster.node("b")
+    gid = a.daemon.create_group("Team", "Plan the release")
+    await a.idle()
+    await cluster.invite(a, b, gid)
+    a.daemon.update_safety(gid, {"require_approval": "inbound"})
+    a.daemon.failpoints.arm(point, "crash")
+    b.daemon.send_message(gid, {"text": "held"})
+    if point.startswith("event."):
+        await a.wait(lambda: bool(a.daemon.held_messages()))
+        a.daemon.update(gid)  # an event the adapters do get
+    await until(lambda: point in a.daemon.failpoints.fired)
+    await a.restart()
+    await a.wait(lambda: len(a.daemon.held_messages()) == 1)
+    await a.wait(lambda: not a.daemon.store.unnotified_events())
+    assert [e for e in a.daemon.store.events(0, limit=1000) if e["type"] == "message_held"]
+    told = {e.type for adapter in (a.adapter, *seconds) for e in adapter.events}
+    assert told
+    assert not told & HUMAN_EVENTS

@@ -104,11 +104,14 @@ agent or facade stop the start.
   would without the early ack, and a `queue_overflow` puts the group out
   of sync. The human hears of it (`delivery_stalled`, with the adapters
   that are behind), and of the end (`delivery_resumed`), when what is pending
-  is back under both limits and what the relay kept is acked.
+  is back under both limits and what the relay kept is acked. The limits
+  are per group, so with several groups behind the daemon can keep 64 MiB
+  of pending plaintext for each.
 - **Events go to every adapter**, each told once and in order, from a
   worker of its own: an adapter that is slow, or never returns, holds up
   only its own events. One that fails is told again after a backoff; the
-  others aren't told twice.
+  others aren't told twice. Events and messages are separate streams: an
+  adapter can get a member's message before its `member_joined`.
 - **The Agent Card** that goes to the group is the first one an adapter of
   the list has (the A2A adapter's, from the local agent).
 - **An adapter the runtime doesn't run is skipped.** A listed name the

@@ -2537,10 +2537,12 @@ class Store:
         the agent's own sequence, so the events it may not see leave no gap
         in what it reads."""
         cur = self._db.execute(
-            "INSERT OR IGNORE INTO events (group_id, type, data, at, event_id, agent_seq) "
-            "VALUES (?, ?, ?, ?, ?, CASE WHEN ? THEN "
-            "(SELECT COALESCE(MAX(agent_seq), 0) + 1 FROM events) END)",
-            (group_id, kind, json.dumps(data), now, event_id, int(agent)),
+            "INSERT OR IGNORE INTO events (group_id, type, data, at, event_id, agent_seq, "
+            "notified) VALUES (?, ?, ?, ?, ?, CASE WHEN ? THEN "
+            "(SELECT COALESCE(MAX(agent_seq), 0) + 1 FROM events) END, ?)",
+            # An event the agent may not see is never for an adapter: it is
+            # notified as it is recorded (SPEC 10.2), whatever crashes next.
+            (group_id, kind, json.dumps(data), now, event_id, int(agent), int(not agent)),
         )
         return cur.rowcount == 1
 
@@ -2791,7 +2793,20 @@ class Store:
     def unnotified_groups(self) -> list[str | None]:
         """The groups (``None``: events of no group) with events not every
         adapter has yet."""
-        return [r[0] for r in self._all("SELECT DISTINCT group_id FROM events WHERE notified = 0")]
+        return [
+            r[0]
+            for r in self._all(
+                "SELECT DISTINCT group_id FROM events WHERE notified = 0 AND agent_seq IS NOT NULL"
+            )
+        ]
+
+    def settle_unseen_events(self) -> int:
+        """Mark notified the events the agent may not see that an older
+        database left unnotified: no adapter is ever told of them."""
+        cur = self._db.execute(
+            "UPDATE events SET notified = 1 WHERE notified = 0 AND agent_seq IS NULL"
+        )
+        return int(cur.rowcount)
 
     def unnotified_for(
         self, group_id: str | None, adapter: str, limit: int = 100
@@ -2799,7 +2814,8 @@ class Store:
         """The group's events ``adapter`` hasn't accepted yet, oldest first."""
         rows = self._all(
             "SELECT seq, group_id, type, data, at, event_id FROM events e WHERE notified = 0 "
-            "AND group_id IS ? AND NOT EXISTS (SELECT 1 FROM event_acks a "
+            "AND agent_seq IS NOT NULL AND group_id IS ? "
+            "AND NOT EXISTS (SELECT 1 FROM event_acks a "
             "WHERE a.event_id = e.event_id AND a.adapter = ?) ORDER BY seq LIMIT ?",
             group_id,
             adapter,

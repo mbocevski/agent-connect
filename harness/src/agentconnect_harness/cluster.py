@@ -63,15 +63,26 @@ WAIT = 8.0  # real-time guard for every wait; nothing sleeps
 HANDOVER_TURNS = 100
 
 
-async def handed_over(engines: list[Any]) -> None:
+async def handed_over(nodes: list[Node]) -> None:
     """Let the event workers hand over what was recorded: until no running
-    engine has an event an adapter hasn't accepted, or the turns run out
-    (an adapter that fails keeps its events)."""
+    node has an event an adapter hasn't accepted. If the turns run out, an
+    event worker is stuck: that fails the test, unless the scenario lets
+    the node's adapters fail (``Node.events_may_fail``: an adapter that is
+    down, a held group, a failpoint)."""
     for _ in range(HANDOVER_TURNS):
-        running = [e for e in engines if getattr(e, "running", False)]
-        if not any(e.store.unnotified_events() for e in running):
+        waiting = [
+            n
+            for n in nodes
+            if getattr(n.daemon, "running", False) and n.daemon.store.unnotified_events()
+        ]
+        if not waiting:
             return
         await asyncio.sleep(0)
+    stuck = [n for n in waiting if not n.events_may_fail]
+    if stuck:
+        kinds = sorted({e["type"] for n in stuck for e in n.daemon.store.unnotified_events()})
+        msg = f"an event worker is stuck on {[n.name for n in stuck]}: {kinds}"
+        raise AssertionError(msg)
 
 
 HOSTS = ("daemon", "embedded")
@@ -139,6 +150,8 @@ class Node:
     # Serve the local API as the hosts do (scenarios usually build their own).
     serve_api: bool = False
     starts: int = 0
+    # Its adapters may fail to take events (handed_over doesn't fail the test).
+    events_may_fail: bool = False
     make_adapters: Callable[[Config, Clock], list[Adapter]] | None = None
     # Extra Options seams for every start (e.g. a short door lifetime).
     options: dict[str, Any] = field(default_factory=dict)
@@ -265,7 +278,7 @@ class Node:
                 for pulse in pulses:  # clear before checking: no pulse is lost
                     pulse.clear()
                 if predicate():
-                    await handed_over(engines)
+                    await handed_over(list({id(n): n for n in (self, *self.peers)}.values()))
                     return
                 waits = [asyncio.ensure_future(p.wait()) for p in pulses]
                 try:

@@ -32,7 +32,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   go to every adapter, in order, from a worker per group and adapter, so
   one that is slow or never returns holds up neither inbound processing
   nor the other adapters; one that fails is told again after a backoff.
-  The first adapter with an Agent Card sends it. A listed adapter the
+  They are in order per adapter, not in order with the messages. Events
+  only the human sees (the safety policy's, the knocks, the delivery
+  events) are recorded as handed over, so none reaches an adapter, also
+  after a crash. The first adapter with an Agent Card sends it. A listed adapter the
   runtime doesn't run is skipped with a warning (`adapter_not_registered`);
   a group none of whose listed adapters runs is held instead, never sent
   elsewhere, and the human hears of it (`adapter_unavailable`, then

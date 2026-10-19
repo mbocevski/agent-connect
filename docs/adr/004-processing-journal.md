@@ -213,4 +213,17 @@ changes:
   order per adapter, not from the inbound worker: an adapter whose
   `on_event` is slow or never returns holds up neither the processing of
   inbound frames nor another adapter's events. The event is still recorded
-  in the transaction of its cause, so a crash loses none.
+  in the transaction of its cause, so a crash loses none. An event the
+  agent may not see (the human's, or one of a group hidden from the agent)
+  is recorded as notified in that same transaction, so no worker, retry or
+  crash can hand it to an adapter (SPEC 10.2). What is not kept any more is
+  the order between a group's events and its messages, or between events
+  of no group and a group's: an adapter can get a new member's message
+  before its `member_joined`. Messages are in order per group and adapter,
+  and so are events.
+- **The bound is per group.** The relay mailbox is one per instance, so on
+  a daemon with several groups behind, the pending plaintext it keeps can
+  reach 64 MiB for each of them, each group stopping the early ack at its
+  own limit. A daemon-wide cap would let one group's undelivered
+  messages stall the others' early acks; the per-group bound and the
+  human events were preferred.

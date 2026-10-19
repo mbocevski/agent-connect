@@ -646,6 +646,9 @@ class Engine:
         # Where each (group, adapter) delivery worker got to (a seq), and the
         # adapter list each group's rows were last settled for.
         self._cursors: dict[tuple[str, str], int] = {}
+        # Bumped when an older row of the group becomes pending (an approved
+        # hold): a worker mid-delivery then doesn't move its cursor past it.
+        self._cursor_gen: dict[str, int] = {}
         self._settled: dict[tuple[str, str | None], tuple[str, ...]] = {}
         self._drain_frame = False
         self._drain = DrainBudget()
@@ -694,6 +697,7 @@ class Engine:
         self.adapters.close()
         self._recover()
         self._migrate_group_adapters()
+        self.store.settle_unseen_events()
         held = [g.group_id for g in self.store.groups() if g.status == "active"]
         self._notify_soon([e for group_id in held for e in self._check_held(group_id)])
         # First thing the inbound worker does: finish what a crash left in
@@ -1139,6 +1143,11 @@ class Engine:
         LOG.info("event", type=kind, group=log.hid(group_id), event_id=log.hid(event_id))
         if not new and self.store.event_notified(event_id):
             return None  # regenerated after a crash, and the adapter already has it
+        if agent:
+            # The events worker runs once this code yields, after the
+            # transaction (which never spans an await) has committed; also
+            # when what follows the commit fails before notifying.
+            self._event_wake.set()
         return Event(kind, group_id, data, event_id)
 
     def _notify_soon(self, events: list[Event]) -> None:
@@ -1288,6 +1297,10 @@ class Engine:
                 if adapter.name not in names:
                     return
                 event = Event(row["type"], row["group_id"], row["data"], str(row["event_id"]))
+                if event.type in HUMAN_EVENTS:
+                    # Recorded notified already; never an adapter's (SPEC 10.2).
+                    self.store.mark_notified(event.event_id)
+                    continue
                 view = None if group_id is None else self._view(group_id)
                 try:
                     self.failpoints.hit("event.after_record")
@@ -2617,6 +2630,7 @@ class Engine:
                     self.store.set_inbox_state(row.seq, "pending")
                     for key in [k for k in self._cursors if k[0] == group_id]:
                         del self._cursors[key]
+                    self._cursor_gen[group_id] = self._cursor_gen.get(group_id, 0) + 1
                     if delivery.addressed_to_me:
                         self._triggered(group_id, delivery.hop, delivery.msg_id)
                     self.safety.transcribe(
@@ -2881,6 +2895,24 @@ class Engine:
             await self._ack(msg_id)
         self._notify_soon(events)
 
+    def _framed(self, stored: Delivery, adapter: str) -> Delivery:
+        """A recorded delivery as one adapter gets it now. Trust can change
+        between reception and delivery (a human verified a member
+        meanwhile): it is framed with the current state. One adapter is
+        triggered; the others get it as context."""
+        members = {m.identity: m for m in self.store.members(stored.group_id)}
+        known = members.get(stored.sender.identity)
+        sender = replace(
+            stored.sender,
+            verified=known is not None and known.verified,
+            display_name=stored.sender.display_name if known is None else known.display_name,
+        )
+        delivery = replace(stored, sender=sender, trust_state=self._trust_state(stored.group_id))
+        if delivery.addressed_to_me:
+            mine = self._triggered_adapter(stored.group_id, delivery) == adapter
+            delivery = replace(delivery, addressed_to_me=mine)
+        return delivery
+
     async def _deliver_group(self, group_id: str, adapter: Adapter) -> None:
         """One group's pending deliveries to one adapter, in order, until
         none is left that it can take now; a ``RETRY`` waits out this
@@ -2888,6 +2920,7 @@ class Engine:
         backoff = Backoff(base=1.0, cap=300.0, rng=self.options.backoff_rng)
         key = (group_id, adapter.name)
         while True:
+            gen = self._cursor_gen.get(group_id, 0)
             rows = self.store.pending_deliveries(
                 group_id,
                 limit=DELIVERY_BATCH,
@@ -2903,28 +2936,10 @@ class Engine:
                     return
                 if row.delivery is None or self.store.inbox_row_state(row.seq) != "pending":
                     continue
-                stored = Delivery.from_json(row.delivery)
-                # Trust can change between reception and delivery (a human
-                # verified a member meanwhile): frame with the current state.
-                members = {m.identity: m for m in self.store.members(stored.group_id)}
-                known = members.get(stored.sender.identity)
-                sender = replace(
-                    stored.sender,
-                    verified=known is not None and known.verified,
-                    display_name=stored.sender.display_name
-                    if known is None
-                    else known.display_name,
-                )
-                delivery = replace(
-                    stored, sender=sender, trust_state=self._trust_state(stored.group_id)
-                )
+                delivery = self._framed(Delivery.from_json(row.delivery), adapter.name)
                 view = self._view(delivery.group_id)
                 if view is None:
                     continue
-                if delivery.addressed_to_me:
-                    # One adapter is triggered; the others get it as context.
-                    mine = self._triggered_adapter(group_id, delivery) == adapter.name
-                    delivery = replace(delivery, addressed_to_me=mine)
                 self._keep_card(delivery)
                 try:
                     result = await adapter.deliver(view, delivery.sender, delivery.to, delivery)
@@ -2936,6 +2951,11 @@ class Engine:
                     # Recorded per adapter; done once every adapter has it.
                     if self.store.mark_delivered(row.seq, adapter.name, names):
                         await self._release(group_id)
+                    if self._cursor_gen.get(group_id, 0) != gen:
+                        # An older row became pending meanwhile: read again
+                        # from the start, so it comes next.
+                        delivered += 1
+                        break
                     self._cursors[key] = row.seq
                     backoff.reset()
                     delivered += 1
