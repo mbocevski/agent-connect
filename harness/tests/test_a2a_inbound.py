@@ -255,7 +255,7 @@ async def test_only_the_requester_cancels_the_task(cluster: Cluster) -> None:
         )
         not_a_command = await send(gid, status, to=[b.me], kind="a2a.task_status")
         await b.wait(
-            lambda: adapter._seen.has("m", stranger) and adapter._seen.has("m", not_a_command)
+            lambda: adapter.handled(c.me, stranger) and adapter.handled(a.me, not_a_command)
         )
         assert executor.canceled == []
         await send(gid, convert.cancel_body(task_id), to=[b.me], kind="a2a.task_cancel")

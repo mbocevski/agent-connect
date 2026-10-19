@@ -96,7 +96,7 @@ message is the peer's A2A `Message` with these changes:
 
 | Field | Value |
 |---|---|
-| `messageId` | `ac-<msg_id>`, the same for every redelivery |
+| `messageId` | `ac-` and 22 base64url characters of SHA-256(sender identity, `msg_id`): the same for every redelivery, and different for another sender's message with the same `msg_id` |
 | `contextId` | the group id (base64url) |
 | `taskId` | the peer's `taskId`, only when it names a task the agent runs for this requester in this group |
 | `role` | `ROLE_USER` |
@@ -271,8 +271,9 @@ and rate limits apply to them.
 ## Delivery guarantees
 
 The daemon hands deliveries and events to the adapter at least once
-(ADR-004). The adapter records every `msg_id` and `event_id` it has handled,
-as SHA-256 hashes in `a2a-seen.db` in the data directory (0600, the most
+(ADR-004). The adapter records every message it has handled, by its sender
+and `msg_id` (a `msg_id` is its sender's, so another member can't reuse one
+to hide a message), and every `event_id`, as SHA-256 hashes in `a2a-seen.db` in the data directory (0600, the most
 recent 50,000), and skips repeats, so the agent never sees a message twice.
 If the daemon stops after the agent accepted a message but before the
 adapter recorded it, the agent can get it again with the same `messageId`.
@@ -328,4 +329,4 @@ can't see the prefix. Known differences from a plain A2A server:
 - `GetExtendedAgentCard` isn't supported.
 - A `contextId` other than the group's is refused.
 - The facade's task ids differ from the peer agent's (`remote_task_id`).
-- The `messageId` the peer's agent sees is `ac-<msg_id>`, not the client's.
+- The `messageId` the peer's agent sees is derived from the sender and the `msg_id` (`ac-...`), not the client's.

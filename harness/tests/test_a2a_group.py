@@ -82,7 +82,7 @@ async def test_mention_mode_triggers_only_the_addressed_agent(cluster: Cluster) 
         assert reply.addressed_to_me
         # b saw c's reply too, and wasn't triggered by it.
         b_adapter = a2a_of(b)
-        await b.wait(lambda: b_adapter._seen.has("m", reply.msg_id))
+        await b.wait(lambda: b_adapter.handled(c.me, reply.msg_id))
         assert len(eb.received) == 2
     finally:
         await agent_b.stop()
