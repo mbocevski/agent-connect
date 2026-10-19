@@ -418,8 +418,8 @@ NOTES: dict[str, str] = {
     "audit": (
         "`decision` is `deliver`, `deliver_as_context`, `hold_for_approval`, `drop`, "
         "`approved`, `rejected`, `cancelled` or `expired`. There is never a body. "
-        "`suppressed` counts the security rows a sender sent past its share, per group, "
-        "sender and decision: they are not stored."
+        "`suppressed` counts, per group, sender and decision, the security rows that "
+        "fell between a sender's oldest and newest half of its share: they are not kept."
     ),
     "verify (verified)": "`outcome` is `verified`; `verified` lists the identities marked.",
     "verify (mismatch)": (

@@ -1185,11 +1185,13 @@ class Store:
         """One audit row, in one of four classes that never evict each other
         (:func:`audit_class`).
 
-        * ``security`` rows are never trimmed for volume, only by age
-          (:meth:`audit_purge`). A sender keeps its oldest ``keep_sender`` of
-          them per group and decision; past that, the row is not stored and
-          the sender's count in ``audit_suppressed`` goes up instead. So a
-          flood never erases a sender's earlier record, its own included.
+        * ``security`` rows are trimmed by age (:meth:`audit_purge`), and
+          only a sender's own rows trim its own: of a decision it keeps
+          ``keep_sender`` per group, the oldest half and a rolling newest
+          half (:meth:`_trim_security`), and counts the rows between in
+          ``audit_suppressed``. So no flood erases a sender's earliest
+          record, nobody else's rows push out any of its own, and its
+          latest rows stay visible.
         * ``drop`` and ``routine`` rows keep the newest ``keep_sender`` of
           their class from a sender in a group.
         * ``drop``, ``routine`` and ``decision`` rows each keep
@@ -1197,26 +1199,14 @@ class Store:
           in all.
         """
         row_class = audit_class(group_id, decision, kind, reason)
-        security = row_class == "security"
-        if (
-            security
-            and keep_sender is not None
-            and self._security_full(group_id, sender, decision, keep_sender)
-        ):
-            self._db.execute(
-                "INSERT INTO audit_suppressed (group_id, sender, decision, count, first_at, "
-                "last_at) VALUES (?, ?, ?, 1, ?, ?) "
-                "ON CONFLICT(group_id, sender, decision) "
-                "DO UPDATE SET count = count + 1, last_at = excluded.last_at",
-                (group_id, sender, decision, at, at),
-            )
-            return
         self._db.execute(
             "INSERT INTO audit (group_id, at, direction, sender, msg_id, kind, size, decision, "
             "reason, class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (group_id, at, direction, sender, msg_id, kind, size, decision, reason, row_class),
         )
-        if security:
+        if row_class == "security":
+            if keep_sender is not None:
+                self._trim_security(group_id, sender, decision, keep_sender)
             return
         if keep_sender is not None and row_class != "decision":
             self._trim_audit(
@@ -1229,18 +1219,39 @@ class Store:
         if keep is not None:
             self._trim_audit("class = ?", (row_class,), keep)
 
-    def _security_full(self, group_id: str, sender: str, decision: str, keep: int) -> bool:
-        """Whether the sender already has ``keep`` security rows of this
-        decision in the group (an indexed walk of at most ``keep``)."""
-        row = self._one(
-            "SELECT 1 FROM audit WHERE group_id = ? AND sender = ? AND decision = ? "
-            "AND class = 'security' LIMIT 1 OFFSET ?",
+    def _trim_security(self, group_id: str, sender: str, decision: str, keep: int) -> None:
+        """Past ``keep`` security rows of one decision from a sender in a
+        group, delete the oldest row after its oldest half (which stays until
+        it ages out) and count it in ``audit_suppressed``, so the newest
+        half rolls. Two indexed walks of at most ``keep`` rows."""
+        where = "group_id = ? AND sender = ? AND decision = ? AND class = 'security'"
+        over = self._one(
+            f"SELECT 1 FROM audit WHERE {where} LIMIT 1 OFFSET ?",  # noqa: S608
             group_id,
             sender,
             decision,
-            keep - 1,
+            keep,
         )
-        return row is not None
+        if over is None:
+            return
+        gap = self._one(
+            f"SELECT seq, at FROM audit WHERE {where} ORDER BY seq LIMIT 1 OFFSET ?",  # noqa: S608
+            group_id,
+            sender,
+            decision,
+            (keep + 1) // 2,
+        )
+        if gap is None:
+            return
+        self._db.execute("DELETE FROM audit WHERE seq = ?", (gap[0],))
+        self._db.execute(
+            "INSERT INTO audit_suppressed (group_id, sender, decision, count, first_at, "
+            "last_at) VALUES (?, ?, ?, 1, ?, ?) "
+            "ON CONFLICT(group_id, sender, decision) "
+            "DO UPDATE SET count = count + 1, first_at = MIN(first_at, excluded.first_at), "
+            "last_at = MAX(last_at, excluded.last_at)",
+            (group_id, sender, decision, gap[1], gap[1]),
+        )
 
     def _trim_audit_fairly(self, group_id: str, row_class: str, keep: int) -> None:
         """Keep at most ``keep`` of a group's rows of a class. Past that, the
@@ -1311,8 +1322,9 @@ class Store:
         return [dict(zip(self._AUDIT_COLUMNS, r, strict=True)) for r in rows]
 
     def audit_suppressed(self, group_id: str | None = None) -> list[dict[str, Any]]:
-        """Security rows a sender sent past its share (:meth:`audit_add`),
-        counted instead of stored: per group, sender and decision."""
+        """Security rows that fell between a sender's oldest and newest half
+        of its share (:meth:`_trim_security`), counted instead of kept: per
+        group, sender and decision."""
         rows = self._all(
             "SELECT group_id, sender, decision, count, first_at, last_at FROM audit_suppressed "
             "WHERE (? IS NULL OR group_id = ?) ORDER BY group_id, sender, decision",

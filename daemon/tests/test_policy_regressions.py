@@ -1009,7 +1009,8 @@ def test_a_flooder_cant_erase_its_own_injection(policy: SafetyPolicy, store: Sto
     """A busy group at its cap: ten members with 100 messages each, then
     Mallory's injection is delivered and Mallory floods with more messages
     than the group holds. Its injection, and every other member's row,
-    stay; Mallory's own messages past its share are counted, not kept."""
+    stay; Mallory keeps its oldest half share and its newest half, and the
+    messages between are counted, not kept."""
     policy.audit_group_rows, policy.audit_sender_rows = 1000, 100
     meta: dict[str, Any] = {"kind": "a2a.message", "size": 10}
     for i in range(100):
@@ -1023,8 +1024,8 @@ def test_a_flooder_cant_erase_its_own_injection(policy: SafetyPolicy, store: Sto
     kept = ids(store)
     assert "inject" in kept
     assert {f"m{s}-{i}" for s in range(10) for i in range(100)} <= kept
-    assert {f"x{n}" for n in range(99)} <= kept
-    assert f"x{99}" not in kept
+    mine = [r["msg_id"] for r in store.audit(G, limit=10_000) if r["sender"] == MALLORY]
+    assert mine == ["inject", *(f"x{n}" for n in range(49)), *(f"x{n}" for n in range(1450, 1500))]
     (counted,) = store.audit_suppressed(G)
     assert (counted["sender"], counted["decision"], counted["count"]) == (MALLORY, "deliver", 1401)
 
@@ -1086,9 +1087,10 @@ def test_a_flood_of_routine_rows_keeps_every_other_row(policy: SafetyPolicy, sto
 def test_a_senders_security_rows_past_its_share_are_counted(
     policy: SafetyPolicy, store: Store, fake_clock: FakeClock
 ) -> None:
-    """A sender keeps its oldest share of security rows per decision; the
-    rest are counted (when, how many), and a share of one decision doesn't
-    use up another's."""
+    """A sender keeps the oldest half of its share of security rows per
+    decision and a rolling newest half; the rows between are counted (how
+    many, from when to when), and a share of one decision doesn't use up
+    another's."""
     policy.audit_sender_rows = 100
     meta: dict[str, Any] = {"sender": MALLORY, "kind": "a2a.message", "size": 10}
     first = fake_clock.unix_millis() // 1000
@@ -1098,18 +1100,41 @@ def test_a_senders_security_rows_past_its_share_are_counted(
     for i in range(3):
         policy.audit(G, "in", msg_id=f"bad{i}", decision="drop", reason="malformed", **meta)
     kept = [r["msg_id"] for r in store.audit(G, limit=10_000)]
-    assert kept == [*(f"d{i}" for i in range(100)), "bad0", "bad1", "bad2"]
+    assert kept == [
+        *(f"d{i}" for i in range(50)),
+        *(f"d{i}" for i in range(100, 150)),
+        "bad0",
+        "bad1",
+        "bad2",
+    ]
     assert store.audit_suppressed(G) == [
         {
             "group_id": G,
             "sender": MALLORY,
             "decision": "deliver",
             "count": 50,
-            "first_at": first + 100,
-            "last_at": first + 149,
+            "first_at": first + 50,
+            "last_at": first + 99,
         }
     ]
     assert store.audit_suppressed("other") == []
+
+
+def test_filler_before_an_injection_doesnt_keep_it_out_of_the_log(
+    policy: SafetyPolicy, store: Store
+) -> None:
+    """A sender that fills its whole share with harmless messages first
+    still has its injection stored: the newest half of the share rolls."""
+    meta: dict[str, Any] = {"sender": MALLORY, "kind": "a2a.message", "size": 10}
+    for i in range(policy.audit_sender_rows):
+        policy.audit(G, "in", msg_id=f"filler{i}", decision="deliver", **meta)
+    policy.audit(G, "in", msg_id="inject", decision="deliver", **meta)
+    kept = ids(store)
+    assert "inject" in kept
+    assert "filler0" in kept, "the earliest stay"
+    assert len(kept) == policy.audit_sender_rows
+    (counted,) = store.audit_suppressed(G)
+    assert counted["count"] == 1
 
 
 SECURITY_ROWS = [

@@ -459,16 +459,27 @@ classes that never push each other out:
 | routine | the other deliveries, which carry no content and change nothing: an unchanged Agent Card, `control.leave`, `control.capabilities` |
 | drops | every other refusal: over a rate or a size, a full held queue, a task waiting for your decision, a join request or a knock refused, and so on |
 
-**Security rows are never trimmed for volume**, only by age. Each sender
-keeps its oldest `policy.audit_max_rows_per_sender` (2000) security rows
-per group and decision. Past that, a new one isn't stored: the sender's
-count for that decision goes up instead, with the time of the first and
-the last row it didn't keep (`suppressed` in `GET /v0/audit`, "not kept"
-in `agentconnect audit`). So no flood, by the sender or by anyone else,
-erases a row that is already in the log: the record of what an injection
-got through survives the flood that follows it, and so does the human's
-decision on another member's held message. The cost is that a busy sender
-past its share is counted, not listed, until its oldest rows age out.
+**Nobody else's rows trim a sender's security rows**, and age does. Each
+sender keeps `policy.audit_max_rows_per_sender` (2000) security rows per
+group and decision: its oldest half, which stays until it ages out, and a
+rolling newest half. When a new row comes past that, the oldest row after
+the oldest half goes, and the sender's count for that decision goes up,
+with the time of the first and the last row it didn't keep (`suppressed`
+in `GET /v0/audit`, "not kept" in `agentconnect audit`). So no flood
+erases a sender's earliest rows or another member's, the record of what
+an injection got through survives a flood by anyone else, and a sender's
+latest rows, an injection sent after a filler of harmless messages
+included, are stored. What a sender can still do is push its own rows out
+of the middle of the log with a flood of its own of the same decision:
+they are then only counted.
+
+These rows are bounded per admitted sender, not per group: each member's
+identity brings its own share per decision, and the group's cap doesn't
+apply. A group of 50 members can therefore hold 50 shares. Admitting a
+member takes your approval (or `policy.auto_approve` and an invite you
+created), so the total grows with whom you let in: a multi-use invite to
+many joiners raises it by one share per joiner. Replicas of one identity
+share one.
 
 The other classes are trimmed for volume. A new drop or routine row keeps
 one sender's rows of its class in a group to their newest

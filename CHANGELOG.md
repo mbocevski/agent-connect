@@ -1209,11 +1209,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   human's approval of its held message. Audit rows now come in four
   classes. `security` rows (content delivered to the agent or sent by it,
   a changed Agent Card's text, holds and their outcomes, and refusals of
-  what a sender may not do) are never trimmed for volume, only by
-  `policy.audit_retention_days`: each sender keeps its oldest
-  `policy.audit_max_rows_per_sender` per group and decision, and the rest
-  are counted (`suppressed` in `GET /v0/audit`, "not kept" in
-  `agentconnect audit`). `decision` rows (controls that change state,
+  what a sender may not do) are trimmed only by age and by the sender's
+  own rows: each sender keeps `policy.audit_max_rows_per_sender` per group
+  and decision, its oldest half and a rolling newest half, and the rows
+  between are counted (`suppressed` in `GET /v0/audit`, "not kept" in
+  `agentconnect audit`). They are bounded per admitted sender, not per
+  group. `decision` rows (controls that change state,
   task cancels), `routine` rows (unchanged cards, leave notices,
   capabilities) and drops keep the group's cap each, the senders holding
   the most giving way first, and 100000 rows each daemon-wide. A changed
