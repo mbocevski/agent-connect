@@ -15,7 +15,9 @@ from typing import Any
 import pytest
 
 import agentconnect_core as ac
+from agentconnect.relay import RelayError
 from agentconnect.runtime.engine import DaemonError
+from agentconnect.runtime.groups import membership_events
 from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
 from agentconnect_harness.proxy import Frame, RelayProxy
 
@@ -443,7 +445,7 @@ async def test_only_the_owners_first_instance_in_sync_drops_departed_roles(
     ghost = ac.Identity._generate_for_testing(rng.getrandbits(63)).id  # named, never joined
     assert a.daemon.set_policy(gid, admins=[ghost]) == "committing"
     await converged([a, b], gid)
-    gone = {"removed": [{"identity": ghost}]}
+    gone = {"removed": [{"identity": ghost}], "epoch": a.epoch(gid)}
     b.daemon.groups._follow_policy(gid, gone)  # not the owner's
     assert b.daemon.store.outbox() == []
     await a.daemon.mark_out_of_sync(gid, "commit_rejected")
@@ -524,3 +526,226 @@ async def test_the_view_shows_the_policy_the_floor_and_new_instances(cluster: Cl
     assert info["pending_leaves"] == []
     me = next(m for m in info["members"] if m["self"])
     assert [i["joined_epoch"] for i in me["instances"]] == [0]
+
+
+# -- review 52 regressions --------------------------------------------------------------------
+
+Cut = Callable[[Node], Awaitable[None]]
+
+
+def member_view(node: Node, gid: str, identity: str) -> dict[str, Any]:
+    return next(m for m in node.daemon.group_info(gid)["members"] if m["identity"] == identity)
+
+
+async def test_a_leaf_repeating_an_instance_id_never_passes_for_that_instance(
+    cluster: Cluster,
+) -> None:
+    """F1: the core refuses a commit that repeats an instance id (SPEC 9.2),
+    and the runtime doesn't take such a leaf for the instance either: its
+    first epoch, the new-since-verified flag and the events go by id and
+    mailbox. (The twin is fed in as the core's member list would show it.)"""
+    a = await cluster.node()
+    gid = a.daemon.create_group("View", "Twin instance")
+    await a.idle()
+    b, c = await cluster.node(), await cluster.node()
+    await cluster.invite(a, b, gid)
+    a.daemon.mark_verified(gid, b.me)
+    await cluster.invite(a, c, gid)  # a later epoch
+    real = a.daemon.client
+    src = next(m for m in real.members(raw(gid)) if m["identity"] == b.me)
+    twin = {**src, "leaf_index": 7, "mailbox_id": "twin-mailbox"}
+
+    class WithTwin:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real, name)
+
+        def members(self, g: bytes) -> list[dict[str, Any]]:
+            return [*real.members(g), twin]
+
+    a.daemon.client = WithTwin()  # ty: ignore[invalid-assignment]
+    try:
+        a.daemon.groups.refresh(gid)
+        bob = member_view(a, gid, b.me)
+        events = membership_events(
+            {"committer": {"identity": a.me}, "added": [twin], "removed": []},
+            a.daemon.client.members(raw(gid)),
+        )
+    finally:
+        a.daemon.client = real
+    epochs = sorted((i["leaf_index"], i["joined_epoch"]) for i in bob["instances"])
+    assert epochs == [(src["leaf_index"], 1), (7, a.epoch(gid))]
+    assert bob["instances_since_verified"] == [src["instance_id_hex"]]
+    assert [k for k, _ in events] == ["instance_joined"]
+
+
+async def test_a_verification_from_before_the_upgrade_is_unknown(cluster: Cluster) -> None:
+    """F3: a member verified by a daemon that didn't record the epoch: what
+    joined since can't be told, so the view says unknown (null), not "none"."""
+    a = await cluster.node()
+    gid = a.daemon.create_group("View", "Legacy verification")
+    await a.idle()
+    b = await cluster.node()
+    await cluster.invite(a, b, gid)
+    a.daemon.mark_verified(gid, b.me)
+    # What the store's migration leaves for a row an older daemon verified.
+    a.daemon.store._db.execute("UPDATE members SET verified_epoch = NULL")
+    b2 = await cluster.node(identity_of=b)
+    await cluster.invite(a, b2, gid)
+    bob = member_view(a, gid, b.me)
+    assert (bob["verified"], bob["instances_since_verified"]) == (True, None)
+    a.daemon.mark_verified(gid, b.me, epoch=a.epoch(gid))
+    assert member_view(a, gid, b.me)["instances_since_verified"] == []
+
+
+async def test_a_departed_admin_back_before_the_owner_saw_it_go_loses_the_role(
+    cluster: Cluster, partition: Cut, heal: Cut
+) -> None:
+    """F4(a): an admin removed and added again while the owner was offline is
+    present when the owner builds the cleanup. It departed all the same: its
+    instances are newer than the departure, so the role goes."""
+    a = await cluster.node()
+    gid = a.daemon.create_group("Roles", "Back before the owner looked")
+    await a.idle()
+    b, c = await cluster.node(), await cluster.node()
+    for joiner in (b, c):
+        await cluster.invite(a, joiner, gid)
+    assert a.daemon.change_policy(gid, {"invite": "admins", "remove": "admins"}) == "committing"
+    await converged([a, b, c], gid)
+    for who in (b, c):
+        assert a.daemon.set_role(gid, who.me, "admin") == "committing"
+        await converged([a, b, c], gid)
+    await partition(a)
+    b.daemon.remove_member(gid, c.me)
+    await c.wait(lambda: status(c, gid) == "removed")
+    back = await cluster.node(identity_of=c)
+    await cluster.invite(b, back, gid, approve=False)
+    await back.wait(lambda: back.daemon.store.group(gid) is not None)
+    await heal(a)
+    await a.wait(lambda: c.me not in policy(a, gid)["admins"])
+    await converged([a, b, back], gid)
+    assert policy(back, gid)["admins"] == [b.me]
+    assert member_view(b, gid, c.me)["role"] == "member"
+    assert data(a, "commit_failed") == []
+    # Granted again on purpose, it keeps the role.
+    assert a.daemon.set_role(gid, c.me, "admin") == "committing"
+    await converged([a, b, back], gid)
+    assert a.daemon.groups._departed(gid) == {}
+    assert c.me in policy(b, gid)["admins"]
+
+
+async def test_a_role_for_a_member_gone_before_the_build_is_not_given(
+    group: GroupFixture, partition: Cut, heal: Cut, advance: Callable[[float], Awaitable[None]]
+) -> None:
+    """F4(b): a role asked for while the owner was offline, for a member that
+    left before the commit was built, is refused as it is built."""
+    (a, b, c), gid = await group(3)
+    await partition(a)
+    assert a.daemon.set_role(gid, c.me, "admin") == "committing"
+    assert await c.daemon.leave(gid) == "leaving"
+    await b.wait(lambda: len(b.daemon.client.pending_leaves(raw(gid))) == 1)
+    for _ in range(3):  # a, the lowest leaf, is away: b commits after the grace
+        await advance(60)
+        if status(c, gid) == "left":
+            break
+    await c.wait(lambda: status(c, gid) == "left")
+    await heal(a)
+    await a.wait(lambda: bool(data(a, "commit_failed")))
+    await converged([a, b], gid)
+    assert data(a, "commit_failed") == [{"intent": "role", "code": "not_permitted"}]
+    assert c.me not in policy(b, gid)["admins"]
+
+
+async def test_a_legacy_whole_policy_row_changes_only_require_verified(
+    group: GroupFixture,
+) -> None:
+    """F5: a row an older daemon queued holds the whole policy it cached;
+    only require_verified (the one change such a row could carry) is
+    applied, so a transfer that landed meanwhile stays."""
+    (a, b, c), gid = await group(3)
+    stale = {**policy(b, gid), "require_verified": True}  # cached while a was the owner
+    assert a.daemon.transfer_ownership(gid, b.me, keep_admin=False) == "committing"
+    await converged([a, b, c], gid)
+    b.daemon._enqueue("commit", gid, {"intent": {"type": "policy", "policy": stale}})
+    await converged([a, b, c], gid)
+    p = policy(c, gid)
+    assert (p["owner"], p["admins"], p["require_verified"]) == (b.me, [], True)
+
+
+async def test_an_add_whose_welcome_is_on_its_way_counts_once(
+    cluster: Cluster, malicious_relay: Proxy
+) -> None:
+    """F6: between an Add's merge and its Welcome the joiner is a member and
+    its approval still `approving`: it counts once, so at max_members - 1
+    the next join is approved."""
+    a = await cluster.node()
+    gid = a.daemon.create_group("Small", "Room for four", {"max_members": 4})
+    await a.idle()
+    b = await cluster.node()
+    await cluster.invite(a, b, gid)
+    held: list[Frame] = []
+
+    def hold_welcomes(frame: Frame) -> list[Frame]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "send" and env.get("kind") == "welcome_wrapped" and not held:
+            held.append(frame)
+            return []
+        return [frame]
+
+    malicious_relay(a).client_filters.append(hold_welcomes)
+    url = (await a.daemon.create_invite(gid, max_uses=2))["url"]
+    c, d = await cluster.node(), await cluster.node()
+    await c.daemon.accept_invite(url)
+    await until(lambda: bool(held))
+    assert len(a.daemon.client.members(raw(gid))) == 3
+    assert a.daemon.groups.room(gid) == 1
+    await d.daemon.accept_invite(url)
+
+    def decided() -> list[str]:
+        return [x["status"] for x in a.daemon.store.approvals("approving") if x["identity"] == d.me]
+
+    # Auto-approved (it would wait for the human, refused `group_full`, if
+    # c counted twice); its Add queues behind c's Welcome.
+    await a.wait(lambda: decided() == ["approving"])
+    assert a.daemon.join_approvals() == []
+
+
+async def test_a_revocation_the_relay_refuses_for_now_is_tried_again(
+    group: GroupFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    advance: Callable[[float], Awaitable[None]],
+) -> None:
+    """F7: the timer tries a closed invite's revocation again, after a
+    backoff, when the relay answered `rate_limited` or `internal`, with
+    no other wake-up."""
+    (a, b), gid = await group(2)
+    assert a.daemon.change_policy(gid, {"invite": "members"}) == "committing"
+    await converged([a, b], gid)
+    made = await b.daemon.create_invite(gid)
+    calls: list[str] = []
+    real = b.daemon.rest.revoke_invite
+
+    async def refuse_twice(invite_id: str) -> None:
+        calls.append(invite_id)
+        if len(calls) == 1:
+            raise RelayError("rate_limited", "slow down")
+        if len(calls) == 2:
+            raise RelayError("internal", "try later")
+        await real(invite_id)
+
+    monkeypatch.setattr(b.daemon.rest, "revoke_invite", refuse_twice)
+    assert a.daemon.change_policy(gid, {"invite": "owner"}) == "committing"
+    await converged([a, b], gid)
+
+    def revoked() -> bool:
+        invite = b.daemon.store.invite(made["invite_id"])
+        return invite is not None and str(invite["status"]) == "revoked"
+
+    # Small steps: the relay checks signed requests against its own clock.
+    for _ in range(20):
+        await until(lambda: bool(calls))
+        if revoked():
+            break
+        await advance(5)
+    await b.wait(revoked)
+    assert len(calls) == 3
+    assert (await b.daemon.rest.invite_meta(made["invite_id"]))["status"] == "revoked"

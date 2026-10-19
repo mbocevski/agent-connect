@@ -424,6 +424,13 @@ def test_groups_show_flags_new_instances_pending_leaves_and_the_floor(fake: Fake
     assert conforms(view, SCHEMAS["groups show"])
     assert [i["new_since_verified"] for i in view["members"][1]["instances"]] == [False, True]
     assert view["pending_leaves"] == info["pending_leaves"]
+    # Verified before the daemon recorded the epoch: unknown (review 52 F3).
+    bob["instances_since_verified"] = None
+    out = fake.run("groups", "show", GID).stdout
+    assert out.count("unknown: verify again") == 2
+    _, view = fake.json("groups", "show", GID)
+    assert conforms(view, SCHEMAS["groups show"])
+    assert [i["new_since_verified"] for i in view["members"][1]["instances"]] == [None, None]
 
 
 def test_unknown_and_ambiguous_group(fake: Fake) -> None:
@@ -449,6 +456,19 @@ def test_approvals_list_shows_fingerprint_and_sas(fake: Fake) -> None:
     assert conforms(data, SCHEMAS["approvals list"])
     fake.routes["GET /v0/approvals"] = {"approvals": []}
     assert "No pending" in fake.run("approvals", "list").stdout
+
+
+def test_requests_that_claim_one_identity_say_so(fake: Fake) -> None:
+    """Review 52 F2: the human sees that several requests claim the
+    identity, and chooses."""
+    assert "requests claim" not in fake.run("approvals").stdout
+    twice = [{**APPROVAL, "request_id": r, "identity_requests": 2} for r in ("r1", "r2")]
+    fake.routes["GET /v0/approvals"] = {"approvals": twice}
+    out = " ".join(fake.run("approvals").stdout.split())
+    assert out.count("2 requests claim this identity") == 2
+    _, data = fake.json("approvals", "list")
+    assert conforms(data, SCHEMAS["approvals list"])
+    assert [a["identity_requests"] for a in data["approvals"]] == [2, 2]
 
 
 def test_approve_uses_the_human_token_and_confirms(fake: Fake) -> None:
@@ -494,7 +514,8 @@ def test_verify_yes_marks_every_other_member(fake: Fake) -> None:
     result = fake.run("verify", GID, input="y\n")
     assert result.exit_code == 0, result.output
     assert "Do the other members see exactly this code? [y/N]" in result.stdout
-    assert fake.posts("/verify")[0] == (True, {"verified": True})
+    # The epoch whose code was shown goes with the answer (SPEC 11).
+    assert fake.posts("/verify")[0] == (True, {"verified": True, "epoch": 1})
     code, out = fake.json("verify", GID, input="y\n")
     assert (code, out) == (0, {"outcome": "verified", "group_id": GID, "verified": [BOB]})
     assert conforms(out, SCHEMAS["verify (verified)"])

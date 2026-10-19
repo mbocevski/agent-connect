@@ -1290,3 +1290,128 @@ fn a_commit_with_a_non_canonical_policy_encoding_is_rejected() {
         );
     }
 }
+
+/// A client of identity `id` whose instance certificate repeats the
+/// `instance_id` of `of` with a fresh key: what anyone holding `id`'s IK can
+/// sign (SPEC §9.4).
+fn twin_of(id: &Identity, of: &C, label: &str, clock: &Arc<FakeClock>) -> C {
+    let fresh = id
+        .create_instance(
+            &Rng::for_test(&format!("group-mode-{label}")),
+            clock.as_ref(),
+        )
+        .unwrap();
+    let mut cert = fresh.cert().clone();
+    cert.instance_id = of.instance().instance_id();
+    cert.sig = id.sign(&cert.signing_input().unwrap());
+    let secret: serde_json::Value =
+        serde_json::from_slice(&fresh.to_secret_bytes().unwrap()).unwrap();
+    let forged = serde_json::to_vec(&serde_json::json!({
+        "cert": String::from_utf8(cert.to_json().unwrap()).unwrap(),
+        "sk": secret["sk"],
+        "v": 0,
+    }))
+    .unwrap();
+    Client::new(
+        MemoryStore::new(),
+        Rng::for_test(&format!("group-mode-{label}-client")),
+        crate::identity::Instance::from_secret_bytes(&forged).unwrap(),
+        clock.clone(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_repeated_instance_id_is_refused_by_the_committer_and_every_member() {
+    let clock = Arc::new(FakeClock::default());
+    let x = identity("twin-x");
+    let mut m = Members::new(client("twin-a", &clock), None);
+    m.join(0, client("twin-b", &clock));
+    m.join(0, instance_of(&x, "twin-x1", &clock));
+    let twin = twin_of(&x, &m.cs[2], "twin-x2", &clock);
+    assert_eq!(
+        twin.instance().instance_id(),
+        m.cs[2].instance().instance_id()
+    );
+
+    // The committer refuses to build it.
+    let inv = Invite::create(
+        m.cs[0].rng(),
+        m.cs[0].clock(),
+        "r.example",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = twin.create_join_request(inv.secret(), "j").unwrap();
+    let v = m.cs[0].verify_join_request(&req, &inv).unwrap();
+    assert_eq!(
+        m.gs[0].add_member(&m.cs[0], &v, &inv, true).map(|_| ()),
+        Err(Error::Unauthorized(REPEATED_INSTANCE))
+    );
+    assert!(!m.gs[0].has_pending_commit());
+    m.converged();
+
+    // Every member rejects it from a committer that skipped the check, and
+    // only that committer moves on (its SAS shows the fork).
+    m.rejected(
+        0,
+        &[key_package(&twin)],
+        &[],
+        None,
+        None,
+        &Error::Unauthorized(REPEATED_INSTANCE),
+    );
+}
+
+#[test]
+fn an_instance_added_again_after_its_leaf_went_is_accepted() {
+    let clock = Arc::new(FakeClock::default());
+    let x = identity("again-x");
+    let mut m = Members::new(client("again-a", &clock), None);
+    m.join(0, instance_of(&x, "again-x1", &clock));
+    m.join(0, instance_of(&x, "again-x2", &clock));
+    let x1_leaf = m.gs[1].own_leaf_index();
+
+    // The same commit removes X1's leaf and adds X1 again (a fresh
+    // KeyPackage of the same instance).
+    let again = key_package(&m.cs[1]);
+    let out = m.gs[0]
+        .commit_unchecked(&m.cs[0], &[again], &[x1_leaf], None, None)
+        .unwrap();
+    assert!(matches!(
+        m.gs[2].process(&m.cs[2], &out.commit),
+        Ok(Event::Commit(_))
+    ));
+    let ids = |g: &Group| -> Vec<u64> {
+        let mut ids: Vec<u64> = g
+            .members()
+            .unwrap()
+            .iter()
+            .map(|mm| mm.instance_id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(ids(&m.gs[0]), ids(&m.gs[2]));
+    assert_eq!(m.gs[0].members().unwrap().len(), 3);
+
+    // In a later commit, after its leaf went in an earlier one.
+    let mut m = Members::new(client("later-a", &clock), None);
+    m.join(0, instance_of(&x, "later-x1", &clock));
+    m.join(0, instance_of(&x, "later-x2", &clock));
+    let leaf = m.gs[1].own_leaf_index();
+    let out = m.gs[2].remove_instances(&m.cs[2], &[leaf]).unwrap();
+    m.apply(2, &out);
+    let back = m.cs.remove(1);
+    m.gs.remove(1).delete(&back).unwrap();
+    m.join(0, back);
+    let x_ids: Vec<u64> = m.gs[0]
+        .members()
+        .unwrap()
+        .iter()
+        .filter(|mm| mm.identity == m.id(1))
+        .map(|mm| mm.instance_id)
+        .collect();
+    assert_eq!(x_ids.len(), 2);
+    assert_ne!(x_ids[0], x_ids[1]);
+}

@@ -91,7 +91,8 @@ What works on `main` today:
   committed it. The owner's human changes roles and the policy and hands
   ownership over; each change is checked by the core before it is queued
   and kept when another member's change lands first. Departed admins lose
-  their role, and multi-use invites cap the requests waiting per joiner
+  their role. Multi-use invites cap the requests waiting per invite and per
+  claimed identity, and show the human when several claim one identity
   ([docs/groups.md](docs/groups.md)).
   <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It

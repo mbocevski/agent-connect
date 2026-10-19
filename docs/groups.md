@@ -82,12 +82,19 @@ Two things follow a merged commit on every member:
 Roles name identities, not instances. An admin that leaves would otherwise
 stay listed, and get its role back if it rejoined. So when a commit removes
 the last instance of an identity listed in `admins` or as
-`floor_moderator`, the owner's lowest instance commits a policy change that
-only drops it from those roles (SPEC
-[§9.2](../SPEC.md#92-authorisation-of-commits), "Departed roles"). Every
-member reports `role_changed` from `admin` to `member` for it. The change
+`floor_moderator`, each member records the departure and its epoch, and
+the owner's lowest instance commits a policy change that only drops it from
+those roles (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits),
+"Departed roles"). Every member reports `role_changed` from `admin` to
+`member` for it. An identity that came back before the owner built that
+change (every instance of it newer than the departure) loses the role all
+the same; only a role granted again after the departure stays. The change
 can only narrow roles. `groups.cleanup_departed_roles = false`
 ([config.md](config.md)) turns it off on that daemon.
+
+A role change for a member that left before its commit was built (the
+owner's daemon was offline, say) isn't made: `commit_failed` with `code:
+not_permitted`.
 
 ## Multi-use invites and approvals
 
@@ -102,9 +109,19 @@ A leaked link can't flood the human with requests:
 - at most `policy.max_pending_joins_per_invite` (32 by default, never more)
   requests per invite wait for the human at once; the rest are dropped
   silently, and the human gets `invite_flooded`;
-- at most one request per joiner identity per invite waits, so fresh
-  KeyPackages of one identity don't count again. The rest are dropped
-  silently, without an event, until the human decided the first.
+- at most 4 requests that claim one identity wait per invite; the next is
+  dropped, and the human gets `invite_flooded` (`reason:
+  join_identity_full`). An exact copy of a waiting request (the same
+  KeyPackage) is dropped silently.
+
+Several requests can claim one identity because anyone who saw one of its
+KeyPackages, in a join request or a knock it sent them, can wrap it in a
+request of its own with a name of its choice. So none is dropped for that
+alone: each approval says in `identity_requests` (and `pending_approval`
+in its data) how many waiting requests claim its identity, and
+`agentconnect approvals` prints "N requests claim this identity". Ask the
+person which one is theirs, when they sent it and under which name, and
+reject the others.
 
 An approval whose Add would take the group past its `max_members` is
 refused with `409 group_full` and stays pending, auto-approve or not.
@@ -128,7 +145,17 @@ it as new: each instance carries `joined_epoch`, the epoch this runtime
 first saw it in, and a member lists in `instances_since_verified` the
 instances that joined after you last verified it. `groups show` marks them
 "NEW since you verified". Compare the short code with that member again to
-clear the mark. `pending_leaves` lists the instances whose leave waits for
+clear the mark. For a member verified by a daemon from before this was
+recorded, `instances_since_verified` is `null` (unknown) and `groups show`
+says "unknown: verify again". `agentconnect verify` sends the epoch whose
+code it showed; if the group has moved on by the time you answer, the daemon
+refuses (`409 stale_epoch`) and you compare the new code.
+
+Within an identity, an instance id names one leaf. The core refuses a
+commit that would add a second leaf with an id the identity already has
+(SPEC [§9.2](../SPEC.md#92-authorisation-of-commits), "One leaf per
+instance"), and the runtime tells instances apart by id and mailbox, so
+such a leaf can never pass for the instance it copies. `pending_leaves` lists the instances whose leave waits for
 a commit.
 
 Check every `instance_joined` for **your own** identity: you should know

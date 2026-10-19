@@ -776,7 +776,7 @@ fn commit_removing_the_owners_last_instance_is_rejected() {
         .unwrap();
     assert_eq!(
         gs[1].commit_pending_proposals(&cs[1]),
-        Err(Error::NotPermitted("no pending proposals"))
+        Err(Error::NothingToCommit)
     );
     assert_eq!(gs[1].pending_leaves().unwrap(), []);
     assert!(!gs[1].has_pending_commit());

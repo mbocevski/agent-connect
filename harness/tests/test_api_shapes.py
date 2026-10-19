@@ -90,7 +90,10 @@ async def test_responses_and_requests_match_the_declared_shapes(
     await alice.call("GET", f"/v0/groups/{gid}")
     await bob.call("GET", f"/v0/groups/{gid}")
     await alice.call(
-        "POST", f"/v0/groups/{gid}/members/{bob.node.me}/verify", {"verified": True}, "human"
+        "POST",
+        f"/v0/groups/{gid}/members/{bob.node.me}/verify",
+        {"verified": True, "epoch": alice.node.epoch(gid)},
+        "human",
     )
     await alice.call("POST", f"/v0/groups/{gid}/messages", {"text": "hello", "to": ["*"]})
     await alice.call("GET", "/v0/events?after=0")

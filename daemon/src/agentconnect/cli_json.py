@@ -50,7 +50,7 @@ GROUP_VIEW: dict[str, Any] = {
                     "leaf_index": "int",
                     "joined_epoch": "int",
                     "self": "bool",
-                    "new_since_verified": "bool",
+                    "new_since_verified": Opt("bool"),
                 }
             ],
         }
@@ -153,6 +153,7 @@ APPROVAL: dict[str, Any] = {
     "received_at": "int",
     "display_name_verified": "bool",
     "fingerprint": "str",
+    "identity_requests?": "int",
     "listing?": {"directory": "str", "name": "str"},
     "note?": Opt("str"),
     "note_verified?": "bool",
@@ -225,6 +226,7 @@ SCHEMAS: dict[str, Any] = {
                 "fingerprint": "str",
                 "received_at": "int",
                 "group_sas": Opt(SAS),
+                "identity_requests?": "int",
                 "listing?": {"directory": "str", "name": "str"},
                 "note?": Opt("str"),
                 "note_verified?": "bool",

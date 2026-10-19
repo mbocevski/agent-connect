@@ -26,7 +26,12 @@ from agentconnect.keystore import FileKeystore
 from agentconnect.relay import RelayError, b64, unb64
 from agentconnect.runtime import Options, Runtime
 from agentconnect.runtime import ledger as replay
-from agentconnect.runtime.engine import HUMAN_EVENTS, DaemonError, Engine
+from agentconnect.runtime.engine import (
+    HUMAN_EVENTS,
+    MAX_PENDING_PER_IDENTITY,
+    DaemonError,
+    Engine,
+)
 
 RELAY = "127.0.0.1:1"
 
@@ -274,27 +279,69 @@ async def test_a_leaked_link_is_held_to_its_invites_quota(owner: Owner, rng: ran
     assert len(owner.engine.join_approvals()) == 3
 
 
-async def test_one_identity_waits_once_per_invite(owner: Owner, rng: random.Random) -> None:
-    """Fresh KeyPackages of one identity get one waiting approval per invite
-    (G10): the rest are dropped silently, with no event, and once the human
-    decided the first, the identity may ask again."""
+def _forge(seen_request: bytes, url: str, name: str = "bob") -> bytes:
+    """A link holder wraps a KeyPackage it saw elsewhere (a JoinRequest the
+    victim sent to the holder's own invite) in a JoinRequest for ``url``:
+    it knows the join key, so it can compute the MAC."""
+    link = ac.parse_invite_url(url)
+    seen = json.loads(seen_request)
+    kp = unb64(seen["key_package"])
+    mac = ac.join_request_mac(link.invite_id, link.secret_bytes(), kp, seen["mailbox_id"], name)
+    forged = {**seen, "invite_id": link.invite_id_b64, "display_name": name, "mac": b64(mac)}
+    return json.dumps(forged, sort_keys=True, separators=(",", ":")).encode()
+
+
+async def test_a_stale_key_package_doesnt_crowd_out_the_victims_own_request(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Review 52 F2: a link holder sends one of the victim's KeyPackages in
+    its name. The victim's own request still reaches the human, and both
+    say how many requests claim the identity, so the human chooses."""
+    url, elsewhere = await owner.invite(max_uses=5), await owner.invite()
+    victim, attacker = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    stale = victim.request(elsewhere)  # stands for one sent to the holder's own invite
+    forged_id = await owner.deliver(_forge(stale, url), attacker.mailbox)
+    real_id = await owner.deliver(victim.request(url), victim.mailbox)
+    assert owner.audit() == []
+    waiting = {w["request_id"]: w for w in owner.engine.join_approvals()}
+    assert set(waiting) == {forged_id, real_id}
+    assert {w["identity_requests"] for w in waiting.values()} == {2}
+    events = [
+        e["data"] for e in owner.engine.store.events(limit=100) if e["type"] == "pending_approval"
+    ]
+    assert [e["identity_requests"] for e in events] == [1, 2]
+    owner.engine.reject(forged_id)
+    (left,) = owner.engine.join_approvals()
+    assert (left["request_id"], left["identity_requests"]) == (real_id, 1)
+    # An exact copy of a waiting request is still dropped.
+    await owner.deliver(_forge(stale, url), attacker.mailbox)
+    assert owner.audit() == ["join_replay"]
+
+
+async def test_one_identity_has_a_few_requests_waiting_per_invite(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Fresh KeyPackages of one identity: at most MAX_PENDING_PER_IDENTITY
+    wait per invite. The next is dropped and the human hears of it
+    (``invite_flooded``); another invite has its own count, and once the
+    human decided one, the identity may ask again."""
     url, other = await owner.invite(), await owner.invite()
     thief = Joiner(rng, owner.now)
     first = await owner.deliver(thief.request(url), thief.mailbox)
-    for _ in range(4):
+    for _ in range(MAX_PENDING_PER_IDENTITY):
         await owner.deliver(thief.request(url), thief.mailbox)
     await owner.deliver(thief.request(other), thief.mailbox)
-    assert owner.audit() == ["join_identity_pending"] * 4
-    assert owner.flooded() == []
-    assert len(owner.engine.join_approvals()) == 2
+    assert owner.audit() == ["join_identity_full"]
+    assert [e["data"]["reason"] for e in owner.flooded()] == ["join_identity_full"]
+    assert len(owner.engine.join_approvals()) == MAX_PENDING_PER_IDENTITY + 1
     owner.engine.reject(first)
     await owner.deliver(thief.request(url), thief.mailbox)
-    assert len(owner.engine.join_approvals()) == 2
-    # A request past the approval window no longer counts.
+    assert len(owner.engine.join_approvals()) == MAX_PENDING_PER_IDENTITY + 1
+    # Requests past the approval window no longer count.
     owner.clock.advance(3601)
     owner.engine.join_approvals()  # lapses them
     await owner.deliver(thief.request(url), thief.mailbox)
-    assert len(owner.engine.join_approvals()) == 1
+    assert [w["identity_requests"] for w in owner.engine.join_approvals()] == [1]
 
 
 async def test_revoking_or_expiring_an_invite_frees_its_entries(
@@ -564,7 +611,8 @@ async def test_closed_invites_drop_their_secrets_and_are_revoked_when_the_relay_
     groups.close_invites(gid)
     groups.close_invites(gid)  # nothing left open: a no-op
     assert owner.engine.store.invite(iid)["status"] == "revoking"  # ty: ignore[not-subscriptable]
-    await groups.revoke_closed_invites()  # offline: the secret goes, the row stays
+    # Offline: the secret goes, the row stays, and the reconnect tries again.
+    assert await groups.revoke_closed_invites() is None
     assert owner.engine.keystore.get(f"invite/{iid}") is None
     assert owner.engine.store.invite(iid)["status"] == "revoking"  # ty: ignore[not-subscriptable]
     carol = Joiner(rng, owner.now)
@@ -582,9 +630,11 @@ async def test_closed_invites_drop_their_secrets_and_are_revoked_when_the_relay_
 
     monkeypatch.setattr(owner.engine.rest, "revoke_invite", revoke)
     monkeypatch.setattr(type(owner.engine.link), "connected", property(lambda _self: True))
-    await groups.revoke_closed_invites()
+    again = await groups.revoke_closed_invites()  # refused for now: after a backoff
+    assert again is not None
+    assert owner.now < again <= owner.now + 300
     assert owner.engine.store.invite(iid)["status"] == "revoking"  # ty: ignore[not-subscriptable]
-    await groups.revoke_closed_invites()
+    assert await groups.revoke_closed_invites() is None
     assert owner.engine.store.invite(iid)["status"] == "revoked"  # ty: ignore[not-subscriptable]
     assert answers == []
 

@@ -166,8 +166,9 @@ def planned_policy(
     """The policy a policy intent makes of ``current``, the policy in force
     when its commit is built. ``present`` are the identities in the group.
 
-    * ``policy``: ``changes`` over the current fields (a row queued before
-      changes were deltas holds a whole ``policy``, applied the same way).
+    * ``policy``: ``changes`` over the current fields. A row queued before
+      changes were deltas holds a whole ``policy``: only its
+      ``require_verified`` is applied, the one field such a row could change.
     * ``owner``: ``identity`` becomes the owner and leaves ``admins``; with
       ``keep_admin`` the old owner becomes an admin.
     * ``role``: ``identity`` joins ``admins`` (``admin``) or leaves it
@@ -176,7 +177,13 @@ def planned_policy(
       leave ``admins`` and ``floor_moderator``: it only narrows roles."""
     t = intent["type"]
     if t == "policy":
-        changes = intent.get("changes", intent.get("policy"))
+        changes = intent.get("changes")
+        legacy = intent.get("policy")
+        if changes is None and isinstance(legacy, dict) and "require_verified" in legacy:
+            # Queued before changes were deltas: the only change such a row
+            # could hold is require_verified (the API took nothing else).
+            # Never the rest of the policy it cached, such as the owner.
+            changes = {"require_verified": legacy["require_verified"]}
         return {**current, **(changes if isinstance(changes, dict) else {})}
     admins = [a for a in current.get("admins") or [] if isinstance(a, str)]
     if t == "owner":
@@ -192,6 +199,10 @@ def planned_policy(
         if who == current.get("owner"):
             raise DaemonError("bad_request", "the owner's role changes only with a transfer")
         if intent.get("role") == "admin":
+            if who not in present:
+                # It left after the change was asked for (SPEC 9.2: roles
+                # name members); don't hand a role to an absent identity.
+                raise DaemonError("not_permitted", "that identity is no longer a member")
             return {**current, "admins": admins if who in admins else [*admins, who]}
         return {**current, "admins": [a for a in admins if a != who]}
     if t == "drop_roles":
@@ -203,6 +214,16 @@ def planned_policy(
     raise DaemonError("bad_intent", f"unknown policy intent {t}")
 
 
+def _role_holders(policy: dict[str, Any]) -> set[str]:
+    """The identities a policy gives a role below the owner's."""
+    admins = policy.get("admins")
+    holders: set[str] = {str(a) for a in admins} if isinstance(admins, list) else set()
+    moderator = policy.get("floor_moderator")
+    if isinstance(moderator, str):
+        holders.add(moderator)
+    return holders
+
+
 def role_of(policy: dict[str, Any], identity: str) -> str:
     if identity == policy.get("owner"):
         return "owner"
@@ -210,18 +231,26 @@ def role_of(policy: dict[str, Any], identity: str) -> str:
     return "admin" if isinstance(admins, list) and identity in admins else "member"
 
 
-def _by_identity(members: Iterable[dict[str, Any]]) -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {}
+def _leaf_key(m: dict[str, Any]) -> tuple[str, str]:
+    """An instance as ``(instance_id, mailbox_id)``: a leaf that repeats an
+    instance id with another key (the core refuses one, SPEC 9.2) is never
+    taken for that instance."""
+    return str(m["instance_id_hex"]), str(m.get("mailbox_id", ""))
+
+
+def _by_identity(members: Iterable[dict[str, Any]]) -> dict[str, list[tuple[str, str]]]:
+    out: dict[str, list[tuple[str, str]]] = {}
     for m in members:
-        out.setdefault(str(m["identity"]), []).append(str(m["instance_id_hex"]))
-    return {identity: sorted(ids) for identity, ids in out.items()}
+        out.setdefault(str(m["identity"]), []).append(_leaf_key(m))
+    return {identity: sorted(keys) for identity, keys in out.items()}
 
 
 def membership_events(
     summary: dict[str, Any], current: list[dict[str, Any]]
 ) -> list[tuple[str, dict[str, Any]]]:
     """The membership events of a merged commit, from its summary and the
-    members after it (``Client.members``), in a stable order.
+    members after it (``Client.members``), in a stable order. Instances are
+    told apart by id and mailbox (:func:`_leaf_key`).
 
     An identity all of whose instances the commit added joined
     (``member_joined``); a new instance of an identity already in the group
@@ -231,23 +260,24 @@ def membership_events(
     instance gets ``instance_left`` or ``instance_removed`` per instance."""
     by = str(summary["committer"]["identity"])
     after = _by_identity(current)
-    left = {str(m["instance_id_hex"]) for m in summary.get("left") or []}
+    left = {_leaf_key(m) for m in summary.get("left") or []}
     out: list[tuple[str, dict[str, Any]]] = []
-    for identity, ids in sorted(_by_identity(summary.get("added") or []).items()):
-        if set(after.get(identity, [])) <= set(ids):
+    for identity, keys in sorted(_by_identity(summary.get("added") or []).items()):
+        if set(after.get(identity, [])) <= set(keys):
+            ids = [i for i, _ in keys]
             out.append(("member_joined", {"identity": identity, "instances": ids, "by": by}))
             continue
         out.extend(
-            ("instance_joined", {"identity": identity, "instance_id": i, "by": by}) for i in ids
+            ("instance_joined", {"identity": identity, "instance_id": i, "by": by}) for i, _ in keys
         )
-    for identity, ids in sorted(_by_identity(summary.get("removed") or []).items()):
+    for identity, keys in sorted(_by_identity(summary.get("removed") or []).items()):
         if identity not in after:
-            kind = "member_left" if all(i in left for i in ids) else "member_removed"
+            kind = "member_left" if all(k in left for k in keys) else "member_removed"
             out.append((kind, {"identity": identity, "by": by}))
             continue
-        for i in ids:
-            kind = "instance_left" if i in left else "instance_removed"
-            out.append((kind, {"identity": identity, "instance_id": i, "by": by}))
+        for k in keys:
+            kind = "instance_left" if k in left else "instance_removed"
+            out.append((kind, {"identity": identity, "instance_id": k[0], "by": by}))
     return out
 
 
@@ -295,6 +325,8 @@ class GroupService:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
         self._wake = asyncio.Event()
+        # Between tries of an invite revocation the relay refused for now.
+        self._revoke_backoff = Backoff(base=1.0, cap=300.0, rng=engine.options.backoff_rng)
 
     # -- plumbing -------------------------------------------------------------
 
@@ -319,9 +351,10 @@ class GroupService:
         gid = unb64(group_id)
         policy = json.loads(self._client.policy(gid))
         epoch = self._client.epoch(gid)
-        # The epoch each instance was first seen in (G8): kept while it stays.
+        # The epoch each instance was first seen in (G8), kept while it stays;
+        # by id and mailbox, so a leaf repeating an id never inherits it.
         seen = {
-            str(i["instance_id"]): int(i.get("joined_epoch", 0))
+            (str(i["instance_id"]), str(i.get("mailbox_id", ""))): int(i.get("joined_epoch", 0))
             for m in e.store.members(group_id)
             for i in m.instances
         }
@@ -332,7 +365,7 @@ class GroupService:
                     "instance_id": m["instance_id_hex"],
                     "mailbox_id": m["mailbox_id"],
                     "leaf_index": m["leaf_index"],
-                    "joined_epoch": seen.get(str(m["instance_id_hex"]), epoch),
+                    "joined_epoch": seen.get(_leaf_key(m), epoch),
                 }
             )
         members = {
@@ -438,10 +471,37 @@ class GroupService:
         """Build a policy intent's commit against the policy in force now; a
         change it already has fails as :data:`UNCHANGED` (nothing to tell)."""
         current = self._policy(gid)
-        new = planned_policy(current, intent, self._identities(gid))
+        present = self._identities(gid)
+        if intent["type"] == "drop_roles":
+            # One that came back since it departed is new: it doesn't keep
+            # the role (only a later grant gives it one again).
+            present -= self._returned(b64(gid), set(intent.get("identities") or []))
+        new = planned_policy(current, intent, present)
         if new == current:
             raise DaemonError(UNCHANGED, "the policy already says so")
         return self._client.set_policy(gid, canonical(new))
+
+    def _departed(self, group_id: str) -> dict[str, int]:
+        """Identities that held a role when a commit took their last
+        instance, each with the epoch that commit started (kv, per group)."""
+        raw = json.loads(self._kv(f"departed_roles/{group_id}") or "{}")
+        return {str(k): int(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+    def _returned(self, group_id: str, identities: set[str]) -> set[str]:
+        """Those of ``identities`` recorded as departed whose every instance
+        joined after the departure: they came back."""
+        departed = self._departed(group_id)
+        out = set()
+        for m in self._engine.store.members(group_id):
+            since = departed.get(m.identity)
+            if (
+                m.identity in identities
+                and since is not None
+                and m.instances
+                and all(int(i.get("joined_epoch", 0)) > since for i in m.instances)
+            ):
+                out.add(m.identity)
+        return out
 
     def set_role(self, group_id: str, identity: str, role: str) -> str:
         """Make a member an admin or a plain member (the owner's role changes
@@ -477,9 +537,14 @@ class GroupService:
         if group is None or group.status != "active":
             return None
         gid = unb64(group_id)
-        staying = len(self._client.members(gid)) - len(self._client.pending_leaves(gid))
+        members = self._client.members(gid)
+        staying = len(members) - len(self._client.pending_leaves(gid))
         limit = int(self._policy(gid).get("max_members", MAX_INSTANCES))
-        return limit - staying - e.store.adding_to(group_id)
+        # An Add that merged already counts in the members until its Welcome
+        # went out and its approval is done: count it once.
+        leaves = {str(m["mailbox_id"]) for m in members}
+        adding = [mb for mb in e.store.adding_to(group_id) if mb not in leaves]
+        return limit - staying - len(adding)
 
     def _follow_policy(self, group_id: str, summary: dict[str, Any]) -> None:
         """After a merged commit: close this identity's open invites for the
@@ -496,18 +561,51 @@ class GroupService:
         out_of_sync = group is not None and group.out_of_sync  # its commits can't land
         if not e.config.groups_cleanup_departed_roles or self.leaving(group_id) or out_of_sync:
             return
+        self._record_departures(group_id, summary, policy)
         members = self._client.members(gid)
         owner = policy.get("owner")
         owner_leaves = sorted(int(m["leaf_index"]) for m in members if m["identity"] == owner)
         if not owner_leaves or self._own_leaf(members) != owner_leaves[0]:
             return
         present = {str(m["identity"]) for m in members}
-        holders = {*(policy.get("admins") or []), policy.get("floor_moderator")}
-        removed = {str(m["identity"]) for m in summary.get("removed") or []}
-        gone = sorted((removed - present) & holders)
-        if gone:
+        departed = set(self._departed(group_id))
+        gone = sorted((departed - present) | self._returned(group_id, departed))
+        if gone and not self._drop_queued(group_id):
             LOG.info("departed_roles", group=log.hid(group_id), count=len(gone))
             e._enqueue("commit", group_id, {"intent": {"type": "drop_roles", "identities": gone}})
+
+    def _record_departures(
+        self, group_id: str, summary: dict[str, Any], policy: dict[str, Any]
+    ) -> None:
+        """Keep the departed-role record (:meth:`_departed`) current: an
+        identity that held a role and lost its last instance in this commit
+        is recorded with the commit's epoch; one that holds no role any
+        more, or was granted one again in this commit, is forgotten."""
+        e = self._engine
+        roles = _role_holders(policy)
+        present = self._identities(unb64(group_id))
+        removed = {str(m["identity"]) for m in summary.get("removed") or []}
+        before = json.loads(summary["previous_policy"]) if summary.get("previous_policy") else None
+        granted: set[str] = set()
+        if before is not None:
+            granted = roles - _role_holders(before)
+        record = {
+            k: v for k, v in self._departed(group_id).items() if k in roles and k not in granted
+        }
+        for identity in (removed - present) & roles:
+            record[identity] = int(summary["epoch"])
+        key = f"departed_roles/{group_id}"
+        if record != self._departed(group_id):
+            e.store.kv_set(key, json.dumps(record, sort_keys=True) if record else "")
+
+    def _drop_queued(self, group_id: str) -> bool:
+        return any(
+            r.kind == "commit"
+            and r.group_id == group_id
+            and "env" not in r.payload
+            and (r.payload.get("intent") or {}).get("type") == "drop_roles"
+            for r in self._engine.store.outbox()
+        )
 
     def close_invites(self, group_id: str) -> None:
         """Close this instance's open invites for the group, because it may
@@ -524,11 +622,13 @@ class GroupService:
         LOG.info("invites_closed", group=log.hid(group_id), count=len(ids))
         e._defer(self.wake)
 
-    async def revoke_closed_invites(self) -> None:
+    async def revoke_closed_invites(self) -> float | None:
         """Drop the secrets of the invites :meth:`close_invites` closed and
-        revoke them at the relay; one the relay can't answer for now stays
-        ``revoking`` and is tried again on the next pass."""
+        revoke them at the relay. One the relay refused for now (while this
+        runtime is connected) stays ``revoking``: returns when to try again,
+        after a backoff. Offline, the reconnect wakes the timer."""
         e = self._engine
+        retry = False
         for invite in e.store.invites("revoking"):
             invite_id = str(invite["invite_id"])
             e.keystore.delete(f"invite/{invite_id}")
@@ -540,8 +640,13 @@ class GroupService:
             except RelayError as err:
                 if err.code in RELAY_RETRY:
                     LOG.info("invite_revoke_retry", code=err.code)
+                    retry = True
                     continue
             e.store.set_invite_status(invite_id, "revoked")
+        if not retry:
+            self._revoke_backoff.reset()
+            return None
+        return float(self._now() + self._revoke_backoff.next())
 
     # -- commits --------------------------------------------------------------
 
@@ -901,8 +1006,8 @@ class GroupService:
     async def step(self) -> float | None:
         """One pass of the timer over the active groups, after revoking the
         invites closed meanwhile; when the next is due."""
-        await self.revoke_closed_invites()
-        times: list[float] = []
+        revoke_again = await self.revoke_closed_invites()
+        times: list[float] = [] if revoke_again is None else [revoke_again]
         for group in self._engine.store.groups():
             if group.status != "active" or group.out_of_sync:
                 continue  # an out-of-sync view decides nothing
@@ -1117,11 +1222,15 @@ class GroupService:
     # -- the view -------------------------------------------------------------
 
     @staticmethod
-    def _since_verified(member: MemberRow) -> list[str]:
+    def _since_verified(member: MemberRow) -> list[str] | None:
         """The member's instances that joined after the human verified it
-        (SPEC 11: the flag stays, and the view shows them as new)."""
-        if not member.verified or member.verified_epoch is None:
+        (SPEC 11: the flag stays, and the view shows them as new). ``None``
+        (unknown) for a member verified by a daemon that didn't record the
+        epoch: verifying it again tells."""
+        if not member.verified:
             return []
+        if member.verified_epoch is None:
+            return None
         return sorted(
             str(i["instance_id"])
             for i in member.instances

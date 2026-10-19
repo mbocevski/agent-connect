@@ -528,7 +528,9 @@ class MemberRow:
     role: str
     verified: bool
     instances: list[dict[str, Any]]
-    # The epoch whose short code the human compared when marking it verified.
+    # The epoch whose short code the human compared when marking it verified;
+    # None while unverified, and for a member verified by a daemon that didn't
+    # record it (unknown: its new instances can't be told).
     verified_epoch: int | None = None
 
 
@@ -1699,25 +1701,26 @@ class Store:
         )
         return 0 if row is None else int(row[0])
 
-    def pending_approval_of(self, invite_id: str, identity: str, since: int) -> bool:
-        """Whether ``identity`` has a join request of this invite waiting for
+    def pending_approvals_of(self, invite_id: str, identity: str, since: int) -> int:
+        """Join requests of this invite that claim ``identity`` and wait for
         the human, received at or after ``since`` (older ones have lapsed)."""
         row = self._one(
-            "SELECT 1 FROM approvals WHERE invite_id = ? AND identity = ? "
-            "AND status = 'pending' AND received_at >= ? LIMIT 1",
+            "SELECT count(*) FROM approvals WHERE invite_id = ? AND identity = ? "
+            "AND status = 'pending' AND received_at >= ?",
             invite_id,
             identity,
             since,
         )
-        return row is not None
+        return 0 if row is None else int(row[0])
 
-    def adding_to(self, group_id: str) -> int:
-        """Approved joins of this group whose Add is under way."""
-        row = self._one(
-            "SELECT count(*) FROM approvals WHERE group_id = ? AND status = 'approving'",
+    def adding_to(self, group_id: str) -> list[str]:
+        """The joiners' mailboxes of the approved joins of this group whose
+        Add is under way (``approving`` until the Welcome went out)."""
+        rows = self._all(
+            "SELECT mailbox_id FROM approvals WHERE group_id = ? AND status = 'approving'",
             group_id,
         )
-        return 0 if row is None else int(row[0])
+        return [str(r[0]) for r in rows]
 
     def uses_taken(self, invite_id: str) -> int:
         """Approvals that hold one of the invite's uses (approving or done)."""

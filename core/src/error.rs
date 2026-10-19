@@ -70,6 +70,9 @@ pub enum Error {
     /// A commit is already pending relay confirmation (SPEC §8.3).
     #[error("a commit is already pending")]
     CommitPending,
+    /// A commit of pending proposals with none pending.
+    #[error("no pending proposals")]
+    NothingToCommit,
     /// There is no pending commit to confirm or discard.
     #[error("no pending commit")]
     NoPendingCommit,
@@ -224,7 +227,16 @@ pub enum ErrorKind {
     /// A commit of this instance's is already waiting for the relay's
     /// answer (SPEC §8.3).
     CommitPending,
-    /// Anything else (storage, MLS, randomness, internal).
+    /// Nothing for the commit to carry: no pending proposals.
+    NothingToCommit,
+    /// The message was processed already (a redelivery, ADR-004).
+    Duplicate,
+    /// An own commit discarded earlier was accepted: re-sync.
+    OwnCommitLost,
+    /// A failure that says nothing about the input: storage, the database
+    /// key, randomness, an internal error. Trying again may work.
+    Transient,
+    /// Anything else (MLS errors and the rest).
     Other,
 }
 
@@ -256,6 +268,10 @@ impl ErrorKind {
             Self::Unauthorized => "unauthorized",
             Self::NotPermitted => "not_permitted",
             Self::CommitPending => "commit_pending",
+            Self::NothingToCommit => "nothing_to_commit",
+            Self::Duplicate => "duplicate",
+            Self::OwnCommitLost => "own_commit_lost",
+            Self::Transient => "transient",
             Self::Other => "other",
         }
     }
@@ -317,6 +333,10 @@ impl Error {
             Self::Unauthorized(_) => K::Unauthorized,
             Self::NotPermitted(_) => K::NotPermitted,
             Self::CommitPending => K::CommitPending,
+            Self::NothingToCommit => K::NothingToCommit,
+            Self::Duplicate => K::Duplicate,
+            Self::OwnCommitLost => K::OwnCommitLost,
+            Self::Storage(_) | Self::StorageKey | Self::Rng | Self::Internal(_) => K::Transient,
             _ => K::Other,
         }
     }
@@ -334,6 +354,26 @@ pub(crate) fn storage<E: Display>(e: E) -> Error {
 mod tests {
     use super::*;
     use ErrorKind as K;
+
+    #[test]
+    fn group_and_processing_errors_have_kinds() {
+        for (e, k) in [
+            (Error::Unauthorized("x"), K::Unauthorized),
+            (Error::NotPermitted("x"), K::NotPermitted),
+            (Error::CommitPending, K::CommitPending),
+            (Error::NotMember, K::Other),
+            (Error::NothingToCommit, K::NothingToCommit),
+            (Error::Duplicate, K::Duplicate),
+            (Error::OwnCommitLost, K::OwnCommitLost),
+            (Error::Storage("x".into()), K::Transient),
+            (Error::StorageKey, K::Transient),
+            (Error::Rng, K::Transient),
+            (Error::Internal("x"), K::Transient),
+            (Error::Mls("x".into()), K::Other),
+        ] {
+            assert_eq!(e.kind(), k, "{e}");
+        }
+    }
 
     #[test]
     fn discovery_reasons_have_kinds() {
@@ -389,11 +429,6 @@ mod tests {
             (Error::WelcomeAuth, K::Authentication),
             (Error::InviteExpired, K::Expired),
             (Error::Malformed("x"), K::Malformed),
-            (Error::Unauthorized("x"), K::Unauthorized),
-            (Error::NotPermitted("x"), K::NotPermitted),
-            (Error::CommitPending, K::CommitPending),
-            (Error::NotMember, K::Other),
-            (Error::Storage("x".into()), K::Other),
         ] {
             assert_eq!(e.kind(), k, "{e}");
         }
@@ -421,11 +456,15 @@ mod tests {
             K::Unauthorized,
             K::NotPermitted,
             K::CommitPending,
+            K::NothingToCommit,
+            K::Duplicate,
+            K::OwnCommitLost,
+            K::Transient,
             K::Other,
         ]
         .into_iter()
         .map(ErrorKind::as_str)
         .collect();
-        assert_eq!(names.len(), 24, "kind names are distinct");
+        assert_eq!(names.len(), 28, "kind names are distinct");
     }
 }

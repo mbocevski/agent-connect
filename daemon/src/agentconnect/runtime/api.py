@@ -255,7 +255,7 @@ _GROUP_INFO: dict[str, Any] = {
                     "self": "bool",
                 }
             ],
-            "instances_since_verified": ["str"],
+            "instances_since_verified": Opt(["str"]),
             "self": "bool",
             "listed_as?": {
                 "directory": "str",
@@ -341,7 +341,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "the peers' Agent Cards (each wrapped as `untrusted`). Each member lists its "
         "instances, `self` marking this one and `joined_epoch` the epoch this runtime first "
         "saw it in; `instances_since_verified` are those that joined after you verified the "
-        "member. `policy_summary` and `floor` repeat the policy's permissions and floor, and "
+        "member (`null`: unknown, the member was verified before the daemon recorded the "
+        "epoch, so verify it again). `policy_summary` and `floor` repeat the policy's "
+        "permissions and floor, and "
         "`pending_leaves` the instances whose leave waits for a commit. `leaving` is set "
         "while this instance leaves the group; `blocked` says the leave waits for an "
         "ownership transfer ([groups.md](groups.md#leaving)).",
@@ -537,8 +539,10 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/groups/{gid}/members/{identity}/verify",
         "_verify",
         "Mark a member verified (the human compared the short code). `verified` "
-        "defaults to `true`.",
-        request={"verified?": "bool"},
+        "defaults to `true`; marking verified needs `epoch`, the epoch whose short code "
+        "the human compared (`GET /v0/groups/{gid}` shows it with the code). If the group "
+        "has moved on since, the code changed: `409 stale_epoch`, compare again (SPEC 11).",
+        request={"verified?": "bool", "epoch?": "int"},
         response={"verified": "bool"},
         human=True,
     ),
@@ -932,7 +936,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (404, "not_found", "No such endpoint, group, invite or request."),
     (405, "method_not_allowed", "The path exists but not for this method."),
     (408, "timeout", "The request was not received within 10 seconds."),
-    (409, "stale_epoch", "The group changed since the epoch you passed."),
+    (
+        409,
+        "stale_epoch",
+        "The group changed since the epoch you passed: its short code is a new one. Show "
+        "the new code and compare again.",
+    ),
     (
         409,
         "no_deliveries",
@@ -1272,7 +1281,13 @@ class ApiServer:
         verified = b.get("verified", True)
         if not isinstance(verified, bool):
             raise ApiError(400, "bad_request", "verified must be a boolean")
-        self.daemon.mark_verified(p["gid"], p["identity"], verified)
+        epoch = b.get("epoch")
+        if (epoch is None and verified) or (
+            epoch is not None and (not isinstance(epoch, int) or isinstance(epoch, bool))
+        ):
+            msg = "epoch must be the integer epoch whose short code the human compared"
+            raise ApiError(400, "bad_request", msg)
+        self.daemon.mark_verified(p["gid"], p["identity"], verified, epoch)
         return {"verified": verified}
 
     async def _sas_mismatch(self, p: dict[str, str], b: dict[str, Any]) -> Any:

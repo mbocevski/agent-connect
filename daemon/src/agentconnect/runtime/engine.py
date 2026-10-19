@@ -98,6 +98,9 @@ LOG = log.get("agentconnect.engine")
 UPDATE_AFTER_SECS = 24 * 3600  # SPEC §3.1 update cadence
 UPDATE_AFTER_MESSAGES = 1000
 APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
+# Join requests claiming one identity that wait per invite (docs/groups.md).
+MAX_PENDING_PER_IDENTITY = 4
+JOIN_IDENTITY_FULL = "join_identity_full"
 JOIN_CLOSED_GRACE_SECS = 60
 MAX_PARKED_GROUPS = 8
 MAX_PARKED_PER_GROUP = 256
@@ -183,14 +186,6 @@ class TransientError(Exception):
         self.group_id, self.reason = group_id, reason
 
 
-# Core errors that say nothing about the message itself (SQLCipher I/O or a
-# lock, the RNG, an internal error); a CoreError (a panic) is transient too.
-TRANSIENT_PREFIXES = (
-    "storage error",
-    "wrong database key",
-    "randomness source failed",
-    "internal error",
-)
 MAX_TRANSIENT_RETRIES = 8
 # Relay errors that say "not now" rather than "no" (SPEC 8.4).
 RETRYABLE_RELAY_ERRORS = frozenset({"rate_limited", "internal"})
@@ -222,14 +217,15 @@ OUTBOUND_PROBLEMS = {
 
 
 def _core_error(e: Exception) -> str:
-    text = str(e)
-    if isinstance(e, ac.CoreError) or text.startswith(TRANSIENT_PREFIXES):
+    """What a core failure means for the message, by the error's kind: a
+    panic (``CoreError``) and storage, key, randomness or internal failures
+    say nothing about the message itself (``transient``)."""
+    kind = getattr(e, "kind", "other")
+    if isinstance(e, ac.CoreError) or kind == "transient":
         return "transient"
-    if "re-sync required" in text:
-        return "own_commit_lost"
-    if text == "message already processed":
-        return "duplicate"
-    if text.startswith("unauthorized commit"):
+    if kind in ("own_commit_lost", "duplicate"):
+        return str(kind)
+    if kind == "unauthorized":
         return "unauthorized_commit"
     return "rejected"
 
@@ -1686,7 +1682,7 @@ class Engine:
             if (
                 taken := self._join_taken(request_id, kp_ref, invite_id, verified.identity)
             ) is not None:
-                return drop_it(taken)
+                return await flooded(taken) if taken == JOIN_IDENTITY_FULL else drop_it(taken)
             waiting = self.store.pending_approvals_for(
                 invite_id, self.now() - APPROVAL_TIMEOUT_SECS
             )
@@ -1712,6 +1708,7 @@ class Engine:
                 identity=verified.identity,
                 display_name=verified.display_name,
                 display_name_verified=False,
+                identity_requests=self._identity_requests(invite_id, verified.identity),
             )
             if self.config.auto_approve:
                 # Joins only: nothing approves a knock but the human (SPEC
@@ -1733,18 +1730,25 @@ class Engine:
     ) -> str | None:
         """Why a new join request can't get an approval of its own, or
         ``None``. Past the ledger's window the request id or the KeyPackage
-        may still be taken: one approval per id and per KeyPackage. And one
-        request per joiner identity and invite waits for the human, so fresh
-        KeyPackages of one identity can't fill the invite's queue."""
+        may still be taken: one approval per id and per KeyPackage (an exact
+        copy is dropped). Distinct requests that claim one identity all reach
+        the human, marked as such, up to :data:`MAX_PENDING_PER_IDENTITY` per
+        invite: anyone who saw one of an identity's KeyPackages can send a
+        request in its name, so the human chooses, and its own can't be
+        crowded out by one other request."""
         if (
             self.store.approval(request_id) is not None
             or self.store.open_approval_for(kp_ref) is not None
         ):
             return "join_replay"
-        since = self.now() - APPROVAL_TIMEOUT_SECS
-        if self.store.pending_approval_of(invite_id, identity, since):
-            return "join_identity_pending"
+        if self._identity_requests(invite_id, identity) >= MAX_PENDING_PER_IDENTITY:
+            return JOIN_IDENTITY_FULL
         return None
+
+    def _identity_requests(self, invite_id: str, identity: str) -> int:
+        """Join requests of this invite that claim ``identity`` and wait."""
+        since = self.now() - APPROVAL_TIMEOUT_SECS
+        return self.store.pending_approvals_of(invite_id, identity, since)
 
     def _auto_approve(self, request_id: str, group_id: str) -> None:
         """``policy.auto_approve``: approve at once, unless the group is full,
@@ -2654,10 +2658,12 @@ class Engine:
         except (ac.AgentConnectError, DaemonError) as e:
             # Nothing left to do: the leaves were committed, or the policy
             # already says what the change asked for.
-            benign = "no pending proposals" in str(e) or (
+            benign = getattr(e, "kind", None) == "nothing_to_commit" or (
                 isinstance(e, DaemonError) and e.code == UNCHANGED
             )
-            refused = getattr(e, "kind", None) in ("unauthorized", "not_permitted")
+            refused = getattr(e, "kind", None) in ("unauthorized", "not_permitted") or (
+                isinstance(e, DaemonError) and e.code == "not_permitted"
+            )
             if not benign:
                 LOG.info("commit_not_built", intent=intent["type"], reason=str(e)[:80])
             code = BENIGN if benign else "not_permitted" if refused else "not_built"
@@ -2969,6 +2975,12 @@ class Engine:
                     "kind": "join",
                     "display_name_verified": False,
                     "fingerprint": ac.fingerprint(ac_identity_key(a["identity"])),
+                    # Requests that claim this identity on this invite, this
+                    # one included: more than one means someone else may
+                    # hold one of its KeyPackages (docs/groups.md).
+                    "identity_requests": self._identity_requests(
+                        str(a["invite_id"]), str(a["identity"])
+                    ),
                 }
             )
         return out
@@ -3263,14 +3275,25 @@ class Engine:
     async def leave(self, group_id: str) -> str:
         return await self.groups.leave(group_id)
 
-    def mark_verified(self, group_id: str, identity: str, verified: bool = True) -> None:
+    def mark_verified(
+        self, group_id: str, identity: str, verified: bool = True, epoch: int | None = None
+    ) -> None:
         """**Human-only.** Records that the human compared the SAS with this
         member over an independent channel. Never reachable by agents: an
         agent that could mark verification would defeat the SAS check, which
-        exists precisely to catch a relay or link thief in the middle."""
+        exists precisely to catch a relay or link thief in the middle.
+
+        ``epoch`` is the epoch whose code the human was shown (SPEC 11): an
+        answer for an earlier one is refused (``stale_epoch``), and the
+        member's instances that join after it are shown as new."""
         self._group_or_raise(group_id)
-        epoch = self._core_epoch(unb64(group_id))
-        if identity == self.me or not self.store.set_verified(group_id, identity, verified, epoch):
+        current = self._core_epoch(unb64(group_id))
+        if epoch is not None and epoch != current:
+            msg = f"the short code changed since epoch {epoch} (now {current}): compare again"
+            raise DaemonError("stale_epoch", msg)
+        if identity == self.me or not self.store.set_verified(
+            group_id, identity, verified, current
+        ):
             raise DaemonError("not_found", "no such member")
         self._delivery_wake.set()
         self._pulse()

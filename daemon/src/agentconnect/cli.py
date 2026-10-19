@@ -718,6 +718,8 @@ def groups_show(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) 
                 notes = "  (this one)" if i["self"] else ""
                 if i["new_since_verified"]:
                     notes += "  NEW since you verified this member: check it is theirs"
+                elif i["new_since_verified"] is None:
+                    notes += "  new since you verified? unknown: verify again"
                 typer.echo(
                     f"    instance {i['instance_id']}  leaf {i['leaf_index']}  "
                     f"since epoch {i['joined_epoch']}{notes}"
@@ -759,6 +761,7 @@ def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
         "fingerprint": a["fingerprint"],
         "received_at": a["received_at"],
         "group_sas": Sas.of(info["sas"]).as_json() if "sas" in info else None,
+        "identity_requests": int(a.get("identity_requests", 1)),
     }
 
 
@@ -801,6 +804,13 @@ def _print_approval(v: dict[str, Any], *, as_json: bool = False) -> None:
         f"  who          {clean(v['display_name'])} (a claimed name, not verified)", as_json=as_json
     )
     _say(f"  fingerprint  {v['fingerprint']}", as_json=as_json)
+    if v["identity_requests"] > 1:
+        _say(
+            f"  NOTE         {v['identity_requests']} requests claim this identity. Anyone who "
+            "saw one of its join requests or knocks can send one in its name: ask the person "
+            "which one is theirs (when, under which name) and reject the others.",
+            as_json=as_json,
+        )
     _say(f"  group        {clean(v['group_name'])} ({v['group_id']})", as_json=as_json)
     if v["group_sas"]:
         _say(
@@ -1093,7 +1103,8 @@ def verify(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> No
             )
         done = [m["identity"] for m in fresh["members"] if not m["self"]]
         for identity in done:
-            api.request("POST", f"/v0/groups/{gid}/members/{identity}/verify", {"verified": True})
+            body = {"verified": True, "epoch": info["epoch"]}
+            api.request("POST", f"/v0/groups/{gid}/members/{identity}/verify", body)
         if as_json:
             emit_json({"outcome": "verified", "group_id": gid, "verified": done})
         else:

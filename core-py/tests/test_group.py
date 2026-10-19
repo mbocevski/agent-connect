@@ -504,12 +504,25 @@ def test_a_refused_policy_change_says_why_in_its_kind(rng: random.Random) -> Non
     a.process(gid, leave)
     a.update(gid)
     kinds["commit pending"] = kind_of(a, verified)
+    a.discard_pending_commit(gid)
+    with pytest.raises(ac.AgentConnectError) as e:
+        b.commit_pending_proposals(gid)
+    kinds["nothing to commit"] = e.value.kind
+    # A storage failure (a core failpoint) says nothing about the message.
+    ct = b.seal(gid, inner(b, "hello"))
+    a._arm_failpoint_for_testing("process.before_mls", "error")
+    with pytest.raises(ac.AgentConnectError) as e:
+        a.process(gid, ct, key="b/1", context=b"x")
+    kinds["storage"] = e.value.kind
+    a._clear_failpoints_for_testing()
     assert kinds == {
         "member": "unauthorized",
         "bad policy": "malformed",
         "not canonical": "malformed",
         "own leave pending": "not_permitted",
         "commit pending": "commit_pending",
+        "nothing to commit": "nothing_to_commit",
+        "storage": "transient",
     }
     # A policy that fails validation is refused before a pending commit is.
     assert kind_of(a, canonical({**policy, "max_members": 0})) == "malformed"

@@ -34,14 +34,28 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `pending_leaves`, each instance's `joined_epoch` and each member's
   `instances_since_verified`; `groups show` prints the policy, the floor,
   the pending leaves and each instance's leaf and epoch, and flags an
-  instance that joined after you verified its member. Join requests: at
-  most one per joiner identity and invite waits for the human (the rest
-  are dropped silently), and an approval whose Add would pass
-  `max_members` is refused with `409 group_full` and stays pending.
-- Core: `ErrorKind` gains `unauthorized`, `not_permitted` and
-  `commit_pending` (Python: `AgentConnectError.kind`), so callers tell a
-  refusal by the policy from a bad policy or a commit under way without
-  reading messages. Python: `default_group_policy(owner)`.
+  instance that joined after you verified its member (`null`, "unknown:
+  verify again", for a member verified before the epoch was recorded).
+  First epochs and events tell instances apart by id and mailbox. A
+  departed admin or moderator loses the role also if it came back before
+  the owner's cleanup was built; a role change for a member gone before its
+  commit is built fails with `not_permitted`. Join requests: at most 4 that
+  claim one identity wait per invite (then `invite_flooded`, `reason:
+  join_identity_full`); each approval and `pending_approval` carries
+  `identity_requests`, and `agentconnect approvals` says when several
+  requests claim one identity, so a request built from a KeyPackage someone
+  saw elsewhere can't crowd out the identity's own. An approval whose Add
+  would pass `max_members` (an Add whose Welcome is on its way counted
+  once) is refused with `409 group_full` and stays pending. A closed
+  invite's revocation that the relay refuses for now is tried again after a
+  backoff.
+- Core: `ErrorKind` gains `unauthorized`, `not_permitted`,
+  `commit_pending`, `nothing_to_commit` (a new `Error::NothingToCommit`,
+  which was `NotPermitted("no pending proposals")`), `duplicate`,
+  `own_commit_lost` and `transient` (storage, the database key,
+  randomness, internal errors, which were `other`); Python:
+  `AgentConnectError.kind`. The runtime classifies core failures by kind
+  only, no longer by message text. Python: `default_group_policy(owner)`.
 - Harness: `Cluster.group(n, invite="multi")` (every joiner redeems one
   invite) and `Node.unchecked_commit` (a commit built without the core's
   checks, sent through the node's outbox to the real relay).
@@ -719,6 +733,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Local API: `POST /v0/groups/{gid}/members/{identity}/verify` needs
+  `epoch`, the epoch whose short code the human compared, to mark a member
+  verified, and answers `409 stale_epoch` when the group has moved on since
+  (SPEC 11); `agentconnect verify` sends it.
 - Local API: `POST /v0/groups/{gid}/policy` answers `{status}`
   (`committing` or `unchanged`) instead of `{require_verified}`, and takes
   the other policy fields with the human token. A policy change that the
@@ -998,6 +1016,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Core and protocol: a commit after which two leaves of one identity have
+  the same `instance_id` is refused by its committer and rejected by every
+  member (SPEC §9.2, "One leaf per instance"). Anyone holding an
+  identity's `IK` can certify a second key under an existing instance id;
+  the copy would have taken over that id's routing hints, its removal and
+  the "new since verified" flag.
 - Core, daemon and SPEC: an invite JoinRequest that was rejected, lapsed
   or dropped could be delivered again by the relay (or anyone holding the
   envelope) and passed every check again, so a request the human rejected

@@ -413,7 +413,9 @@ def group_view(api: ApiClient, group_id: str) -> dict[str, Any]:
                         "leaf_index": i["leaf_index"],
                         "joined_epoch": i["joined_epoch"],
                         "self": bool(i.get("self")),
-                        "new_since_verified": i["instance_id"] in m["instances_since_verified"],
+                        "new_since_verified": None
+                        if m["instances_since_verified"] is None
+                        else i["instance_id"] in m["instances_since_verified"],
                     }
                     for i in m["instances"]
                 ],

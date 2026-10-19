@@ -264,9 +264,11 @@ def test_a_policy_change_is_applied_to_the_policy_in_force(ids: Ids) -> None:
     queued = {"type": "policy", "changes": {"invite": "members"}}
     newer = full_policy(a, floor="moderated", floor_pinned=True)
     assert planned_policy(newer, queued, {a, b}) == {**newer, "invite": "members"}
-    # A row queued before changes were deltas holds a whole policy.
-    legacy = {"type": "policy", "policy": full_policy(a, require_verified=True)}
-    assert planned_policy(newer, legacy, {a})["require_verified"] is True
+    # A row queued before changes were deltas holds a whole policy: only its
+    # require_verified applies, never the rest it cached (review 52 F5).
+    legacy = {"type": "policy", "policy": full_policy(b, admins=[a], require_verified=True)}
+    assert planned_policy(newer, legacy, {a}) == {**newer, "require_verified": True}
+    assert planned_policy(newer, {"type": "policy", "policy": {"owner": b}}, {a}) == newer
     assert planned_policy(newer, {"type": "policy"}, {a}) == newer
 
 
@@ -284,6 +286,10 @@ def test_a_transfer_and_role_changes(ids: Ids) -> None:
 
     make = {"type": "role", "identity": c, "role": "admin"}
     assert planned_policy(full_policy(a), make, {a, c})["admins"] == [c]
+    # Gone by the time the commit is built (review 52 F4b): no role for it.
+    with pytest.raises(DaemonError) as e:
+        planned_policy(full_policy(a), make, {a})
+    assert e.value.code == "not_permitted"
     assert planned_policy(current, make, {a, b, c}) == current  # already one
     drop = {**make, "role": "member"}
     assert planned_policy(current, drop, {a, b, c})["admins"] == [b]
@@ -326,3 +332,15 @@ def test_departed_roles_cleanup_can_be_turned_off(tmp_path: Path) -> None:
     assert cfg.groups_cleanup_departed_roles is False
     with pytest.raises(ConfigError, match="must be bool"):
         _load(tmp_path, '[groups]\ncleanup_departed_roles = "no"\n')
+
+
+def test_a_leaf_repeating_an_instance_id_is_a_new_instance(ids: Ids) -> None:
+    """Review 52 F1: instances are told apart by id and mailbox, so a leaf
+    that repeats an instance id with another key is reported as joining."""
+    a, b = ids.identity(), ids.identity()
+    one = {**member(b, "1" * 16, 1), "mailbox_id": "m1"}
+    twin = {**member(b, "1" * 16, 2), "mailbox_id": "m2"}
+    events = membership_events(summary(a, added=[twin]), [one, twin])
+    assert events == [("instance_joined", {"identity": b, "instance_id": "1" * 16, "by": a})]
+    gone = membership_events(summary(a, removed=[twin], left=[one]), [one])
+    assert gone == [("instance_removed", {"identity": b, "instance_id": "1" * 16, "by": a})]

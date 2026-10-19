@@ -35,6 +35,13 @@ class FlakyCore:
         return getattr(self._client, name)
 
 
+def core_error(message: str, kind: str) -> ac.AgentConnectError:
+    """An error as the core raises it: the message, and the kind callers branch on."""
+    e = ac.AgentConnectError(message)
+    e.kind = kind
+    return e
+
+
 def flaky(node: Node, monkeypatch: pytest.MonkeyPatch) -> FlakyCore:
     core = FlakyCore(node.daemon.client)
     monkeypatch.setattr(node.daemon, "client", core)
@@ -44,12 +51,19 @@ def flaky(node: Node, monkeypatch: pytest.MonkeyPatch) -> FlakyCore:
 @pytest.mark.parametrize(
     ("error", "kind"),
     [
-        (ac.AgentConnectError("storage error: database is locked"), "transient"),
-        (ac.AgentConnectError("wrong database key, or not an encrypted store"), "transient"),
-        (ac.AgentConnectError("internal error: x"), "transient"),
+        (core_error("storage error: database is locked", "transient"), "transient"),
+        (core_error("wrong database key, or not an encrypted store", "transient"), "transient"),
+        (core_error("internal error: x", "transient"), "transient"),
         (ac.CoreError("the core panicked; the operation did not complete"), "transient"),
-        (ac.AgentConnectError("message is for a different epoch"), "rejected"),
-        (ac.AgentConnectError("unauthorized commit: x"), "unauthorized_commit"),
+        (core_error("message is for a different epoch", "other"), "rejected"),
+        (core_error("unauthorized commit: x", "unauthorized"), "unauthorized_commit"),
+        (core_error("message already processed", "duplicate"), "duplicate"),
+        (
+            core_error("an own commit discarded earlier was accepted", "own_commit_lost"),
+            "own_commit_lost",
+        ),
+        # The message text decides nothing: only the kind.
+        (ac.AgentConnectError("storage error: no kind"), "rejected"),
     ],
 )
 def test_classification(error: Exception, kind: str) -> None:
@@ -62,7 +76,7 @@ async def test_transient_errors_are_retried_without_acking(
     (a, b), gid = await group(2)
     core = flaky(b, monkeypatch)
     core.errors = [
-        ac.AgentConnectError("storage error: disk I/O error"),
+        core_error("storage error: disk I/O error", "transient"),
         ac.CoreError("the core panicked; the operation did not complete"),
     ]
     msg_id = a.daemon.send_message(gid, {"text": "eventually"})
@@ -82,7 +96,7 @@ async def test_persistent_transient_errors_give_up_unacked(
 ) -> None:
     (a, b), gid = await group(2)
     core = flaky(b, monkeypatch)
-    core.errors = [ac.AgentConnectError("storage error: x")] * MAX_TRANSIENT_RETRIES
+    core.errors = [core_error("storage error: x", "transient")] * MAX_TRANSIENT_RETRIES
     msg_id = a.daemon.send_message(gid, {"text": "later"})
     for n in range(1, MAX_TRANSIENT_RETRIES):
         await b.wait(lambda n=n: core.calls == n and b.clock.sleepers > 0)

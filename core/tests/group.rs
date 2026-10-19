@@ -816,7 +816,7 @@ fn leave_via_remove_proposal() {
         groups[0]
             .commit_pending_proposals(&peers[0].client)
             .unwrap_err(),
-        Error::NotPermitted("no pending proposals")
+        Error::NothingToCommit
     );
     // A sole member doesn't propose; it deletes its state.
     let mut solo = peers[0].client.create_group("solo", "").unwrap();
