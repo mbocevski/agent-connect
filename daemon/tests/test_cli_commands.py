@@ -197,6 +197,28 @@ def test_invite_create_options_and_policy(fake: Fake) -> None:
     assert fake.posts("/policy")[0][1] == {"require_verified": True}
 
 
+def test_a_replica_invite_uses_the_human_token_and_needs_a_group(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/invites"] = {
+        "url": URL,
+        "invite_id": "abc",
+        "expires_at": 5,
+    }
+    code, out = fake.json("invite", "create", "--group", GID, "--replica")
+    assert code == 0
+    assert conforms(out, SCHEMAS["invite create"])
+    assert out["replica"] is True
+    assert "replica's host" in out["reminder"]
+    assert fake.posts("/invites") == [(True, {"ttl_secs": 86400, "max_uses": 1, "replica": True})]
+    shown = fake.run("invite", "create", "--group", GID, "--replica").stdout
+    assert "Replica invite for group" in shown
+    # A plain invite stays on the agent token and doesn't say replica.
+    code, out = fake.json("invite", "create", "--group", GID)
+    assert (code, out["replica"]) == (0, False)
+    assert fake.posts("/invites")[-1] == (False, {"ttl_secs": 86400, "max_uses": 1})
+    code, out = fake.json("invite", "create", "--replica")
+    assert (code, out["error"]["code"]) == (2, "bad_args")
+
+
 @pytest.mark.parametrize("ttl", ["soon", "8d", "0"])
 def test_bad_ttl_is_a_usage_error(fake: Fake, ttl: str) -> None:
     code, out = fake.json("invite", "create", "--ttl", ttl)

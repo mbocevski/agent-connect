@@ -1694,7 +1694,9 @@ class Engine:
             if refused is not None:
                 return drop_it(refused)
             if (
-                taken := self._join_taken(request_id, kp_ref, invite_id, verified.identity)
+                taken := self._join_taken(
+                    request_id, kp_ref, invite_id, verified.identity, replica=invite["replica"]
+                )
             ) is not None:
                 return await flooded(taken) if taken == JOIN_IDENTITY_FULL else drop_it(taken)
             waiting = self.store.pending_approvals_for(
@@ -1740,7 +1742,7 @@ class Engine:
             raise
 
     def _join_taken(
-        self, request_id: str, kp_ref: str, invite_id: str, identity: str
+        self, request_id: str, kp_ref: str, invite_id: str, identity: str, *, replica: bool
     ) -> str | None:
         """Why a new join request can't get an approval of its own, or
         ``None``. Past the ledger's window the request id or the KeyPackage
@@ -1749,7 +1751,11 @@ class Engine:
         the human, marked as such, up to :data:`MAX_PENDING_PER_IDENTITY` per
         invite: anyone who saw one of an identity's KeyPackages can send a
         request in its name, so the human chooses, and its own can't be
-        crowded out by one other request."""
+        crowded out by one other request. A replica invite admits instances
+        of this identity only (SPEC 9.4): the human never sees another
+        identity's request for one (``join_not_replica``)."""
+        if replica and identity != self.me:
+            return "join_not_replica"
         if (
             self.store.approval(request_id) is not None
             or self.store.open_approval_for(kp_ref) is not None
@@ -2866,14 +2872,20 @@ class Engine:
         ttl_secs: int = 86_400,
         max_uses: int = 1,
         inviter_name: str | None = None,
+        *,
+        replica: bool = False,
     ) -> dict[str, Any]:
+        """Create and register an invite. ``replica`` (**human-only**, the
+        API checks the token) makes it an invite for another instance of
+        this identity: it may be created whatever ``invite`` says, and a
+        join request from any other identity is dropped (SPEC 9.2, 9.4)."""
         group = self._group_or_raise(group_id)
         policy = group.policy
         allowed = {
             "owner": {policy.get("owner")},
             "admins": {policy.get("owner"), *policy.get("admins", [])},
         }.get(str(policy.get("invite")))
-        if allowed is not None and self.me not in allowed:
+        if not replica and allowed is not None and self.me not in allowed:
             raise DaemonError("forbidden", "the group policy does not let this identity invite")
         reserved = sum(
             self._join_reserve(int(i["max_uses"]))
@@ -2904,7 +2916,13 @@ class Engine:
         # mid-registration the row says so, and the next connect revokes
         # the invite and drops its secret instead of orphaning them.
         self.store.add_invite(
-            invite_id, group_id, invite.expires_at, max_uses, self.now(), status="registering"
+            invite_id,
+            group_id,
+            invite.expires_at,
+            max_uses,
+            self.now(),
+            status="registering",
+            replica=replica,
         )
         # The secret stays local; only public metadata goes to the relay.
         self.keystore.put(f"invite/{invite_id}", invite.secret_bytes())

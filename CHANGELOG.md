@@ -10,6 +10,25 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- CLI and runtime: replica provisioning (docs/cli.md, docs/groups.md).
+  `agentconnect identity export --out FILE` writes the identity key into a
+  new 0600 file, encrypted (ChaCha20-Poly1305) under a fresh random code
+  that it prints once; `agentconnect identity import FILE` takes the code
+  (asked for without echo, or `--code`) and installs the identity into a
+  new, empty data directory with a fresh instance of its own. Both refuse
+  to run while a runtime holds the data directory, and the import refuses a
+  directory that already holds an identity, an instance, a database key or
+  a database, so a copied one can't pass as a replica. No API route, SDK
+  call or MCP tool offers either. `agentconnect invite create --group G
+  --replica` (human token; `replica: true` on `POST
+  /v0/groups/{gid}/invites`) creates an invite for another instance of
+  your own identity: allowed whatever the group's `invite` says, and a join
+  request from any other identity is dropped (`join_not_replica` in the
+  audit log). A policy change that stops you inviting leaves your replica
+  invites open. Core: `agentconnect_core::export` and the bindings
+  `wrap_identity_export`, `unwrap_identity_export` and
+  `identity_export_identity`, a new `Error::ExportAuth` (kind
+  `authentication`), and the vectors `testdata/identity-export.json`.
 - Runtime and CLI: roles and the group policy (docs/groups.md). The human
   token makes a member an admin or a plain member (`POST
   /v0/groups/{gid}/members/{identity}/role`, `agentconnect group role`),

@@ -124,7 +124,13 @@ def test_invites_approvals_joins_events_kv(tmp_path: Path, opened: Opener) -> No
         "expires_at": 100,
         "max_uses": 2,
         "status": "open",
+        "replica": False,
     }
+    s.add_invite("i2", "g1", 100, 1, 2, replica=True)
+    assert [(i["invite_id"], i["replica"]) for i in s.invites("open")] == [
+        ("i1", False),
+        ("i2", True),
+    ]
     s.set_invite_status("i1", "revoked")
     assert (s.invite("i1") or {})["status"] == "revoked"
     assert s.invite("nope") is None
@@ -265,6 +271,21 @@ def test_old_handled_ids_are_cleared_once(tmp_path: Path, opened: Opener, db_key
     s.close()
     s = Store(path, db_key)
     assert s.handled_has("bare-after")  # not on every open
+    s.close()
+
+
+def test_an_invite_from_before_replica_invites_is_a_plain_one(
+    tmp_path: Path, opened: Opener, db_key: bytes
+) -> None:
+    path = tmp_path / "i.sqlite3"
+    s = opened(path)
+    s.add_invite("i1", "g1", 100, 2, 1)
+    s._db.execute("ALTER TABLE invites DROP COLUMN replica")  # the old schema
+    s.close()
+    s = Store(path, db_key)
+    assert (s.invite("i1") or {})["replica"] is False
+    s.add_invite("i2", "g1", 100, 1, 2, replica=True)
+    assert (s.invite("i2") or {})["replica"] is True
     s.close()
 
 

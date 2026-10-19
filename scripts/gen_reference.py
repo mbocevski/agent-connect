@@ -102,8 +102,17 @@ class CliCommand:
         return cli_support.HUMAN_ONLY_HELP in (self.command.help or "")
 
     @property
+    def local(self) -> bool:
+        return cli_support.LOCAL_ONLY_HELP in (self.command.help or "")
+
+    @property
+    def token(self) -> str:
+        return "**human**" if self.human else "**local**" if self.local else "api"
+
+    @property
     def help(self) -> str:
         text = (self.command.help or "").replace(cli_support.HUMAN_ONLY_HELP, "")
+        text = text.replace(cli_support.LOCAL_ONLY_HELP, "")
         return "\n\n".join(" ".join(p.split()) for p in text.split("\n\n") if p.strip()).strip()
 
 
@@ -183,7 +192,7 @@ def render_cli_commands(app: typer.Typer = cli.app) -> str:
         [
             (
                 f"`{c.name}`",
-                "**human**" if c.human else "api",
+                c.token,
                 first_sentence(c.help),
             )
             for c in commands
@@ -193,12 +202,19 @@ def render_cli_commands(app: typer.Typer = cli.app) -> str:
         NOTICE,
         summary,
         "Token: the commands marked human use the human token and are decisions for "
-        "a person. Never run them on the human's behalf.",
+        "a person. Never run them on the human's behalf. The commands marked local use "
+        "no token and no API: they work on a stopped runtime's data directory, and only "
+        "a person runs them.",
     ]
     for c in commands:
         parts += [f"### `agentconnect {c.name}`", c.help, fence(c.usage)]
         if c.human:
             parts.append("Uses the **human token**: a person makes this decision.")
+        if c.local:
+            parts.append(
+                "Runs **locally**, with no API and no token, on a stopped runtime's data "
+                "directory: a person makes this decision."
+            )
         if args := _arguments(c):
             parts.append(
                 table(

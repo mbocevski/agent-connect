@@ -3,7 +3,7 @@
 - **Status:** Accepted (2026-10-17). The runtime refactor and the embedded
   SDK host are implemented (2026-10-18), and so are the MCP host and the
   delivery routes; attach for the embedded SDK (`on_locked="attach"`) is
-  not yet.
+  not yet. Replica provisioning (Decision 5) is implemented (2026-10-19).
 - **Date:** 2026-10-17
 - **Deciders:** Marko Bocevski
 
@@ -118,6 +118,53 @@ below ([adapters/mcp.md](../adapters/mcp.md)):
   `human-token` and keeps only its hash (Decision 4); no tool exposes it, and
   an attached session reads `api-token` only.
 - **Isolation.** `isolation.enabled` is refused, as by the embedded SDK.
+
+## Implementation notes (replica provisioning)
+
+What was built for Decision 5's follow-up ([cli.md](../cli.md#provisioning-a-replica),
+[groups.md](../groups.md#replicas)):
+
+- **Commands, and nothing else.** `agentconnect identity export --out FILE`
+  and `agentconnect identity import FILE [--code CODE]`
+  (`agentconnect.provision`). No local API route, `AgentApi` method, SDK
+  call or MCP tool reaches them, so not even the human token over the API
+  can export the key: provisioning needs a person at the data directory.
+  Both take the data directory's lock first and refuse while any runtime
+  holds it. They don't write the lock note, so an MCP session still sees
+  the last runtime as the holder.
+- **The export.** The core wraps `IK`'s secret (`agentconnect_core::export`,
+  bindings `wrap_identity_export` and `unwrap_identity_export`):
+  `JCS({"v": 0, "identity", "wrapped"})`, with `wrapped` =
+  `nonce(12) ‖ ChaCha20-Poly1305(key, nonce, aad =
+  "agentconnect/v0/identity-export", IK.secret)`, the AEAD the core already
+  uses for Welcomes. `key` is 32 fresh random bytes, printed once as the
+  export code (base64url, 43 characters) and stored nowhere. A code the
+  machine draws rather than a passphrase the human picks needs no password
+  KDF, so no new dependency, and has the full 256 bits; the cost is that the
+  human carries 43 characters by a second channel. The file is created 0600
+  with `O_EXCL | O_NOFOLLOW`, never over an existing file or through a link.
+  `identity` is readable without the code, so the import can say which
+  identity it is about to install, and a file whose `identity` was changed
+  doesn't open (the secret must give that identity). Another `v` is refused
+  as unsupported. The vectors are `testdata/identity-export.json`.
+- **The import.** Only into a data directory without `identity`,
+  `instance` or `db_key` in its keystore, without `mls.sqlite3` or
+  `daemon.sqlite3`, and with an empty `keys/`: a copied data directory is
+  refused, not only warned about (Decision 5). There is no flag to force it.
+  It creates the instance at once, from the OS RNG, so the replica's
+  `instance_id` and signing key are its own; the database key is created
+  when the runtime first starts, as for any new data directory. The code is
+  asked for without echo when `--code` is not given.
+- **Replica invites.** `invite create --replica` (human token;
+  `replica: true` on the existing invites route, so no new route) may be
+  created whatever `invite` says (SPEC §9.2) and drops join requests from
+  any other identity (`join_not_replica` in the audit log). A policy change
+  that stops this identity from inviting closes its other invites but not
+  its replica invites.
+- **Residual exposure.** The secret is zeroized in the core; the CLI passes
+  it once as Python `bytes` into the keystore, and the code is a Python
+  `str`, neither of which can be zeroized, as for every key the runtime
+  loads (`agentconnect.identity`). Nothing logs either.
 
 ## Context
 
@@ -471,9 +518,10 @@ made per mode.
   replica: verifying a peer on one replica doesn't mark it verified on
   another.
 - **Provisioning a replica** needs the identity key in a second data
-  directory with a fresh instance. Nothing does that today. The follow-up
-  adds a human-only CLI command (identity export and import, never over the
-  API), and the docs say that every replica host then holds `IK`.
+  directory with a fresh instance. The human-only CLI commands `identity
+  export` and `identity import` do it, never over the API ([Implementation
+  notes](#implementation-notes-replica-provisioning)), and the docs say
+  that every replica host then holds `IK`.
 - **Copying a whole data directory is not a replica.** The copy has the same
   instance key, mailbox and MLS state, and two runtimes on one leaf break the
   group. The lock can't catch a copy on another machine.
@@ -521,7 +569,8 @@ Supported:
 - MCP-spawned runtimes: the first session owns, later sessions attach, one
   takes over when the owner exits.
 - Replicas of one identity across processes or machines, each with its own
-  data directory and invites, once replica provisioning exists.
+  data directory and replica invites, provisioned with `identity export`
+  and `identity import`.
 
 Unsupported:
 
@@ -562,7 +611,7 @@ Unsupported:
   takeover, the deny rules for the data directory and the human-scope CLI
   commands in the agent tool's permission settings.
 - **`docs/cli.md`:** the `--agent NAME` shortcut, and replica provisioning
-  once it exists.
+  (done: `identity export` and `identity import`).
 - The harness and the contract test run every host against the same
   runtime, so a behaviour fork shows up as a failing test.
 

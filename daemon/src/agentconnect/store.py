@@ -128,7 +128,8 @@ CREATE TABLE IF NOT EXISTS invites (
     expires_at INTEGER NOT NULL,
     max_uses INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    replica INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS approvals (
     request_id TEXT PRIMARY KEY,
@@ -600,6 +601,9 @@ class Store:
         member_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('members')")}
         if "verified_epoch" not in member_columns:
             self._db.execute("ALTER TABLE members ADD COLUMN verified_epoch INTEGER")
+        invite_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('invites')")}
+        if "replica" not in invite_columns:
+            self._db.execute("ALTER TABLE invites ADD COLUMN replica INTEGER NOT NULL DEFAULT 0")
         feed_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('feed')")}
         if "at" not in feed_columns:
             self._db.execute("ALTER TABLE feed ADD COLUMN at INTEGER NOT NULL DEFAULT 0")
@@ -1613,11 +1617,12 @@ class Store:
         now: int,
         *,
         status: str = "open",
+        replica: bool = False,
     ) -> None:
         self._db.execute(
-            "INSERT INTO invites (invite_id, group_id, expires_at, max_uses, created_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (invite_id, group_id, expires_at, max_uses, now, status),
+            "INSERT INTO invites (invite_id, group_id, expires_at, max_uses, created_at, status, "
+            "replica) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (invite_id, group_id, expires_at, max_uses, now, status, int(replica)),
         )
 
     def delete_invite(self, invite_id: str) -> None:
@@ -1625,23 +1630,26 @@ class Store:
 
     def invite(self, invite_id: str) -> dict[str, Any] | None:
         row = self._one(
-            "SELECT invite_id, group_id, expires_at, max_uses, status FROM invites "
+            "SELECT invite_id, group_id, expires_at, max_uses, status, replica FROM invites "
             "WHERE invite_id = ?",
             invite_id,
         )
-        if row is None:
-            return None
-        keys = ("invite_id", "group_id", "expires_at", "max_uses", "status")
-        return dict(zip(keys, row, strict=True))
+        return None if row is None else self._invite_row(row)
 
     def invites(self, status: str) -> list[dict[str, Any]]:
         rows = self._all(
-            "SELECT invite_id, group_id, expires_at, max_uses, status FROM invites "
+            "SELECT invite_id, group_id, expires_at, max_uses, status, replica FROM invites "
             "WHERE status = ? ORDER BY created_at",
             status,
         )
+        return [self._invite_row(r) for r in rows]
+
+    @staticmethod
+    def _invite_row(row: tuple[Any, ...]) -> dict[str, Any]:
         keys = ("invite_id", "group_id", "expires_at", "max_uses", "status")
-        return [dict(zip(keys, r, strict=True)) for r in rows]
+        out = dict(zip(keys, row[:5], strict=True))
+        out["replica"] = bool(row[5])
+        return out
 
     def set_invite_status(self, invite_id: str, status: str) -> None:
         self._db.execute("UPDATE invites SET status = ? WHERE invite_id = ?", (status, invite_id))
