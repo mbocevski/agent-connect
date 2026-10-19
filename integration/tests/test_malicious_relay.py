@@ -101,9 +101,8 @@ def test_an_injected_commit_is_rejected(
 def test_a_forked_group_view_shows_in_sas_runs(
     trio: tuple[Any, str, dict[str, str]], driver: ModuleType
 ) -> None:
-    """A's commit reaches B only: A and B move to an epoch C never sees. A
-    SAS run between A and B gives both the same code; one between A and C
-    never pairs (SPEC 12)."""
+    """A's commit reaches B only: A and B move to an epoch C never sees, and
+    the fork shows as SAS runs that never pair (SPEC 12)."""
     dep, gid, _ids = trio
     epoch, members = state(dep, gid, "agent-c")
     dep.tap("host-a", "fork")
@@ -115,10 +114,10 @@ def test_a_forked_group_view_shows_in_sas_runs(
     a, b, c = (state(dep, gid, s) for s in ("daemon-a", "daemon-b", "agent-c"))
     assert a == b == (epoch + 1, members)
     assert c == (epoch, members)
-    run_a, run_b = driver.sas_runs(dep, "daemon-a", "daemon-b", gid)
-    assert run_a["state"] == run_b["state"] == "done"
-    assert run_a["sas"] == run_b["sas"]
-    run_a, run_c = driver.sas_runs(dep, "daemon-a", "agent-c", gid, within=15)
-    for seen in (run_a, run_c):
-        assert "peer_instance" not in seen, seen  # never paired
-        assert "sas" not in seen
+    # The relay is still at C's epoch, so it refuses what A and B send in
+    # theirs: no run pairs, across the fork or on A's side of it.
+    for one, other in (("daemon-a", "agent-c"), ("daemon-a", "daemon-b")):
+        for seen in driver.sas_runs(dep, one, other, gid, within=15):
+            assert "peer_instance" not in seen, seen  # never paired
+            assert "sas" not in seen
+            assert "unpaired_text" in seen or seen["state"] == "waiting", seen

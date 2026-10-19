@@ -372,9 +372,8 @@ compose project (`acint-<pid>-<name>`), torn down afterwards.
   a group of three docker hosts: replayed frames are dropped (one delivery),
   an old commit relabelled as current and a changed one move nobody (the
   member that got them reports `out_of_sync`, `commit_rejected`), and a
-  commit that reaches only some members shows in SAS runs: the members
-  that share a view read the same code, and a run across the fork never
-  pairs.
+  commit that reaches only some members shows in SAS runs: no run pairs,
+  since the relay refuses what the forked members send.
 - **Time.** The deployment runs on real clocks, so these tests poll the CLI
   and the agents' output with deadlines. Each takes about a minute.
 
