@@ -1249,7 +1249,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   under the earlier code are reset once.
 - Runtime and CLI: instance labels that don't mirror are no longer a
   silent retry. In the forked-view attack the attacker's own instance ids
-  make them differ, so `verify` asks about the code and the labels always,
+  make them differ, so `verify` asks about the code and the labels always.
+  A code that differs is the mismatch whatever the labels, since the
+  attacker can also copy the real instance ids. With the same code, it
   asks for the other human's labels when they don't mirror, and the
   daemon counts a warning and treats it as codes that differ, unless both
   labels name instances in its view (replicas paired crosswise, which

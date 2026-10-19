@@ -175,8 +175,10 @@ N − 1 others.
 
 - `verify` shows the code with two instance labels, yours and theirs; the
   other human reads the same two the other way round. It asks about the
-  code and about the labels, always. Labels that don't mirror count as a
-  warning, and `verify` asks for the two labels the other human reads. If
+  code and about the labels, always. A code that differs is the
+  mismatch, whatever the labels: an attacker in the middle can copy the
+  real instance ids. With the same code, labels that don't mirror count as
+  a warning, and `verify` asks for the two labels the other human reads. If
   both name instances in your view (theirs one of the member's, and their
   "yours" one of your own identity's), two runs of replicas paired
   crosswise: start again, naming the instance with `--instance`. Anything

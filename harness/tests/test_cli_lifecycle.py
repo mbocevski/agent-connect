@@ -7,7 +7,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from agentconnect import cli_support
 from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
+from agentconnect.runtime.sas import label
 from agentconnect_harness.cluster import Cluster, Node, compare, status
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import on_free_port
@@ -370,3 +371,50 @@ async def test_one_attacker_in_two_forked_groups_ends_in_a_mismatch(
     code, out = await verifying
     assert (code, out["outcome"], out["status"]) == (6, "mismatch", "left")
     assert status(alice.node, g1) == "left"
+
+
+@pytest.mark.parametrize("code_answer", ["n", "y"])
+async def test_twin_instance_ids_never_turn_codes_that_differ_into_a_restart(
+    cluster: Cluster, serve: Callable[[Node], Awaitable[Cli]], code_answer: str
+) -> None:
+    """Review 67 V-1 (probe P6): instance ids are unique only within an
+    identity (SPEC 9.2), so Mallory gives her view-1 identity a second
+    instance with Bob's id, and her view-2 instance Alice's id. Bob then
+    reads labels (bob, alice) that Alice's daemon explains as replicas paired
+    crosswise. "Codes differ" is still the mismatch; only "same code" with
+    those labels is the restart, and it counts a warning. (The twin is fed
+    in as the core's member list would show it, as test_group_roles does.)"""
+    alice = await serve(await cluster.node("alice"))
+    m1 = await cluster.node("m1")
+    bob = await cluster.node("bob")
+    g1 = alice.node.daemon.create_group("Plans", "p")
+    await alice.node.idle()
+    await cluster.invite(alice.node, m1, g1)
+    b_id = bob.daemon.instance.instance_id_hex
+    a_id = alice.node.daemon.instance.instance_id_hex
+    store = alice.node.daemon.store
+    real = store.members
+
+    def members(gid: str) -> Any:
+        out = []
+        for m in real(gid):
+            if m.identity == m1.me:
+                twin = {**m.instances[0], "instance_id": b_id}
+                m = replace(m, instances=[*m.instances, twin])  # noqa: PLW2901
+            out.append(m)
+        return out
+
+    store.members = members  # ty: ignore[invalid-assignment]
+    verifying = asyncio.ensure_future(
+        alice.json("verify", g1, input=f"{code_answer}\nn\n{label(b_id)} {label(a_id)}\n")
+    )
+    await alice.node.wait(lambda: bool(alice.node.daemon.sas._active))
+    m1.daemon.sas_start(g1, alice.node.me)
+    code, out = await verifying
+    if code_answer == "n":
+        assert (code, out["outcome"], out["status"]) == (6, "mismatch", "left")
+        assert status(alice.node, g1) == "left"
+    else:
+        assert (code, out["error"]["code"]) == (3, "labels_differ")
+        assert status(alice.node, g1) == "active"
+        assert store.sas_warnings(g1, m1.me)[0] == 1

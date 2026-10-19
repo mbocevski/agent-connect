@@ -417,8 +417,10 @@ class SasService:
         run.answered = True
 
     def labels(self, group_id: str, run_id: str, theirs: tuple[str, str]) -> dict[str, Any]:
-        """**Human-only.** The other human reads labels that don't mirror
-        ours (SPEC 11.5). ``theirs`` is (their own label, their peer's).
+        """**Human-only.** The other human reads the same code, but labels
+        that don't mirror ours (SPEC 11.5); a code that differs is a mismatch
+        whatever the labels, and never comes here. ``theirs`` is (their own
+        label, their peer's).
 
         It counts as a warning either way. Only when both name instances in
         this instance's view, the peer's for theirs and ours for their peer,

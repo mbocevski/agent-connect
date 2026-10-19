@@ -688,16 +688,32 @@ def test_verify_labels_that_dont_mirror_are_a_mismatch(fake: Fake) -> None:
 
 
 def test_verify_labels_of_crossed_replicas_count_and_restart(fake: Fake) -> None:
+    """Same code, labels that name replicas paired crosswise: no answer is
+    recorded, and the humans start again with --instance."""
     sas_routes(fake)
     labels = f"POST /v0/groups/{GID}/sas/runs/{RUN}/labels"
     text = "The labels name other instances of you and of bob."
     fake.routes[labels] = {"outcome": "replicas", "instance": "2" * 16, "text": text}
-    result = fake.run("verify", GID, input="n\nn\n22222222 00000000\n")
+    result = fake.run("verify", GID, input="y\nn\n22222222 00000000\n")
     assert result.exit_code == 3, result.output
     assert text in result.output
     assert f"--instance {'2' * 16}" in result.output
     assert not fake.posts("/verify")
     assert not fake.posts("/mismatch")
+
+
+def test_verify_codes_that_differ_are_a_mismatch_whatever_the_labels(fake: Fake) -> None:
+    """Review 67 V-1: "codes differ" always posts the mismatch (SPEC 11.5).
+    The labels, which an attacker in the middle can make look like replicas,
+    never turn it into a restart."""
+    sas_routes(fake)
+    labels = f"POST /v0/groups/{GID}/sas/runs/{RUN}/labels"
+    fake.routes[labels] = {"outcome": "replicas", "instance": "2" * 16, "text": "x"}
+    result = fake.run("verify", GID, input="n\nn\n22222222 00000000\n")
+    assert result.exit_code == 6, result.output
+    assert fake.posts("/mismatch")[0] == (True, {"run": RUN})
+    assert not fake.posts("/labels")
+    assert not fake.posts("/verify")
 
 
 def test_verify_needs_other_members_and_an_active_group(fake: Fake) -> None:

@@ -1431,11 +1431,13 @@ def verify(
         same_labels = typer.confirm(
             "And the same two instance labels, the other way round?", default=False, err=as_json
         )
-        if not same_labels:
-            _labels_differ(api, gid, info, view, as_json)
         if not same_code:
+            # Whatever the labels say: an attacker in the middle chooses her
+            # instance ids, so labels can't explain codes that differ.
             _mismatch(api, gid, info, as_json, run=view["run"])
             return
+        if not same_labels:
+            _labels_differ(api, gid, info, view, as_json)
         body = {"verified": True, "run": view["run"]}
         api.request("POST", f"/v0/groups/{gid}/members/{peer['identity']}/verify", body)
         if as_json:
@@ -1459,9 +1461,10 @@ LABEL = re.compile(r"^[0-9a-f]{8}$")
 def _labels_differ(
     api: ApiClient, gid: str, info: dict[str, Any], view: dict[str, Any], as_json: bool
 ) -> None:
-    """The labels don't mirror (SPEC 11.5): the other human's two labels go
-    to the daemon, which counts a warning and treats it as codes that differ,
-    unless both name instances in this view (replicas paired crosswise)."""
+    """The same code, but labels that don't mirror (SPEC 11.5): the other
+    human's two labels go to the daemon, which counts a warning and treats it
+    as codes that differ, unless both name instances in this view (replicas
+    paired crosswise)."""
     while True:
         raw = typer.prompt(
             "The two labels they read, theirs first (e.g. 1a2b3c4d 5e6f7a8b)", err=as_json

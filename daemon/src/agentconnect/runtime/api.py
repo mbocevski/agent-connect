@@ -685,7 +685,8 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "POST",
         "/v0/groups/{gid}/sas/runs/{run}/labels",
         "_sas_labels",
-        "The instance labels the other human reads don't mirror yours: `self` is the label "
+        "The other human reads the same code, but instance labels that don't mirror yours "
+        "(a code that differs goes to `sas/mismatch`, whatever the labels): `self` is the label "
         "they read as theirs, `peer` the one they read as yours. It counts as a warning. If "
         "both name instances in your view (theirs one of the member's, `peer` one of your "
         "identity's), two comparisons of replicas paired crosswise: `outcome` is "
