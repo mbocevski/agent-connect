@@ -1090,7 +1090,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   answered `rate_limited` or `internal` held it for its backoff. Such a row
   now waits out its own backoff while the rows of other groups go out; a
   group's own rows still go out in the order they were queued, behind it.
-  A message or commit the relay keeps refusing still fails after 8 tries.
+  `rate_limited` is the relay's send budget for the mailbox, shared by
+  every group, so it pauses the whole outbox for one shared backoff, after
+  which the oldest row goes first; it no longer counts toward a row's
+  tries. A message or commit fails after 8 `internal` answers to its own
+  send; storage errors and a cadence Update's answers don't count toward
+  it.
 - Runtime: a policy change that lost an epoch conflict was rebuilt from the
   whole policy cached when it was queued, which could undo a change another
   member committed meanwhile. Changes are queued as what they change and

@@ -357,9 +357,13 @@ your handler sees each message and each event once.
   one at a time. Messages and events are separate streams, so an event
   handler can run before the handler of an earlier message. What you send
   goes out in order within a group too: a message, commit or Welcome the
-  relay refuses for now (`rate_limited`, `internal`) is sent again after a
-  backoff, and the rest of its group waits behind it while other groups'
-  sends go on.
+  relay refuses for now is sent again after a backoff. After `internal`
+  the rest of its group waits behind it while other groups' sends go on;
+  `rate_limited` means the relay's send budget for your mailbox, which all
+  your groups share, is used up, so every send waits out one pause and the
+  oldest goes first. A send answered `internal` 8 times fails
+  (`send_failed` or `commit_failed`, code `attempts_exhausted`);
+  `rate_limited` answers don't count toward that.
 - **Don't block the event loop.** Embedded handlers run on the same asyncio
   loop as the runtime: the relay link, the outbox and the local API your
   human uses for approvals. A handler that blocks the loop (a synchronous

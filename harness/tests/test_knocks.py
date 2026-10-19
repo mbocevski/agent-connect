@@ -586,9 +586,10 @@ async def test_a_message_in_the_hidden_window_waits_for_the_agent(
 # -- a Welcome the relay refuses for now (N5) ------------------------------------
 
 
-def refuse_welcomes(node: Node, times: int) -> list[str]:
-    """Have the relay answer the node's next ``times`` Welcomes
-    `rate_limited`. Returns the msg_id of every Welcome the node sends,
+def refuse_welcomes(node: Node, times: int, code: str = "quota_exceeded") -> list[str]:
+    """Have the relay answer the node's next ``times`` Welcomes ``code``
+    (by default `quota_exceeded`, the knocker's mailbox is full: a refusal
+    of this Welcome only). Returns the msg_id of every Welcome the node sends,
     refused or not."""
     tried: list[str] = []
 
@@ -599,7 +600,7 @@ def refuse_welcomes(node: Node, times: int) -> list[str]:
         return [frame]
 
     node.proxy.client_filters.append(count)
-    node.proxy.fail_next("send", "rate_limited", kind="welcome_wrapped", times=times)
+    node.proxy.fail_next("send", code, kind="welcome_wrapped", times=times)
     return tried
 
 
@@ -616,7 +617,7 @@ async def approve_with_refused_welcome(
     cluster: Cluster, directory: DirectoryProcess, owner: Node, ref: str, refusals: int
 ) -> tuple[Node, str, str, str, list[str]]:
     """Approve a knock whose Welcome the relay refuses ``refusals`` times
-    (`rate_limited`), and wait until the first refusal is waiting out its
+    (`quota_exceeded`), and wait until the first refusal is waiting out its
     backoff."""
     k = await knocker(cluster, directory)
     sent = await k.runtime.agent.knock(ref)
@@ -678,6 +679,29 @@ async def test_a_welcome_the_relay_refuses_for_now_holds_up_no_other_group(
     assert len(tried) == 4  # three refused, then taken
     assert len(set(tried)) == 1
     assert bob.adapter.texts(gid) == ["one", "two", "three"]
+
+
+async def test_a_rate_limited_welcome_pauses_every_group(
+    cluster: Cluster, directory: DirectoryProcess, rng: random.Random
+) -> None:
+    """A Welcome answered `rate_limited` met the mailbox's send budget,
+    which every group shares: the owner's other sends wait out the same
+    pause, and then the Welcome, the oldest row, goes first."""
+    owner, ref = await listed(cluster, directory, rng)
+    bob, gid = await team(cluster, owner)
+    k = await knocker(cluster, directory)
+    knock_id = str((await k.runtime.agent.knock(ref))["knock_id"])
+    (request,) = await pending(owner)
+    tried = refuse_welcomes(owner, 1, "rate_limited")
+    kid = str(owner.daemon.approve(request["request_id"])["group_id"])
+    await until(lambda: len(tried) == 1 and owner.clock.sleepers > 0)
+    msg = owner.daemon.send_message(gid, {"text": "one"})
+    await owner.wait(lambda: owner.daemon._next_row() is None)
+    assert owner.daemon.store.outbox_state_of(msg) == "queued"
+    await welcome_goes_out(cluster, owner, k, knock_id, kid)
+    assert await bob.wait_texts(gid, 1) == ["one"]
+    assert len(tried) == 2
+    assert len(set(tried)) == 1
 
 
 async def test_a_welcome_refused_for_now_goes_once_after_a_restart(

@@ -63,6 +63,7 @@ from agentconnect.runtime.engine import (
     KNOCK_REQUEST_PREFIX,
     DaemonError,
     Engine,
+    RateLimitedError,
     TransientError,
     _same_relay,
     ac_identity_key,
@@ -654,8 +655,11 @@ class KnockService:
                 code = relay_code(e.code)
                 if code in RETRY_WELCOME:
                     # Not now: the outbox sends it again (the same msg_id)
-                    # after a backoff, until the deadline above.
+                    # after a backoff, until the deadline above. rate_limited
+                    # is the mailbox's budget: the whole outbox pauses.
                     LOG.info("knock_welcome_retry", code=code)
+                    if code == "rate_limited":
+                        raise RateLimitedError(group.group_id, code) from None
                     raise TransientError(group.group_id, code) from None
                 LOG.info("knock_welcome_not_sent", code=code)
                 self.add_failed(request_id, code)
