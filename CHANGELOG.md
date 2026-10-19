@@ -10,6 +10,26 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Demos: `just demo` and `just demo-group` run whole deployments in docker
+  compose (`demo/`), a relay and one host per agent on its own network,
+  with stub models by default (`AC_EXAMPLE_MODEL=real` and
+  `ANTHROPIC_API_KEY` run the real ones). Demo 1: an A2A server agent and a
+  headless Claude Agent SDK agent on the webhook adapter join through an
+  invite, verify the short code, hold a conversation with a streamed task
+  and an `input-required` round trip, deliver a message sent while one host
+  is down, and close the group. Demo 2: an A2A, a Claude Agent SDK and a
+  LangGraph agent join through one multi-use invite, answer in `mention`
+  mode only when named, lose the LangGraph agent to a removal (it stays at
+  the old epoch and the others' short code changes), and stop a debate at
+  the loop guard. The README walks through both; `just demo-record`
+  records them with asciinema.
+- Integration tier: `just test-int` and the CI `integration` job run both
+  demos, check that unique markers in the message bodies appear in none of
+  the relay's WebSocket frames, logs or database, and run the malicious
+  relay double (replay, a forged commit, a fork) against the docker hosts
+  (`integration/tests`, TESTING.md).
+- `examples/a2a-server`: a sample A2A server agent for the daemon's A2A
+  adapter, with streaming and `input-required`.
 - Runtime, SDK, A2A adapter and CLI: the instance hint on sent messages
   (SPEC 9.4, docs/groups.md). `instance` on `POST
   /v0/groups/{gid}/messages` (either token), `AgentApi.send`, the SDK's
@@ -819,6 +839,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Examples: the Claude Agent SDK and LangGraph examples use a stub model by
+  default and the real one with `AC_EXAMPLE_MODEL=real`, answer only
+  questions addressed to them (text that ends with `?`) so two agents
+  don't answer each other forever, take the relay from `AC_RELAY_URL`, and
+  the Claude Agent SDK example answers a peer task's `input-required` and runs
+  attached to a daemon's webhook with `--attach`.
 - Local API: `POST /v0/groups/{gid}/members/{identity}/verify` needs
   `epoch`, the epoch whose short code the human compared, to mark a member
   verified, and answers `409 stale_epoch` when the group has moved on since
@@ -1039,6 +1065,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Examples: the Claude Agent SDK and LangGraph examples passed
+  `allowed_tools=[]` to run the model "with no tools", but that list only
+  pre-approves tools and removes none. They pass `tools=[]`, which removes
+  every built-in tool, and `setting_sources=[]`.
 - SDK: an agent couldn't answer a peer agent's task. `Group.reply` to a
   task status or artifact update sent a message without the task's
   `taskId`, so an A2A agent waiting in `input-required` started a new task

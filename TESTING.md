@@ -8,7 +8,7 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 | Command | Contents | Budget | Network / docker | Runs |
 |---|---|---|---|---|
 | `just test` | Rust and Python unit, property and contract tests (`just contract`), multi-node harness scenarios | < 60 s | loopback only | pre-push, CI |
-| `just test-int` | docker compose integration (`compose.test.yaml`: Postgres for the directory store) and demos | < 10 min | docker | CI (once populated) |
+| `just test-int` | docker compose integration: Postgres for the directory store (`compose.test.yaml`), and the demos and the malicious relay double (`demo/compose.yaml`, `integration/tests`) | < 10 min once the image is built | docker | CI (`integration` job, not part of `ci-ok`) |
 | `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests; fuzzing and criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
 | `just ci` | exactly the PR pipeline: `lint`, `test`, `cov` (gates and ratchet), `changelog-check`, `docs-check` | minutes | none | PR CI (`ci-ok`) |
 
@@ -341,6 +341,32 @@ scenarios are in `harness/tests/`.
   lifecycle, which takes about 2.5 s per host because its humans run the
   CLI; the whole harness, both hosts, takes a few seconds across the xdist
   workers.
+
+## Integration tier: the docker demos
+
+`integration/tests` runs the deployment in `demo/compose.yaml`: the relay
+and one host per agent, each host on its own docker network, from one image
+(`demo/Dockerfile`, `just demo-image`; `just test-int` builds it first).
+The tests drive it with the demo driver, `demo/run.py`, so `just demo` and
+`just demo-group` and their checks are the same code. Each test runs its own
+compose project (`acint-<pid>-<name>`), torn down afterwards.
+
+- **The demos.** `test_demos.py` runs both demos with markers from the run
+  seed in the message bodies. The markers must reach the agents and appear
+  nowhere the relay could see: the WebSocket frames each host's tap recorded
+  in both directions, the relay's logs and its database files with the WAL,
+  raw or in base64. The relay's REST is metadata-only (SPEC §8), so REST
+  goes past the tap unrecorded.
+- **The malicious relay double.** Each host reaches the relay through
+  `agentconnect_harness.tap` on its loopback, which hands the WebSocket to
+  the harness proxy (`proxy.py`). Its control port replays, injects and
+  forks frames. `test_malicious_relay.py` runs the fast tier's attacks on
+  a group of three docker hosts: replayed frames are dropped (one delivery),
+  an old commit relabelled as current and a changed one move nobody (the
+  member that got them reports `out_of_sync`, `commit_rejected`), and a
+  commit that reaches only some members shows as a different short code.
+- **Time.** The deployment runs on real clocks, so these tests poll the CLI
+  and the agents' output with deadlines. Each takes about a minute.
 
 ## Failpoints (crash consistency)
 
