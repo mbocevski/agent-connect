@@ -332,7 +332,7 @@ Response:
 
 ### `POST /v0/groups/{gid}/invites`
 
-Create an invite. `ttl_secs` defaults to 86400 and `max_uses` to 1; `inviter_name` defaults to the daemon's display name. `replica: true` (human token only, else `403 human_only`) makes it an invite for another instance of this identity: it is allowed whatever the group's `invite` says, and join requests from any other identity are dropped ([groups.md](groups.md#replicas)).
+Create an invite. `ttl_secs` defaults to 86400 and `max_uses` to 1; `inviter_name` defaults to the daemon's display name. `replica: true` (human token only, else `403 human_only`) makes it an invite for another instance of this identity: it is allowed whatever the group's `invite` says, and join requests from any other identity are dropped. `instance` (16 lowercase hex, with `replica` only) pins it to the instance `identity import` printed: requests from any other instance are dropped too, and only a pinned replica invite is approved by `auto_approve` ([groups.md](groups.md#replicas)).
 
 Accepts the api token or the human token.
 
@@ -343,7 +343,8 @@ Request body:
   "ttl_secs"?: int,
   "max_uses"?: int,
   "inviter_name"?: str,
-  "replica"?: bool
+  "replica"?: bool,
+  "instance"?: str
 }
 ```
 
@@ -556,6 +557,8 @@ Response:
     "display_name_verified": bool,
     "fingerprint": str,
     "identity_requests"?: int,
+    "instance_id"?: str | null,
+    "mailbox_id"?: str,
     "listing"?: {
       "directory": str,
       "name": str

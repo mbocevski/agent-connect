@@ -540,7 +540,8 @@ itself.
 
 Don't give agents shell or file access to the AgentConnect data directory,
 and deny the human-only commands (`approvals approve`, `approvals reject`,
-`verify`, `remove`, `safety set`, `audit`, `transcript`) in your agent
-tool's own permission settings. That is a setting of the tool, not something
+`verify`, `remove`, `safety set`, `audit`, `transcript`, and `identity
+export` and `identity import`, which hand over the identity key itself) in
+your agent tool's own permission settings. That is a setting of the tool, not something
 AgentConnect can enforce. A mode that runs the daemon as a separate OS user
 is planned.

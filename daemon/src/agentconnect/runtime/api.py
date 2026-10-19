@@ -358,12 +358,16 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "`inviter_name` defaults to the daemon's display name. `replica: true` (human "
         "token only, else `403 human_only`) makes it an invite for another instance of "
         "this identity: it is allowed whatever the group's `invite` says, and join requests "
-        "from any other identity are dropped ([groups.md](groups.md#replicas)).",
+        "from any other identity are dropped. `instance` (16 lowercase hex, with `replica` "
+        "only) pins it to the instance `identity import` printed: requests from any other "
+        "instance are dropped too, and only a pinned replica invite is approved by "
+        "`auto_approve` ([groups.md](groups.md#replicas)).",
         request={
             "ttl_secs?": "int",
             "max_uses?": "int",
             "inviter_name?": "str",
             "replica?": "bool",
+            "instance?": "str",
         },
         response={"url": "str", "invite_id": "str", "expires_at": "int"},
     ),
@@ -1196,6 +1200,9 @@ class ApiServer:
         replica = b.get("replica", False)
         if not isinstance(replica, bool):
             raise ApiError(400, "bad_request", "replica must be a boolean")
+        instance = b.get("instance")
+        if instance is not None and (not replica or not isinstance(instance, str)):
+            raise ApiError(400, "bad_request", "instance is a replica invite's pin: a string")
         ttl_secs, max_uses = _int(b, "ttl_secs", 86_400), _int(b, "max_uses", 1)
         if not replica:
             return await self.agent.create_invite(
@@ -1203,7 +1210,9 @@ class ApiServer:
             )
         if p.get(SCOPE) != "human":
             raise ApiError(403, "human_only", "a replica invite needs the human token")
-        return await self.daemon.create_invite(p["gid"], ttl_secs, max_uses, name, replica=True)
+        return await self.daemon.create_invite(
+            p["gid"], ttl_secs, max_uses, name, replica=True, instance=instance
+        )
 
     async def _policy(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         """The human token changes any field. The agent token only turns

@@ -282,11 +282,12 @@ def mcp_run(  # noqa: PLR0913, PLR0917
 # -- identity: provisioning a replica ------------------------------------------------
 
 # Refusals about where the command runs (exit 2); the rest are about the file (exit 1).
-_PROVISION_USAGE = {"runtime_running", "exists", "not_empty", "no_identity"}
+_PROVISION_USAGE = {"runtime_running", "exists", "not_empty", "no_identity", "data_dir_access"}
 _NEXT_STEPS = (
     "Next: start the runtime on this data directory. Then, on a running instance of "
-    "this identity, create an invite for it with `agentconnect invite create --group "
-    "<group> --replica` (human token) and accept it here, once per group."
+    "this identity, create an invite pinned to the instance above with `agentconnect "
+    "invite create --group <group> --replica --instance <instance>` (human token) and "
+    "accept it here, once per group."
 )
 
 
@@ -298,6 +299,9 @@ def _provision[T](call: Callable[[], T]) -> T:
         raise CliError(e.code, e.message, code) from None
     except KeystoreError as e:
         raise CliError("keystore", f"keystore: {e}", EXIT_FAILED) from None
+    except OSError as e:
+        where = f"{e.filename}: " if e.filename else ""
+        raise CliError("os_error", f"{where}{e.strerror or e}", EXIT_FAILED) from None
 
 
 @identity_app.command(
@@ -348,8 +352,9 @@ def identity_import(
         str | None,
         typer.Option(
             "--code",
-            help="The export code. Without it you are asked for it, which keeps it out of "
-            "your shell history and the process list.",
+            help="The export code. Without it you are asked for it (with --json it is "
+            "read from one line on stdin), which keeps it out of your shell history and "
+            "the process list.",
         ),
     ] = None,
     config: ConfigOpt = None,
@@ -359,9 +364,13 @@ def identity_import(
         cfg = load(config)
         data = _provision(lambda: provision.read_export(file.expanduser()))
         identity = _provision(lambda: provision.export_identity_id(data))
+        if code is None and as_json:
+            # One line on stdin, so a script needn't put the code in argv.
+            code = str(sys.stdin.readline()).strip()
+            if not code:
+                msg = "--json reads the code from stdin (one line), or pass --code"
+                raise CliError("needs_code", msg, EXIT_USAGE)
         if code is None:
-            if as_json:
-                raise CliError("needs_code", "--json can't prompt; pass --code", EXIT_USAGE)
             typer.echo(f"Importing {identity} into {cfg.data_dir}.")
             code = str(typer.prompt("Export code", hide_input=True))
         given = code
@@ -619,6 +628,15 @@ def invite_create(  # noqa: PLR0913, PLR0917
             "--require-verified", help="Hold deliveries until every member is verified (SPEC 10.4)."
         ),
     ] = False,
+    instance: Annotated[
+        str | None,
+        typer.Option(
+            "--instance",
+            help="With --replica: the instance id `identity import` printed (16 hex "
+            "characters). Only that instance can join, and only a pinned replica invite is "
+            "approved automatically.",
+        ),
+    ] = None,
     replica: Annotated[
         bool,
         typer.Option(
@@ -641,6 +659,10 @@ def invite_create(  # noqa: PLR0913, PLR0917
         if replica and group is None:
             msg = "--replica needs --group: the group to add the replica to"
             raise CliError("bad_args", msg, EXIT_USAGE)
+        if instance is not None and not replica:
+            raise CliError(
+                "bad_args", "--instance pins a replica invite: add --replica", EXIT_USAGE
+            )
         api = connect(config, human=replica)
         gid = (
             resolve_group(api, group) if group is not None else _new_group(api, purpose or "", None)
@@ -650,6 +672,8 @@ def invite_create(  # noqa: PLR0913, PLR0917
         body: dict[str, Any] = {"ttl_secs": secs, "max_uses": max_uses}
         if replica:
             body["replica"] = True
+        if instance is not None:
+            body["instance"] = instance
         made = api.request("POST", f"/v0/groups/{gid}/invites", body)
         reminder = REPLICA_REMINDER if replica else SHARE_REMINDER
         if as_json:
@@ -662,12 +686,15 @@ def invite_create(  # noqa: PLR0913, PLR0917
                     "max_uses": max_uses,
                     "require_verified": require_verified,
                     "replica": replica,
+                    "instance": instance,
                     "reminder": reminder,
                 }
             )
             return
         uses = f"{max_uses} use" + ("" if max_uses == 1 else "s")
         kind = "Replica invite" if replica else "Invite"
+        if instance is not None:
+            kind += f" for instance {instance}"
         typer.echo(f"{kind} for group {gid}, {uses}, expires {_when(made['expires_at'])}:")
         typer.echo("")
         typer.echo(made["url"])
@@ -893,6 +920,8 @@ def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
         "received_at": a["received_at"],
         "group_sas": Sas.of(info["sas"]).as_json() if "sas" in info else None,
         "identity_requests": int(a.get("identity_requests", 1)),
+        "instance_id": a.get("instance_id"),
+        "mailbox_id": a.get("mailbox_id", ""),
     }
 
 
@@ -935,6 +964,8 @@ def _print_approval(v: dict[str, Any], *, as_json: bool = False) -> None:
         f"  who          {clean(v['display_name'])} (a claimed name, not verified)", as_json=as_json
     )
     _say(f"  fingerprint  {v['fingerprint']}", as_json=as_json)
+    instance = v.get("instance_id") or "unknown (a request from before this was recorded)"
+    _say(f"  instance     {instance}, mailbox {v.get('mailbox_id') or '?'}", as_json=as_json)
     if v["identity_requests"] > 1:
         _say(
             f"  NOTE         {v['identity_requests']} requests claim this identity. Anyone who "

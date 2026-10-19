@@ -281,14 +281,16 @@ def test_the_cli_json_shapes_and_exit_codes(
     assert again["error"]["code"] == "exists"
 
     target = write_config(tmp_path / "replica")
-    result = run(target, "identity", "import", str(out), "--json")
+    result = run(target, "identity", "import", str(out), "--json", input="")
     assert (result.exit_code, json.loads(result.stdout)["error"]["code"]) == (2, "needs_code")
     wrong = base64.urlsafe_b64encode(rng.randbytes(32)).rstrip(b"=").decode()
     result = run(target, "identity", "import", str(out), "--code", wrong, "--json")
     assert (result.exit_code, json.loads(result.stdout)["error"]["code"]) == (1, "bad_code")
-    result = run(target, "identity", "import", str(out), "--code", made["code"], "--json")
-    assert result.exit_code == 0
+    # --json reads the code from stdin, so it stays off the command line.
+    result = run(target, "identity", "import", str(out), "--json", input=f"{made['code']}\n")
+    assert result.exit_code == 0, result.output
     imported = json.loads(result.stdout)
+    assert made["code"] not in result.output
     assert conforms(imported, SCHEMAS["identity import"])
     result = run(target, "identity", "import", str(out), "--code", made["code"], "--json")
     assert (result.exit_code, json.loads(result.stdout)["error"]["code"]) == (2, "not_empty")
@@ -301,8 +303,9 @@ def test_a_failed_write_leaves_no_file(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(provision.os, "write", full)
-    with pytest.raises(OSError, match="No space"):
+    with pytest.raises(ProvisionError, match="No space") as e:
         provision.export_identity(source, tmp_path / "id.export")
+    assert e.value.code == "cannot_write"
     assert not (tmp_path / "id.export").exists()
 
 
@@ -326,3 +329,121 @@ def test_the_cli_reports_a_keystore_failure(
     result = run(write_config(source.data_dir), "identity", "export", "--out", "x", "--json")
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]["code"] == "keystore"
+
+
+# -- review 55: a cut import, file errors ---------------------------------------------
+
+
+class PowerCut(BaseException):
+    """A crash between two keystore writes."""
+
+
+def test_an_import_cut_between_its_writes_resumes_on_retry(
+    source: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review 55 F3: a crash after `identity` and before `instance` leaves
+    a directory that holds that identity and nothing else; the retry with the
+    same export finishes the import instead of refusing it."""
+    data, made = exported(source, tmp_path)
+    target = config(tmp_path / "replica")
+    real_put = FileKeystore.put
+
+    def cut_before_instance(self: FileKeystore, name: str, value: bytes) -> None:
+        if name == "instance":
+            raise PowerCut
+        real_put(self, name, value)
+
+    monkeypatch.setattr(FileKeystore, "put", cut_before_instance)
+    with pytest.raises(PowerCut):
+        provision.import_identity(target, data, made["code"])
+    assert sorted(p.name for p in (target.data_dir / "keys").iterdir()) == ["identity"]
+    monkeypatch.setattr(FileKeystore, "put", real_put)
+    imported = provision.import_identity(target, data, made["code"])
+    instance = ac.Instance.from_secret_bytes(keys(target.data_dir).get("instance") or b"")
+    assert instance.instance_id_hex == imported["instance_id"]
+    assert instance.identity == imported["identity"]
+    # Done now: a third run refuses, the directory holds an instance.
+    assert refusal(lambda: provision.import_identity(target, data, made["code"])) == "not_empty"
+
+
+def test_a_cut_import_of_another_identity_or_with_more_state_is_not_resumed(
+    source: Config, tmp_path: Path, rng: random.Random
+) -> None:
+    data, made = exported(source, tmp_path)
+    other = config(tmp_path / "other")
+    keys(other.data_dir).put(
+        "identity", ac.Identity._generate_for_testing(rng.getrandbits(63)).secret_bytes()
+    )
+    assert refusal(lambda: provision.import_identity(other, data, made["code"])) == "not_empty"
+    same = config(tmp_path / "same")
+    keys(same.data_dir).put("identity", keys(source.data_dir).get("identity") or b"")
+    keys(same.data_dir).put("invite/abc", os.urandom(32))
+    assert refusal(lambda: provision.import_identity(same, data, made["code"])) == "not_empty"
+    assert keys(same.data_dir).get("instance") is None
+
+
+def no_traceback(result: Any) -> dict[str, Any]:
+    """The JSON error of a command that failed cleanly."""
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code != 0
+    return dict(json.loads(result.stdout)["error"])
+
+
+def test_an_out_path_in_a_missing_directory_is_a_clean_error(
+    source: Config, tmp_path: Path
+) -> None:
+    out = tmp_path / "missing" / "id.export"
+    result = run(write_config(source.data_dir), "identity", "export", "--out", str(out), "--json")
+    error = no_traceback(result)
+    assert (result.exit_code, error["code"]) == (1, "cannot_write")
+    assert str(out) in error["message"]
+    assert not out.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+@pytest.mark.parametrize("command", ["export", "import"])
+def test_a_data_directory_this_user_cannot_open_is_a_clean_error(
+    source: Config, tmp_path: Path, command: str
+) -> None:
+    """Review 55 F4, as when the human runs the command against the daemon
+    user's data directory in separate-OS-user mode."""
+    data, made = exported(source, tmp_path)
+    (tmp_path / "file").write_bytes(data)
+    closed = tmp_path / "closed"
+    closed.mkdir(mode=0o500)
+    cfg = tmp_path / "closed.toml"
+    cfg.write_text(
+        f'[daemon]\ndata_dir = "{closed / "data"}"\nkeystore = "file"\n', encoding="utf-8"
+    )
+    try:
+        args = (
+            ["export", "--out", str(tmp_path / "x")]
+            if command == "export"
+            else ["import", str(tmp_path / "file"), "--code", made["code"]]
+        )
+        result = run(cfg, "identity", *args, "--json")
+    finally:
+        closed.chmod(0o700)
+    error = no_traceback(result)
+    assert (result.exit_code, error["code"]) == (2, "data_dir_access")
+    assert "daemon's OS user" in error["message"]
+
+
+def test_a_keystore_write_that_fails_is_a_clean_error(
+    source: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data, made = exported(source, tmp_path)
+    (tmp_path / "file").write_bytes(data)
+
+    def full(_self: FileKeystore, _name: str, _value: bytes) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(FileKeystore, "put", full)
+    cfg = write_config(tmp_path / "replica")
+    result = run(
+        cfg, "identity", "import", str(tmp_path / "file"), "--code", made["code"], "--json"
+    )
+    error = no_traceback(result)
+    assert (result.exit_code, error["code"]) == (1, "cannot_write")
+    assert "No space" in error["message"]
+    assert made["code"] not in result.output

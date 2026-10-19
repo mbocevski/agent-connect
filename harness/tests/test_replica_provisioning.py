@@ -146,12 +146,21 @@ async def test_a_replica_provisioned_by_the_cli_joins_by_a_replica_invite_and_is
     with pytest.raises(ApiClientError) as refused:
         await asyncio.to_thread(agent.request, "POST", f"/v0/groups/{gid}/invites", {"replica": 1})
     assert (refused.value.status, refused.value.code) == (400, "bad_request")
+    # The normal flow pins the invite to the instance the import printed.
     code, invite = await asyncio.to_thread(
-        cli, x_cli, "invite", "create", "--group", gid, "--replica"
+        cli,
+        x_cli,
+        "invite",
+        "create",
+        "--group",
+        gid,
+        "--replica",
+        "--instance",
+        imported["instance_id"],
     )
     assert code == 0, invite
     assert conforms(invite, SCHEMAS["invite create"])
-    assert invite["replica"] is True
+    assert (invite["replica"], invite["instance"]) == (True, imported["instance_id"])
     assert x.daemon.store.invite(invite["invite_id"])["replica"] is True  # ty: ignore[not-subscriptable]
 
     await x2.daemon.accept_invite(invite["url"])
@@ -175,9 +184,12 @@ async def test_a_replica_provisioned_by_the_cli_joins_by_a_replica_invite_and_is
         assert data(n, "member_removed") == []
 
 
-async def test_a_replica_invite_drops_every_other_identitys_request(
+async def test_an_unpinned_replica_invite_drops_other_identities_and_waits_for_the_human(
     cluster: Cluster, group: GroupFixture
 ) -> None:
+    """Other identities are dropped; the replica's own request is not
+    approved automatically (auto_approve is on), and the human tells it
+    from any other instance of the identity by its instance id."""
     (a, x), gid = await group(2)
     made = await x.daemon.create_invite(gid, max_uses=2, replica=True)
     outsider = await cluster.node("outsider")
@@ -190,6 +202,11 @@ async def test_a_replica_invite_drops_every_other_identitys_request(
 
     x2 = await cluster.node("x2", identity_of=x)
     await x2.daemon.accept_invite(made["url"])
+    await x.wait(lambda: len(x.daemon.approvals()) == 1)
+    (waiting,) = x.daemon.approvals()
+    assert (waiting["identity"], waiting["instance_id"]) == (x.me, instance_of(x2))
+    assert waiting["mailbox_id"] == x2.daemon.instance.mailbox_id
+    x.daemon.approve(waiting["request_id"])
     await converged([a, x, x2], gid)
     assert outsider.daemon.store.group(gid) is None
     assert data(a, "instance_joined") == [
@@ -204,13 +221,13 @@ async def test_a_replica_invite_stays_open_when_its_creator_may_no_longer_invite
     assert a.daemon.change_policy(gid, {"invite": "members"}) == "committing"
     await converged([a, b], gid)
     plain = await b.daemon.create_invite(gid)
-    replica = await b.daemon.create_invite(gid, replica=True)
+    b2 = await cluster.node("b2", identity_of=b)
+    replica = await b.daemon.create_invite(gid, replica=True, instance=instance_of(b2))
     assert a.daemon.change_policy(gid, {"invite": "owner"}) == "committing"
     await converged([a, b], gid)
     await b.wait(lambda: b.daemon.store.invite(plain["invite_id"])["status"] == "revoked")  # ty: ignore[not-subscriptable]
     assert b.daemon.store.invite(replica["invite_id"])["status"] == "open"  # ty: ignore[not-subscriptable]
 
-    b2 = await cluster.node("b2", identity_of=b)
     await b2.daemon.accept_invite(replica["url"])
     await converged([a, b, b2], gid)
     assert data(a, "instance_joined") == [

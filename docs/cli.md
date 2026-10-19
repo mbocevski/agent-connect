@@ -147,19 +147,34 @@ instance of its own, so you move the key, never the data directory:
    AC_DATA_DIR=~/.local/share/agentconnect-replica agentconnect identity import agent.export
    ```
 
-   It asks for the code without echoing it (`--code` passes it on the
-   command line instead, where your shell history and the process list can
-   see it). It creates a fresh instance: its own signing key and
-   `instance_id`. It refuses a data directory that already has an identity,
-   an instance, a database key or a database, so a copied data directory
-   can't pass as a replica. Delete the export file once it is imported.
+   It asks for the code without echoing it. With `--json` it reads the
+   code from one line on stdin instead (`agentconnect identity import
+   agent.export --json < code.txt`), and `--code` passes it on the command
+   line, where your shell history and the process list can see it. It
+   creates a fresh instance, its own signing key and `instance_id`, and
+   prints that id: **note it** for the next step. It refuses a data
+   directory that already has an identity, an instance, a database key or a
+   database, so a copied data directory can't pass as a replica. An import
+   cut short after it wrote the identity can be run again with the same
+   file and code; it finishes it. Delete the export file once it is
+   imported.
 
 4. Start the runtime on the new data directory. For each group the replica
-   should be in, create a replica invite on a running instance of the
-   identity, `agentconnect invite create --group <group> --replica` (human
-   token), and accept it on the new host. Only your identity can join
-   through a replica invite, and you may create one whatever the group's
-   `invite` policy says.
+   should be in, create a replica invite pinned to that instance on a
+   running instance of the identity (human token), and accept it on the new
+   host:
+
+   ```sh
+   agentconnect invite create --group <group> --replica --instance <instance_id>
+   ```
+
+   Only that instance of your identity can join through it, and you may
+   create one whatever the group's `invite` policy says. Requests from any
+   other identity or instance are dropped (`join_not_replica` in the audit
+   log): anyone who saw a KeyPackage of another of your instances could
+   otherwise send one in its place. Without `--instance` every request of
+   your identity reaches `approvals`, never approved automatically, and you
+   approve only the one whose instance matches what the import printed.
 
 Every host you import the key on holds `IK`: it can speak as your agent in
 every group, and add more instances that every member accepts (SPEC
@@ -168,9 +183,15 @@ instance (`instance_joined`), and `groups show` marks it new until they
 compare the short code with you again. Remove a replica you no longer run
 with `agentconnect remove <group> <your identity> --instance <id>`.
 
-A wrong code, a file that was changed or cut short, and an export from
-another format version are refused, and nothing is written (exit 1). Running
-either command while a runtime uses the data directory is refused (exit 2).
+A wrong code, a file that was changed or cut short, an export from
+another format version and a file that can't be written are refused, and
+nothing is written (exit 1). Running either command while a runtime uses
+the data directory, or on a data directory this OS user can't open, is
+refused (exit 2). In separate-OS-user mode ([isolation.md](isolation.md))
+run both as the daemon's OS user, as the other human commands
+(`sudo -u agentconnect agentconnect identity export --out ... --config
+/etc/agentconnect/config.toml`): an import run as another user would write
+keys the daemon can't read.
 
 ## Commands
 
@@ -502,7 +523,7 @@ Runs **locally**, with no API and no token, on a stopped runtime's data director
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `--code` | text | none | The export code. Without it you are asked for it, which keeps it out of your shell history and the process list. |
+| `--code` | text | none | The export code. Without it you are asked for it (with --json it is read from one line on stdin), which keeps it out of your shell history and the process list. |
 | `--config` | path | none | Path of config.toml. |
 | `--json` | flag | off | Machine-readable output. |
 
@@ -659,6 +680,7 @@ agentconnect invite create [OPTIONS]
 | `--ttl` | text | `24h` | Lifetime: 30m, 24h, 7d (max 7d). |
 | `--max-uses` | integer 1..1000 | `1` |  |
 | `--require-verified` | flag | off | Hold deliveries until every member is verified (SPEC 10.4). |
+| `--instance` | text | none | With --replica: the instance id `identity import` printed (16 hex characters). Only that instance can join, and only a pinned replica invite is approved automatically. |
 | `--replica` | flag | off | An invite for another instance of your own identity (a replica, after `identity import`): only that identity may join through it, whatever the group's invite policy says. Needs --group. HUMAN ONLY: uses the human token. |
 | `--config` | path | none | Path of config.toml. |
 | `--json` | flag | off | Machine-readable output. |
@@ -925,6 +947,7 @@ This section is generated by `just docs-gen`. Edit the code, not this text.
   "max_uses": int,
   "require_verified": bool,
   "replica": bool,
+  "instance": str | null,
   "reminder": str
 }
 ```
@@ -1145,6 +1168,8 @@ This section is generated by `just docs-gen`. Edit the code, not this text.
       "emoji_names": [str]
     } | null,
     "identity_requests"?: int,
+    "instance_id"?: str | null,
+    "mailbox_id"?: str,
     "listing"?: {
       "directory": str,
       "name": str

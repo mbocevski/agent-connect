@@ -124,8 +124,11 @@ KeyPackages, in a join request or a knock it sent them, can wrap it in a
 request of its own with a name of its choice. So none is dropped for that
 alone: each approval in `GET /v0/approvals` says in `identity_requests` how
 many waiting requests claim its identity now, and `agentconnect approvals`
-prints "N requests claim this identity". `pending_approval` carries the
-count when that request arrived; an earlier request's event isn't sent
+prints "N requests claim this identity". Each approval, and its
+`pending_approval` event, also carries the joiner's `instance_id` and
+`mailbox_id`, which tell two requests of one identity apart
+(`instance_id` is null for a request stored by an older daemon).
+`pending_approval` carries the count when that request arrived; an earlier request's event isn't sent
 again when another arrives, so the approvals view is the one to go by. Ask
 the person which one is theirs, when they sent it and under which name,
 and reject the others. Rejecting one makes room for the identity's next
@@ -188,16 +191,26 @@ two steps, both for the human:
    holds an instance, so a copy of one can't pass as a replica
    ([cli.md](cli.md#provisioning-a-replica)).
 2. **Add it to each group.** On a running instance of the identity,
-   `agentconnect invite create --group <group> --replica` (human token;
-   `replica: true` on `POST /v0/groups/{gid}/invites`) creates a replica
-   invite, and the new host accepts it. You may create one whatever the
-   group's `invite` says (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits):
-   any instance may add another instance of its own identity), and it
-   admits only your identity: a join request from any other identity is
-   dropped without reaching you, with an audit row with reason
-   `join_not_replica`. A replica invite stays open when the policy stops
-   letting you invite; it closes, like every other, when you leave or are
-   removed. Approval works as for any invite, `auto_approve` included.
+   `agentconnect invite create --group <group> --replica --instance <id>`
+   (human token; `replica: true` and `instance` on `POST
+   /v0/groups/{gid}/invites`) creates a replica invite pinned to the
+   instance id the import printed, and the new host accepts it. You may
+   create one whatever the group's `invite` says (SPEC
+   [§9.2](../SPEC.md#92-authorisation-of-commits): any instance may add
+   another instance of its own identity). It admits only your identity, and
+   only the pinned instance: any other request is dropped before it uses
+   any of the invite's share of the join ledger, without reaching you,
+   with an audit row with reason `join_not_replica`. A replica invite stays
+   open when the policy stops letting you invite; it closes, like every
+   other, when you leave or are removed.
+
+   Pin it. Anyone who holds the link and saw a KeyPackage of another of
+   your instances (in a request it sent to their invite, say) can send a
+   request that claims your identity too. Pinned, such a request is
+   dropped. Unpinned, every request of your identity waits for you, even
+   with `auto_approve` on, and you approve only the one whose `instance_id`
+   is the one `identity import` printed. A wrong pick uses the invite up
+   and adds a leaf that nobody runs.
 
 The members see `instance_joined` for the new instance. Every host that
 holds the key can add instances that every member accepts, so check each

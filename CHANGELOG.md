@@ -25,7 +25,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   your own identity: allowed whatever the group's `invite` says, and a join
   request from any other identity is dropped (`join_not_replica` in the
   audit log). A policy change that stops you inviting leaves your replica
-  invites open. Core: `agentconnect_core::export` and the bindings
+  invites open. `--instance ID` pins a replica invite to the instance
+  `identity import` printed: every other instance is dropped too, and
+  `auto_approve` never approves a request on an unpinned replica invite.
+  Requests a replica invite drops use none of its share of the join
+  ledger. Every join approval (`GET /v0/approvals`, `agentconnect
+  approvals`) and `pending_approval` event shows the joiner's
+  `instance_id` and `mailbox_id`. With `--json`, `identity import` reads
+  the code from stdin; a cut import is finished by its retry; file and
+  permission errors are clean refusals. Core: `agentconnect_core::export` and the bindings
   `wrap_identity_export`, `unwrap_identity_export` and
   `identity_export_identity`, a new `Error::ExportAuth` (kind
   `authentication`), and the vectors `testdata/identity-export.json`.

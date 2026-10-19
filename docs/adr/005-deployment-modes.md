@@ -153,14 +153,27 @@ What was built for Decision 5's follow-up ([cli.md](../cli.md#provisioning-a-rep
   refused, not only warned about (Decision 5). There is no flag to force it.
   It creates the instance at once, from the OS RNG, so the replica's
   `instance_id` and signing key are its own; the database key is created
-  when the runtime first starts, as for any new data directory. The code is
-  asked for without echo when `--code` is not given.
-- **Replica invites.** `invite create --replica` (human token;
-  `replica: true` on the existing invites route, so no new route) may be
-  created whatever `invite` says (SPEC §9.2) and drops join requests from
-  any other identity (`join_not_replica` in the audit log). A policy change
-  that stops this identity from inviting closes its other invites but not
-  its replica invites.
+  when the runtime first starts, as for any new data directory. The two
+  keystore writes (`identity`, then `instance`) can't be one transaction
+  in a keyring, so a directory that holds the same identity and nothing
+  else, which is what a cut import leaves, is finished by the retry. The
+  code is asked for without echo when `--code` is not given, and read
+  from one line on stdin with `--json`. File and permission errors are
+  refusals with a code (`cannot_write`, `data_dir_access`), not
+  tracebacks.
+- **Replica invites.** `invite create --replica [--instance ID]` (human
+  token; `replica: true` and `instance` on the existing invites route, so
+  no new route) may be created whatever `invite` says (SPEC §9.2). It drops
+  join requests from any other identity, and with `--instance` from any
+  other instance (`join_not_replica` in the audit log), before the
+  per-invite quota and the join ledger, so they use none of its share. The
+  identity alone isn't enough to tell the replica: anyone who saw a
+  KeyPackage of another instance of the identity can rewrap it for the
+  link. So every join approval shows the joiner's `instance_id` and
+  mailbox, the documented flow pins the invite to the id `identity import`
+  printed, and `auto_approve` never approves a request on an unpinned
+  replica invite. A policy change that stops this identity from inviting
+  closes its other invites but not its replica invites.
 - **Residual exposure.** The secret is zeroized in the core; the CLI passes
   it once as Python `bytes` into the keystore, and the code is a Python
   `str`, neither of which can be zeroized, as for every key the runtime

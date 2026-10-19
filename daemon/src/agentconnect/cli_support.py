@@ -98,8 +98,9 @@ SHARE_REMINDER = (
 )
 REPLICA_REMINDER = (
     "Accept it on the replica's host only (`agentconnect accept <url>` there): only an "
-    "instance of your own identity can join through it. The other members will see a new "
-    "instance of yours join."
+    "instance of your own identity can join through it, and with --instance only that one. "
+    "Without --instance, approve only the request whose instance is the one `identity "
+    "import` printed. The other members will see a new instance of yours join."
 )
 COMPARE_REMINDER = (
     "Compare the short code with the other members over a different channel "

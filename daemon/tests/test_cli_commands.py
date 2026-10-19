@@ -217,6 +217,19 @@ def test_a_replica_invite_uses_the_human_token_and_needs_a_group(fake: Fake) -> 
     assert fake.posts("/invites")[-1] == (False, {"ttl_secs": 86400, "max_uses": 1})
     code, out = fake.json("invite", "create", "--replica")
     assert (code, out["error"]["code"]) == (2, "bad_args")
+    pin = "cd" * 8
+    code, out = fake.json("invite", "create", "--group", GID, "--replica", "--instance", pin)
+    assert (code, out["instance"]) == (0, pin)
+    assert fake.posts("/invites")[-1] == (
+        True,
+        {"ttl_secs": 86400, "max_uses": 1, "replica": True, "instance": pin},
+    )
+    assert (
+        f"instance {pin}"
+        in fake.run("invite", "create", "--group", GID, "--replica", "--instance", pin).stdout
+    )
+    code, out = fake.json("invite", "create", "--group", GID, "--instance", pin)
+    assert (code, out["error"]["code"]) == (2, "bad_args")
 
 
 @pytest.mark.parametrize("ttl", ["soon", "8d", "0"])
@@ -478,6 +491,25 @@ def test_approvals_list_shows_fingerprint_and_sas(fake: Fake) -> None:
     assert conforms(data, SCHEMAS["approvals list"])
     fake.routes["GET /v0/approvals"] = {"approvals": []}
     assert "No pending" in fake.run("approvals", "list").stdout
+
+
+def test_approvals_show_the_joiners_instance(fake: Fake) -> None:
+    """Review 55 F1: two requests of one identity differ in their instance,
+    which the human matches against what `identity import` printed."""
+    one = {**APPROVAL, "instance_id": "ab" * 8, "mailbox_id": "m" * 22}
+    fake.routes["GET /v0/approvals"] = {"approvals": [one]}
+    out = fake.run("approvals").stdout
+    assert f"instance     {'ab' * 8}, mailbox {'m' * 22}" in out
+    code, data = fake.json("approvals", "list")
+    assert code == 0
+    assert conforms(data, SCHEMAS["approvals list"])
+    assert (data["approvals"][0]["instance_id"], data["approvals"][0]["mailbox_id"]) == (
+        "ab" * 8,
+        "m" * 22,
+    )
+    # A request stored before the instance was recorded says so.
+    fake.routes["GET /v0/approvals"] = {"approvals": [APPROVAL]}
+    assert "instance     unknown" in fake.run("approvals").stdout
 
 
 def test_requests_that_claim_one_identity_say_so(fake: Fake) -> None:

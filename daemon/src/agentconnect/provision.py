@@ -18,7 +18,11 @@ instances that every member accepts (SPEC 12).
 
 Both take the data directory's lock first, so they refuse to run while a
 runtime (a daemon, an embedded agent, an MCP server) holds it, and nothing
-starts on the directory meanwhile.
+starts on the directory meanwhile. An import cut between its two keystore
+writes (the identity, then the instance) leaves a directory that holds that
+identity and nothing else; importing the same export again finishes it.
+File errors are :class:`ProvisionError` too, naming the path, so the CLI
+reports them like any other refusal.
 
 Nothing here logs. The secret is zeroized inside the core; in Python it
 passes once as ``bytes`` into the keystore, and the code is a ``str``,
@@ -41,6 +45,10 @@ from agentconnect.keystore import DataDirLock, DataDirLockedError, Keystore, ope
 # What makes a data directory an instance already: its keys and databases.
 STATE_KEYS = ("identity", "instance", "db_key")
 STATE_FILES = ("mls.sqlite3", "daemon.sqlite3")
+ISOLATION_HINT = (
+    "in separate-OS-user mode, run `identity export` and `identity import` as the "
+    "daemon's OS user (docs/isolation.md)"
+)
 
 EXPORT_WARNING = (
     "Whoever has both this file and the code holds the identity: every host you "
@@ -59,9 +67,22 @@ class ProvisionError(Exception):
 
 
 @contextlib.contextmanager
+def _os_errors(code: str, what: str) -> Generator[None]:
+    """An ``OSError`` inside as ``ProvisionError(code)``, naming ``what``."""
+    try:
+        yield
+    except OSError as e:
+        msg = f"{what}: {e.strerror or e}"
+        if isinstance(e, PermissionError):
+            msg = f"{msg}; {ISOLATION_HINT}"
+        raise ProvisionError(code, msg) from None
+
+
+@contextlib.contextmanager
 def _locked(data_dir: Path) -> Generator[None]:
     try:
-        lock = DataDirLock(data_dir, note=False)
+        with _os_errors("data_dir_access", f"can't open the data directory {data_dir}"):
+            lock = DataDirLock(data_dir, note=False)
     except DataDirLockedError as e:
         msg = f"{e}; provisioning works only on a stopped runtime's data directory"
         raise ProvisionError("runtime_running", msg) from None
@@ -80,6 +101,8 @@ def _write_new(path: Path, data: bytes) -> None:
     except FileExistsError:
         msg = f"{path} exists: an export never replaces a file, choose another path"
         raise ProvisionError("exists", msg) from None
+    except OSError as e:
+        raise ProvisionError("cannot_write", f"can't write {path}: {e.strerror}") from None
     try:
         try:
             os.fchmod(fd, 0o600)
@@ -89,8 +112,10 @@ def _write_new(path: Path, data: bytes) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
-    except BaseException:
+    except BaseException as e:
         path.unlink(missing_ok=True)
+        if isinstance(e, OSError):
+            raise ProvisionError("cannot_write", f"can't write {path}: {e.strerror}") from None
         raise
 
 
@@ -98,8 +123,9 @@ def export_identity(config: Config, out: Path, keystore: Keystore | None = None)
     """Wrap this data directory's identity into ``out``: the file's path,
     the identity, its fingerprint and the code (to show once)."""
     with _locked(config.data_dir):
-        store = keystore or open_keystore(config.keystore, config.data_dir)
-        secret = store.get("identity")
+        with _os_errors("data_dir_access", f"can't read the keys in {config.data_dir}"):
+            store = keystore or open_keystore(config.keystore, config.data_dir)
+            secret = store.get("identity")
         if secret is None:
             msg = f"{config.data_dir} has no identity to export"
             raise ProvisionError("no_identity", msg)
@@ -154,19 +180,33 @@ def _open_error(e: ac.AgentConnectError) -> ProvisionError:
     return ProvisionError("bad_export", msg)
 
 
-def _check_fresh(config: Config, store: Keystore) -> None:
-    """Refuse a data directory that is an instance already, or a copy of one."""
+def _not_empty(config: Config, found: list[str]) -> ProvisionError:
+    msg = (
+        f"{config.data_dir} already holds an instance ({', '.join(found)}): import "
+        "only into a new, empty data directory (a copied one is not a replica)"
+    )
+    return ProvisionError("not_empty", msg)
+
+
+def _check_fresh(config: Config, store: Keystore) -> bytes | None:
+    """Refuse a data directory that is an instance already, or a copy of one.
+    One that holds an identity and nothing else is what an import cut
+    between its writes leaves: its secret is returned, for the caller to
+    resume only an import of that same identity."""
     found = [name for name in STATE_KEYS if store.get(name) is not None]
     found += [name for name in STATE_FILES if (config.data_dir / name).exists()]
     keys = config.data_dir / "keys"
-    if not found and keys.is_dir() and any(keys.iterdir()):
+    # A dot file is a temporary of a write that was cut (keystore.write_private).
+    other_keys = keys.is_dir() and any(
+        p.name != "identity" and not p.name.startswith(".") for p in keys.iterdir()
+    )
+    if other_keys and found in ([], ["identity"]):
         found.append("keys/")
+    if found == ["identity"]:
+        return store.get("identity")
     if found:
-        msg = (
-            f"{config.data_dir} already holds an instance ({', '.join(found)}): import "
-            "only into a new, empty data directory (a copied one is not a replica)"
-        )
-        raise ProvisionError("not_empty", msg)
+        raise _not_empty(config, found)
+    return None
 
 
 def import_identity(
@@ -174,17 +214,23 @@ def import_identity(
 ) -> dict[str, Any]:
     """Open an export into this fresh data directory and create a new
     instance for it: the identity, its fingerprint and the new
-    ``instance_id``."""
+    ``instance_id``. A directory that holds the same identity and nothing
+    else (an import cut before its second write) is finished."""
     with _locked(config.data_dir):
-        store = keystore or open_keystore(config.keystore, config.data_dir)
-        _check_fresh(config, store)
+        with _os_errors("data_dir_access", f"can't read the keys in {config.data_dir}"):
+            store = keystore or open_keystore(config.keystore, config.data_dir)
+            resumed = _check_fresh(config, store)
         try:
             identity = ac.unwrap_identity_export(data, code)
         except ac.AgentConnectError as e:
             raise _open_error(e) from None
+        if resumed is not None and resumed != identity.secret_bytes():
+            raise _not_empty(config, ["identity"])
         instance = identity.create_instance()
-        store.put("identity", identity.secret_bytes())
-        store.put("instance", instance.to_secret_bytes())
+        with _os_errors("cannot_write", f"can't write the keys in {config.data_dir}"):
+            if resumed is None:
+                store.put("identity", identity.secret_bytes())
+            store.put("instance", instance.to_secret_bytes())
     return {
         "identity": identity.id,
         "fingerprint": identity.fingerprint,
