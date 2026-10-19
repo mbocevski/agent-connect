@@ -1234,6 +1234,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Directory: at `RUST_LOG=trace`, `axum::serve` logged client addresses,
+  since the log filter held back only the MCP library. Crates other than
+  the directory's own are now held at `warn` (the MCP library at `error`)
+  whatever `RUST_LOG` says, as the relay's are. Log lines are written
+  without colour codes unless stdout is a terminal.
 - Core: deleting a group left the HPKE private keys of the epoch before
   the instance's removal in the store (SR-61, `docs/security-review-v0.md`).
   OpenMLS deletes only the current epoch's key pairs, and a member that

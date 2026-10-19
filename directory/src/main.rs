@@ -100,7 +100,9 @@ async fn serve<S: Store>(
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let spec = std::env::var("RUST_LOG").ok();
-    logging::subscriber(spec.as_deref(), std::io::stdout).init();
+    // Colours only on a terminal, so log files and collectors get plain text.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    logging::subscriber(spec.as_deref(), ansi, std::io::stdout).init();
 
     let config = Config::from_env().map_err(invalid)?;
     // Every signature, token and canonical-form check, under the pinned

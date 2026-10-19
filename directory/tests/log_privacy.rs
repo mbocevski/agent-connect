@@ -46,7 +46,7 @@ async fn logs_carry_route_templates_and_no_identifiers() {
     let capture = Capture::default();
     let writer = capture.clone();
     // The binary's filter, at its most verbose.
-    let subscriber = logging::subscriber(Some("trace"), move || writer.clone());
+    let subscriber = logging::subscriber(Some("trace"), false, move || writer.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
 

@@ -46,8 +46,8 @@ pub fn allowed(meta: &Metadata<'_>) -> bool {
 
 /// The directory's subscriber: `rust_log` (the `RUST_LOG` syntax, `info`
 /// when unset, empty or invalid) narrowed by [`allowed`], written to
-/// `writer`.
-pub fn subscriber<W>(rust_log: Option<&str>, writer: W) -> impl Subscriber + Send + Sync
+/// `writer`, with ANSI colours only if `ansi`.
+pub fn subscriber<W>(rust_log: Option<&str>, ansi: bool, writer: W) -> impl Subscriber + Send + Sync
 where
     W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
 {
@@ -56,6 +56,7 @@ where
         .and_then(|s| EnvFilter::builder().parse(s).ok())
         .unwrap_or_else(|| EnvFilter::new("info"));
     let layer = fmt::layer()
+        .with_ansi(ansi)
         .with_writer(writer)
         .with_filter(env.and(filter_fn(allowed)));
     tracing_subscriber::registry().with(layer)
@@ -83,7 +84,7 @@ mod tests {
     fn logs_with(rust_log: Option<&str>, emit: impl FnOnce()) -> String {
         let captured = Captured::default();
         let writer = captured.clone();
-        let sub = subscriber(rust_log, move || writer.clone());
+        let sub = subscriber(rust_log, false, move || writer.clone());
         tracing::subscriber::with_default(sub, emit);
         String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
     }
