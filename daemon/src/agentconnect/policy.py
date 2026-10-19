@@ -563,6 +563,9 @@ class Outbound:
     inner: dict[str, Any]
     size: int
     internal: bool  # the daemon's own (Agent Cards, loop-guard pauses)
+    # A floor grant the daemon checked the role for (SPEC 9.3): a control
+    # the agent may send, counted against its rate like its messages.
+    grant: bool = False
 
     @property
     def kind(self) -> str:
@@ -707,7 +710,7 @@ class SafetyPolicy:
         if problem is not None:
             return drop(problem)
         human = m.inner.get("origin") == "human"
-        if m.kind in NON_CONTENT_KINDS and not m.internal and not human:
+        if m.kind in NON_CONTENT_KINDS and not m.internal and not human and not m.grant:
             # Cards and controls come from the daemon or the human, never
             # from the agent: it can't use them to carry content.
             return drop("not_for_agents")

@@ -24,6 +24,7 @@ only that shape:
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from collections.abc import Callable
 from typing import Any
@@ -32,6 +33,9 @@ CONTENT_KINDS = frozenset({"a2a.message", "a2a.task_status", "a2a.task_artifact"
 CONTENT_MEMBERS = frozenset({"parts", "text", "data", "file", "raw"})
 MAX_REASON = 200
 MAX_ID = 256
+# Floor counters and epochs: what a signed 64-bit SQLite integer holds.
+MAX_COUNTER = 2**63 - 1
+INSTANCE_ID = re.compile(r"[0-9a-f]{16}")
 MAX_WORD = 64  # a pause reason, an adapter name, an accepted part kind
 MAX_ADAPTERS = 16
 MAX_DEPTH = 32
@@ -144,13 +148,40 @@ def _close(body: dict[str, Any]) -> dict[str, Any]:
     return {"reason": _text(body["reason"], MAX_REASON)} if "reason" in body else {}
 
 
-def _floor(body: dict[str, Any]) -> dict[str, Any]:
-    holder = body.get("holder", ...)
-    if holder is not None and not (
-        isinstance(holder, str) and holder.startswith("ac:v0:") and len(holder) <= MAX_ID
-    ):
+def _identity(value: Any) -> str:
+    if not (isinstance(value, str) and value.startswith("ac:v0:") and len(value) <= MAX_ID):
         raise MalformedError
-    return {"holder": holder}
+    return value
+
+
+def _counter(value: Any) -> int:
+    """A floor counter or epoch: an integer SQLite can hold (SPEC 9.3)."""
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= MAX_COUNTER:
+        raise MalformedError
+    return value
+
+
+def _floor(body: dict[str, Any]) -> dict[str, Any]:
+    """``{holder, counter}``, and for the copy of a grant sent to members
+    that join, ``copy: {epoch, sender, instance}`` naming the grant copied
+    (SPEC 9.3)."""
+    holder = body.get("holder", ...)
+    if holder is not None:
+        holder = _identity(holder)
+    out: dict[str, Any] = {"holder": holder, "counter": _counter(body.get("counter"))}
+    if "copy" in body:
+        copy = body["copy"]
+        if not isinstance(copy, dict) or holder is None:
+            raise MalformedError
+        instance = copy.get("instance")
+        if not (isinstance(instance, str) and INSTANCE_ID.fullmatch(instance)):
+            raise MalformedError
+        out["copy"] = {
+            "epoch": _counter(copy.get("epoch")),
+            "sender": _identity(copy.get("sender")),
+            "instance": instance,
+        }
+    return out
 
 
 def _pause(body: dict[str, Any]) -> dict[str, Any]:

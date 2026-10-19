@@ -196,23 +196,20 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS floor (
+CREATE TABLE IF NOT EXISTS floor_state (
     group_id TEXT PRIMARY KEY,
     holder TEXT,
-    granted_by TEXT,
-    granted_seq INTEGER,
-    sender_instance TEXT,
-    at INTEGER,
-    mode TEXT,
-    moderator TEXT,
-    effective TEXT
+    state TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS floor_seqs (
+CREATE TABLE IF NOT EXISTS floor_writes (
     group_id TEXT NOT NULL,
-    identity TEXT NOT NULL,
-    instance_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    PRIMARY KEY (group_id, identity, instance_id)
+    epoch INTEGER NOT NULL,
+    counter INTEGER NOT NULL,
+    sender TEXT NOT NULL,
+    instance TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    holder TEXT,
+    PRIMARY KEY (group_id, epoch, counter, sender, instance)
 );
 CREATE TABLE IF NOT EXISTS group_safety (
     group_id TEXT PRIMARY KEY,
@@ -417,19 +414,6 @@ GROUP_COLUMNS = (
     "msgs_since_commit",
     "hidden",
     "origin",
-)
-
-
-FLOOR_COLUMNS = (
-    "group_id",
-    "holder",
-    "granted_by",
-    "granted_seq",
-    "sender_instance",
-    "at",
-    "mode",
-    "moderator",
-    "effective",
 )
 
 
@@ -863,42 +847,47 @@ class Store:
 
     # -- floor control (agentconnect.runtime.floor) --------------------------------
 
-    def floor(self, group_id: str) -> dict[str, Any] | None:
-        """The group's floor row: the holder and the grant that named it, and
-        the mode, moderator and effective moderator last reported."""
-        row = self._one(
-            f"SELECT {', '.join(FLOOR_COLUMNS)} FROM floor WHERE group_id = ?",  # noqa: S608
+    def floor(self, group_id: str) -> tuple[str | None, dict[str, Any]] | None:
+        """The group's floor holder and register state (``None``: no row)."""
+        row = self._one("SELECT holder, state FROM floor_state WHERE group_id = ?", group_id)
+        return None if row is None else (row[0], dict(json.loads(row[1])))
+
+    def set_floor(self, group_id: str, holder: str | None, state: dict[str, Any]) -> None:
+        self._db.execute(
+            "INSERT INTO floor_state (group_id, holder, state) VALUES (?, ?, ?) "
+            "ON CONFLICT(group_id) DO UPDATE SET holder = excluded.holder, state = excluded.state",
+            (group_id, holder, json.dumps(state, sort_keys=True)),
+        )
+
+    def floor_writes(self, group_id: str) -> list[tuple[int, int, str, str, str, str | None]]:
+        """The writes kept for the group's floor register, in key order:
+        ``(epoch, counter, sender, instance, kind, holder)``."""
+        rows = self._all(
+            "SELECT epoch, counter, sender, instance, kind, holder FROM floor_writes "
+            "WHERE group_id = ?",
             group_id,
         )
-        return None if row is None else dict(zip(FLOOR_COLUMNS, row, strict=True))
+        return sorted((int(r[0]), int(r[1]), str(r[2]), str(r[3]), str(r[4]), r[5]) for r in rows)
 
-    def set_floor(self, group_id: str, **fields: Any) -> None:
-        """Write the given columns (of :data:`FLOOR_COLUMNS`) of the group's
-        floor row, created if new."""
-        names = ["group_id", *(k for k in FLOOR_COLUMNS if k in fields)]
-        fields = {k: fields[k] for k in names[1:]}
-        updates = ", ".join(f"{k} = excluded.{k}" for k in fields)
-        self._db.execute(
-            f"INSERT INTO floor ({', '.join(names)}) VALUES ({', '.join('?' * len(names))}) "  # noqa: S608
-            f"ON CONFLICT(group_id) DO UPDATE SET {updates}",
-            (group_id, *fields.values()),
+    def add_floor_write(
+        self,
+        group_id: str,
+        key: tuple[int, int, str, str],
+        kind: str,
+        holder: str | None,
+    ) -> bool:
+        """Keep a write; ``False`` if one with that key is kept already."""
+        cur = self._db.execute(
+            "INSERT OR IGNORE INTO floor_writes "
+            "(group_id, epoch, counter, sender, instance, kind, holder) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (group_id, *key, kind, holder),
         )
+        return cur.rowcount == 1
 
-    def floor_seq(self, group_id: str, identity: str, instance_id: str) -> int | None:
-        """The ``seq`` of the last floor grant accepted from that instance."""
-        row = self._one(
-            "SELECT seq FROM floor_seqs WHERE group_id = ? AND identity = ? AND instance_id = ?",
-            group_id,
-            identity,
-            instance_id,
-        )
-        return None if row is None else int(row[0])
-
-    def set_floor_seq(self, group_id: str, identity: str, instance_id: str, seq: int) -> None:
+    def drop_floor_writes(self, group_id: str, before_epoch: int) -> None:
         self._db.execute(
-            "INSERT INTO floor_seqs (group_id, identity, instance_id, seq) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(group_id, identity, instance_id) DO UPDATE SET seq = excluded.seq",
-            (group_id, identity, instance_id, seq),
+            "DELETE FROM floor_writes WHERE group_id = ? AND epoch < ?", (group_id, before_epoch)
         )
 
     def delete_group_data(self, group_id: str) -> None:
@@ -912,8 +901,8 @@ class Store:
                 "group_safety",
                 "task_decisions",
                 "listed_peers",
-                "floor",
-                "floor_seqs",
+                "floor_state",
+                "floor_writes",
             ):
                 db.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))  # noqa: S608
             db.execute(

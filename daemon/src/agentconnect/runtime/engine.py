@@ -1350,9 +1350,13 @@ class Engine:
                 self.safety.transcribe(group_id, "in", identity, msg_id, delivery.inner)
                 self._defer(self._delivery_wake.set)
             if delivery.kind == "control.floor":
-                # Checked in _make_delivery (floor.acceptable): it may take the floor.
+                # Judged in _make_delivery (floor.judge): it may move the floor.
                 await self.floor.accept(
-                    group_id, identity, delivery.sender.instance_id, delivery.inner
+                    group_id,
+                    int(event["epoch"]),
+                    identity,
+                    delivery.sender.instance_id,
+                    delivery.inner,
                 )
             if delivery.kind == "control.close":
                 # SPEC 7.3: the owner asks everyone to leave. Leaving is the
@@ -1386,25 +1390,41 @@ class Engine:
         before the daemon recorded the result (ADR-004)."""
         for entry in self.client.journal_pending():
             try:
-                ctx = json.loads(entry["context"])
-                env = ctx["env"]
-                if not isinstance(env, dict) or _envelope_problem({**env, "ct": ""}) is not None:
-                    raise ValueError("context")
-            except (ValueError, KeyError, TypeError):
-                # Not something this daemon wrote: drop it.
-                self.client.journal_consume(
-                    str(entry["key"]), None if entry["welcome"] else entry["group_id"]
+                await self._replay_entry(entry)
+            except TransientFailure:
+                raise  # the inbound worker retries the replay after a backoff
+            except Exception as err:
+                # One entry that fails for good must not stop the others, nor
+                # the renotify after them. It stays pending: the next replay,
+                # on the next start or reconnect, tries it once more.
+                LOG.warning(
+                    "journal_replay_failed",
+                    error=type(err).__name__,
+                    entry=log.hid(str(entry.get("key"))),
                 )
-                continue
-            LOG.info("journal_replay", kind=env.get("kind"), msg=log.hid(str(env.get("msg_id"))))
-            if entry["welcome"] and isinstance(ctx.get("knock_id"), str):
-                await self.knocks.finish_welcome(env, ctx["knock_id"], entry["group_id"])
-            elif entry["welcome"]:
-                await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
-            else:
-                event = {**entry["event"], "replayed": True}
-                path = "receive" if ctx.get("from_relay", True) else "confirm"
-                await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
+
+    async def _replay_entry(self, entry: dict[str, Any]) -> None:
+        """Finish one pending journal entry (:meth:`_replay_journal`)."""
+        try:
+            ctx = json.loads(entry["context"])
+            env = ctx["env"]
+            if not isinstance(env, dict) or _envelope_problem({**env, "ct": ""}) is not None:
+                raise ValueError("context")
+        except (ValueError, KeyError, TypeError):
+            # Not something this daemon wrote: drop it.
+            self.client.journal_consume(
+                str(entry["key"]), None if entry["welcome"] else entry["group_id"]
+            )
+            return
+        LOG.info("journal_replay", kind=env.get("kind"), msg=log.hid(str(env.get("msg_id"))))
+        if entry["welcome"] and isinstance(ctx.get("knock_id"), str):
+            await self.knocks.finish_welcome(env, ctx["knock_id"], entry["group_id"])
+        elif entry["welcome"]:
+            await self._finish_welcome(env, str(ctx.get("invite_id")), entry["group_id"])
+        else:
+            event = {**entry["event"], "replayed": True}
+            path = "receive" if ctx.get("from_relay", True) else "confirm"
+            await self._finish(env, event, from_relay=bool(ctx.get("from_relay")), path=path)
 
     def _journalled_by_an_older_daemon(self, key: str) -> bool:
         """Whether the journal entry being finished was written by a daemon
@@ -1520,12 +1540,17 @@ class Engine:
         if (
             decision.verdict is not Verdict.DROP
             and inner["kind"] == "control.floor"
-            and not self.floor.acceptable(
-                group.group_id, identity, str(sender["instance_id_hex"]), inner
+            and self.floor.judge(
+                group.group_id,
+                int(event["epoch"]),
+                identity,
+                str(sender["instance_id_hex"]),
+                inner,
             )
+            is None
         ):
-            # SPEC 9.3: a grant this daemon's view doesn't allow is ignored,
-            # silently, after the rates counted it.
+            # SPEC 9.3: a grant the facts of its epoch don't allow is
+            # ignored, silently, after the rates counted it.
             decision = drop("floor_ignored")
         if decision.verdict is Verdict.DROP:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=decision.reason)
@@ -2571,6 +2596,14 @@ class Engine:
                 self._fail_codes[row.seq] = e.code
                 return "failed"
             self.store.bump_messages(group.group_id)
+            if payload["inner"].get("kind") == "control.floor":
+                # Taken in the epoch the relay took it in, as receivers do.
+                await self.floor.sent(
+                    group.group_id,
+                    payload["inner"],
+                    int(payload["env"]["epoch"]),
+                    payload["msg_id"],
+                )
             return "done"
         self._fail_codes[row.seq] = "attempts_exhausted"
         return "failed"
@@ -3178,6 +3211,8 @@ class Engine:
         reply_to: list[str] | None = None,
         internal: bool = False,
         addressee: list[str] | None = None,
+        floor_grant: bool = False,
+        daemon_control: bool = False,
     ) -> tuple[str, str]:
         """Queue an application message; returns ``(msg_id, status)`` where
         ``status`` is ``queued``, or ``held`` when the group's
@@ -3193,8 +3228,14 @@ class Engine:
         count against the rate and are never held.
 
         ``addressee`` (SPEC 9.3): with ``to: ["*"]`` every member sees the
-        message, and only the members listed are triggered."""
+        message, and only the members listed are triggered.
+
+        ``floor_grant``: a ``control.floor`` that ``FloorService.grant``
+        checked; the agent's count against its send rate. ``daemon_control``:
+        a control the daemon sends on its own, not on anyone's behalf (the
+        floor copy for newcomers): internal, hop 0, replying to nothing."""
         group = self._group_or_raise(group_id)
+        internal = internal or daemon_control
         if addressee is not None and not (
             _str_list(addressee) and 0 < len(addressee) <= MAX_ADDRESSEE
         ):
@@ -3205,10 +3246,12 @@ class Engine:
             raise DaemonError("bad_request", "origin must be agent or human")
         if kind in HUMAN_ONLY_KINDS and origin != "human":
             raise DaemonError("forbidden", f"{kind} must come from the human")
-        if kind == "control.floor" and not internal:
-            # The grant checks the role and takes the floor locally too.
+        if kind == "control.floor" and not (internal or floor_grant):
+            # The grant checks the role first (FloorService.grant).
             raise DaemonError("bad_request", "grant the floor with POST /v0/groups/{gid}/floor")
-        if origin == "human":
+        if daemon_control:
+            hop, refs = 0, []
+        elif origin == "human":
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
             hop, refs = self._reply_hop(group.group_id, reply_to)
@@ -3229,6 +3272,7 @@ class Engine:
                 inner,
                 size,
                 internal=internal,
+                grant=floor_grant,
             )
         )
         if decision.verdict is Verdict.DROP:

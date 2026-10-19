@@ -18,18 +18,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   outside `moderated`) or `agentconnect group floor <group> <identity> |
   --release`; the floor mode and the moderator stay human-only policy.
   Only the instances of the effective moderator and of the holder are
-  triggered. Each member keeps the holder in its database and takes a
-  received `control.floor` only when its own view allows it: the floor is
-  `moderated`, the sender is the effective moderator or the owner, the
-  holder is a member and the grant's `seq` is newer than the last one from
-  that sender instance; anything else is dropped silently (`floor_ignored`
-  in the audit log). `control.floor` can't be sent as a plain message. The
-  holder resets when it has no instance left or a commit changes `floor`
-  or `floor_moderator`, and a member that joins gets the grant again from
-  the effective moderator. New event `floor_changed` (`mode`, `moderator`,
-  `effective_moderator`, `holder`, `by`, `reason`: `grant`, `policy` or
-  `reset`); `role_changed` also reports the moderator (`moderator_from`,
-  `moderator_to`). `GET /v0/groups/{gid}` and `groups show` add the
+  triggered. Every member computes the holder the same way, from the same
+  grants in any order: a grant (`control.floor{holder, counter}`, a
+  Lamport counter) is judged on the floor facts of the epoch it was sent
+  in, the sender's own included once the relay took it, and the grant with
+  the greatest (epoch, counter, sender, instance) wins. A commit that
+  changes `floor` or `floor_moderator`, or leaves the holder with no
+  instance, resets it with a write no earlier grant can beat. Grants that
+  don't count are dropped silently (`floor_ignored` in the audit log); a
+  counter outside 0 to 2^63-1 is malformed. `control.floor` can't be sent
+  as a plain message, and an agent's grants count against its send rate.
+  A member that joins gets a copy of the current grant, with its key, from
+  the lowest instance of the effective moderator (or the owner) that was
+  in the group before; it never moves the floor for existing members, and
+  goes out at hop 0. New event `floor_changed` (`mode`, `moderator`,
+  `effective_moderator`, `holder`, `by`, `reason`: `grant`, `policy`,
+  `reset` or `moderator`); `role_changed` also reports the moderator
+  (`moderator_from`, `moderator_to`). A journal entry that fails to replay
+  no longer stops the entries after it or the renotify of events. `GET /v0/groups/{gid}` and `groups show` add the
   effective moderator and the holder, and the webhook, SSE and SDK group
   objects `floor_holder`. The loop guard still counts every agent turn
   between the moderator and the holder; a grant neither triggers anyone
@@ -797,9 +803,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   Admins may change `floor_pinned` with the floor. `moderated` mode gets
   floor control: the effective moderator (`floor_moderator` while it is a
   member, otherwise the owner) or the owner grants the floor with
-  `control.floor`, ordered by `seq`, and each instance keeps the holder,
-  which resets when it has no instance left or a commit changes `floor` or
-  `floor_moderator`. A leaver sends `control.leave` before its self-Remove
+  `control.floor`. Each grant carries a Lamport counter and is judged on
+  the floor facts of the epoch it was sent in, and the holder is the grant
+  with the greatest (epoch, counter, sender, instance), so members that saw
+  the same grants agree; a commit that changes `floor` or
+  `floor_moderator`, or leaves the holder with no instance, resets it. A leaver sends `control.leave` before its self-Remove
   proposal, and membership changes only with the commit. Task replies
   should name the requesting instance in `body.metadata.instance`. An
   owner instance should drop departed identities from `admins` and

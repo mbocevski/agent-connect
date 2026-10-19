@@ -851,7 +851,7 @@ Inner = {
 |---|---|---|
 | `control.leave` | `{}` | Any member, about itself. Sent immediately before its leave proposal (§9.2); receivers MUST NOT change membership because of it. |
 | `control.close` | `{"reason": "..."}` | Owner. All members SHOULD leave. |
-| `control.floor` | `{"holder": "ac:v0:…" \| null}` | The effective moderator or the owner (§9.3) |
+| `control.floor` | `{"holder": "ac:v0:…" \| null, "counter": <0..2^63-1>, "copy"?: {"epoch", "sender", "instance"}}` | The effective moderator or the owner (§9.3) |
 | `control.pause` | `{"reason": "loop_guard" \| "human"}` | Any member |
 | `control.resume` | `{}` | Any member, with a human-originated message (`origin: "human"`) |
 | `control.capabilities` | `{"adapters": [...], "accepts": [...part kinds]}` | Any member |
@@ -1303,17 +1303,45 @@ triggering.
 In `mention` mode, an agent-originated message with `to: ["*"]` and no
 `addressee` triggers nobody: every member gets it as context.
 
-**Floor holder.** Each instance keeps a floor holder, initially null. It
-accepts a `control.floor{holder}` only when the floor is `moderated`, the
-sender is the effective moderator or the owner, `holder` is null or a
-current member, and the message's `seq` is greater than that of the last
-`control.floor` it accepted from the same sender instance; it ignores any
-other. The holder becomes null when it has no instance left and when a
-commit changes `floor` or `floor_moderator`. A new member starts with null;
-the effective moderator SHOULD resend the current grant to new members.
-Holders are local state: a relay that drops or delays a grant can make
-members disagree on who holds the floor, which changes only who is
-triggered (§12).
+**Floor holder.** The floor holder is a register that every member
+computes from the same writes, so members that have seen the same writes
+agree on it whatever order they arrived in. Each write has a key
+`(epoch, counter, sender, instance)`, compared in that order (identities
+and instance ids as strings), and the holder is the result of applying the
+writes in key order, starting from null:
+
+- **Grant.** A `control.floor{holder, counter}` sent in MLS epoch `e` by
+  instance `i` of identity `s` writes `holder` at key `(e, counter, s, i)`.
+  `counter` is a Lamport counter of the group: the sender uses one more
+  than the greatest counter it has seen in a grant, at most 2^63-1. A
+  member judges a grant against the **floor facts of epoch `e`** (the
+  floor mode, the owner, the effective moderator and the member
+  identities), never against its own later view: the grant is valid only
+  if the floor was `moderated`, `s` was the effective moderator or the
+  owner, and `holder` is null or was a member. A member keeps the facts of
+  the epochs whose application messages it can still decrypt, and ignores
+  a grant from any other epoch. A `counter` outside 0 to 2^63-1 makes the
+  message malformed. The sender applies its own grant by the same rule,
+  in the epoch the relay accepted it in.
+- **Reset.** A commit that starts epoch `e` and changes `floor` or
+  `floor_moderator` writes null at `(e, 0, "", "")`. A commit after which an
+  identity `z` has no instance writes "drop `z`" at `(e, 0, "", z)`, which
+  makes the holder null if it is `z` at that point of the order. A grant
+  sent before the commit therefore loses to the reset however late it is
+  processed.
+- **Copy.** A new member starts with null. After a commit that adds
+  instances, the lowest instance of the effective moderator that was in the
+  group before the commit (if it has none, of the owner) SHOULD send the
+  new instances `control.floor{holder, counter, copy: {epoch, sender,
+  instance}}`: the current holder with the key of the grant that set it.
+  It is judged as a grant from its own sender and epoch, names a holder,
+  and is written at the copied key, which can't be from a later epoch than
+  the copy's; a member that has that write already changes nothing.
+
+Writes from epochs that can no longer be decrypted MAY be folded into a
+base value. A relay that drops or withholds a grant can still make members
+disagree on who holds the floor, which changes only who is triggered
+(§12).
 
 **`addressee`.** An inner message MAY carry `addressee`, a list of 1 to 50
 identities. In `free` and `mention` mode, a message with `addressee`
@@ -2296,9 +2324,11 @@ Decided by the maintainer (2026-10-17), now normative:
 
 Decided by the maintainer (2026-10-18), group mode, now normative:
 
-- Floor control: grants by the effective moderator or the owner, ordered by
-  `seq`, with local holder state (§7.3, §9.3). The effective moderator is
-  `floor_moderator` while it is a member, otherwise the owner.
+- Floor control: grants by the effective moderator or the owner, judged on
+  the facts of the epoch they were sent in, and a holder register ordered
+  by `(epoch, counter, sender, instance)` that commits reset (§7.3, §9.3).
+  The effective moderator is `floor_moderator` while it is a member,
+  otherwise the owner.
 - The `free` → `mention` floor switch counts identities, not instances, so
   a new instance of a member never switches a 1:1 group; `max_members`
   still counts instances (§9.1).

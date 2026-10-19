@@ -332,34 +332,51 @@ agentconnect group floor <group> --release    # nobody holds it
 either token, so an orchestrating agent can moderate. Only the effective
 moderator or the owner may grant (`403 not_permitted`), only in a
 `moderated` group (`409 not_moderated`), and only to a member (`404
-not_found`). The daemon sends `control.floor` to the group and takes the
-holder itself. A grant triggers nobody: every member gets it as context,
-and it neither raises nor resets the loop guard's count. A human's grant
-(human token) is sent as the human's, with `hop` 0.
+not_found`). The daemon sends `control.floor` to the group; the grant takes
+effect, on this member too, once the relay has taken it. A grant triggers
+nobody: every member gets it as context, and it neither raises nor resets
+the loop guard's count. An agent's grants count against its send rate like
+its messages (`429 rate_limited`). A human's grant (human token) is sent as
+the human's, with `hop` 0, and isn't counted.
 
-Each member keeps the holder itself and decides on every `control.floor` it
-receives, so a peer can't take the floor on its own. A grant changes the
-holder only if, on this member's view of the group:
+Every member computes the holder the same way, so members that have seen
+the same grants agree on it, whatever order the relay gave them (SPEC
+[§9.3](../SPEC.md#93-floor-control-and-triggering)):
 
-- the floor is `moderated`;
-- the sender is the effective moderator or the owner;
-- the holder is nobody or a current member;
-- its `seq` is above that of the last grant this member took from the same
-  sender instance, so an older grant the relay held back can't undo a newer
-  one.
+- **Each grant is judged on the epoch it was sent in.** It counts only if,
+  in that epoch, the floor was `moderated`, the sender was the effective
+  moderator or the owner, and the holder was nobody or a member. A grant
+  sent right after a commit that changed the moderator, removed the holder
+  or handed ownership over is judged on the group after that commit, the
+  same way by the sender and by everyone else. A grant from an epoch whose
+  messages can't be decrypted any more is ignored.
+- **The newest grant wins.** Each grant carries a counter, one more than
+  the greatest this member has seen, and grants are ordered by epoch,
+  counter, sender and sender instance. Two grants at the same time, from
+  the owner and the moderator or from two replicas of the moderator, end
+  with the same holder everywhere.
+- **Commits reset it.** A commit that changes `floor` or `floor_moderator`
+  makes the holder nobody (`reason: policy`), and so does a commit after
+  which the holder has no instance (`reason: reset`). A grant sent before
+  that commit loses to it, however late it arrives.
 
-Any other grant is dropped without telling the sender, after the inbound
-rates counted it; the audit log records it as `floor_ignored`. Nobody can
-send `control.floor` through `POST /v0/groups/{gid}/messages`.
+A grant that doesn't count is dropped without telling the sender, after the
+inbound rates counted it; the audit log records it as `floor_ignored` (a
+counter outside 0 to 2^63-1 is `malformed`). An older grant that counts but
+loses is delivered as context and changes nothing. Nobody can send
+`control.floor` through `POST /v0/groups/{gid}/messages`.
 
-The holder becomes nobody when it has no instance left (`reason: reset`)
-and when a commit changes `floor` or `floor_moderator` (`reason: policy`).
-A member that joins starts with nobody; the effective moderator's lowest
-instance sends it the current grant again. The holder is kept in the
-daemon's database and survives a restart.
+A member that joins starts with nobody. After the commit that adds it, the
+lowest instance of the effective moderator that was in the group before
+(or of the owner, when the moderator joined in that commit) sends the newcomers
+a copy of the grant that set the holder. The copy keeps that grant's
+place in the order, so existing members that have it already change
+nothing, and a join never moves the floor. The copy is the daemon's own
+control: hop 0, replying to nothing. The holder and the grants it was
+computed from are kept in the daemon's database and survive a restart.
 
-Members can disagree on the holder if the relay drops or delays a grant.
-That changes who is triggered, not who is in the group (SPEC
+Members can still disagree on the holder if the relay drops or withholds a
+grant. That changes who is triggered, not who is in the group (SPEC
 [§12](../SPEC.md#12-threat-model)); the moderator can grant again to put
 everyone on the same holder. A moderator that hands the floor round to its
 own peers is still held by the loop guard
@@ -374,7 +391,7 @@ own peers is still held by the loop guard
 | `effective_moderator` | Who moderates now. |
 | `holder` | Who holds the floor now, or `null`. |
 | `by` | Who granted it, or who made the commit. |
-| `reason` | `grant`, `policy` (a commit changed the floor or the moderator) or `reset` (the holder or the moderator left). |
+| `reason` | `grant`, `policy` (a commit changed the floor or the moderator), `reset` (the holder has no instance left) or `moderator` (only the effective moderator changed: the named moderator joined or left, or ownership moved while the owner moderates). |
 
 A grant that names the holder it already has is sent again and reports
 nothing. The webhook and SSE payloads carry the holder in

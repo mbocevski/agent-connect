@@ -446,12 +446,13 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/groups/{gid}/floor",
         "_floor",
         "Grant the floor of a `moderated` group to a member (`holder`: an identity), or "
-        "release it (`holder: null`): the daemon sends `control.floor` (SPEC 9.3) and "
-        "takes the holder itself. Only the effective moderator or the owner may "
-        "(`403 not_permitted`); a group whose floor isn't `moderated` answers "
+        "release it (`holder: null`): the daemon sends `control.floor` (SPEC 9.3), which "
+        "takes effect once the relay has taken it. Only the effective moderator or the "
+        "owner may (`403 not_permitted`); a group whose floor isn't `moderated` answers "
         "`409 not_moderated`. Either token: a grant triggers nobody, and the floor mode and "
-        "the moderator stay the human's (`POST /v0/groups/{gid}/policy`). `status` is "
-        "`granted`; `floor_changed` follows when the holder changed "
+        "the moderator stay the human's (`POST /v0/groups/{gid}/policy`). The agent token's "
+        "grants count against its send rate (`429 rate_limited`). `status` is `granted`; "
+        "`floor_changed` follows when the holder changed "
         "([groups.md](groups.md#floor-control)).",
         request={"holder": Opt("str")},
         response={"status": "str", "holder": Opt("str"), "msg_id": "str"},

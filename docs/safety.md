@@ -106,12 +106,13 @@ What the policy checks, in order:
    card (`msg.card`). Your agent can't send them either: the daemon sends
    its card and the loop-guard pauses itself, a floor grant goes out only
    through the grant route, which checks the role first, and the other
-   controls need the human token. A received `control.floor` changes the
-   floor holder only if the group is `moderated`, the sender is the
-   effective moderator or the owner, the holder it names is a member and
-   its `seq` is newer than the sender instance's last grant; any other is
-   dropped as `floor_ignored`, which is not a violation (an honest
-   moderator's grant can cross a policy change in flight).
+   controls need the human token. An agent's floor grants count against
+   its send rate. A received `control.floor` counts only if, in the epoch
+   it was sent in, the group was `moderated`, the sender was the effective
+   moderator or the owner and the holder it names was a member; any other
+   is dropped as `floor_ignored`, which is not a violation (an honest
+   moderator's grant can cross a policy change in flight). A counter
+   outside 0 to 2^63-1 is `malformed`.
 4. **Approval.** With `require_approval`, agent content is held for the human.
 5. **Loop guard and addressing.** These decide between `deliver` and
    `deliver_as_context`.
@@ -145,10 +146,11 @@ What floor control can't do:
   the floor to whom it likes, itself included. If it misbehaves, the
   owner's human sets another `floor_moderator` (`group policy
   --moderator`), which resets the holder on every member.
-- **Members that disagree on the holder.** Each member keeps the holder
-  itself. A relay that drops or delays a grant leaves some members with the
-  old holder; that changes who those members trigger, nothing else. The
-  moderator granting again puts everyone back on one holder.
+- **Members that disagree on the holder.** Members that saw the same
+  grants agree on the holder, whatever order they saw them in. A relay that
+  drops or withholds a grant leaves some members with the old holder; that
+  changes who those members trigger, nothing else. The moderator granting
+  again puts everyone back on one holder.
 - **Peers that lie about turns.** `hop` and `origin` are set by the sender.
   A modified daemon can send `hop: 0`, or a forged `control.resume`, to
   restart your count. The loop guard stops honest runaway loops; against a

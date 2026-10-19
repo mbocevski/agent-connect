@@ -529,7 +529,9 @@ async def test_a_floor_grant_is_taken_once_after_a_crash(
     await settled([a, b, c], gid)
     granted = [e for e in events(c, "floor_changed") if e["reason"] == "grant"]
     assert [e["holder"] for e in granted] == [c.me]
-    assert c.daemon.store.floor_seq(gid, b.me, b.daemon.instance.instance_id_hex) is not None
+    assert [w[2:5] for w in c.daemon.store.floor_writes(gid) if w[4] == "grant"] == [
+        (b.me, b.daemon.instance.instance_id_hex, "grant")
+    ]
     if mode == "raise":
         # A failure after the transaction leaves its events for the next
         # start (or reconnect) to tell the adapter.
@@ -591,16 +593,16 @@ async def test_a_holder_reset_is_reported_once_after_a_crash(
 @pytest.mark.hosts("daemon")
 async def test_the_floor_holder_survives_a_restart(group: GroupFixture) -> None:
     """The holder is stored, so a restarted member still triggers the
-    holder, and still ignores a grant older than the last it took."""
+    holder, and an older grant still loses to the one it took."""
     (a, b, c), gid = await group(3)
     await moderated_by([a, b, c], gid, b)
     b.daemon.grant_floor(gid, c.me)
     await until(lambda: holder_of(a, gid) == holder_of(c, gid) == c.me)
-    taken = a.daemon.store.floor_seq(gid, b.me, b.daemon.instance.instance_id_hex)
+    taken = a.daemon.store.floor_writes(gid)
     await a.restart()
     await a.connected()
     assert holder_of(a, gid) == c.me
-    assert a.daemon.store.floor_seq(gid, b.me, b.daemon.instance.instance_id_hex) == taken
+    assert a.daemon.store.floor_writes(gid) == taken
     send = c.adapter.send
     assert send is not None
     await send(gid, {"text": "after the restart"})
@@ -608,8 +610,7 @@ async def test_the_floor_holder_survives_a_restart(group: GroupFixture) -> None:
     hit = next(d for d in a.adapter.deliveries if d.body == {"text": "after the restart"})
     assert hit.addressed_to_me is False  # a is neither the moderator nor the holder
     # An older grant from b, held back by the relay, is ignored after the restart.
-    inner = b.daemon.inner("control.floor", {"holder": a.me}, ["*"])
-    inner["seq"] = 1
+    inner = b.daemon.inner("control.floor", {"holder": a.me, "counter": 0}, ["*"])
     b.daemon._enqueue("app", gid, {"inner": inner, "msg_id": engine_mod.new_msg_id()})
     b.daemon.send_message(gid, {"text": "marker"})
     await a.adapter.wait_for(lambda: "marker" in a.adapter.texts(gid), WAIT)
