@@ -5,8 +5,10 @@ Three workers run on one event loop:
 * **inbound**: takes relay frames in order, runs them through the core and
   records the outcome in the inbox (dedup by ``(sender, msg_id)``);
 * **outbox**: sends queued work in order (group creation, joins,
-  application messages, commits, proposals, Welcomes). Because there is
-  one outbox, local commits are serialised;
+  application messages, commits, proposals, Welcomes). Rows of one group
+  go out in the order they were queued, so local commits are serialised;
+  a row the relay refuses for now waits out a backoff and holds up only
+  its own group (``Engine._next_row``);
 * **delivery**: hands pending inbox rows to the adapter and acks the relay
   frame only once the adapter accepted it.
 
@@ -267,6 +269,15 @@ REST_TS_KEY = "relay/rest_ts"
 REPLAY_JOURNAL = "_replay_journal"
 SUMMARY_REPORTS_LEAVES = "left_reported"
 TransientFailure = (TransientError, FailpointError)
+
+
+@dataclass
+class Postponed:
+    """An outbox row that failed for now: it runs again at ``at`` (Unix
+    seconds on the daemon clock), and its group's later rows wait for it."""
+
+    at: float
+    backoff: Backoff
 
 
 def journal_key(sender: str, msg_id: str) -> str:
@@ -549,6 +560,8 @@ class Engine:
         )
         self._frames: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._outbox_wake = asyncio.Event()
+        # Outbox rows waiting out a backoff, by seq (_postpone).
+        self._postponed: dict[int, Postponed] = {}
         self._delivery_wake = asyncio.Event()
         self._changed = asyncio.Event()
         self._parked: dict[str, list[dict[str, Any]]] = {}
@@ -2551,13 +2564,62 @@ class Engine:
         self._outbox_wake.set()
         return seq
 
+    def _next_row(self) -> OutboxRow | None:
+        """The first queued row that may run now. A group's rows (its lane,
+        ``Store.outbox_lanes``) go out in the order they were queued, so while
+        a lane's first row waits out its backoff the rest of that lane waits
+        behind it, and every other lane goes on."""
+        if not self._postponed:
+            return self.store.next_outbox()
+        lanes = self.store.outbox_lanes()
+        queued = {seq for seq, _ in lanes}
+        for seq in [s for s in self._postponed if s not in queued]:
+            del self._postponed[seq]  # finished some other way
+        now = self.clock.unix_millis() / 1000
+        seen: set[str | None] = set()
+        for seq, lane in lanes:
+            if lane in seen:
+                continue
+            seen.add(lane)
+            wait = self._postponed.get(seq)
+            if wait is None or wait.at <= now:
+                return self.store.outbox_row(seq)
+        return None
+
+    def _postpone(self, seq: int) -> None:
+        """Run this row again after its own backoff (it stays queued)."""
+        wait = self._postponed.get(seq)
+        if wait is None:
+            backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
+            wait = self._postponed[seq] = Postponed(0.0, backoff)
+        wait.at = self.clock.unix_millis() / 1000 + wait.backoff.next()
+
+    def _retries(self, seq: int) -> int:
+        """How many times this row was postponed (since the start)."""
+        wait = self._postponed.get(seq)
+        return 0 if wait is None else wait.backoff.attempts
+
+    async def _outbox_idle(self) -> None:
+        """Wait for a new row, or for the first postponed row's time."""
+        if not self._postponed:
+            await self._outbox_wake.wait()
+            return
+        due = min(w.at for w in self._postponed.values())
+        timer = asyncio.ensure_future(self.clock.sleep_until(due))
+        waker = asyncio.ensure_future(self._outbox_wake.wait())
+        await asyncio.sleep(0)
+        self._pulse()  # announce the pause (tests advance time then)
+        try:
+            await asyncio.wait({timer, waker}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            await cancel_and_wait(timer, waker)
+
     async def _outbox(self) -> None:
-        backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
         while True:
-            row = self.store.next_outbox()
+            row = self._next_row()
             if row is None:
                 self._outbox_wake.clear()
-                await self._outbox_wake.wait()
+                await self._outbox_idle()
                 continue
             await self.link.wait_connected()
             try:
@@ -2565,15 +2627,16 @@ class Engine:
             except NotConnectedError:
                 continue
             except TransientFailure:
-                # The row stays queued and runs again from what it recorded;
-                # a confirmed commit is finished from the core's journal.
+                # The row stays queued and runs again from what it recorded,
+                # after a backoff; a confirmed commit is finished from the
+                # core's journal. Only its own lane waits for it.
                 LOG.warning("outbox_transient", kind=row.kind)
-                await self._sleep(backoff.next())
+                self._postpone(row.seq)
                 continue
             except Exception:
                 LOG.exception("outbox_failed", kind=row.kind)
                 state = "failed"
-            backoff.reset()
+            self._postponed.pop(row.seq, None)
             msg_id = row.payload.get("msg_id")
             event = None
             with self.store.tx():
@@ -2697,8 +2760,12 @@ class Engine:
                     payload.pop("env")  # too old an epoch: seal again
                     continue
                 if e.code in RETRYABLE_RELAY_ERRORS:
-                    await self._sleep(1.0)
-                    continue
+                    if self._retries(row.seq) + 1 >= MAX_COMMIT_ATTEMPTS:
+                        self._fail_codes[row.seq] = "attempts_exhausted"
+                        return "failed"
+                    # Not now: the same envelope again after a backoff,
+                    # while other groups' rows go on.
+                    raise TransientError(group.group_id, e.code) from None
                 LOG.info("send_failed", code=e.code)
                 self._fail_codes[row.seq] = e.code
                 return "failed"
@@ -2752,17 +2819,21 @@ class Engine:
             self.store.update_outbox(row.seq, payload=payload)
         update = self.store.outbox_row(int(seq))
         if update is not None and update.state == "queued":
-            state = await self._run_commit(update, group)
+            state = await self._run_commit(update, group, outbox_seq=row.seq)
             self.store.update_outbox(update.seq, state=state)
         payload.pop("update_row", None)
         self.store.update_outbox(row.seq, payload=payload)
         return self.store.group(group.group_id) or group
 
-    async def _run_commit(self, row: OutboxRow, group: GroupRow) -> str:
+    async def _run_commit(
+        self, row: OutboxRow, group: GroupRow, outbox_seq: int | None = None
+    ) -> str:
+        """Build, send and confirm the row's commit. ``outbox_seq``: the row
+        the outbox runs, when this one runs inside it (a cadence Update)."""
         gid = unb64(group.group_id)
+        retries = self._retries(row.seq if outbox_seq is None else outbox_seq)
         payload = dict(row.payload)
         intent = payload["intent"]
-        backoff = Backoff(base=1.0, cap=60.0, rng=self.options.backoff_rng)
         for _ in range(MAX_COMMIT_ATTEMPTS):
             current = self.store.group(group.group_id)
             if current is None or current.status != "active" or current.out_of_sync:
@@ -2782,12 +2853,14 @@ class Engine:
                     await self._request({"t": "send", "env": env}, str(env["msg_id"]))
                 except RelayError as e:
                     if e.code in RETRYABLE_RELAY_ERRORS:
+                        if retries + 1 >= MAX_COMMIT_ATTEMPTS:
+                            break
                         # SPEC 8.3: resend the same bytes under the same
                         # msg_id; the relay didn't take it (a rejected send
-                        # doesn't consume its msg_id).
+                        # doesn't consume its msg_id). After a backoff, while
+                        # other groups' rows go on.
                         LOG.info("commit_retry", code=e.code)
-                        await self._sleep(backoff.next())
-                        continue
+                        raise TransientError(group.group_id, e.code) from None
                     with contextlib.suppress(ac.AgentConnectError):
                         self.client.discard_pending_commit(gid)
                     built_epoch = int(env["epoch"])

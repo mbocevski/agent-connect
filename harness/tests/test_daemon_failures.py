@@ -80,6 +80,41 @@ async def test_relay_errors_on_sends(
     assert await b.wait_texts(gid, 3) == ["resealed", "later", "still in sync"]
 
 
+async def test_a_send_refused_for_now_holds_up_only_its_group(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """N5: a commit or a message the relay refuses for now waits out its
+    backoff without holding up the sender's other groups, and its own
+    group's later rows still wait behind it."""
+    (a, b), gid = await group(2)
+    other = a.daemon.create_group("Other", "Elsewhere")
+    await a.idle()
+    await cluster.invite(a, b, other)
+    proxy = malicious_relay(a)
+    epoch = a.epoch(gid)
+    proxy.fail_next("send", "rate_limited", kind="commit")
+    a.daemon.update(gid)
+    await a.wait(lambda: a.clock.sleepers > 0)
+    a.daemon.send_message(gid, {"text": "after the commit"})
+    a.daemon.send_message(other, {"text": "elsewhere"})
+    assert await b.wait_texts(other, 1) == ["elsewhere"]
+    assert a.epoch(gid) == epoch
+    await advance(1)
+    assert await b.wait_texts(gid, 1) == ["after the commit"]
+    assert a.epoch(gid) == epoch + 1
+    proxy.fail_next("send", "rate_limited", kind="application")
+    a.daemon.send_message(gid, {"text": "first"})
+    await a.wait(lambda: a.clock.sleepers > 0)
+    a.daemon.send_message(gid, {"text": "second"})
+    a.daemon.send_message(other, {"text": "meanwhile"})
+    assert await b.wait_texts(other, 2) == ["elsewhere", "meanwhile"]
+    assert b.adapter.texts(gid) == ["after the commit"]
+    await advance(1)
+    assert await b.wait_texts(gid, 3) == ["after the commit", "first", "second"]
+    await a.idle()
+    assert a.daemon._postponed == {}
+
+
 async def test_invite_registration_failures_keep_no_secret(
     group: GroupFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

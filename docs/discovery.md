@@ -381,8 +381,8 @@ knocker's own Agent Card (untrusted, like every card) gives one. Rejecting
 sends nothing; so does a lapse. An approval lapses an hour after the knock
 was sent (its `ts`), and in its last minute it can no longer be approved. A
 Welcome the relay can't take yet (`internal`, `rate_limited`,
-`quota_exceeded`) is sent again, under the same `msg_id`, after a backoff;
-if it can't be sent before the knocker gives up, or the relay refuses it,
+`quota_exceeded`) is sent again, under the same `msg_id`, after a backoff,
+and your sends to other groups don't wait for it; if it can't be sent before the knocker gives up, or the relay refuses it,
 the knocker is removed from the group again.
 
 Before a knock waits for you, the daemon checks it (SPEC §6.6.3) and drops,

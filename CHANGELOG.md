@@ -1083,6 +1083,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   instead of continuing. The reply now carries the task's `taskId` and
   `contextId`, in both modes; a reply to a plain message still names no
   task. `Group.send(..., task_id=)` names a task explicitly.
+- Runtime: a send the relay refused for now held up every other send. An
+  approved knock's Welcome answered `rate_limited`, `internal` or
+  `quota_exceeded` stayed at the head of the single outbox and was retried
+  there until the knock's deadline, up to an hour, and a commit or message
+  answered `rate_limited` or `internal` held it for its backoff. Such a row
+  now waits out its own backoff while the rows of other groups go out; a
+  group's own rows still go out in the order they were queued, behind it.
+  A message or commit the relay keeps refusing still fails after 8 tries.
 - Runtime: a policy change that lost an epoch conflict was rebuilt from the
   whole policy cached when it was queued, which could undo a change another
   member committed meanwhile. Changes are queued as what they change and

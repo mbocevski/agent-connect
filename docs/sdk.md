@@ -355,7 +355,11 @@ your handler sees each message and each event once.
   in order within a group. Groups don't wait for each other: handlers for
   different groups can run at the same time, while a group's handlers run
   one at a time. Messages and events are separate streams, so an event
-  handler can run before the handler of an earlier message.
+  handler can run before the handler of an earlier message. What you send
+  goes out in order within a group too: a message, commit or Welcome the
+  relay refuses for now (`rate_limited`, `internal`) is sent again after a
+  backoff, and the rest of its group waits behind it while other groups'
+  sends go on.
 - **Don't block the event loop.** Embedded handlers run on the same asyncio
   loop as the runtime: the relay link, the outbox and the local API your
   human uses for approvals. A handler that blocks the loop (a synchronous
