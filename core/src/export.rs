@@ -163,10 +163,15 @@ fn parse(file: &[u8]) -> Result<ExportJson> {
     }
     let text = file.trim_ascii_end();
     // The version first, so a later format reads as one, not as garbage.
+    // Only a non-negative integer names a version; `-0`, `0.0` and the
+    // like are malformed (and never canonical).
     let value: Value = serde_json::from_slice(text).map_err(|_| Error::Malformed(WHAT))?;
-    match value.get("v") {
-        Some(v) if v.as_u64() == Some(0) => {}
-        Some(Value::Number(_)) => return Err(Error::UnsupportedVersion),
+    match value.get("v").and_then(Value::as_number) {
+        Some(n) if n.is_u64() => {
+            if n.as_u64() != Some(0) {
+                return Err(Error::UnsupportedVersion);
+            }
+        }
         _ => return Err(Error::Malformed(WHAT)),
     }
     from_jcs(text, WHAT)
@@ -287,12 +292,22 @@ mod tests {
                 Error::UnsupportedVersion
             );
         }
-        // A version that isn't a number, or none at all, is malformed.
+        // A version that isn't a non-negative integer, or none at all, is
+        // malformed: only an integer names a format version.
         for v in [Value::String("0".into()), Value::Null] {
             let file = with_field(&out.file, "v", v);
             assert_eq!(
                 unwrap_identity_export(&file, &out.code).unwrap_err(),
                 Error::Malformed(WHAT)
+            );
+        }
+        let text = String::from_utf8(out.file.clone()).unwrap();
+        for v in ["-0", "0.0", "1.0", "-1", "1e0"] {
+            let file = text.replace("\"v\":0", &format!("\"v\":{v}"));
+            assert_eq!(
+                unwrap_identity_export(file.as_bytes(), &out.code).unwrap_err(),
+                Error::Malformed(WHAT),
+                "{v}"
             );
         }
         let mut v: Value = serde_json::from_slice(&out.file).unwrap();
