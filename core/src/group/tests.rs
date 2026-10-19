@@ -980,3 +980,29 @@ fn a_leave_after_a_large_message_is_not_padded() {
     assert!(fresh.len() < crate::padding::BUCKETS[1], "{}", fresh.len());
     assert_eq!(after.len(), fresh.len());
 }
+
+/// Only a member's Remove of its own leaf is a leave (SPEC §9.2): a Remove
+/// of another leaf in the proposal store, here one built with raw OpenMLS,
+/// is not.
+#[test]
+fn a_stored_remove_of_another_leaf_is_not_a_leave() {
+    let (cs, mut gs) = trio();
+    let signer = cs[1].signer();
+    gs[1]
+        .mls
+        .propose_remove_member(&cs[1].provider, &signer, LeafNodeIndex::new(2))
+        .unwrap();
+    assert!(gs[1].has_pending_proposals());
+    assert_eq!(gs[1].pending_leaves().unwrap(), vec![]);
+}
+
+/// The relay fans a member's own messages back to it: its own application
+/// message and its own leave proposal are echoes, not commits to check.
+#[test]
+fn own_messages_come_back_as_echoes() {
+    let (cs, mut gs) = trio();
+    let ct = gs[1].seal(&cs[1], &inner(&cs[1])).unwrap();
+    assert_eq!(gs[1].process(&cs[1], &ct), Ok(Event::OwnEcho));
+    let leave = gs[1].propose_leave(&cs[1]).unwrap();
+    assert_eq!(gs[1].process(&cs[1], &leave), Ok(Event::OwnEcho));
+}

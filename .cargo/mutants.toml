@@ -21,4 +21,8 @@ exclude_re = [
     'core/src/identity\.rs:.*: replace match guard !p\.contains\(.:.\) with true in canonical_relay_host$',
     # A port never starts with `0`, so the number is never 0.
     'core/src/identity\.rs:.*: replace > with >= in canonical_relay_host$',
+    # The own-commit echo check (column 48; the other `&&` is tested): only our
+    # confirmed commit, which has both properties, matches the stored hash, so
+    # any other message just costs a lookup.
+    'core/src/group\.rs:[0-9]+:48: replace && with \|\| in Group::process_inner$',
 ]
