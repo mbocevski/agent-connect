@@ -85,27 +85,31 @@ What works on `main` today:
   directory under a one-time code, and `invite create --replica` adds the
   replica to a group ([docs/cli.md](docs/cli.md)).
   <!-- component: cli -->
-- **Group membership** (in the runtime): every member checks each commit
-  against the group's policy. A leave is a notice and a proposal that the
-  member with the lowest leaf commits, or the next one a minute later, also
-  after a restart. A leave that can't complete because the leaver is the
-  owner's last instance says so instead of deleting the group. Events name
-  who joined, left or was removed, per member or per instance, and who
-  committed it. The owner's human changes roles and the policy and hands
-  ownership over; each change is checked by the core before it is queued
-  and kept when another member's change lands first. Departed admins lose
-  their role. Multi-use invites cap the requests waiting per invite and per
-  claimed identity, and show the human when several claim one identity.
-  A replica invite admits only instances of its creator's identity,
-  whatever the group's invite policy says. In a moderated group the
-  moderator, or an agent acting for it, gives the floor to a member, and
-  only the moderator and the holder are triggered; every member computes
-  the holder the same way from the grants, and it resets when the holder
-  leaves or the moderator changes. A sender can name one instance of a
-  member, such as the replica that asked: the SDK's replies and the A2A
-  adapter's task replies do, so only that replica acts on the answer. The
-  hint only narrows who is triggered; every instance still receives the
-  message ([docs/groups.md](docs/groups.md)).
+- **Group mode** (in the runtime): groups of up to 50 instances with an
+  owner, admins and members, under a policy that every member checks on
+  each commit, so a commit the policy forbids is rejected by the others.
+  The owner's human sets the policy when creating the group, changes it,
+  changes roles and hands ownership over; each change is checked by the
+  core before it is queued and kept when another member's change lands
+  first, and departed admins lose their role. A multi-use invite takes one
+  human approval per joiner, caps the requests waiting per invite and per
+  claimed identity, and shows the human when several claim one identity.
+  A leave is a notice and a proposal that the member with the lowest leaf
+  commits, also after a restart; the owner hands ownership over before it
+  leaves. A removal takes a whole member or only some of its instances.
+  Replicas of one agent are instances of its identity: `identity export`
+  and `identity import` provision one, and a replica invite adds it to a
+  group. The floor decides whose agents a message triggers: every member,
+  the members it names, or in a moderated group the moderator and the
+  member it gives the floor to; every member computes who holds the floor
+  the same way. The loop guard pauses runaway exchanges between agents.
+  A sender can name one instance of a member, such as the replica that
+  asked, and the SDK's and the A2A adapter's replies do. Events tell the
+  human and the agent who joined, left or was removed, per member or per
+  instance, and every role, policy and floor change with who made it. A
+  harness suite runs a group of five through all of it, on both hosts and
+  through the CLI, the local API, the SDK and the A2A adapter
+  ([docs/groups.md](docs/groups.md)).
   <!-- component: group-mode -->
 - **Safety policy**: every message passes the policy in both directions. It
   caps message size and rate, stops reply loops, can require a verified
