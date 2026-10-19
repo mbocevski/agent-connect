@@ -1751,7 +1751,9 @@ these steps:
      instance of X's own identity, sent in epoch e less than 600 s ago: one
      run per pair of identities at a time.
    - While X has a pending MLS commit (§8.3), X waits until the commit is
-     confirmed or discarded, and e is the epoch after that.
+     confirmed or discarded, and e is the epoch after that. While a
+     proposal is pending (a leave, §9.2), X waits until it is committed,
+     and e is the epoch of that commit.
    - X draws a fresh nonce and sends
      `control.sas_commit{commitment, epoch: e, peer: Y}`.
 2. **Pair.** X pairs the run with the first commitment, in order of
@@ -1763,7 +1765,8 @@ these steps:
 3. **Reveal.** Once the run is paired **and** the relay has accepted X's own
    `control.sas_commit` (its `accepted` frame, §8.2), X sends
    `control.sas_reveal{answers: <i's commitment>, epoch: e, nonce}`. X MUST
-   NOT send its reveal before both. From then on X's nonce is spent.
+   NOT send its reveal before both. X's reveal counts as sent once it is
+   sealed (MLS-encrypted); from then on X's nonce is spent.
    - Holding the peer's commitment is the security condition. Waiting for
      `accepted` is about ordering only: through an honest relay it keeps
      X's commitment ahead of its reveal. A malicious relay can only stall
@@ -1822,10 +1825,16 @@ these steps:
   doesn't defer it. X SHOULD defer the departed-role clean-up of §9.2 too.
   A commit its human asks for goes out at once and aborts the run.
 - A commit of pending proposals, such as another member's leave (§9.2),
-  can't wait: while a proposal is pending, the MLS library sends no
+  can't wait: while a proposal is pending, the MLS library seals no
   application message, the ceremony messages included. It goes out as
   §9.2 says. When X's own commit that ends a run carries another member's
   leave, the warning names that member, not X.
+- A ceremony message that can't be sealed because a proposal is pending
+  isn't sent. The run it belongs to ends before X's reveal
+  (`proposal_pending`, not a warning) and starts again under the restart
+  rule above, waiting for the commit (step 1). A reveal is never sealed
+  for a run that ended before it was: it is dropped, and X's nonce stays
+  unspent.
 - A ceremony message is not a send that triggers the cadence Update.
 - A ceremony message queued behind a pending commit (§8.3) is dropped when
   that commit is confirmed, never sent in the new epoch. It is sent if the
@@ -1872,8 +1881,9 @@ warning. Cancels count against the ceremony budget below.
 **Warnings and the abort count.**
 
 - These aborts are **warnings**:
-  - every abort after X sent its reveal, whatever its reason, including
-    `epoch_changed`, `timed_out`, `peer_restarted` and `send_failed`, but
+  - every abort after X sent (sealed) its reveal, whatever its reason,
+    including `epoch_changed`, `timed_out`, `peer_restarted` and
+    `send_failed`, but
     not an end the human asked for (the mismatch action, giving the run
     up);
   - `bad_reveal` and `out_of_order`, whenever they happen;
@@ -2212,6 +2222,9 @@ Implementations in this repository MUST have:
     mismatch unless both labels name instances in the local view (replicas
     paired crosswise); codes that differ: the mismatch whatever the labels,
     also when the attacker's instances carry the real instances' ids;
+  - a pending proposal: a run started during it waits and then completes;
+    a reveal that couldn't be sealed ends the run `proposal_pending` with
+    no warning, and the run starts again after the commit;
   - cancels: a held commitment dropped, a paired run before its reveal
     aborted with no warning, a cancel after the reveal or from another
     instance ignored (the run still ends as a warning), and the cancels
@@ -2349,7 +2362,13 @@ cause aborts and unpaired runs too, so the human decides. A relay, or a
 member that commits during runs, can still push the humans towards the
 mismatch action, and so towards leaving and recreating the group. That is
 denial of service, which the relay can cause anyway; it doesn't let anyone
-into the middle. The earlier v0
+into the middle. A member can also stall runs by proposing its own leave:
+while the proposal waits for its commit, no application message is sealed,
+so every run in the group waits (§11.3). The stall lasts until a member
+commits the leave; the reference daemon has the next leaf commit when the
+lowest one hasn't after 60 s, so about 60 s per committer that doesn't
+commit. The proposer leaves with that commit, and an honest lowest leaf
+that is offline causes the same stall. The earlier v0
 code, derived from the `epoch_authenticator` alone, could be ground offline
 by the epoch's last committer; the SAS run replaced it (§11.8).
 
