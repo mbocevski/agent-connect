@@ -17,9 +17,10 @@ continues it; an ``a2a.task_cancel`` from the task's requester cancels it.
 the group through a server on ``127.0.0.1``.
 
 **At least once.** The daemon may repeat a delivery or an event (ADR-004);
-both are deduplicated here by ``msg_id`` and ``event_id`` (:mod:`.seen`), so
-the agent never sees one twice. The message sent to the agent also has a
-``messageId`` derived from the ``msg_id``, for the crash window between the
+both are deduplicated here by sender and ``msg_id`` (as the inbox does) and
+by ``event_id`` (:mod:`.seen`), so the agent never sees one twice. The
+message sent to the agent also has a ``messageId`` derived from the sender
+and the ``msg_id`` (:func:`message_id`), for the crash window between the
 agent accepting it and the adapter recording that.
 
 Peer content is untrusted. It goes to the agent as data with the framing in
@@ -32,7 +33,9 @@ Logs carry tags and error types, never bodies.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import logging
 import secrets
@@ -122,6 +125,20 @@ class TaskRef:
     trigger: str
 
 
+def _seen_key(sender: str, msg_id: str) -> str:
+    """By sender too: a msg_id is its sender's, so another member reusing
+    it must not pass for a redelivery and hide the first message."""
+    return f"{sender}\0{msg_id}"
+
+
+def message_id(d: Delivery) -> str:
+    """The ``messageId`` the local agent sees: ``ac-`` and 22 base64url
+    characters of SHA-256(sender, msg_id). The same for every redelivery,
+    and different for another sender's message with the same msg_id."""
+    digest = hashlib.sha256(f"{d.sender.identity}\0{d.msg_id}".encode()).digest()
+    return "ac-" + base64.urlsafe_b64encode(digest[:16]).rstrip(b"=").decode()
+
+
 class A2AAdapter:
     """See the module docstring."""
 
@@ -165,13 +182,17 @@ class A2AAdapter:
         self, group: GroupView, sender: Sender, to: list[str], inner: Delivery
     ) -> DeliveryResult:
         self._groups[group.group_id] = group
-        if self._seen.has("m", inner.msg_id):
+        if self.handled(sender.identity, inner.msg_id):
             return DeliveryResult.ACK  # redelivered (at least once)
         self._peers.setdefault(group.group_id, set()).add(sender.identity)
         result = await self._handle(group, inner)
         if result is DeliveryResult.ACK:
-            self._seen.add("m", inner.msg_id)
+            self._seen.add("m", _seen_key(sender.identity, inner.msg_id))
         return result
+
+    def handled(self, sender: str, msg_id: str) -> bool:
+        """Whether this sender's message ``msg_id`` was handled already."""
+        return self._seen.has("m", _seen_key(sender, msg_id))
 
     async def on_event(self, group: GroupView | None, event: Event) -> None:
         if group is not None:
@@ -317,7 +338,7 @@ class A2AAdapter:
 
     def _local_message(self, d: Delivery) -> Message:
         peer = convert.parse_message(d.body)
-        msg = Message(role=Role.ROLE_USER, message_id=f"ac-{d.msg_id}", context_id=d.group_id)
+        msg = Message(role=Role.ROLE_USER, message_id=message_id(d), context_id=d.group_id)
         # The notice goes first unless the adapter (a2a.frame_text) or the
         # group's safety policy (frame_text) turned it off.
         framed = self.options.frame_text and d.frame_text

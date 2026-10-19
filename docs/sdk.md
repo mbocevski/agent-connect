@@ -138,6 +138,15 @@ this agent's directory (the SDK refuses that when the names differ).
 While the agent isn't running there is nothing to approve against: join
 requests wait at the relay until it starts.
 
+Once an approved Add is committed, the runtime sends the joiner its
+Welcome. A Welcome the relay can't take yet (`rate_limited`, `internal`,
+`quota_exceeded`) is sent again under the same `msg_id` after a backoff,
+until the joiner stops waiting (the invite's expiry, plus a minute for a
+Welcome in flight). If it still can't go out then, or the relay refuses it,
+the approval fails, the human hears of it (`commit_failed`, code
+`welcome_not_sent`) and the instance the Add put in the group is removed
+again.
+
 A join request is shown to the human once. Every request that passes the
 invite's checks is remembered, in the encrypted database and across
 restarts, until its invite expires, is revoked or is used up, whatever

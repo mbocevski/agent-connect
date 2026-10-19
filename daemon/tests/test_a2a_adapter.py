@@ -31,6 +31,7 @@ from jwt.utils import base64url_encode
 
 from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, cards, convert
 from agentconnect.a2a_adapter import adapter as adapter_module
+from agentconnect.a2a_adapter.adapter import message_id
 from agentconnect.a2a_adapter.seen import Seen
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
 from agentconnect.runtime.engine import DaemonError
@@ -132,8 +133,32 @@ async def test_redelivery_never_reaches_the_agent_twice(hello: AgentServer, tmp_
     await again.aclose()
     assert len(received(hello)) == 1
     assert sent2.calls == []
-    # The agent's messageId comes from the msg_id, for its own dedup.
-    assert received(hello)[0].message.message_id == "ac-m1"
+    # The agent's messageId comes from the sender and msg_id, for its own dedup.
+    assert received(hello)[0].message.message_id == message_id(d)
+    assert message_id(d).startswith("ac-")
+    assert len(message_id(d)) == 25
+
+
+async def test_a_msg_id_from_another_sender_is_not_a_redelivery(
+    hello: AgentServer, tmp_path: Path
+) -> None:
+    """Deliveries are deduplicated by (sender, msg_id), as the inbox does: a
+    member that reuses another member's msg_id can't hide the other's
+    message from the agent, nor make the agent see two messages with one
+    messageId."""
+    adapter, sent = await started(A2AOptions(local_agent_url=hello.url, data_dir=tmp_path))
+    first = delivery("m1", text("from the peer"))
+    copy = delivery("m1", text("from mallory"), sender="ac:v0:mallory")
+    for d in (first, copy, first, copy):
+        assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.ACK
+    await sent.wait_for(2)
+    await adapter.aclose()
+    messages = [r.message for r in received(hello)]
+    assert [p.text for m in messages for p in m.parts if p.text.startswith("from ")] == [
+        "from the peer",
+        "from mallory",
+    ]
+    assert len({m.message_id for m in messages}) == 2
 
 
 async def test_events_are_deduplicated_by_event_id(hello: AgentServer, tmp_path: Path) -> None:

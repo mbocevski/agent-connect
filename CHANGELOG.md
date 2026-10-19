@@ -1065,6 +1065,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Runtime: after an approved join's Add, a Welcome the relay answered
+  `rate_limited` or `internal` failed the commit's outbox row, so the
+  joiner was in the MLS group but never got its Welcome. Such a Welcome
+  (and `quota_exceeded`) is now sent again under the same `msg_id` after a
+  backoff, as a knock's is, until the joiner stops waiting (its invite's
+  expiry plus a minute). If it still can't go out, or the relay refuses
+  it, the approval fails (`commit_failed`, code `welcome_not_sent`) and the
+  added instance is removed again.
 - Examples: the Claude Agent SDK and LangGraph examples passed
   `allowed_tools=[]` to run the model "with no tools", but that list only
   pre-approves tools and removes none. They pass `tools=[]`, which removes
@@ -1146,6 +1154,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- A2A adapter: deliveries were deduplicated by `msg_id` alone, so a member
+  that sent a message under another member's `msg_id` first made the
+  adapter skip the other member's message as a redelivery. They are now
+  deduplicated by sender and `msg_id`, as the inbox does, and the
+  `messageId` the local agent sees is derived from both
+  (`ac-` and 22 base64url characters) instead of `ac-<msg_id>`. A message
+  handled before the upgrade and delivered again after it reaches the agent
+  once more.
 - Core and protocol: a commit after which two leaves of one identity have
   the same `instance_id` is refused by its committer and rejected by every
   member (SPEC §9.2, "One leaf per instance"), and so is a commit whose

@@ -22,7 +22,7 @@ from agentconnect.adapter import (
 from agentconnect.keystore import FileKeystore
 from agentconnect.relay import RelayError
 from agentconnect.runtime.engine import DaemonError, Engine, new_msg_id
-from agentconnect_harness.cluster import WAIT, Cluster, Node, status
+from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
 from agentconnect_harness.proxy import RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -176,6 +176,87 @@ async def test_welcome_failures_and_parked_messages(
     await asyncio.wait_for(holding.wait(), WAIT)
     b.daemon.send_message(gid, {"text": "early"}, to=["*"])
     assert await d.wait_texts(gid, 1) == ["early"]
+
+
+def refuse_welcomes(proxy: RelayProxy, times: int) -> list[str]:
+    """The relay answers the next ``times`` Welcomes `rate_limited`; the
+    msg_id of every Welcome the daemon sends, refused or not."""
+    tried: list[str] = []
+
+    def count(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if frame.get("t") == "send" and env.get("kind") == "welcome_wrapped":
+            tried.append(str(env["msg_id"]))
+        return [frame]
+
+    proxy.client_filters.append(count)
+    proxy.fail_next("send", "rate_limited", kind="welcome_wrapped", times=times)
+    return tried
+
+
+def approval_of(node: Node, invite_id: str) -> dict[str, Any]:
+    (approval,) = [
+        a
+        for status in ("pending", "approving", "approved", "failed")
+        for a in node.daemon.store.approvals(status)
+        if a["invite_id"] == invite_id
+    ]
+    return approval
+
+
+async def test_a_welcome_the_relay_refuses_for_now_is_sent_again(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """After an approved join's Add, a Welcome the relay can't take yet
+    (`rate_limited`, `internal`) is sent again after a backoff, under the
+    same msg_id, and the joiner joins. It used to fail the commit's row,
+    leaving the joiner in the MLS group without its Welcome."""
+    (a, b), gid = await group(2)
+    c = await cluster.node("c")
+    tried = refuse_welcomes(malicious_relay(a), 2)
+    invite = await a.daemon.create_invite(gid)
+    await c.daemon.accept_invite(invite["url"])
+    for _ in range(10):
+        if c.daemon.store.group(gid) is not None:
+            break
+        await a.wait(lambda: a.clock.sleepers > 0 or c.daemon.store.group(gid) is not None)
+        await advance(60)
+    await c.wait(lambda: c.daemon.store.group(gid) is not None)
+    await converged([a, b, c], gid)
+    assert len(tried) == 3
+    assert len(set(tried)) == 1
+    assert approval_of(a, invite["invite_id"])["status"] == "approved"
+    assert not a.adapter.of_type("commit_failed")
+    assert len(c.adapter.of_type("joined")) == 1
+
+
+async def test_a_welcome_that_cant_go_out_in_time_removes_the_joiner_again(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """A Welcome still refused once the joiner has given up (its invite's
+    expiry and the grace for a Welcome in flight) is given up too: the
+    approval fails, the human hears of it, and the instance the Add put in
+    the group is removed again."""
+    (a, b), gid = await group(2)
+    c = await cluster.node("c")
+    tried = refuse_welcomes(malicious_relay(a), 10_000)
+    invite = await a.daemon.create_invite(gid, ttl_secs=600)
+    epoch = a.epoch(gid)
+    await c.daemon.accept_invite(invite["url"])
+    await a.wait(lambda: bool(tried) and a.clock.sleepers > 0)
+    await b.wait(lambda: b.epoch(gid) == epoch + 1)
+    assert len(a.daemon.store.members(gid)) == 3
+    for _ in range(30):
+        if a.adapter.of_type("commit_failed"):
+            break
+        await a.wait(lambda: a.clock.sleepers > 0 or bool(a.adapter.of_type("commit_failed")))
+        await advance(60)
+    (failed,) = a.adapter.of_type("commit_failed")
+    assert (failed.data["intent"], failed.data["code"]) == ("add", "welcome_not_sent")
+    assert approval_of(a, invite["invite_id"])["status"] == "failed"
+    await converged([a, b], gid)
+    assert {m.identity for m in a.daemon.store.members(gid)} == {a.me, b.me}
+    assert len(set(tried)) == 1
 
 
 async def test_bad_outbox_rows_fail_cleanly(group: GroupFixture) -> None:
