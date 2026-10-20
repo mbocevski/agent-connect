@@ -22,11 +22,16 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import httpx
+import keyring.errors
 import pytest
 
 import agentconnect_core as ac
+from agentconnect.failpoints import SimulatedCrash
+from agentconnect.keystore import KeystoreError, KeystoreNameError
 from agentconnect.limits import SENDER_PER_MINUTE
 from agentconnect.policy import SafetyPolicy
+from agentconnect.relay import RelayError
 from agentconnect.runtime import engine as engine_module
 from agentconnect.runtime.engine import Engine
 from agentconnect_harness.cluster import WAIT, Cluster, Node, converged
@@ -39,6 +44,7 @@ from .test_poison_messages import (
     raising_for,
     raw_plaintext,
     raw_send,
+    until,
     unwedged,
 )
 
@@ -222,8 +228,8 @@ async def test_a_commit_that_fails_before_the_core_puts_the_group_out_of_sync(
     # Never merged: b stays behind the group, and says so.
     assert b.epoch(gid) == epoch
     info = b.daemon.group_info(gid)
-    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_failed")
-    assert [e["reason"] for e in events(b, "out_of_sync")] == ["commit_failed"]
+    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_unapplied")
+    assert [e["reason"] for e in events(b, "out_of_sync")] == ["commit_unapplied"]
 
 
 async def test_a_merged_commit_whose_bookkeeping_fails_puts_the_group_out_of_sync(
@@ -261,8 +267,8 @@ async def test_a_merged_commit_whose_bookkeeping_fails_puts_the_group_out_of_syn
     # The bookkeeping it skipped can't be trusted: out of sync, and the human
     # hears. b's commits can't land any more, so its invites close.
     info = b.daemon.group_info(gid)
-    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_failed")
-    assert [e["reason"] for e in events(b, "out_of_sync")] == ["commit_failed"]
+    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_unapplied")
+    assert [e["reason"] for e in events(b, "out_of_sync")] == ["commit_unapplied"]
     # The earlier epoch's SAS runs end all the same (SPEC 11.3).
     assert ended == [gid]
     invite_id = made["invite_id"]
@@ -432,3 +438,141 @@ async def test_a_failure_is_logged_by_its_type_only(
     (line,) = [x for x in lines if x.get("event") == "message_failed"]
     assert line["error"] == "KeyError"
     assert "exception" not in line
+
+
+# -- local state is never the message's: a locked keyring consumes nothing -----------
+
+
+def lock_keyring(node: Node, monkeypatch: pytest.MonkeyPatch, prefix: str) -> list[bool]:
+    """``node``'s keystore refuses ``prefix/...`` secrets, as a locked OS
+    keyring does, while the returned flag is set."""
+    locked = [True]
+    get = node.daemon.keystore.get
+
+    def flaky(name: str) -> bytes | None:
+        if locked[0] and name.startswith(prefix):
+            msg = "keyring read failed"
+            raise KeystoreError(msg)
+        return get(name)
+
+    monkeypatch.setattr(node.daemon.keystore, "get", flaky)
+    return locked
+
+
+async def test_a_locked_keyring_never_consumes_a_welcome(
+    cluster: Cluster, monkeypatch: pytest.MonkeyPatch, advance: Advance
+) -> None:
+    monkeypatch.setattr(engine_module, "MAX_ENTRY_ATTEMPTS", 2)
+    monkeypatch.setattr(engine_module, "MAX_TRANSIENT_RETRIES", 2)
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    b = await cluster.node()
+    locked = lock_keyring(b, monkeypatch, "join/")
+    invite = await a.daemon.create_invite(gid)
+    await b.daemon.accept_invite(invite["url"])
+    # Given up again and again, past the bound: a locked keyring is no
+    # message's failure, so the Welcome waits.
+    await through_retries(b, advance, lambda: len(events(b, "processing_failed")) >= 3)
+    assert not events(b, "message_failed")
+    assert b.daemon.store.group(gid) is None
+    assert [j["invite_id"] for j in b.daemon.store.pending_joins()] == [invite["invite_id"]]
+    locked[0] = False
+    await through_retries(
+        b, advance, lambda: (g := b.daemon.store.group(gid)) is not None and g.status == "active"
+    )
+    assert not events(b, "message_failed")
+    assert events(b, "joined")
+
+
+async def test_a_locked_keyring_never_consumes_a_join_request(
+    cluster: Cluster, monkeypatch: pytest.MonkeyPatch, advance: Advance
+) -> None:
+    monkeypatch.setattr(engine_module, "MAX_ENTRY_ATTEMPTS", 2)
+    monkeypatch.setattr(engine_module, "MAX_TRANSIENT_RETRIES", 2)
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    b = await cluster.node()
+    locked = lock_keyring(a, monkeypatch, "invite/")
+    invite = await a.daemon.create_invite(gid)
+    await b.daemon.accept_invite(invite["url"])
+    await through_retries(a, advance, lambda: len(events(a, "processing_failed")) >= 3)
+    assert not events(a, "message_failed")
+    assert len(a.daemon.client.members(raw(gid))) == 1
+    locked[0] = False
+    await through_retries(a, advance, lambda: len(a.daemon.client.members(raw(gid))) == 2)
+    await b.wait(lambda: (g := b.daemon.store.group(gid)) is not None and g.status == "active")
+    assert not events(a, "message_failed")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        KeystoreError("keyring read failed"),
+        keyring.errors.KeyringLocked("locked"),
+        MemoryError(),
+        httpx.ConnectError("down"),
+        RelayError("internal"),
+    ],
+    ids=["keystore", "keyring", "memory", "network", "relay-internal"],
+)
+def test_failures_of_local_state_are_transient(error: Exception) -> None:
+    assert engine_module._transient(error)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ValueError("x"), KeyError("x"), KeystoreNameError("invalid secret name"), RelayError("no")],
+    ids=["value", "key", "secret-name", "relay-refusal"],
+)
+def test_failures_a_message_causes_are_not_transient(error: Exception) -> None:
+    assert not engine_module._transient(error)
+
+
+def test_only_an_unavailable_keystore_waits_without_end() -> None:
+    assert engine_module._waits_unbounded(KeystoreError("keyring read failed"))
+    assert engine_module._waits_unbounded(keyring.errors.KeyringLocked("locked"))
+    assert not engine_module._waits_unbounded(KeystoreNameError("invalid secret name"))
+    assert not engine_module._waits_unbounded(ac.CoreError("panic"))
+
+
+# -- a message that crashes the process is counted, and fails alone ------------------
+
+
+async def test_a_message_that_crashes_the_daemon_fails_alone_after_the_bound(
+    group: GroupFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine_module, "MAX_ENTRY_ATTEMPTS", 3)
+    (a, b), gid = await group(2)
+    b.events_may_fail = True
+    crashes: list[str] = []
+    poison: set[str] = set()
+    transcribe = SafetyPolicy.transcribe
+
+    def crashing(self: SafetyPolicy, group_id: str, direction: str, *args: Any) -> None:
+        if direction == "in" and args[1] in poison:
+            crashes.append(args[1])
+            msg = "the process died here"
+            raise SimulatedCrash(msg)
+        transcribe(self, group_id, direction, *args)
+
+    monkeypatch.setattr(SafetyPolicy, "transcribe", crashing)
+    bad = raw_send(a, gid, {"parts": [{"text": "x"}]})
+    poison.add(bad)
+    await a.idle()
+    mailbox = a.daemon.mailbox
+    for n in range(1, 6):
+        await until(
+            lambda n=n: len(crashes) >= n or b.daemon.store.inbox_state(mailbox, bad) is not None
+        )
+        if b.daemon.store.inbox_state(mailbox, bad) is not None:
+            break
+        await b.restart()
+    # Each try was counted before it ran: three crashes, then it failed alone.
+    await b.wait(lambda: b.daemon.store.inbox_state(mailbox, bad) == "failed")
+    assert len(crashes) == 3
+    (event,) = events(b, "message_failed")
+    assert (event["msg_id"], event["reason"]) == (bad, "RetriesExhausted")
+    b.events_may_fail = False
+    await unwedged(b, a, gid)

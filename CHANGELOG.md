@@ -959,7 +959,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Daemon: events are no longer kept for good. The events of
   `agentconnect events` and `GET /v0/events` are kept for
   `daemon.event_retention_days` (default 30, 1 to 365) once every adapter
-  has them, and 100000 at most, oldest first.
+  has them, the human-only ones only once the human token has read them,
+  and 100000 at most, oldest first. `GET /v0/events` answers `gap` and
+  `oldest_available`, and `agentconnect events` warns when events it
+  asks for are gone.
 - Relay: `/metrics` moved off the public listener to the operator's
   listener, `AC_RELAY_METRICS_ADDR` (default `127.0.0.1:9091`), which also
   serves `/healthz`; point Prometheus there. `frames_total` no longer counts
@@ -1413,17 +1416,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
     housekeeping, or in a message parked until a join completes, fails
     neither the frame nor the Welcome.
   - A commit that fails alone, merged by the core or not, puts its group
-    out of sync (`commit_failed`) and closes this instance's invites to
+    out of sync (`commit_unapplied`) and closes this instance's invites to
     it, and a merged one still ends the earlier epoch's SAS runs; before,
     a merged commit's skipped bookkeeping (closing invites, role and
     member events, ending SAS runs) went unnoticed.
   - A Welcome the core joined but the daemon couldn't record keeps its
     journal entry for the replay to finish, and the human gets
     `processing_failed`; before, the joined group was orphaned for good.
-  - A failure that is retried (a core panic, a storage error that never
-    clears, a Welcome's bookkeeping) fails alone after 8 give-ups, counted
-    across restarts; a commit or a Welcome then leaves its group out of
-    sync (`commit_failed`, `welcome_failed`).
+  - A failure that comes from local state rather than the message (the
+    OS, memory, the network, storage, a core panic) is retried. A message
+    is counted before each handling, so one that crashes the daemon is
+    counted too, and after 8 handlings that never finished, counted across
+    restarts, it fails alone; a commit or a Welcome then leaves its group
+    out of sync (`commit_unapplied`, `welcome_failed`). A locked or
+    unavailable keyring is retried for as long as it takes and never
+    consumes a message, and no pending join lapses while a Welcome waits
+    for it.
+  - The nesting pre-scan is linear on any input; it took seconds on a long
+    string that never closed.
   - A `control.floor` grant or a SAS ceremony message outside the bounds
     is dropped and moves nothing.
   - Failures on paths that handle peer data are logged by their type, never

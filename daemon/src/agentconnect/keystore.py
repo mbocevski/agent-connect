@@ -31,6 +31,10 @@ class KeystoreError(RuntimeError):
     """The keystore could not read or write a secret."""
 
 
+class KeystoreNameError(KeystoreError):
+    """A secret name the keystore refuses (not the store's state, the name's)."""
+
+
 def private_dir(path: Path) -> Path:
     """Create ``path`` (and parents) and make it 0700."""
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -161,7 +165,7 @@ class DataDirLock:
 def _check_name(name: str) -> str:
     if not _NAME.match(name):
         msg = "invalid secret name"
-        raise KeystoreError(msg)
+        raise KeystoreNameError(msg)
     return name
 
 

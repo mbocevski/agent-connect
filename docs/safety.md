@@ -53,15 +53,42 @@ a join completes, fail on their own. The rates and size checks below run
 before anything else reads the message, so a message that fails later was
 counted against its sender all the same.
 
-A failure that may pass (storage, a core panic, a lost connection) is
-retried instead, after a backoff, and given up for now after 8 tries; the
-relay delivers the message again after the next reconnect, and a journal
-entry is replayed. A message given up 8 times, counted across restarts,
-fails alone. So does the bookkeeping of a Welcome the core has joined:
-its journal entry stays, the human gets `processing_failed`, and the next
-replay finishes the join; after 8 give-ups the group is recorded out of
-sync (`welcome_failed`). A commit that fails alone puts its group out of
-sync (`commit_failed`), whether the core merged it (its bookkeeping, such
+A failure that comes from local state rather than from the message
+(storage, the OS, a core panic, the network, a lost connection) may pass,
+so it is retried instead, after a backoff, and given up for now after 8
+tries; the relay delivers the message again after the next reconnect, and
+a journal entry is replayed. Each handling of a message is counted before
+it starts, in a write of its own, and the count is cleared once the
+message is handled; so a message that crashes the daemon is counted too.
+After 8 handlings that never finished, counted across restarts, the
+message fails alone (reason `RetriesExhausted` when the last one
+crashed). The bookkeeping of a Welcome the core has joined is retried the
+same way: its journal entry stays, the human gets `processing_failed`,
+and the next replay finishes the join; after 8 the group is recorded out
+of sync (`welcome_failed`).
+
+A locked or unavailable keystore (an OS keyring still locked after a
+login, say) is the one exception: it says nothing about the message, and waiting
+loses nothing, so a message that needs a secret from it is retried for as
+long as it takes and never fails alone for it. Your human sees
+`processing_failed` with reason `KeystoreError` until the keyring opens
+again. While a Welcome waits for it, no pending join lapses as
+"invite used".
+
+This is a trade-off. A local failure that lasts through 8 handlings
+(each gives up after about 2 minutes of retries, and the next waits for a
+reconnect: about 15 to 20 minutes in all) now drops the message, or puts
+its group out of sync, where it used to be retried without end and hold up
+every message after it. To recover from a dropped message (`message_failed`),
+fix the local cause and ask the sender to send it again: the daemon won't
+take the same `msg_id` twice, but the sender's agent can resend the
+content. A group out of sync can't be repaired: start a new group and
+invite the others again (or have its owner invite you to one), and leave
+the old one with `agentconnect leave`; if no member commits the leave,
+it ends locally after `groups.leave_timeout_secs`.
+
+A commit that fails alone puts its group out of
+sync (`commit_unapplied`), whether the core merged it (its bookkeeping, such
 as role and member events and closing the invites the policy no longer
 allows, was skipped) or not (this member is behind the group). This
 instance's open invites to the group close, and a merged commit still
@@ -383,9 +410,14 @@ Each setting is also a key of `[policy]` in `config.toml` (`policy.<setting>`), 
 <!-- generated:safety-settings:end -->
 
 `policy.audit_retention_days` (default 30) applies to the whole daemon, and
-so does `daemon.event_retention_days` (default 30): the events of
-`agentconnect events` and `GET /v0/events` are kept that long once every
-adapter has them, and 100000 at most.
+so does `daemon.event_retention_days` (default 30): an event of
+`agentconnect events` and `GET /v0/events` is kept that long once every
+adapter has it, and the policy's own events, which only the human sees,
+until `agentconnect events` (or `GET /v0/events` with the human token)
+has read them. Past 100000 events the oldest go, read or not. A reader
+asking for events that are gone is told: `GET /v0/events` answers
+`gap: true` with `oldest_available`, and `agentconnect events` prints a
+warning.
 
 The limits can only be made stricter. SPEC [§10.2](../SPEC.md#102-limits)
 makes its values maximums, so a value above one (31 messages a minute, say)

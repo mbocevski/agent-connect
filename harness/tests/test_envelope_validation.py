@@ -91,7 +91,7 @@ async def test_require_verified_holds_after_an_error_mid_processing(
     # The commit's bookkeeping was skipped: the group is out of sync, and
     # the human has heard (SPEC 7.2).
     info = b.daemon.group_info(gid)
-    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_failed")
+    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_unapplied")
     assert "out_of_sync" in {e["type"] for e in b.daemon.store.events(limit=1000)}
 
 

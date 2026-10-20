@@ -232,15 +232,18 @@ async def test_one_failing_journal_entry_does_not_stop_the_replay() -> None:
             raise FailpointError
         done.append(str(entry["key"]))
 
-    async def fail(entry: dict[str, Any], error: Exception) -> None:
+    async def fail(entry: dict[str, Any], error: Exception) -> bool:
         assert isinstance(error, OverflowError)
         failed.append(str(entry["key"]))
+        return True
 
     entries = [{"key": "poison"}, {"key": "next"}]
     fake = SimpleNamespace(
         client=SimpleNamespace(journal_pending=lambda: entries),
         _replay_entry=replay,
         _fail_entry=fail,
+        _count=lambda _key: 1,
+        _uncount=lambda _key: None,
     )
     await Engine._replay_journal(fake)  # ty: ignore[invalid-argument-type]
     assert (done, failed) == (["next"], ["poison"])

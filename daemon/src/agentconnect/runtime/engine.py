@@ -51,6 +51,9 @@ from collections.abc import Awaitable, Callable, Generator, Iterable
 from dataclasses import dataclass, replace
 from typing import Any
 
+import httpx
+import keyring.errors
+
 import agentconnect_core as ac
 from agentconnect import log
 from agentconnect.a2a_adapter import cards, convert
@@ -75,7 +78,13 @@ from agentconnect.identity import (
     load_instance,
     open_core_client,
 )
-from agentconnect.keystore import DataDirLock, Keystore, open_keystore
+from agentconnect.keystore import (
+    DataDirLock,
+    Keystore,
+    KeystoreError,
+    KeystoreNameError,
+    open_keystore,
+)
 from agentconnect.limits import (
     DRAIN_RATE_MULTIPLE,
     KNOWN_KINDS,
@@ -366,14 +375,53 @@ def _refs(inner: dict[str, Any]) -> list[str]:
     return [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)] if isinstance(refs, list) else []
 
 
+def _retry_reason(e: BaseException) -> tuple[str | None, str]:
+    """The group and reason a retried failure is reported with."""
+    if isinstance(e, TransientError):
+        return e.group_id, e.reason
+    if isinstance(e, FailpointError):
+        return None, "failpoint"
+    return None, type(e).__name__
+
+
+class RetriesExhausted(Exception):  # noqa: N818 - the reason a human reads
+    """A message whose handling never finished in
+    :data:`MAX_ENTRY_ATTEMPTS` tries (each crashed the process, or gave up):
+    it fails alone without another."""
+
+
+def _waits_unbounded(e: BaseException) -> bool:
+    """Whether a failure is the local secret store being locked or
+    unavailable (an OS keyring nobody unlocked yet). It says nothing about
+    the message and waiting loses nothing, so the message is retried for as
+    long as it takes and never fails alone for it. A secret name the store
+    refuses is the message's (it came from the message)."""
+    if isinstance(e, KeystoreNameError):
+        return False
+    return isinstance(e, KeystoreError | keyring.errors.KeyringError)
+
+
 def _transient(e: BaseException) -> bool:
     """Whether a failure handling a frame may pass if the same frame is
-    tried again: an injected or flagged transient failure, a lost
-    connection, or a core or storage failure of the transient kind. Any
-    other failure would repeat on every try, so the message fails alone
+    tried again: it comes from local state or a connection, not from the
+    message. That is an injected or flagged transient failure, a lost
+    connection or the network, the OS (files, memory), a locked or
+    unavailable keystore (:func:`_waits_unbounded`), a relay answer that
+    says "not now", or a core or storage failure of the transient kind.
+    Any other failure would repeat on every try, so the message fails alone
     (``Engine._fail_message``)."""
-    if isinstance(e, TransientError | FailpointError | OSError | TimeoutError):
+    transient = (
+        TransientError,
+        FailpointError,
+        OSError,
+        TimeoutError,
+        MemoryError,
+        httpx.TransportError,
+    )
+    if isinstance(e, transient) or _waits_unbounded(e):
         return True
+    if isinstance(e, RelayError):
+        return e.code in RETRYABLE_RELAY_ERRORS
     if isinstance(e, ac.AgentConnectError | ac.CoreError):
         return _core_error(e) == "transient"
     return False
@@ -391,6 +439,8 @@ REST_TS_KEY = "relay/rest_ts"
 # An internal frame: finish every pending journal entry (ADR-004).
 REPLAY_JOURNAL = "_replay_journal"
 SUMMARY_REPORTS_LEAVES = "left_reported"
+# Set while a Welcome waits for a locked keystore (Engine.check_joins).
+WELCOME_WAITING = "welcome_waiting"
 TransientFailure = (TransientError, FailpointError)
 
 
@@ -730,6 +780,8 @@ class Engine:
         self._followups: deque[dict[str, Any]] = deque()
         # The journal entry a replay stopped at, when it is retried.
         self._replaying: dict[str, Any] | None = None
+        # The messages whose handling this frame counted already (_count).
+        self._counted: set[str] = set()
         # message_failed per (group, sender): when the last one went out and
         # the failures since (_failed_report).
         self._failed: OrderedDict[tuple[str, str], tuple[int, int]] = OrderedDict()
@@ -1529,9 +1581,21 @@ class Engine:
         """Handle one frame. A failure the frame itself would cause on every
         try fails its message alone (SPEC 7.2). One that may pass is retried
         in place, then given up for now (the relay redelivers it after a
-        reconnect, and a journal entry is replayed); a message given up
-        :data:`MAX_ENTRY_ATTEMPTS` times, counted across restarts, fails
-        alone too."""
+        reconnect, and a journal entry is replayed).
+
+        Each handling of a message is counted before it starts, in a write
+        of its own, and the count goes once it is handled: a message that
+        crashes the process is counted too. Past :data:`MAX_ENTRY_ATTEMPTS`
+        handlings, counted across restarts, it fails alone. A locked or
+        unavailable keystore (:func:`_waits_unbounded`) is never counted: it
+        says nothing about the message, and waiting loses nothing."""
+        self._counted = set()
+        key = self._frame_key(frame)
+        if key is not None and self._count(key) > MAX_ENTRY_ATTEMPTS:
+            await self._fail_frame(frame, RetriesExhausted())
+            self._uncount(key)
+            backoff.reset()
+            return
         attempt = 0
         while True:
             attempt += 1
@@ -1543,30 +1607,31 @@ class Engine:
                     # It would fail the same way every time: it fails alone,
                     # and the frames after it go on (SPEC 7.2).
                     await self._fail_frame(frame, e)
+                    self._uncount(key)
                     break
                 # Nothing was acked: retry the same frame, in order. If the
                 # core already processed it, the retry gets the journalled
                 # result back (ADR-004), and the inbox's (sender, msg_id)
                 # dedup means its effects are recorded once: a retry can't
                 # process or deliver a message twice.
-                if isinstance(e, TransientError):
-                    group_id, reason = e.group_id, e.reason
-                elif isinstance(e, FailpointError):
-                    group_id, reason = None, "failpoint"
-                else:
-                    group_id, reason = None, type(e).__name__
+                group_id, reason = _retry_reason(e)
                 LOG.warning("inbound_transient", reason=reason, attempt=attempt)
                 if attempt < MAX_TRANSIENT_RETRIES and _transient(e):
                     await self._sleep(backoff.next())
                     continue
                 entry = self._stopped_at()
-                if self._attempts(self._attempt_key(frame)) >= MAX_ENTRY_ATTEMPTS:
+                failing = key if entry is None else str(entry["key"])
+                if _waits_unbounded(e):
+                    self._uncount(failing)  # retried for as long as it takes
+                elif self._count(failing) >= MAX_ENTRY_ATTEMPTS:
                     # Tried on every reconnect and restart, and it never
                     # passed: whatever the cause, it fails alone now.
                     if entry is None:
                         await self._fail_frame(frame, e)
+                        self._uncount(key)
                         break
                     if await self._fail_entry(entry, e):
+                        self._uncount(failing)
                         attempt = 0
                         continue  # the rest of the replay goes on
                 # Give up for now; unacked, the relay redelivers it after
@@ -1575,6 +1640,8 @@ class Engine:
                 self._caught_up, self._gave_up = 0, self.link.connections
                 await self.emit(group_id, "processing_failed", reason=reason)
                 await self.link.kick()
+            else:
+                self._uncount(key)
             break
         backoff.reset()
 
@@ -1592,26 +1659,39 @@ class Engine:
             return False
         return self._journal_entry(env) is not None
 
-    def _attempts(self, key: str | None) -> int:
-        """Count one more give-up of the message ``key`` (persisted); the
-        count so far. A count that can't be stored is 0: tried again."""
+    def _count(self, key: str | None) -> int:
+        """The handlings of the message ``key`` so far, this one included:
+        the first call while a frame is handled counts it, in a committed
+        write of its own (:meth:`Store.attempt`), and later ones read the
+        count. A count that can't be stored is 0: tried again."""
         if key is None:
             return 0
         try:
+            if key in self._counted:
+                return self.store.attempt_count(key)
+            self._counted.add(key)
             return self.store.attempt(key, self.now())
         except Exception as e:
             LOG.warning("attempt_not_counted", error=type(e).__name__)
             return 0
 
+    def _uncount(self, key: str | None) -> None:
+        """The message ``key`` is handled (or failed alone): its count goes."""
+        if key is None:
+            return
+        try:
+            self.store.attempt_clear(key)
+        except Exception as e:
+            LOG.warning("attempt_not_cleared", error=type(e).__name__)
+
     def _stopped_at(self) -> dict[str, Any] | None:
         """The journal entry the last replay stopped at, if it did."""
         return self._replaying
 
-    def _attempt_key(self, frame: dict[str, Any]) -> str | None:
-        """What a give-up of ``frame`` is counted against: the journal entry a
-        replay stopped at, or the message a delivered frame carries."""
-        if frame.get("t") == REPLAY_JOURNAL:
-            return None if self._replaying is None else str(self._replaying["key"])
+    def _frame_key(self, frame: dict[str, Any]) -> str | None:
+        """The message a delivered frame carries, to count its handlings by;
+        ``None`` for any other frame and for a message recorded already (a
+        redelivery, which is only acked)."""
         env = frame.get("env")
         if (
             frame.get("t") != "deliver"
@@ -1620,7 +1700,11 @@ class Engine:
             or not isinstance(env.get("msg_id"), str)
         ):
             return None
-        return journal_key(str(env["sender"]), str(env["msg_id"]))
+        sender, msg_id = str(env["sender"]), str(env["msg_id"])
+        with contextlib.suppress(Exception):
+            if self.store.inbox_state(sender, msg_id) is not None:
+                return None
+        return journal_key(sender, msg_id)
 
     def _journal_entry(self, env: dict[str, Any]) -> dict[str, Any] | None:
         """The core's pending journal entry for the message ``env`` carries."""
@@ -1835,6 +1919,8 @@ class Engine:
     async def _on_welcome_env(self, env: dict[str, Any]) -> None:
         sender, msg_id = str(env["sender"]), str(env["msg_id"])
         joined = await self._on_welcome(env)
+        if self.store.kv_get(WELCOME_WAITING) == "1":
+            self.store.kv_set(WELCOME_WAITING, "")
         if joined is None:
             self.store.record_inbox(sender, msg_id, env.get("group_id"), "done", self.now())
             await self._ack(msg_id)
@@ -1997,7 +2083,7 @@ class Engine:
                     # skipped; not merged, this member is behind the group.
                     # Either way its view can't be trusted, nor can its
                     # commits land, so its invites close.
-                    await self.mark_out_of_sync(group.group_id, "commit_failed")
+                    await self.mark_out_of_sync(group.group_id, "commit_unapplied")
                     self.groups.close_invites(group.group_id)
                 if merged and etype != "removed":
                     # SPEC 11.3: the earlier epoch's SAS runs end with it,
@@ -2330,6 +2416,13 @@ class Engine:
         consumed: a crash (or a failure) came after the core committed and
         before the daemon recorded the result (ADR-004)."""
         for entry in self.client.journal_pending():
+            key = str(entry["key"])
+            if self._count(key) > MAX_ENTRY_ATTEMPTS:
+                # Its handlings never finished (each crashed, or gave up):
+                # it fails alone, unreplayed.
+                if await self._fail_entry(entry, RetriesExhausted()):
+                    self._uncount(key)
+                continue
             try:
                 await self._replay_entry(entry)
             except Exception as err:
@@ -2343,7 +2436,10 @@ class Engine:
                 # One entry that fails for good must not stop the others, nor
                 # the renotify after them, nor come back on every replay: it
                 # fails alone.
-                await self._fail_entry(entry, err)
+                if await self._fail_entry(entry, err):
+                    self._uncount(key)
+            else:
+                self._uncount(key)
 
     async def _fail_entry(self, entry: dict[str, Any], error: Exception) -> bool:
         """A journal entry whose replay failed for a reason that would
@@ -3130,8 +3226,11 @@ class Engine:
         The relay marks an invite used only after the inviter sent the
         Welcome, so a join is failed only once the invite has been seen
         closed for :data:`JOIN_CLOSED_GRACE_SECS` (its Welcome may still be
-        on the way). Runs on every (re)connect.
+        on the way). Runs on every (re)connect. Not while a Welcome waits for
+        a locked keystore (``WELCOME_WAITING``): it may be this join's.
         """
+        if self.store.kv_get(WELCOME_WAITING) == "1":
+            return  # a Welcome came that the locked keyring kept us from opening
         for pending in self.store.pending_joins():
             invite_id = pending["invite_id"]
             try:
@@ -3167,7 +3266,13 @@ class Engine:
         sender, msg_id = str(env["sender"]), str(env["msg_id"])
         for pending in self.store.pending_joins():
             invite_id = pending["invite_id"]
-            url = self.keystore.get(f"join/{invite_id}")
+            try:
+                url = self.keystore.get(f"join/{invite_id}")
+            except KeystoreError:
+                # The keyring is locked: this Welcome waits (it is retried),
+                # and no pending join lapses as "invite used" meanwhile.
+                self.store.kv_set(WELCOME_WAITING, "1")
+                raise
             if url is None:
                 continue
             link = ac.parse_invite_url(url.decode())

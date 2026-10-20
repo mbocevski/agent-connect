@@ -488,6 +488,12 @@ async def test_a_message_that_cant_be_written_out_fails_alone(owned: Path) -> No
     await s.close()
 
 
+def test_only_writable_ids_reach_a_stand_in() -> None:
+    assert tools_module._plain("m1") == "m1"
+    assert tools_module._plain(1) is None
+    assert tools_module._plain("\ud800") is None
+
+
 def test_a_result_that_cant_be_written_out_is_an_error() -> None:
     result = server_module._result({"groups": [{"name": "\ud800"}]})
     assert result.is_error

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ from agentconnect.limits import (
     parse_inner,
     part_kind,
     too_deep,
+    unsound,
     valid_hop,
 )
 
@@ -160,6 +163,14 @@ def test_a_lone_surrogate_anywhere_is_malformed(message: dict[str, Any]) -> None
     assert content_problem(message, 10) in ("malformed", "unknown_kind")
 
 
+def test_objects_nested_too_deep_are_unsound() -> None:
+    value: Any = {"a": 1}
+    for _ in range(MAX_DEPTH):
+        value = {"a": value}
+    assert unsound(value)
+    assert not unsound({"a": [{"b": "😀"}]})
+
+
 def test_a_surrogate_pair_is_a_character() -> None:
     message = {"kind": "a2a.message", "body": {"parts": [{"text": "\U0001f600"}]}}
     text = json.dumps(message)
@@ -194,6 +205,55 @@ def test_depth_is_read_from_json_text_without_parsing_it(
     text: str, limit: int, deep_: bool
 ) -> None:
     assert json_too_deep(text, limit) is deep_
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"' + '\\"' * (1 << 20),  # 2 MiB: one string that never closes, all escapes
+        '"' + "x" * (2 << 20),  # 2 MiB unterminated, no escapes
+        '["' + '\\"' * (1 << 20) + "]",
+        '"' * (2 << 20),  # 2 MiB of quotes
+        "\\" * (2 << 20),
+    ],
+    ids=["escapes", "plain", "in-array", "quotes", "backslashes"],
+)
+def test_the_depth_scan_is_linear(text: str) -> None:
+    """It ran from every quote that never closed: 128 KB took 12 s."""
+    start = time.perf_counter()
+    json_too_deep(text, MAX_DEPTH)
+    assert time.perf_counter() - start < 0.5
+
+
+def test_the_depth_scan_agrees_with_the_parser(rng: random.Random) -> None:
+    """Valid JSON whose strings are full of brackets, quotes, backslashes and
+    non-ASCII: the scan's depth is the parsed value's."""
+    alphabet = ['"', "\\", "[", "]", "{", "}", ",", ":", "a", " ", "\n", "é", "\U0001f600"]
+
+    def text_of() -> str:
+        return "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+
+    def value(level: int, top: int) -> Any:
+        if level >= top or rng.random() < 0.3:
+            return rng.choice([text_of(), 1, None, True])
+        if rng.random() < 0.5:
+            return [value(level + 1, top) for _ in range(rng.randint(0, 3))]
+        return {text_of(): value(level + 1, top) for _ in range(rng.randint(0, 3))}
+
+    def depth_of(v: Any) -> int:
+        if isinstance(v, list):
+            return 1 + max((depth_of(c) for c in v), default=0)
+        if isinstance(v, dict):
+            return 1 + max((depth_of(c) for c in v.values()), default=0)
+        return 0
+
+    for _ in range(2000):
+        v = value(0, rng.randint(1, 10))
+        text = json.dumps(v, ensure_ascii=rng.random() < 0.5)
+        d = depth_of(v)
+        for limit in (d - 1, d, d + 1):
+            if limit >= 0:
+                assert json_too_deep(text, limit) is (d > limit), (limit, text)
 
 
 def test_json_too_deep_is_refused_before_the_parser_runs(monkeypatch: pytest.MonkeyPatch) -> None:

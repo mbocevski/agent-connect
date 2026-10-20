@@ -999,7 +999,12 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "frame has `id` (the feed sequence number), `event` and one line of "
         "JSON `data`, in the payload shape of the webhook adapter. Send "
         "`Last-Event-ID` to resume after that id, also after a daemon restart; "
-        "without it the stream starts live.",
+        "without it the stream starts live. "
+        "Events are kept for `daemon.event_retention_days` once every adapter has them, "
+        "and 100000 at most; the human's own (those the agent token doesn't see) only once "
+        "the human token read them without `group`. `oldest_available` is the lowest "
+        "`seq` retention may have left, and `gap` says that events after `after` are "
+        "gone.",
         query="`after`: only events with a greater `seq` (default 0). `group`: only "
         "that group (`404 not_found` on a stream for an unknown group).",
         response={
@@ -1012,7 +1017,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
                     "at": "int",
                     "event_id": "str",
                 }
-            ]
+            ],
+            "gap": "bool",
+            "oldest_available": "int",
         },
     ),
     RouteSpec(
@@ -1650,7 +1657,13 @@ class ApiServer:
             after = int(p.get("after", "0") or 0)
             if p.get(SCOPE) != "human":
                 return await self.agent.events(after, group)
-            return {"events": self.daemon.store.events(after, group_id=group)}
+            store = self.daemon.store
+            rows = store.events(after, group_id=group)
+            if group is None and rows:
+                # Read: retention may drop the human's own events now.
+                store.events_read(int(rows[-1]["seq"]))
+            purged, _ = store.events_purged()
+            return {"events": rows, "gap": after < purged, "oldest_available": purged + 1}
         hub = self.daemon.adapters.get("sse")
         if not isinstance(hub, SseAdapter):
             raise ApiError(409, "no_sse_adapter", 'add "sse" to daemon.adapters')

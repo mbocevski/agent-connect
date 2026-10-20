@@ -412,17 +412,48 @@ def test_events_are_kept_for_their_retention_and_bounded(tmp_path: Path, opened:
     s.add_event("g1", "message_failed", {}, 1, "human-only", agent=False)
     for n in range(5):
         s.mark_notified(f"ev-{n}")
-    # Older than the cutoff and handed over: gone. Not handed over yet: kept.
+    # Older than the cutoff and handed over: gone. Not handed over yet, or
+    # the human's and unread: kept.
     s.events_purge(before=13, keep=100)
-    assert [e["event_id"] for e in s.events()] == ["ev-3", "ev-4", "ev-5"]
+    assert [e["event_id"] for e in s.events()] == ["ev-3", "ev-4", "ev-5", "human-only"]
     # Past the cap the oldest go, handed over or not; the agent's newest
     # number is kept, so its sequence never runs backwards.
     s.events_purge(before=0, keep=1)
-    assert [e["event_id"] for e in s.events()] == ["ev-5"]
+    assert [e["event_id"] for e in s.events()] == ["ev-5", "human-only"]
     s.events_purge(before=100, keep=0)
     assert [e["event_id"] for e in s.events()] == ["ev-5"]
     s.add_event("g1", "member_joined", {}, 20, "ev-6")
     assert [e["seq"] for e in s.agent_events()] == [6, 7]
+
+
+def test_human_only_events_stay_until_read_and_gaps_are_marked(
+    tmp_path: Path, opened: Opener
+) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+    s.add_event("g1", "message_failed", {}, 1, "human-1", agent=False)
+    s.add_event("g1", "member_joined", {}, 2, "agent-1")
+    s.mark_notified("agent-1")
+    s.add_event("g1", "message_held", {}, 3, "human-2", agent=False)
+    s.add_event("g1", "member_joined", {}, 4, "agent-2")
+    assert s.events_purged() == (0, 0)
+    # Past retention, but the human hasn't read them: human-only events stay.
+    s.events_purge(before=100, keep=100)
+    assert [e["event_id"] for e in s.events()] == ["human-1", "human-2", "agent-2"]
+    assert s.events_purged() == (2, 1)
+    s.events_read(1)
+    s.events_read(0)  # a cursor never moves back
+    s.events_purge(before=100, keep=100)
+    assert [e["event_id"] for e in s.events()] == ["human-2", "agent-2"]
+    assert s.events_purged() == (2, 1)  # the highest gone, by each sequence
+    s.events_read(3)
+    s.events_purge(before=100, keep=100)
+    assert [e["event_id"] for e in s.events()] == ["agent-2"]
+    assert s.events_purged() == (3, 1)
+    # The cap takes unread ones too.
+    s.add_event("g1", "message_held", {}, 5, "human-3", agent=False)
+    s.events_purge(before=0, keep=0)
+    assert [e["event_id"] for e in s.events()] == ["agent-2"]
+    assert s.events_purged() == (5, 1)
 
 
 def test_attempts_are_counted_per_key_and_forgotten(tmp_path: Path, opened: Opener) -> None:
@@ -436,6 +467,9 @@ def test_attempts_are_counted_per_key_and_forgotten(tmp_path: Path, opened: Open
     s.attempts_purge(before=25)  # untouched since: gone
     assert s.attempt("b", 40) == 1
     assert s.attempt("a", 40) == 5
+    assert s.attempt_count("a") == 5
+    s.attempt_clear("a")
+    assert (s.attempt_count("a"), s.attempt_count("never")) == (0, 0)
 
 
 @pytest.mark.timeout(120)

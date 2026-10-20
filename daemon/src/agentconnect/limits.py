@@ -28,6 +28,7 @@ import json
 import re
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import Any
 
 from agentconnect.clock import Clock
@@ -174,30 +175,29 @@ def unsound(value: Any, limit: int = MAX_DEPTH) -> bool:
     return False
 
 
-# A JSON string, escapes included (possessive: linear on any input).
-_JSON_STRING = re.compile(r'"[^"\\]*+(?:\\.[^"\\]*+)*+"', re.DOTALL)
+# Three linear passes: escapes go first (each backslash with the character
+# after it), so a string is then a quote, no quotes, a quote; then strings;
+# then everything but brackets. None of them backtracks: an unterminated
+# string is scanned to the end once.
+_ESCAPE = re.compile(r"\\.", re.DOTALL)
+_JSON_STRING = re.compile(r'"[^"]*+"')
 _NOT_BRACKET = re.compile(r"[^\[\]{}]++")
+_STEP = {"[": 1, "{": 1, "]": -1, "}": -1}
 
 
 def json_too_deep(text: str, limit: int = MAX_DEPTH) -> bool:
     """Whether the JSON ``text`` nests arrays and objects past ``limit``
-    levels, read without parsing it: brackets are counted outside strings.
-    Python's JSON parser recurses once per level, and on a small thread
-    stack (macOS, musl) Python 3.12 and 3.13 crash on a few thousand levels
-    instead of raising ``RecursionError``. What isn't valid JSON may count
-    deeper than it is, never shallower: the parser refuses it anyway."""
-    brackets = _NOT_BRACKET.sub("", _JSON_STRING.sub("", text))
+    levels, read without parsing it: brackets are counted outside strings,
+    in time linear in the text. Python's JSON parser recurses once per
+    level, and on a small thread stack (macOS, musl) Python 3.12 and 3.13
+    crash on a few thousand levels instead of raising ``RecursionError``.
+    On valid JSON the depth is exact. On anything else it can differ only
+    after the first place the parser refuses (a backslash outside a string,
+    an unterminated string), which the parser never gets past."""
+    brackets = _NOT_BRACKET.sub("", _JSON_STRING.sub("", _ESCAPE.sub("", text)))
     if brackets.count("[") + brackets.count("{") <= limit:
         return False
-    depth = 0
-    for char in brackets:
-        if char in "[{":
-            depth += 1
-            if depth > limit:
-                return True
-        else:
-            depth -= 1
-    return False
+    return max(accumulate(map(_STEP.__getitem__, brackets))) > limit
 
 
 def loads(text: str | bytes, limit: int = MAX_DEPTH) -> Any:

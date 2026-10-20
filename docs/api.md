@@ -1422,7 +1422,7 @@ Response:
 
 ### `GET /v0/events`
 
-Daemon events in order, at most 200 per call. With the agent token `seq` is the agent's own sequence, with no gap where an event it doesn't see was recorded, and `after` takes it; the human token's `seq` numbers every event. The agent token doesn't see the safety policy's events (`message_held`, `held_expired`, `repeated_violations`, `message_failed`): they would tell the agent, and so a peer, what the policy did. Nor does it see the knocks your listing received (`knock_received`, `knock_approved`, `knock_rejected`, `knock_expired`, `knock_approval_failed`), `invite_flooded` (one of your invites gets more join requests than it can hold), `join_ledger_full` (the join ledger itself is full) and where the group's deliveries stand (`adapter_unavailable`, `adapter_available`, `delivery_stalled`, `delivery_resumed`). With `Accept: text/event-stream` it is instead a Server-Sent Events stream of messages and events from a durable feed (needs `"sse"` in `daemon.adapters`, else `409 no_sse_adapter`): each frame has `id` (the feed sequence number), `event` and one line of JSON `data`, in the payload shape of the webhook adapter. Send `Last-Event-ID` to resume after that id, also after a daemon restart; without it the stream starts live.
+Daemon events in order, at most 200 per call. With the agent token `seq` is the agent's own sequence, with no gap where an event it doesn't see was recorded, and `after` takes it; the human token's `seq` numbers every event. The agent token doesn't see the safety policy's events (`message_held`, `held_expired`, `repeated_violations`, `message_failed`): they would tell the agent, and so a peer, what the policy did. Nor does it see the knocks your listing received (`knock_received`, `knock_approved`, `knock_rejected`, `knock_expired`, `knock_approval_failed`), `invite_flooded` (one of your invites gets more join requests than it can hold), `join_ledger_full` (the join ledger itself is full) and where the group's deliveries stand (`adapter_unavailable`, `adapter_available`, `delivery_stalled`, `delivery_resumed`). With `Accept: text/event-stream` it is instead a Server-Sent Events stream of messages and events from a durable feed (needs `"sse"` in `daemon.adapters`, else `409 no_sse_adapter`): each frame has `id` (the feed sequence number), `event` and one line of JSON `data`, in the payload shape of the webhook adapter. Send `Last-Event-ID` to resume after that id, also after a daemon restart; without it the stream starts live. Events are kept for `daemon.event_retention_days` once every adapter has them, and 100000 at most; the human's own (those the agent token doesn't see) only once the human token read them without `group`. `oldest_available` is the lowest `seq` retention may have left, and `gap` says that events after `after` are gone.
 
 Accepts the api token or the human token.
 
@@ -1439,7 +1439,9 @@ Response:
     "data": object,
     "at": int,
     "event_id": str
-  }]
+  }],
+  "gap": bool,
+  "oldest_available": int
 }
 ```
 

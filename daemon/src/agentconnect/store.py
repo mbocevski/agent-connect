@@ -3105,27 +3105,54 @@ class Store:
             self._db.execute("DELETE FROM event_acks WHERE event_id = ?", (event_id,))
 
     def events_purge(self, before: int, keep: int) -> None:
-        """Retention: events stamped before ``before`` that every adapter has,
-        and any beyond the newest ``keep``. The event holding the agent's
-        highest number stays, so the agent's sequence never runs backwards."""
+        """Retention: events stamped before ``before`` that every adapter
+        has, human-only ones (no agent number) only once the human read them
+        (:meth:`events_read`), and any beyond the newest ``keep``, read or
+        not. The event holding the agent's highest number stays, so the
+        agent's sequence never runs backwards. The highest number gone, in
+        each sequence, is kept (:meth:`events_purged`)."""
+        gone = (
+            "((at < ? AND notified = 1 AND (agent_seq IS NOT NULL OR seq <= ?)) OR seq <= "
+            "(SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?)) "
+            "AND (agent_seq IS NULL OR agent_seq < (SELECT MAX(agent_seq) FROM events))"
+        )
+        args = (before, self._human_read(), keep)
         with self.tx():
-            self._db.execute(
-                "DELETE FROM events WHERE ((at < ? AND notified = 1) OR seq <= "
-                "(SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?)) "
-                "AND (agent_seq IS NULL OR agent_seq < "
-                "(SELECT MAX(agent_seq) FROM events))",
-                (before, keep),
-            )
+            row = self._one(f"SELECT MAX(seq), MAX(agent_seq) FROM events WHERE {gone}", *args)  # noqa: S608 - constant
+            if row is None or row[0] is None:
+                return
+            seq, agent_seq = self.events_purged()
+            self.kv_set("events/purged", str(max(seq, int(row[0]))))
+            if row[1] is not None:
+                self.kv_set("events/purged_agent", str(max(agent_seq, int(row[1]))))
+            self._db.execute(f"DELETE FROM events WHERE {gone}", args)  # noqa: S608 - constant
             self._db.execute(
                 "DELETE FROM event_acks WHERE event_id NOT IN "
                 "(SELECT event_id FROM events WHERE event_id IS NOT NULL)"
             )
 
+    def events_purged(self) -> tuple[int, int]:
+        """The highest ``seq`` and the highest agent number retention removed
+        (0: none): a reader asking for events after less than that missed
+        some."""
+        return (
+            int(self.kv_get("events/purged") or "0"),
+            int(self.kv_get("events/purged_agent") or "0"),
+        )
+
+    def events_read(self, seq: int) -> None:
+        """The human has read every event up to ``seq`` (it never moves back)."""
+        if seq > self._human_read():
+            self.kv_set("events/human_read", str(seq))
+
+    def _human_read(self) -> int:
+        return int(self.kv_get("events/human_read") or "0")
+
     # -- attempts -------------------------------------------------------------
 
     def attempt(self, key: str, now: int) -> int:
-        """Count one more give-up of the message ``key``; returns the count,
-        which survives restarts."""
+        """Count one more handling of the message ``key``; returns the
+        count, which survives restarts."""
         with self.tx():
             self._db.execute(
                 "INSERT INTO attempts (key, n, at) VALUES (?, 1, ?) "
@@ -3134,6 +3161,16 @@ class Store:
             )
             row = self._one("SELECT n FROM attempts WHERE key = ?", key)
         return 0 if row is None else int(row[0])
+
+    def attempt_count(self, key: str) -> int:
+        """The give-ups counted for the message ``key`` (0: none)."""
+        row = self._one("SELECT n FROM attempts WHERE key = ?", key)
+        return 0 if row is None else int(row[0])
+
+    def attempt_clear(self, key: str) -> None:
+        """The message ``key`` is handled: its count goes."""
+        with self.tx():
+            self._db.execute("DELETE FROM attempts WHERE key = ?", (key,))
 
     def attempts_purge(self, before: int) -> None:
         """Forget the counts last bumped before ``before``."""

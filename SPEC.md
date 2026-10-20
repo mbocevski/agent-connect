@@ -857,9 +857,12 @@ Inner = {
   the messages after it, and MUST NOT retry it without end: it drops the
   message, acks it at the relay (§8.2), and SHOULD tell its human. Only a
   failure the message causes fails it: the receiver's own housekeeping, or
-  another message, never does. A failure it retries as transient is
-  retried a bounded number of times, counted across restarts, and then
-  fails alone too. Such a message counts against its sender like a
+  another message, never does, and neither does a failure of its own
+  state (storage, a secret store, the network). A failure it retries as
+  transient is retried a bounded number of times, counted across restarts
+  and crashes, and then fails alone too, except while a local secret store
+  is locked: waiting for it loses nothing, so the receiver MAY wait without
+  bound. Such a message counts against its sender like a
   malformed one (§10.2), after the sender's rates and size limits were
   applied to it. A commit that fails alone leaves the receiver behind the
   group or without the commit's bookkeeping, so the receiver MUST treat

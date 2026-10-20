@@ -885,6 +885,18 @@ def test_events_list_follow_and_interrupt(fake: Fake, monkeypatch: pytest.Monkey
     assert fake.run("events", "--follow").exit_code == 0
 
 
+def test_events_warn_when_some_are_gone(fake: Fake) -> None:
+    ev = {"seq": 7, "group_id": None, "type": "joined", "data": {}, "at": 0, "event_id": "e7"}
+    fake.routes["GET /v0/events?after=0"] = {"events": [ev], "gap": True, "oldest_available": 7}
+    fake.routes["GET /v0/events?after=7"] = {"events": [], "gap": False, "oldest_available": 7}
+    result = fake.run("events")
+    assert "7  1970-01-01 00:00 UTC  joined" in result.stdout
+    assert "events before 7 are gone" in result.stderr
+    result = fake.run("events", "--json")
+    assert [json.loads(line)["seq"] for line in result.stdout.splitlines()] == [7]
+    assert "events before 7 are gone" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("error", "code"),
     [

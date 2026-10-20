@@ -326,8 +326,8 @@ async def test_a_commit_that_fails_in_handling_fails_alone(
     # bookkeeping it skipped leaves the group out of sync, and the human hears.
     await b.wait(lambda: b.epoch(gid) == a.epoch(gid))
     info = b.daemon.group_info(gid)
-    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_failed")
-    assert [e["reason"] for e in events(b, "out_of_sync")] == ["commit_failed"]
+    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_unapplied")
+    assert [e["reason"] for e in events(b, "out_of_sync")] == ["commit_unapplied"]
     await unwedged(b, a, gid)
 
 
