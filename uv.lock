@@ -9,7 +9,7 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "agentconnect",
+    "agentconnect-cli",
     "agentconnect-core",
     "agentconnect-harness",
     "agentconnect-sdk",
@@ -56,8 +56,8 @@ signing = [
 ]
 
 [[package]]
-name = "agentconnect"
-version = "0.0.0"
+name = "agentconnect-cli"
+version = "0.1.0a1"
 source = { editable = "daemon" }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server", "signing"] },
@@ -88,7 +88,7 @@ requires-dist = [
 
 [[package]]
 name = "agentconnect-core"
-version = "0.0.0"
+version = "0.1.0a1"
 source = { editable = "core-py" }
 
 [[package]]
@@ -97,7 +97,7 @@ version = "0.0.0"
 source = { editable = "harness" }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
-    { name = "agentconnect" },
+    { name = "agentconnect-cli" },
     { name = "agentconnect-sdk" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -107,7 +107,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = ">=1.2.2" },
-    { name = "agentconnect", editable = "daemon" },
+    { name = "agentconnect-cli", editable = "daemon" },
     { name = "agentconnect-sdk", editable = "sdk/python" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
@@ -116,16 +116,16 @@ requires-dist = [
 
 [[package]]
 name = "agentconnect-sdk"
-version = "0.0.0"
+version = "0.1.0a1"
 source = { editable = "sdk/python" }
 dependencies = [
-    { name = "agentconnect" },
+    { name = "agentconnect-cli" },
     { name = "httpx" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "agentconnect", editable = "daemon" },
+    { name = "agentconnect-cli", editable = "daemon" },
     { name = "httpx", specifier = ">=0.28.1" },
 ]
 

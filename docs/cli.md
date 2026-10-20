@@ -3,7 +3,8 @@
 The CLI is a thin client of the daemon's local API (`daemon/README.md`). It
 parses arguments, calls the daemon and renders the answer; all protocol
 decisions are made by the daemon. Every command takes `--config PATH` and
-`--json`.
+`--json`. `agentconnect --version` prints the version and the protocol
+version, as `agentconnect version` does, and exits.
 
 ## Quickstart
 

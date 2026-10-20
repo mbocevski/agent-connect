@@ -1,6 +1,11 @@
 # Signed release: build artifacts, sign with Sigstore (cosign keyless), attach
-# SLSA build provenance, publish a GitHub Release with CHANGELOG notes.
-# workflow_dispatch runs everything except publishing (dry run).
+# SLSA build provenance, publish the Python packages to PyPI (trusted
+# publishing) and the relay and directory images to ghcr.io, publish a GitHub
+# Release, then install the published packages on clean machines.
+#
+# workflow_dispatch is the dry run: it runs every build, check and
+# verification, installing from the built files instead of PyPI, and
+# publishes nothing (no PyPI upload, no image push, no GitHub Release).
 name: release
 
 on:
@@ -14,14 +19,51 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UV_FROZEN: "1"
+  # The public relay the verification jobs point `agentconnect mcp` at.
+  PUBLIC_RELAY: wss://connect.yggdrasill.network
 
 jobs:
+  # The version every job uses: the tag without its `v`, or on a dry run the
+  # version in the packages. scripts/check_version.py fails unless every
+  # package, the Rust workspace and the README's install command agree.
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version=$(python3 scripts/check_version.py "${GITHUB_REF_NAME#v}")
+            if [[ -z "$(scripts/changelog-section.sh "$version" | tr -d '[:space:]')" ]]; then
+              echo "::error::CHANGELOG.md has no [$version] section"
+              exit 1
+            fi
+            publish=true
+          else
+            version=$(python3 scripts/check_version.py)
+            publish=false
+          fi
+          prerelease=false
+          if [[ "$version" =~ (a|b|rc)[0-9]+$ ]]; then prerelease=true; fi
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $version, pre-release $prerelease, publish $publish"
+
   # One build per platform. Each signs and attests its own artifacts, so a
   # platform's job can be rerun alone. The pure-Python packages and the sdists
   # are built once, on x86_64 Linux.
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
@@ -42,6 +84,11 @@ jobs:
             pure: false
           - target: aarch64-macos
             os: macos-15
+            manylinux: "off"
+            relay: false
+            pure: false
+          - target: x86_64-macos
+            os: macos-15-intel
             manylinux: "off"
             relay: false
             pure: false
@@ -69,9 +116,23 @@ jobs:
       - name: Python packages and sdists
         if: matrix.pure
         run: |
-          uv build --all-packages --sdist --out-dir dist
-          uv build --package agentconnect --wheel --out-dir dist
-          uv build --package agentconnect-sdk --wheel --out-dir dist
+          uv build --package agentconnect-core --sdist --out-dir dist
+          uv build --package agentconnect-cli --sdist --wheel --out-dir dist
+          uv build --package agentconnect-sdk --sdist --wheel --out-dir dist
+      # A broken sdist can't be replaced on PyPI: build a wheel from each one,
+      # outside the workspace's uv settings (no test hooks), with the pinned
+      # Rust toolchain.
+      - name: The sdists build
+        if: matrix.pure
+        run: |
+          RUSTUP_TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          export RUSTUP_TOOLCHAIN
+          out="$RUNNER_TEMP/sdist-wheels"
+          for sdist in dist/agentconnect_core-*.tar.gz dist/agentconnect_cli-*.tar.gz dist/agentconnect_sdk-*.tar.gz; do
+            uv build --no-config --wheel --out-dir "$out" "$sdist"
+          done
+          uv run --no-project python scripts/check_wheel_hooks.py "$out"/agentconnect_core-*.whl
+          ls -l "$out"
       - name: Checksums
         run: |
           (cd dist && shasum -a 256 -- * > ../sums.tmp)
@@ -82,6 +143,7 @@ jobs:
           for f in dist/*; do
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
           done
+      # Provenance for every file in dist/: binaries, wheels, sdists, checksums.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: "dist/*"
@@ -90,22 +152,355 @@ jobs:
           name: release-dist-${{ matrix.target }}
           path: dist/
 
-  publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+  # The exact set of files PyPI gets, checked: four core wheels (abi3,
+  # cp312+), the pure wheels and the three sdists, all at the release
+  # version, and valid metadata (twine check). Every one of them was attested
+  # by its build job.
+  pypi-dist:
+    needs: [version, build]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-dist-*
           merge-multiple: true
           path: dist
-      - name: Release notes from CHANGELOG
-        run: scripts/changelog-section.sh "${GITHUB_REF_NAME#v}" > notes.md
+      - name: Select and check the PyPI files
+        run: |
+          mkdir pypi
+          cp dist/*.whl pypi/
+          for p in core cli sdk; do cp "dist/agentconnect_${p}-${VERSION}.tar.gz" pypi/; done
+          ls -l pypi
+          one() {
+            local n
+            n=$( (compgen -G "pypi/$1" || true) | wc -l)
+            if [[ "$n" != 1 ]]; then echo "::error::expected one pypi/$1, found $n"; exit 1; fi
+          }
+          for platform in manylinux_2_28_x86_64 manylinux_2_28_aarch64 macosx_*_arm64 macosx_*_x86_64; do
+            one "agentconnect_core-${VERSION}-cp312-abi3-*${platform}.whl"
+          done
+          for p in cli sdk; do one "agentconnect_${p}-${VERSION}-py3-none-any.whl"; done
+          count=$(find pypi -type f | wc -l)
+          if [[ "$count" != 9 ]]; then echo "::error::expected 9 files for PyPI, found $count"; exit 1; fi
+      - run: uvx twine@7.0.0 check --strict pypi/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pypi-dist
+          path: pypi/
+
+  # The relay and directory images, one architecture per native runner. Every
+  # run builds and smoke-tests them; a tag also pushes each by digest, and
+  # image-publish joins the two digests into one tagged index.
+  image:
+    name: image (${{ matrix.component }}, ${{ matrix.arch }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, directory]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    env:
+      PUBLISH: ${{ needs.version.outputs.publish }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentconnect-${{ matrix.component }}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.component }}/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: ac-${{ matrix.component }}:release
+          provenance: false
+          sbom: false
+      - run: scripts/smoke-image.sh ${{ matrix.component }} ac-${{ matrix.component }}:release linux/${{ matrix.arch }}
+        timeout-minutes: 5
+      - if: env.PUBLISH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The same build again (from the builder's cache), pushed by digest
+      # only: no tag exists until image-publish creates the index.
+      - name: Push by digest
+        id: push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.component }}/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.title=agentconnect-${{ matrix.component }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=Apache-2.0
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Record the digest
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p digests
+          echo "$DIGEST" > "digests/${{ matrix.arch }}"
+      - if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.component }}-${{ matrix.arch }}
+          path: digests/
+          retention-days: 7
+
+  # Trusted publishing (OIDC): no token is stored anywhere. PyPI attaches its
+  # own attestations (PEP 740) to each file. Runs only on a tag, after every
+  # build, the PyPI file checks and the image builds passed.
+  #
+  # One environment per package (`pypi-core`, `pypi-cli`, `pypi-sdk`): PyPI
+  # allows only one pending publisher per repository, workflow and
+  # environment, so a new project needs its own environment. One package at
+  # a time, core first, since the CLI and the SDK depend on it.
+  pypi:
+    name: pypi (${{ matrix.package }})
+    if: needs.version.outputs.publish == 'true'
+    needs: [version, pypi-dist, image]
+    strategy:
+      max-parallel: 1
+      matrix:
+        package: [core, cli, sdk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi-${{ matrix.package }}
+      url: https://pypi.org/project/agentconnect-${{ matrix.package }}/${{ needs.version.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pypi-dist
+          path: pypi
+      - name: This package's files
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir upload
+          mv pypi/agentconnect_"$PACKAGE"-* upload/
+          ls -l upload
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: upload/
+          print-hash: true
+
+  # One multi-architecture index per image, tagged with the version (no `v`,
+  # never `latest`), signed with cosign and attested in the registry.
+  image-publish:
+    name: image-publish (${{ matrix.component }})
+    if: needs.version.outputs.publish == 'true'
+    needs: [version, pypi-dist, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, directory]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentconnect-${{ matrix.component }}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-${{ matrix.component }}-*
+          merge-multiple: true
+          path: digests
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the index
+        id: index
+        run: |
+          mapfile -t sources < <(sed "s|^|$IMAGE@|" digests/amd64 digests/arm64)
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.title=agentconnect-${{ matrix.component }}" \
+            --annotation "index:org.opencontainers.image.description=AgentConnect ${{ matrix.component }}" \
+            --annotation "index:org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "index:org.opencontainers.image.version=$VERSION" \
+            --annotation "index:org.opencontainers.image.licenses=Apache-2.0" \
+            --tag "$IMAGE:$VERSION" "${sources[@]}"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          docker buildx imagetools inspect "$IMAGE@$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          mkdir -p image
+          echo "$IMAGE:$VERSION@$digest" > "image/${{ matrix.component }}"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign (cosign keyless)
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.component }}
+          path: image/
+
+  # The release notes: the CHANGELOG section, the install command and the
+  # image digests. A dry run renders them too (without digests) and keeps
+  # them as an artifact.
+  notes:
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.image-publish.result == 'success' || needs.image-publish.result == 'skipped') }}
+    needs: [version, image-publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.version.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          merge-multiple: true
+          path: images
+      - name: Render
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          scripts/release-notes.sh "$VERSION" images > notes.md
+          cat notes.md
+          # GitHub refuses a Release body over 125000 characters.
+          chars=$(wc -m < notes.md)
+          if (( chars > 125000 )); then
+            echo "::error::notes.md has $chars characters; write docs/releases/$VERSION.md"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: notes.md
+
+  release:
+    if: needs.version.outputs.publish == 'true'
+    needs: [version, build, pypi, image-publish, notes]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-dist-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           body_path: notes.md
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           files: dist/*
+
+  # Install the published package the documented way on clean machines and
+  # talk MCP to it (scripts/verify-install.sh). On a tag this runs after the
+  # PyPI upload and retries while the CDN catches up; the dry run installs
+  # from the built files.
+  verify-linux:
+    name: verify (${{ matrix.python }}, ${{ matrix.arch }})
+    if: ${{ !cancelled() && needs.pypi-dist.result == 'success' && (needs.pypi.result == 'success' || (needs.version.outputs.publish != 'true' && needs.pypi.result == 'skipped')) }}
+    needs: [version, pypi-dist, pypi]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["python:3.12-slim", "python:3.13-slim"]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    env:
+      PUBLISH: ${{ needs.version.outputs.publish }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PYTHON_IMAGE: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: env.PUBLISH != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pypi-dist
+          path: pypi
+      - name: Install and check in a fresh container
+        run: |
+          local_files=()
+          if [[ "$PUBLISH" != true ]]; then
+            local_files=(-v "$PWD/pypi:/dist:ro" -e UV_FIND_LINKS=/dist -e PIP_FIND_LINKS=/dist)
+          fi
+          docker run --rm --pull always -v "$PWD/scripts:/smoke:ro" "${local_files[@]}" \
+            "$PYTHON_IMAGE" bash /smoke/verify-install.sh "$VERSION" "$PUBLIC_RELAY"
+
+  verify-macos:
+    name: verify (${{ matrix.os }})
+    if: ${{ !cancelled() && needs.pypi-dist.result == 'success' && (needs.pypi.result == 'success' || (needs.version.outputs.publish != 'true' && needs.pypi.result == 'skipped')) }}
+    needs: [version, pypi-dist, pypi]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    env:
+      PUBLISH: ${{ needs.version.outputs.publish }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        id: python
+        with:
+          python-version: "3.12"
+      - if: env.PUBLISH != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pypi-dist
+          path: pypi
+      - name: Install and check
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          if [[ "$PUBLISH" != true ]]; then
+            export UV_FIND_LINKS="$PWD/pypi" PIP_FIND_LINKS="$PWD/pypi"
+          fi
+          scripts/verify-install.sh "$VERSION" "$PUBLIC_RELAY"

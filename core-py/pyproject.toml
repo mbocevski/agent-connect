@@ -1,7 +1,8 @@
 [project]
 name = "agentconnect-core"
-version = "0.0.0"
+version = "0.1.0a1"
 description = "Python bindings for the AgentConnect protocol core"
+readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 classifiers = ["Programming Language :: Rust", "Programming Language :: Python :: 3"]
@@ -14,7 +15,11 @@ build-backend = "maturin"
 module-name = "agentconnect_core._native"
 python-source = "python"
 manifest-path = "Cargo.toml"
-locked = true
+# Not `locked = true`: the sdist carries the whole workspace's Cargo.lock for
+# a two-crate workspace, and cargo prunes the unused entries (it changes no
+# version), which --locked refuses, so the sdist would not build. The
+# release wheel (.github/actions/core-wheel) and the development build (the
+# root pyproject.toml) pass --locked themselves.
 
 # Rebuild the extension when any Rust input changes, not only pyproject.toml.
 [tool.uv]

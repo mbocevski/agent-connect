@@ -200,7 +200,12 @@ merge pr:
 apply-ruleset:
     scripts/apply-ruleset.sh
 
-# Verify a release's signatures and provenance
+# Cut CHANGELOG [Unreleased] into a release section, in the release PR (version without the v; date defaults to today, UTC)
+changelog-cut version date="":
+    scripts/changelog-cut.sh {{ version }} {{ date }}
+
+# Verify a release's provenance: every release file and both images (version without the v, e.g. 0.1.0a1)
 release-verify version:
     gh release download v{{ version }} --dir dist/verify-{{ version }} --clobber
     cd dist/verify-{{ version }} && for f in *; do case "$f" in *.sigstore.json) ;; *) gh attestation verify "$f" --repo "$(gh repo view --json nameWithOwner --jq .nameWithOwner)" ;; esac; done
+    repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"; owner="$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")"; for c in relay directory; do gh attestation verify "oci://ghcr.io/$owner/agentconnect-$c:{{ version }}" --repo "$repo"; done

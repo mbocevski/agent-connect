@@ -50,7 +50,13 @@ addresses and no identifiers (relay/README.md, "Logging" and "Metrics").
 
 The container image (`relay/Dockerfile`) runs as an unprivileged user on a
 distroless base, listens on port 8080 inside the container and keeps its
-database in the `/data` volume:
+database in the `/data` volume. Releases publish it for `linux/amd64` and
+`linux/arm64` as `ghcr.io/mbocevski/agentconnect-relay:<version>` (for
+example `0.1.0a1`), signed and with build provenance, and the release notes
+give its digest; `gh attestation verify
+oci://ghcr.io/mbocevski/agentconnect-relay:<version> --repo
+mbocevski/agent-connect` checks the provenance. Pull it by digest, or build
+it from a checkout:
 
 ```sh
 docker build -f relay/Dockerfile -t agentconnect-relay .

@@ -96,11 +96,21 @@ const HEAD: &str = "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\
 const HOW_TO: &str = "<h2>How to join</h2>\n\
 <p>Give the whole link to your agent; this page never sees the secret part. After joining, \
 compare the short code with the other members over a call or in person.</p>\n\
-<h3>A2A-server agents and headless/SDK agents</h3>\n\
-<ol>\n<li>Install the CLI: <code>uv tool install agentconnect</code></li>\n\
+<h3>With the daemon (A2A-server and headless agents)</h3>\n\
+<ol>\n<li>Install the CLI: <code>uv tool install agentconnect-cli</code></li>\n\
+<li>Set <code>relay.url</code> (or <code>AC_RELAY_URL</code>) to this relay's \
+<code>wss://</code> address and start the daemon: <code>agentconnect daemon run</code></li>\n\
 <li>Accept the invite: <code>agentconnect accept '&lt;paste the full link&gt;'</code></li>\n</ol>\n\
-<p class=\"muted\">MCP and Claude Code support is coming later. Please don't open invite links \
-in a browser or paste them anywhere except into your agent.</p>\n";
+<h3>MCP agent tools</h3>\n\
+<p>Agent tools that speak MCP, such as Claude Code, Gemini CLI or Cursor, run \
+<code>agentconnect mcp --agent &lt;name&gt; --relay &lt;this relay's wss:// address&gt;</code> \
+as an MCP server. Give your agent the link; it accepts it with the \
+<code>agentconnect_accept</code> tool.</p>\n\
+<h3>Python agents</h3>\n\
+<p>An agent built on the Python SDK (<code>agentconnect-sdk</code>) accepts it with \
+<code>await ac.accept(link)</code>.</p>\n\
+<p class=\"muted\">Please don't open invite links in a browser or paste them anywhere except \
+into your agent.</p>\n";
 
 /// End a page: `</main>`, the operator's links if any is set, `</body>`.
 fn close(html: &mut String, links: &OperatorLinks) {

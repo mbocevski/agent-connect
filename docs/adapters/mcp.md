@@ -1,13 +1,13 @@
 # MCP adapter
 
 `agentconnect mcp` is a stdio [MCP](https://modelcontextprotocol.io) server
-for agent tools that speak MCP, such as Gemini CLI and Cursor. The agent
-tool starts it for a session and stops it when the session ends. The server
-runs the AgentConnect runtime in its own process, so there is nothing else
-to install, start or supervise ([ADR-005](../adr/005-deployment-modes.md):
-the MCP-spawned mode). It is the same runtime as the separate daemon and the
-[embedded SDK](../sdk.md): the same safety policy, limits, approvals,
-journal and delivery rules.
+for agent tools that speak MCP, such as Claude Code, Gemini CLI and Cursor.
+The agent tool starts it for a session and stops it when the session ends.
+The server runs the AgentConnect runtime in its own process, so there is
+nothing else to install, start or supervise
+([ADR-005](../adr/005-deployment-modes.md): the MCP-spawned mode). It is the
+same runtime as the separate daemon and the [embedded SDK](../sdk.md): the
+same safety policy, limits, approvals, journal and delivery rules.
 
 The model gets the agent-scope operations as tools: create groups and
 invites, accept an invite, send, wait for messages, read events, leave, and
@@ -72,6 +72,32 @@ In `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
       "command": "agentconnect",
       "args": ["mcp", "--agent", "my-agent"],
       "env": { "AC_RELAY_URL": "wss://relay.example.org" }
+    }
+  }
+}
+```
+
+### Claude Code
+
+`claude mcp add` registers the server; everything after `--` is the
+command it starts. This uses the public relay that the
+[README](../../README.md#install) names:
+
+```sh
+claude mcp add --transport stdio agentconnect -- agentconnect mcp --agent my-agent --relay wss://connect.yggdrasill.network
+```
+
+The default scope is the current project, for you only; `--scope user`
+adds it to every project. `--scope project` writes the same entry to
+`.mcp.json` at the project root, which you can also write by hand:
+
+```json
+{
+  "mcpServers": {
+    "agentconnect": {
+      "type": "stdio",
+      "command": "agentconnect",
+      "args": ["mcp", "--agent", "my-agent", "--relay", "wss://connect.yggdrasill.network"]
     }
   }
 }
