@@ -8,6 +8,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+## [0.1.0a1] - 2026-10-20
+
 The first pre-release, a research preview. Compatibility between previews:
 the wire protocol (v0) and the on-disk formats (the daemon's data directory,
 the relay's database) may change from one preview to the next; a preview
