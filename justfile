@@ -104,7 +104,7 @@ demo-record: demo-image
 
 # Nightly tier: mutation testing, quarantined tests, long property runs
 # (fuzzing and benchmarks are added with the core)
-test-nightly: nightly-mutants nightly-py
+test-nightly: nightly-mutants nightly-py nightly-relay-load
 
 # Mutation testing of the core, every mutant (hours; config in .cargo/mutants.toml)
 nightly-mutants *args:
@@ -113,6 +113,11 @@ nightly-mutants *args:
 # One shard of it, as the nightly matrix runs it: just nightly-mutants-shard 3/24
 nightly-mutants-shard shard *args:
     cargo mutants -p agentconnect-core --no-shuffle --shard {{ shard }} {{ args }}
+
+# The relay's load tests (budgets, stalls, the purge) and the wire sizes its caps rely on (ignored by `just test`)
+nightly-relay-load:
+    cargo nextest run --release -p agentconnect-relay --locked --run-ignored only
+    cargo nextest run --release -p agentconnect-core --locked --run-ignored only -E 'test(wire_sizes_fit_the_relay_caps)'
 
 nightly-py: build-relay-dev
     AC_RUN_QUARANTINE=1 HYPOTHESIS_PROFILE=nightly uv run --all-packages --frozen pytest -q -n auto

@@ -84,6 +84,12 @@ pub struct Metrics {
     /// Gauge: bytes read and not yet handed on as messages (the read
     /// budget's total, shared with [`crate::conn::ReadBudget`]).
     pub(crate) read_held: Arc<AtomicU64>,
+    /// Gauge: storage in use at the last maintenance run.
+    storage_bytes: AtomicU64,
+    /// Gauge: the storage high-water mark.
+    storage_high_water: AtomicU64,
+    /// Gauge: 1 while new messages are refused for storage.
+    storage_full: AtomicU64,
     errors: [AtomicU64; ErrorCode::ALL.len()],
 }
 
@@ -316,6 +322,34 @@ impl Metrics {
         }
     }
 
+    /// The storage gauges (SPEC §8.3, "Limits").
+    fn render_storage(&self, out: &mut String) {
+        let mut gauge = |name: &str, help: &str, v: &AtomicU64| {
+            let _ = writeln!(
+                out,
+                "# HELP {name} {help}
+# TYPE {name} gauge
+{name} {}",
+                v.load(Ordering::Relaxed)
+            );
+        };
+        gauge(
+            "agentconnect_relay_storage_bytes",
+            "Bytes of database pages in use, as of the last periodic purge.",
+            &self.storage_bytes,
+        );
+        gauge(
+            "agentconnect_relay_storage_high_water_bytes",
+            "The storage high-water mark: at or above it new messages are refused.",
+            &self.storage_high_water,
+        );
+        gauge(
+            "agentconnect_relay_storage_full",
+            "1 while storage is at or above its high-water mark, else 0.",
+            &self.storage_full,
+        );
+    }
+
     /// Prometheus text exposition.
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one call per counter")]
@@ -433,6 +467,7 @@ impl Metrics {
             &self.groups_max,
         );
         self.render_connections(&mut out);
+        self.render_storage(&mut out);
         let _ = writeln!(
             out,
             "# HELP agentconnect_relay_errors_total Errors returned, by code.\n\
@@ -859,6 +894,9 @@ impl<S: Store> Relay<S> {
     pub fn new(store: S, clock: Arc<dyn Clock>, host: impl Into<String>, limits: Limits) -> Self {
         let started = clock.unix_millis();
         let metrics = Metrics::default();
+        metrics
+            .storage_high_water
+            .store(limits.storage_high_water, Ordering::Relaxed);
         let read_budget = ReadBudget::new(
             WsLimits::default().read_buffer_bytes,
             Arc::clone(&metrics.read_held),
@@ -891,6 +929,23 @@ impl<S: Store> Relay<S> {
             stopping: watch::Sender::new(false),
         }
         .with_quotas(Quotas::default())
+    }
+
+    fn over_budget() -> RelayError {
+        RelayError::new(
+            ErrorCode::OverBudget,
+            "this mailbox has its budget of undelivered messages stored, in all or in this \
+             group; retry later",
+        )
+    }
+
+    fn storage_full(&self) -> RelayError {
+        self.metrics.storage_full.store(1, Ordering::Relaxed);
+        tracing::warn!("storage is above its high-water mark; message refused");
+        RelayError::new(
+            ErrorCode::StorageFull,
+            "relay storage is above its high-water mark; retry later",
+        )
     }
 
     /// Replace the abuse limits (defaults: [`Quotas::default`]).
@@ -1369,7 +1424,8 @@ impl<S: Store> Relay<S> {
     }
 
     /// Run periodic maintenance: expire rows, rate-limit windows and replay
-    /// entries, and once an hour delete idle groups.
+    /// entries, refresh the storage gauges, and once an hour delete idle
+    /// groups.
     ///
     /// # Errors
     ///
@@ -1385,6 +1441,12 @@ impl<S: Store> Relay<S> {
             .purge_expired(now)
             .await
             .map_err(|e| internal(&e))?;
+        let used = self.store.storage_bytes().await.map_err(|e| internal(&e))?;
+        self.metrics.storage_bytes.store(used, Ordering::Relaxed);
+        self.metrics.storage_full.store(
+            u64::from(used >= self.limits.storage_high_water),
+            Ordering::Relaxed,
+        );
         let last = self.idle_swept_at.load(Ordering::Relaxed);
         if now.saturating_sub(last) >= IDLE_SWEEP_EVERY_MS {
             self.idle_swept_at.store(now, Ordering::Relaxed);
@@ -1560,7 +1622,7 @@ impl<S: Store> Relay<S> {
         };
         match self
             .store
-            .deliver_direct(&owner, &msg, &self.limits, self.now_ms())
+            .deliver_direct(Kind::Knock, &owner, &msg, &self.limits, self.now_ms())
             .await
         {
             Ok(DirectOutcome::Delivered) => {
@@ -1568,9 +1630,14 @@ impl<S: Store> Relay<S> {
                 self.wake([&owner]);
             }
             Ok(DirectOutcome::Duplicate) => tracing::debug!("knock repeated"),
-            // Unlike `join`: the knocker was told `accepted` either way.
-            Ok(DirectOutcome::QuotaExceeded) => {
+            // Unlike `join`: the knocker was told `accepted` either way. A
+            // knock isn't charged to its sender, so it is never over budget.
+            Ok(DirectOutcome::QuotaExceeded | DirectOutcome::OverBudget) => {
                 tracing::debug!(reason = "queue_full", "knock dropped");
+            }
+            Ok(DirectOutcome::StorageFull) => {
+                self.metrics.storage_full.store(1, Ordering::Relaxed);
+                tracing::debug!(reason = "storage_full", "knock dropped");
             }
             Err(e) => {
                 let _ = internal(&e);
@@ -1623,6 +1690,7 @@ impl<S: Store> Relay<S> {
             remove: &routing.remove,
             to: &env.to,
             msg: &msg,
+            ct_bytes: env.ct.len().saturating_mul(3) / 4,
         };
         let outcome = self
             .store
@@ -1674,6 +1742,16 @@ impl<S: Store> Relay<S> {
                 ErrorCode::QuotaExceeded,
                 format!("group is limited to {} instances", self.limits.group_max),
             )),
+            GroupOutcome::NotAwaitingWelcome => Err(E::new(
+                ErrorCode::BadRequest,
+                "a Welcome goes only to a mailbox the sender's commit added, once",
+            )),
+            GroupOutcome::QueueFull => Err(E::new(
+                ErrorCode::QuotaExceeded,
+                "a recipient's queue is full; retry later",
+            )),
+            GroupOutcome::OverBudget => Err(Self::over_budget()),
+            GroupOutcome::StorageFull => Err(self.storage_full()),
         }
     }
 
@@ -1820,7 +1898,13 @@ impl<S: Store> Relay<S> {
         };
         match self
             .store
-            .deliver_direct(&invite.inviter_mailbox, &msg, &self.limits, self.now_ms())
+            .deliver_direct(
+                Kind::JoinRequest,
+                &invite.inviter_mailbox,
+                &msg,
+                &self.limits,
+                self.now_ms(),
+            )
             .await
             .map_err(|e| internal(&e))?
         {
@@ -1840,6 +1924,8 @@ impl<S: Store> Relay<S> {
                 ErrorCode::QuotaExceeded,
                 "the inviter queue is full",
             )),
+            DirectOutcome::OverBudget => Err(Self::over_budget()),
+            DirectOutcome::StorageFull => Err(self.storage_full()),
         }
     }
 

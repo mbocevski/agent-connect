@@ -663,3 +663,116 @@ async def test_a_dead_worker_is_restarted(cluster: Cluster, advance: Advance) ->
     await asyncio.wait_for(task, 5)
     assert calls == 2
     n.daemon.running = True
+
+
+def refuse_kind(proxy: RelayProxy, gid: str, kind: str, code: str, times: int) -> list[int]:
+    """Answer the node's next ``times`` sends of ``kind`` in ``gid`` with
+    ``code``, without forwarding them. Returns the count left (a list, so
+    the test can watch it)."""
+    left = [times]
+
+    def refuse(frame: dict[str, Any]) -> list[dict[str, Any]]:
+        env = frame.get("env") or {}
+        if left[0] and env.get("kind") == kind and env.get("group_id") == gid:
+            left[0] -= 1
+            proxy._forged.append({"t": "error", "msg_id": env["msg_id"], "code": code})
+            return []
+        return [frame]
+
+    proxy.client_filters.append(refuse)
+    return left
+
+
+async def test_storage_full_pauses_every_group_until_the_relay_takes_messages_again(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """Review F2: `storage_full` (the relay's storage at its high-water
+    mark, SPEC 8.4) says "not now" for every group: the whole outbox pauses,
+    and messages and commits alike go out once the relay takes them again,
+    however many times it refused, never failing."""
+    (a, b), gid = await group(2)
+    other = a.daemon.create_group("Other", "Elsewhere")
+    await a.idle()
+    await cluster.invite(a, b, other)
+    proxy = malicious_relay(a)
+    times = MAX_COMMIT_ATTEMPTS + 2
+    apps = refuse_kind(proxy, gid, "application", "storage_full", times)
+    commits = refuse_kind(proxy, gid, "commit", "storage_full", times)
+    epoch = a.epoch(gid)
+    a.daemon.update(gid)
+    a.daemon.send_message(gid, {"text": "after the mark"})
+    await a.wait(lambda: a.clock.sleepers > 0)
+    elsewhere = a.daemon.send_message(other, {"text": "elsewhere"})
+    await a.wait(lambda: a.daemon._next_row() is None)
+    assert a.daemon.store.outbox_state_of(elsewhere) == "queued"  # every group waits
+    for _ in range(4 * times):
+        if b.adapter.texts(gid):
+            break
+        await a.wait(lambda: a.clock.sleepers > 0 or bool(b.adapter.texts(gid)))
+        await advance(60)
+    assert await b.wait_texts(gid, 1) == ["after the mark"]
+    assert await b.wait_texts(other, 1) == ["elsewhere"]
+    assert (apps, commits) == ([0], [0])
+    await a.idle()
+    assert a.epoch(gid) == epoch + 1
+    assert not a.adapter.of_type("send_failed")
+    assert not a.adapter.of_type("commit_failed")
+
+
+async def test_over_budget_holds_up_only_its_group_and_costs_no_try(
+    cluster: Cluster, group: GroupFixture, malicious_relay: Proxy, advance: Advance
+) -> None:
+    """Review F2: `over_budget` (the sender's budget of undelivered
+    messages, SPEC 8.3) holds up only the group whose send it refused, for
+    as long as it takes, and a cadence Update inside the message's row
+    waits the same way."""
+    (a, b), gid = await group(2)
+    other = a.daemon.create_group("Other", "Elsewhere")
+    await a.idle()
+    await cluster.invite(a, b, other)
+    proxy = malicious_relay(a)
+    times = MAX_COMMIT_ATTEMPTS + 2
+    epoch = a.epoch(gid)
+    a.daemon.store.update_group(gid, msgs_since_commit=UPDATE_AFTER_MESSAGES)
+    commits = refuse_kind(proxy, gid, "commit", "over_budget", times)
+    apps = refuse_kind(proxy, gid, "application", "over_budget", times)
+    a.daemon.send_message(gid, {"text": "once there is room"})
+    await a.wait(lambda: a.clock.sleepers > 0)
+    a.daemon.send_message(other, {"text": "meanwhile"})
+    assert await b.wait_texts(other, 1) == ["meanwhile"]
+    for _ in range(4 * times):
+        if b.adapter.texts(gid):
+            break
+        await a.wait(lambda: a.clock.sleepers > 0 or bool(b.adapter.texts(gid)))
+        await advance(60)
+    assert await b.wait_texts(gid, 1) == ["once there is room"]
+    assert (apps, commits) == ([0], [0])
+    await a.idle()
+    assert a.epoch(gid) == epoch + 1
+    assert not a.adapter.of_type("send_failed")
+    assert not a.adapter.of_type("commit_failed")
+
+
+async def test_a_joiner_sends_its_capabilities_whatever_its_adapter(
+    cluster: Cluster,
+) -> None:
+    """Review F3: right after joining, every instance sends
+    `control.capabilities` (SPEC 7.3), also one whose adapter has no Agent
+    Card. That first send in the group is what makes the relay count the
+    group's traffic to it as member traffic (SPEC 8.3)."""
+    a = await cluster.node("a")
+    gid = a.daemon.create_group("Caps", "")
+    await a.idle()
+    b = await cluster.node("b")
+    assert b.adapter.capabilities().agent_card is None
+    await cluster.invite(a, b, gid)
+
+    def caps() -> list[Any]:
+        return [d for d in a.adapter.deliveries if d.kind == "control.capabilities"]
+
+    await a.adapter.wait_for(lambda: bool(caps()), WAIT)
+    (got,) = caps()
+    assert got.sender.identity == b.me
+    assert got.body["adapters"] == [], "nothing of the operator's configuration"
+    assert "text" in got.body["accepts"]
+    assert not got.addressed_to_me  # context: it triggers nobody

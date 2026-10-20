@@ -59,7 +59,13 @@ async fn fill(h: &Harness, mailbox: &str, n: usize, size: usize) -> Vec<String> 
         };
         h.relay
             .store()
-            .deliver_direct(mailbox, &msg, h.relay.limits(), h.relay.now_ms())
+            .deliver_direct(
+                agentconnect_relay::proto::Kind::JoinRequest,
+                mailbox,
+                &msg,
+                h.relay.limits(),
+                h.relay.now_ms(),
+            )
             .await
             .unwrap();
         ids.push(id);

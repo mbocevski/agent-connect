@@ -322,6 +322,9 @@ async fn welcome_goes_to_the_named_mailbox_even_if_it_never_connected() {
     let mut a = h.client(1).await;
     let gid = make_group(&mut a, &[]).await;
     let newcomer = mailbox_id_from_key(signing_key(9).verifying_key().as_bytes());
+    let add = commit(&a, &gid, 0, &[&newcomer], &[]);
+    assert_eq!(a.send(&add).await["t"], "accepted");
+    a.deliver().await;
 
     let mut w = envelope("welcome_wrapped", Some(&gid), None, &a.mailbox);
     w["to"] = json!([newcomer]);
@@ -392,7 +395,10 @@ async fn fill(a: &mut Client, gid: &str, n: usize) {
 
 async fn small_queue_harness() -> Harness {
     Harness::with_limits(Limits {
+        // Members added by a commit stay in the non-member bucket until they
+        // send; the overflow rules are the same in both.
         queue_max_bytes: 3000,
+        non_member_queue_max_bytes: 3000,
         sends_per_sec: 100_000,
         ..Limits::default()
     })

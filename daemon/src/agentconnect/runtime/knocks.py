@@ -61,6 +61,7 @@ from agentconnect.relay import RelayError, b64, unb64
 from agentconnect.runtime import ledger as replay
 from agentconnect.runtime.engine import (
     KNOCK_REQUEST_PREFIX,
+    PAUSE_RELAY_ERRORS,
     DaemonError,
     Engine,
     RateLimitedError,
@@ -126,6 +127,8 @@ RELAY_CODES = frozenset(
         "rate_limited",
         "too_large",
         "quota_exceeded",
+        "storage_full",
+        "over_budget",
         "bad_request",
         "internal",
     }
@@ -133,7 +136,9 @@ RELAY_CODES = frozenset(
 
 
 #: Answers to a Welcome that say "not now": the outbox tries again.
-RETRY_WELCOME = frozenset({"internal", "rate_limited", "quota_exceeded"})
+RETRY_WELCOME = frozenset(
+    {"internal", "rate_limited", "quota_exceeded", "storage_full", "over_budget"}
+)
 
 
 def relay_code(code: str) -> str:
@@ -662,7 +667,7 @@ class KnockService:
                     # after a backoff, until the deadline above. rate_limited
                     # is the mailbox's budget: the whole outbox pauses.
                     LOG.info("knock_welcome_retry", code=code)
-                    if code == "rate_limited":
+                    if code in PAUSE_RELAY_ERRORS:
                         raise RateLimitedError(group.group_id, code) from None
                     raise TransientError(group.group_id, code) from None
                 LOG.info("knock_welcome_not_sent", code=code)
@@ -1336,6 +1341,7 @@ class KnockService:
                 }
             store.record_inbox(sender, msg_id, group_id, "done", now)
             await engine.emit(group_id, "joined", **data)
+            await engine.send_capabilities(group_id)
             await engine._send_card(group_id, ["*"])
             return "done"
 

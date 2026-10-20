@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use agentconnect_core::clock::SystemClock;
 use agentconnect_relay::config::Config;
-use agentconnect_relay::{Limits, Relay, Server, SqliteStore, logging, restart};
+use agentconnect_relay::{Relay, Server, SqliteStore, logging, restart};
 use tokio::sync::watch;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -47,7 +47,7 @@ async fn main() -> std::io::Result<()> {
         store,
         Arc::new(SystemClock),
         config.host.clone(),
-        Limits::default(),
+        config.limits(),
     )
     .with_quotas(config.quotas.clone())
     .with_ws_limits(config.ws.clone());

@@ -36,6 +36,9 @@ docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
 | `AC_RELAY_CLIENT_IP_HEADER` | none | The header the reverse proxy writes the client address to: `x-forwarded-for`, or `forwarded` (RFC 7239). Needs `AC_RELAY_TRUSTED_PROXIES`. Required behind a proxy (below). |
 | `AC_RELAY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`127.0.0.1/32`, `::1`) of the reverse proxies whose header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6) are refused. Needs `AC_RELAY_CLIENT_IP_HEADER`. |
 | `AC_RELAY_PROXY_HOPS` | `1` | How many proxies append to the header: the client is the entry this many places from the right. Needs `AC_RELAY_CLIENT_IP_HEADER`. |
+| `AC_RELAY_NON_MEMBER_QUEUE_BYTES` | `16777216` (16 MiB) | Per-mailbox queue for traffic from non-members, kept apart from the 64 MiB queue for group traffic (below). |
+| `AC_RELAY_SENDER_BUDGET_BYTES` | `134217728` (128 MiB) | Bytes of undelivered messages one sender may have stored, and half of it in one group. Each payload counts once, however many mailboxes it goes to, until the last of them acks it, is removed from the group, or it expires. |
+| `AC_RELAY_STORAGE_HIGH_WATER_BYTES` | `4294967296` (4 GiB) | Storage high-water mark, in bytes of database pages in use. Set it below the free space of the database's volume, less the 64 MiB reserve for commits that add nobody and room for the WAL and a migration. |
 | `AC_RELAY_METRICS_ADDR` | `127.0.0.1:9091` | The operator's listener: `/metrics` and `/healthz`. The public listener has no `/metrics`. In a container, set it to an address only your monitoring network reaches. Two relays on one host collide on the default port, and a relay that can't bind it exits at start: give each its own. |
 | `RUST_LOG` | `info` | `tracing` filter for the relay's own logs (below). |
 
@@ -295,6 +298,9 @@ counted as frames.
 | `read_bytes_held` | gauge | Bytes read from WebSocket clients and not yet handed on as whole messages. |
 | `drain_bytes_total` | counter | Bytes of queued messages other than knocks sent to connections, on reconnect and live. |
 | `drain_bytes_loaded` | gauge | Bytes of queued messages other than knocks loaded into memory for sending now. |
+| `storage_bytes` | gauge | Bytes of database pages in use, as of the last purge (every minute). It counts stored knocks too, as one total with everything else. |
+| `storage_high_water_bytes` | gauge | The storage high-water mark (`AC_RELAY_STORAGE_HIGH_WATER_BYTES`). |
+| `storage_full` | gauge | 1 while new messages are refused with `storage_full`, else 0. |
 
 ## Doors and knocks (ADR-006)
 
@@ -325,10 +331,12 @@ nothing else: no door key, no listing, no card text.
   knocks, at most 64 from one source and 16 for one door; past any of them
   a knock is dropped behind its `accepted`, like one to a busy door). A single worker writes the queue every 250 ms, so neither the
   answer nor the store's load right after it depends on whether the knock
-  was forwarded. What remains: the worker's write at its next tick takes
-  store time only for a forwarded knock, and a knocker that keeps measuring
-  the store's latency across that tick can tell (with a 60,000-message owner
-  queue, about 46 ms against 7 ms). A knock answered `accepted` is held in
+  was forwarded. The worker's write at its next tick takes store time only
+  for a forwarded knock, but the queue checks are counters, so that time no
+  longer grows with the owner's queue: a knocker that keeps measuring the
+  store's latency across the tick tells forwarded from dropped at chance
+  (45% to 60% on the review's probe with a 60,000-message owner queue,
+  against 95% before the counters). A knock answered `accepted` is held in
   memory until that tick, so a crash can lose it; `accepted` for a knock
   was never a delivery promise.
 - Answers: `door_not_open` for an unknown, expired or closed door;
@@ -375,22 +383,109 @@ nothing else: no door key, no listing, no card text.
 - Commits fan out to the members from before the commit (including the sender
   and any member the commit removes); members added by the commit receive a
   Welcome instead. After the commit, removed mailboxes receive nothing new.
-- A full mailbox queue (64 MiB) never blocks a fan-out: every recipient with
-  room gets the message and the sender gets `accepted`. A recipient without
-  room gets one `queue_overflow` frame per overflow episode
+- A mailbox's queue has two parts. Group traffic of a group the mailbox has
+  sent in goes to a 64 MiB part. Everything from non-members goes to a
+  separate part (`AC_RELAY_NON_MEMBER_QUEUE_BYTES`): Welcomes, join
+  requests, knocks, and the traffic of a group the mailbox was added to
+  but hasn't sent in yet (the relay can't tell a real joiner from a
+  mailbox named in a stranger's routing hints until it sends; the daemon
+  sends `control.capabilities` right after joining, whatever its
+  adapters, so this lasts moments). Within each part, one group holds at
+  most half (join requests and knocks together count as one group). So a
+  stranger who knows a mailbox id can fill half of the non-member part,
+  and a co-member half of the group part, never the rest; two hostile
+  groups can fill a part between them, and then every group that loses
+  messages gets its own marker (below).
+- A full queue part never blocks a fan-out of group traffic: every
+  recipient with room gets the message and the sender gets `accepted`. A
+  recipient without room gets one `queue_overflow` frame per overflow
+  episode, and an episode is per (mailbox, part, group), so every group
+  that loses messages is told
   (`{"t":"queue_overflow","group_id","msg_id","epoch"}`, naming the first
   dropped message). It is cleared by acking that `msg_id`, and the episode
-  ends once the queue has room again. A `join` to a full inviter queue still
-  gets `quota_exceeded`.
+  ends once the group's share has room again. Markers may exceed a part's
+  cap by 256 KiB (about 1,700 of them); a drop past that goes unmarked. A
+  `join` to a full inviter queue gets `quota_exceeded`, and so does a
+  Welcome: it is queued for all of its recipients or none, and the sender
+  tries again later.
+- A Welcome goes only to mailboxes that an accepted commit of its sender
+  added (`routing.add`) and that haven't had their Welcome: one Welcome per
+  Add, within the message TTL, and none once the mailbox is removed again.
+  Anything else is `bad_request`. A Welcome's `ct` is at most 256 KiB
+  decoded and a `join_request`'s at most 16 KiB (`too_large`). The largest
+  Welcome a group sends, for its fiftieth member once every member has
+  committed an update path (the full ratchet tree), is about 147 KB; a
+  JoinRequest is about 4.2 KB. A nightly test checks both.
+- Each payload is stored once and every recipient's queue row refers to
+  it; each recipient's queue is still charged its full size. Past its
+  budget (`AC_RELAY_SENDER_BUDGET_BYTES`, in all, and half of it in one
+  group) a sender's messages are refused with `over_budget` until
+  recipients ack, are removed, or the messages expire. When a commit
+  removes a member, the senders are no longer charged for what is still
+  queued for it in that group, before the commit itself is judged; the
+  messages stay queued for it until it acks them or they expire, so a
+  forged remove hint can release charges but never deletes anyone's
+  messages. The half-share rule means one group's queued messages for a
+  mailbox is at most 32 MiB of its group part (8 MiB of its non-member
+  part), and one sender's undelivered messages in one group at most
+  64 MiB of its budget. Knocks are not charged to
+  their sender, so the budget can't tell a knocker when the owner acked
+  its knock; joins and group traffic are, so a sender can learn by
+  probing its budget when its slowest recipient fetched a message.
+- At or above the storage high-water mark, every new message is refused
+  with `storage_full` ("relay storage is above its high-water mark").
+  Acks, the purge, invite and door requests and `group.create` go on, and
+  a knock is still answered `accepted` and dropped. A commit that adds
+  nobody (an Update, a removal, a policy change) with a `ct` of at most
+  128 KiB may still use a 64 MiB reserve above the mark, charged to its
+  sender's budget: a group can shed a member and renew its keys while the
+  relay is full. The largest such commit measured, an Update in a sparse
+  50-member tree, is about 67 KB. Adds and messages wait, and once the
+  reserve is used up so do Updates, which delays post-compromise security
+  for as long as the relay stays full. The daemon treats `storage_full`
+  and `over_budget` as "not now": it keeps the message or commit queued
+  and sends it again after a backoff (`storage_full` pauses every group,
+  `over_budget` only the group refused), however long it takes.
+- The mark is one switch for the whole relay, and mailboxes are free:
+  about 32 throwaway mailboxes at the default budget reach a 4 GiB mark.
+  Put connection and request limits per source address, and DDoS
+  protection, in front of a public relay, and size the mark so the
+  reserve, the WAL and a migration fit the free space.
 - `msg_id` idempotency is scoped to the sender and lasts as long as the
   message TTL (7 days). A rejected send does not consume its `msg_id`.
 - `group.create` and `invite.consume` echo an optional client-supplied
   `msg_id` (up to 64 characters) in their `accepted` or `error` reply, and
   otherwise the group or invite id. `epoch_conflict` errors carry
   `current_epoch`.
-- The SQLite store uses a single connection, so every operation is serialised.
-  The `Store` trait keeps each decision (commit ordering, invite use, quota,
-  idempotency) a single atomic call so a Postgres backend can replace it.
+- The SQLite store writes through a single connection, so every write is
+  serialised; queue drains and lookups use up to four read-only
+  connections, which in WAL mode neither wait for the writer nor hold it
+  up. Quotas are byte counters kept in the transaction that changes the
+  queue, so no check scans a queue, and acks use an index on
+  `(mailbox, msg_id)`. The `Store` trait keeps each decision (commit
+  ordering, invite use, quota, idempotency) a single atomic call so a
+  Postgres backend can replace it.
+- Deleted rows are overwritten (`secure_delete`), and the purge, every
+  minute, ends with a truncating WAL checkpoint, so acked or expired
+  ciphertext doesn't stay readable in the database files. The cost is in
+  the deletes: removing a payload writes about twice its size again
+  (about 4% more bytes written for a 1 KB message, 50% for 16 KB, eight
+  times for 256 KB, measured per acked message on a 3-member group), so a
+  sender that sends and fetches its own large messages makes the relay
+  write about three times what it receives; only the send rate bounds it.
+  The purge deletes expired messages 16 MiB at a time, with a passive WAL
+  checkpoint and a yield to waiting writes between batches.
+- Migration `0005` converts an existing database in place, in one
+  transaction: the relay serves nothing until it is done, and it needs
+  about the size of the queued messages in free space (it copies each
+  envelope before it drops the old table). Queued messages keep their
+  order and each becomes its own payload, charged to its sender (a sender
+  with many fan-outs from before the upgrade may start over its budget
+  until they are fetched or expire; knocks are charged to nobody, as new
+  ones are). Welcomes, join requests and knocks already queued count as
+  non-member traffic, and existing members count as members. A Welcome
+  for an Add committed before the upgrade is refused (`bad_request`), so
+  that joiner needs a new invite.
 
 ## Testing
 
@@ -400,7 +495,11 @@ pacing) run on a manual timer (`timer::ManualTimer`) that a test advances,
 and `tests/ws_limits.rs` drives slow readers over in-memory connections with
 a small buffer. `tests/trace_logs.rs` runs the binary at `RUST_LOG=trace`.
 The same limits on real time and the binary's memory under 20 stalled
-connections (`tests/limits_int.rs`) run in `just test-int`. `relay/fuzz/` holds `cargo-fuzz` targets for the frame parser and the
+connections (`tests/limits_int.rs`) run in `just test-int`. The load tests in `tests/load.rs` (sender budget, a relay with
+full queues under a flood, a purge of large expired messages) are ignored
+there and run with `just nightly-relay-load` in the nightly tier, with the
+core test that the largest Welcome, JoinRequest and reserve commit fit the
+caps. `relay/fuzz/` holds `cargo-fuzz` targets for the frame parser and the
 `knock` frame (nightly toolchain, not part of `just test`):
 
 ```sh

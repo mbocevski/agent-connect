@@ -289,6 +289,14 @@ async def test_a_dead_replica_is_removed_by_its_own_identity(
 
 async def test_the_update_threshold_is_drawn_per_instance_and_epoch(group: GroupFixture) -> None:
     (a, b), gid = await group(2)
+    # b's control.capabilities, sent as it joined, counts toward the
+    # threshold: let it arrive before the count is set.
+    await a.wait(
+        lambda: any(
+            r["kind"] == "control.capabilities" and r["sender"] == b.me
+            for r in a.daemon.store.audit(gid)
+        )
+    )
     epoch = a.epoch(gid)
     threshold = update_threshold(gid, epoch, instance_of(a))
     assert 900 <= threshold <= 1000

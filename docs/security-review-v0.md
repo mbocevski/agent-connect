@@ -67,8 +67,8 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; the rest open, follow-up task |
-| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 partly fixed in #74; SR-19 fixed in #71; the rest open, follow-up task |
+| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); the rest open, follow-up task |
+| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
@@ -106,11 +106,11 @@ relay is offered to the public:
 
 1. SR-01 (fixed in #67).
 2. SR-02 (fixed in #71).
-3. SR-03, SR-04 and SR-07 (disk exhaustion and forced re-syncs by a
-   stranger; SR-07 fixed in #71).
+3. SR-03 and SR-04 (fixed in #73), and SR-07 (fixed in #71) (disk
+   exhaustion and forced re-syncs by a stranger).
 4. SR-05, SR-06 and SR-13 (one connection stalls the relay; memory
    exhaustion; no connection caps or timeouts). SR-06, SR-13 and SR-05's
-   frame rate limit fixed in #74.
+   frame rate limit fixed in #74, the rest of SR-05 in #73.
 5. SR-14 (trace logs carry `ct` and client addresses, against
    `relay/README.md`). Fixed: the relay in #74, the directory in #77.
 
@@ -244,7 +244,19 @@ in memory; drop the global refusal from SPEC §8.1.1.
   copies stay for 7 days because nobody acks for invented mailboxes.
 - **Component:** relay (`proto.rs:238-248`, `sqlite.rs:145-206`,
   `sqlite.rs:506-508`, `store.rs:88`).
-- **Status:** open (T-03).
+- **Status:** fixed in #73. Each payload is stored once and referenced by
+  every recipient's queue row. A Welcome goes only to mailboxes an
+  accepted commit of its sender added (the relay already sees
+  `routing.add`), once each, and its `ct` is at most 256 KiB. A sender
+  may have 128 MiB of undelivered payloads stored, half of it in one
+  group (`over_budget`), and above a storage high-water mark (4 GiB by
+  default, on `/metrics`) new messages are refused (`storage_full`).
+  Commits that add nobody, with a `ct` of at most 128 KiB, may use a
+  64 MiB reserve above the mark, charged to the budget like everything
+  else. The bounds are per mailbox: with free mailboxes and no per-address
+  limits (SR-13) a Sybil can still reach the mark, which then refuses
+  everyone's messages until enough is fetched or expires (SPEC §12, "A
+  full relay's storage").
 - **Confirmed.**
 
 `welcome_wrapped.to` takes any 1 to 50 well-formed mailbox ids, and the
@@ -264,7 +276,16 @@ Welcome's `ct`; add a byte budget per sender and a disk high-water mark.
   group it is in (SPEC §8.3 overflow rule).
 - **Component:** relay (as SR-03; one 64 MiB queue per mailbox for every
   kind).
-- **Status:** open (T-04).
+- **Status:** fixed in #73. Non-member traffic (Welcomes, joins, knocks,
+  and the traffic of a group the mailbox hasn't sent in yet, since
+  `routing.add` can name any mailbox) has its own 16 MiB part of each
+  queue. In each part one group holds at most half, and overflow episodes
+  and markers are per group, so every group that loses messages is told.
+  The daemon sends `control.capabilities` right after joining, so its
+  group traffic leaves the non-member part at once. A Welcome that doesn't
+  fit is refused instead of dropped. Residual: two hostile groups can fill
+  a part between them (each loss is marked), and past a 256 KiB reserve of
+  markers per part a drop goes unmarked.
 - **Confirmed.**
 
 Welcomes, joins and group traffic share the recipient's queue. Probe: with
@@ -284,8 +305,11 @@ Fix: a separate sub-quota for traffic from non-members (`welcome_wrapped`,
   by two to three orders of magnitude.
 - **Component:** relay (`sqlite.rs:65-71`, `sqlite.rs:113-126`,
   `sqlite.rs:607-614`, `relay.rs:555-560`, `ws.rs:374-381`).
-- **Status:** open (T-05). The per-connection frame rate limit is fixed in
-  #74; the byte counter and the `(mailbox, msg_id)` index are open.
+- **Status:** fixed: the per-connection frame rate limit in #74, the rest
+  in #73. Quotas are counters kept in the queue's transaction, acks use an
+  index on `(mailbox, msg_id)`, drains and lookups use read-only WAL
+  connections, and the purge deletes expired messages 16 MiB a
+  transaction.
 - **Confirmed.**
 
 Every recipient of every send runs `SUM(size) … WHERE mailbox = ? AND
@@ -517,9 +541,9 @@ store written the old way.
 | SR-13 | relay | No connection caps, no header-read timeout (axum sets no hyper timer), no WebSocket ping or idle timeout after authentication. Unauthenticated sockets are closed after 10 s, as they should be. | `main.rs:39-52`, `ws.rs:365-396`. Probe: unfinished headers held for 40 s; an idle authenticated socket held for 45 s. Confirmed. | Fixed in #74 |
 | SR-14 | relay, directory | At `RUST_LOG=trace`, `tungstenite` logs whole frames (`ct`, every id) and `axum::serve` logs client addresses; `relay/README.md` says logs never contain `ct`. The directory's filter clamps only `rmcp`, so it logs client addresses at trace too. Debug and info are clean. | `relay/src/main.rs:15-17`, `directory/src/lib.rs:37-40`. Probe: `TRACE tungstenite::protocol: Received message {"t": "send", "env": {... "ct": ...}}`. Confirmed. | Fixed in #74 (relay) and #77 (directory) |
 | SR-15 | relay | `connected` and `disconnected` lines log the mailbox tag next to the knock lines, and tags are an unkeyed 32-bit hash prefix, so anyone holding an id can find it. SPEC §8.3: knock paths log no identifier, hashed or not. `door_log_privacy.rs` doesn't go through `ws.rs`. | `ws.rs:125`, `ws.rs:174`, `proto.rs:43-50`. Confirmed in probe logs. | Fixed in #74 |
-| SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Partly fixed in #74 (residual, T-16) |
-| SR-17 | relay | Join requests have only the 2 MiB frame cap, and the per-invite budget of 10 a minute is shared by anyone who knows the public `invite_id`: junk joins fill the inviter's queue in about 3.5 minutes and use up the real joiner's budget. | `relay.rs:756-827`, `proto.rs:249`. Confirmed. | Open (T-17) |
-| SR-18 | relay | Deleted rows stay in the database file: `secure_delete` is off, so acked ciphertext and expired door mappings remain readable on disk. | `sqlite.rs:59-64`. Probe found acked ciphertext in the file after a checkpoint. Confirmed. | Open (T-18) |
+| SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Fixed in #74, the residual in #73 (T-16) |
+| SR-17 | relay | Join requests have only the 2 MiB frame cap, and the per-invite budget of 10 a minute is shared by anyone who knows the public `invite_id`: junk joins fill the inviter's queue in about 3.5 minutes and use up the real joiner's budget. | `relay.rs:756-827`, `proto.rs:249`. Confirmed. | Fixed in #73: `ct` at most 16 KiB, joins charged to the inviter's non-member queue |
+| SR-18 | relay | Deleted rows stay in the database file: `secure_delete` is off, so acked ciphertext and expired door mappings remain readable on disk. | `sqlite.rs:59-64`. Probe found acked ciphertext in the file after a checkpoint. Confirmed. | Fixed in #73: `secure_delete`, and a truncating WAL checkpoint every minute |
 | SR-19 | relay, web | Invite registration rejects only Cc characters, so bidi controls and zero-width characters in `group_name`, `inviter_name` and `purpose` reach the landing page unaltered (escaped, but reordering what the human reads). The CLI already replaces them. | `relay.rs:374-380`, `landing.rs:29-41`. Probe: U+202E accepted and rendered raw. Confirmed. | Fixed in #71: the three fields must be one-line text (SPEC §4.2, §13.1.2). |
 | SR-20 | directory | `/search` and MCP `search_agents` results omit the verbatim signed listing that SPEC §13.2.6 requires in machine-readable results; only `get_card` has it. | `api.rs:24-61`, `http.rs:273-283`, `mcp.rs:93-110`. Confirmed. | Open (T-20) |
 | SR-21 | directory | The client's HTTP method is logged verbatim at info, so any client can write arbitrary text (an address, a name) into the logs. | `http.rs:682`, `http.rs:714`. Probe: `method=ME-203.0.113.9-alice`. Confirmed. | Open (T-21) |
@@ -768,8 +792,9 @@ another leaf's `instance_id`.
   dropped knocks look the same in the metrics, and the owner's checks run
   in the SPEC order. SR-15 and SR-16 leaked a little to the relay's logs and
   to the knocker's timing. #74 fixed the logs and moved the knock's write
-  off its answer's path; a knocker that keeps timing the relay across the
-  next write can still tell (SR-16 residual).
+  off its answer's path; #73's quota counters made the remaining write
+  cheap whatever the owner's queue, so timing the relay across it tells
+  nothing (SR-16 residual).
 - **Replay ledger.** 65,536 entries; through an honest relay a flooder
   can deliver at most about 2,600 knocks per mailbox in 65 minutes, so it
   can't fill it. A malicious relay can, which is relay denial of service.
@@ -789,9 +814,12 @@ What it stores, and for how long:
 | `invites` | `invite_id`, `group_name`, `inviter_name`, `purpose`, `expires_at`, `max_uses`, `uses_left`, `member_count`, `inviter_mailbox`, `revoked`, `created_at` | `expires_at` + 7 days |
 | `groups` | `group_id`, `epoch`, `created_at`, `active_at` | until idle for 30 days with no member connected (SR-43, fixed in #71) |
 | `group_members` | `group_id`, `mailbox` | until a commit's `routing.remove` names it, or its group is deleted |
-| `messages` | `seq`, `mailbox`, `msg_id`, `size`, `expires_at`, `marker`, `env` (the envelope with `ct`) | until acked, at most 7 days |
+| `messages` | `seq`, `mailbox`, `msg_id`, `payload`, `group_id`, `size`, `bucket`, `expires_at`, `marker` | until acked, or at most 7 days |
+| `payloads` | `id`, `sender`, `group_id`, `size`, `env` (the envelope with `ct`) | until its last queue row goes (since #73) |
+| `mailbox_usage`, `group_usage`, `sender_usage`, `sender_group_usage` | byte counters per mailbox queue part, per (mailbox, part, group), per sender and per (sender, group) | while non-zero (since #73) |
+| `welcome_due` | `group_id`, `mailbox`, `added_by`, `expires_at` | until the Welcome, a removal or 7 days (since #73) |
 | `seen` | `sender`, `msg_id`, `expires_at` | 7 days |
-| `overflow` | `mailbox` | until the next enqueue that fits |
+| `overflow` | `mailbox`, `bucket`, `group_id` | until the next enqueue for that group that fits |
 | `doors` | `door_id`, `owner_mailbox`, `expires_at`, `closed`, `created_at` | until `expires_at` |
 | memory | rate windows, the signed-request cache, live connections | seconds to 1 hour |
 
@@ -1004,12 +1032,12 @@ One line per open item, ready to file.
 - **T-02 (Medium, SR-02):** (done in #71) Relay: record signed REST requests only after
   validation, give each mailbox a bounded share of the replay cache, limit
   per source address, and drop the global refusal from SPEC §8.1.1.
-- **T-03 (Medium, SR-03):** Relay: store each payload once, accept Welcomes
+- **T-03 (Medium, SR-03, fixed in #73):** Relay: store each payload once, accept Welcomes
   only for mailboxes the group's last commit added, cap Welcome `ct`, add a
   per-sender byte budget and a disk high-water mark.
-- **T-04 (Medium, SR-04):** Relay: give non-member traffic (Welcome, join,
+- **T-04 (Medium, SR-04, fixed in #73):** Relay: give non-member traffic (Welcome, join,
   knock) its own per-mailbox sub-quota.
-- **T-05 (Medium, SR-05):** Relay: per-mailbox byte counter (or covering
+- **T-05 (Medium, SR-05, fixed in #73 and #74):** Relay: per-mailbox byte counter (or covering
   index), index on `(mailbox, msg_id)`, per-connection frame rate limit
   (the frame rate limit is done in #74).
 - **T-06 (Medium, SR-06):** Relay: cap drain batches by bytes, cap
@@ -1042,13 +1070,14 @@ One line per open item, ready to file.
   enqueue. Partly done in #74: the answer goes first and knocks are written
   by a worker on a 250 ms tick, forwarded and dropped alike, so the next
   frames' timing is at chance (52% on the review's probes, with a small and
-  a 60,000-message owner queue). Open: a knocker probing continuously across
-  the next tick still sees the write (46 ms against 7 ms with the large
-  queue); closing it needs the dropped path to cost the same in the store,
-  which the SR-05 quota counter would make cheap.
-- **T-17 (Low, SR-17):** Relay: cap `join_request` `ct` and count joins in
+  a 60,000-message owner queue). The residual, a knocker probing
+  continuously across the next tick seeing the write (46 ms against 7 ms
+  with the large queue), is gone with #73's quota counters: the same probe
+  tells the two apart at chance (45% to 60% single-shot accuracy, against
+  95% to 98% on main before it, on the same machine).
+- **T-17 (Low, SR-17, fixed in #73):** Relay: cap `join_request` `ct` and count joins in
   the non-member sub-quota.
-- **T-18 (Low, SR-18):** Relay: `secure_delete` and periodic WAL
+- **T-18 (Low, SR-18, fixed in #73):** Relay: `secure_delete` and periodic WAL
   checkpoints.
 - **T-19 (Low, SR-19):** (done in #71) Relay: apply the one-line text rule to
   `InviteMeta` strings at registration (SPEC §4.2).

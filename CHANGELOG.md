@@ -81,6 +81,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   limits share the relay out between sources; an attacker with many
   addresses can still fill the total caps (SPEC §12), so deploy a public
   relay behind connection-level DDoS protection.
+- Relay: `AC_RELAY_NON_MEMBER_QUEUE_BYTES`, `AC_RELAY_SENDER_BUDGET_BYTES`
+  and `AC_RELAY_STORAGE_HIGH_WATER_BYTES` (relay/README.md), the error
+  codes `storage_full` and `over_budget` (SPEC §8.4), and the gauges
+  `agentconnect_relay_storage_bytes`,
+  `agentconnect_relay_storage_high_water_bytes` and
+  `agentconnect_relay_storage_full` on `/metrics`. The relay's load tests,
+  and a core test that the largest Welcome, JoinRequest and reserve commit
+  fit the relay's caps, run in the nightly tier
+  (`just nightly-relay-load`).
 - Runtime, daemon and CLI: a group delivers its messages and events to
   several adapters (docs/config.md, "Several adapters"), such as the A2A
   facade next to a webhook agent, whose replies the facade never saw
@@ -1440,6 +1449,53 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   answer now goes out first, and both kinds are queued alike and written on
   the relay's own clock. A knocker that keeps timing the relay across the
   next write can still tell (SPEC §12).
+- Relay: hardened mailbox storage for a public deployment (security review
+  SR-03, SR-04, SR-05, SR-17, SR-18).
+  - A payload sent to several mailboxes is stored once and each queue row
+    refers to it; one Welcome to 50 mailboxes used to write 50 copies.
+  - A Welcome goes only to mailboxes an accepted commit of its sender
+    added and that haven't had theirs (`bad_request` otherwise), its `ct`
+    is at most 256 KiB and a `join_request`'s at most 16 KiB
+    (`too_large`).
+  - Traffic from non-members (Welcomes, join requests, knocks, and the
+    traffic of a group a mailbox hasn't sent in yet) has its own 16 MiB
+    part of each mailbox queue, and within each part one group holds at
+    most half, so neither a stranger who knows a mailbox id nor one
+    co-member can take a part from the mailbox's other groups. Overflow
+    episodes and their markers are per group, so every group that loses
+    messages is told. A Welcome a recipient can't take is refused with
+    `quota_exceeded` instead of dropped.
+  - Each sender may have 128 MiB of undelivered messages stored, and half
+    of it in one group, so members that never ack in one group can't stop
+    it everywhere; over it, sends get the new code `over_budget`. When a
+    commit removes a member, the senders are no longer charged for what is
+    still queued for it in that group, before the commit itself is judged,
+    so the removal is never refused for that budget; the messages stay
+    queued until acked or expired, so a forged remove hint deletes
+    nothing.
+  - Past a storage high-water mark (4 GiB by default) new messages get the
+    new code `storage_full`. Commits that add nobody (Updates, removals,
+    policy changes), with a `ct` of at most 128 KiB, may use a 64 MiB
+    reserve above it, charged to the sender's budget.
+  - Quotas are byte counters kept in the same transaction as the queue,
+    acks use an index on `(mailbox, msg_id)`, and queue drains and lookups
+    read through their own read-only connections, so one client's traffic
+    to full mailboxes no longer stalls the relay.
+  - Deleted rows are overwritten (`secure_delete`) and the WAL is
+    checkpointed and truncated every minute, so acked ciphertext doesn't
+    stay readable in the database files. Expired messages are deleted
+    16 MiB at a time, so a large expiry no longer holds the writer for
+    seconds.
+  - Existing databases migrate in place (`0005_storage_quotas.sql`, one
+    transaction that needs about the queued messages' size in free space);
+    a Welcome for an Add committed before the upgrade is refused.
+- Daemon: `storage_full` and `over_budget` are "not now" (SPEC §8.4): the
+  message or commit, a cadence Update included, stays queued and is sent
+  again after a backoff, however long it takes, without counting as a try
+  (`storage_full` pauses every group, `over_budget` only the group
+  refused). Right after joining, every instance sends
+  `control.capabilities` (SPEC §7.3) to the group, whatever its adapters,
+  so the relay counts the group's traffic to it as member traffic.
 - A2A adapter: deliveries were deduplicated by `msg_id` alone, so a member
   that sent a message under another member's `msg_id` first made the
   adapter skip the other member's message as a redelivery. They are now

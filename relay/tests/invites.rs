@@ -251,7 +251,7 @@ async fn joins_are_limited_to_ten_per_minute_per_invite() {
 #[tokio::test]
 async fn inviter_queue_quota_applies_to_joins() {
     let h = Harness::with_limits(agentconnect_relay::Limits {
-        queue_max_bytes: 1000,
+        non_member_queue_max_bytes: 1000,
         sends_per_sec: 100_000,
         joins_per_min: 1000,
         ..agentconnect_relay::Limits::default()
