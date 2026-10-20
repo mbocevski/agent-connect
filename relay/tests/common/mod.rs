@@ -14,7 +14,8 @@ use agentconnect_core::clock::FakeClock;
 use agentconnect_relay::auth::{rest_auth_message, ws_auth_message};
 use agentconnect_relay::proto::{b64_decode, b64_encode, mailbox_id_from_key, parse_client_frame};
 use agentconnect_relay::store::Store;
-use agentconnect_relay::{DEFAULT_FRAME_MAX, Limits, Relay, SqliteStore, app};
+use agentconnect_relay::store::Window;
+use agentconnect_relay::{DEFAULT_FRAME_MAX, Limits, Quotas, Relay, SqliteStore, app};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::serve::ListenerExt;
@@ -46,20 +47,24 @@ impl Harness {
     }
 
     pub async fn with_limits(limits: Limits) -> Self {
-        Self::build(limits, None).await
+        Self::build(limits, roomy_quotas()).await
     }
 
-    pub async fn with_replay_cap(cap: usize) -> Self {
-        Self::build(Limits::default(), Some(cap)).await
+    pub async fn with_quotas(quotas: Quotas) -> Self {
+        Self::build(
+            Limits {
+                sends_per_sec: 100_000,
+                ..Limits::default()
+            },
+            quotas,
+        )
+        .await
     }
 
-    async fn build(limits: Limits, replay_cap: Option<usize>) -> Self {
+    async fn build(limits: Limits, quotas: Quotas) -> Self {
         let clock = Arc::new(FakeClock::default());
         let store = SqliteStore::in_memory().await.unwrap();
-        let mut relay = Relay::new(store, clock.clone(), HOST, limits);
-        if let Some(cap) = replay_cap {
-            relay = relay.with_replay_cap(cap);
-        }
+        let relay = Relay::new(store, clock.clone(), HOST, limits).with_quotas(quotas);
         let relay = Arc::new(relay);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -85,6 +90,26 @@ impl Harness {
     /// repeated signed requests are not replays of one another.
     pub fn ts(&self) -> u64 {
         self.now_secs() + NEXT_TS.fetch_add(1, Ordering::Relaxed) % 250
+    }
+}
+
+/// Quotas no ordinary test reaches: tests that care set their own.
+pub fn roomy_quotas() -> Quotas {
+    let roomy = |w: Window| Window { max: 100_000, ..w };
+    let q = Quotas::default();
+    Quotas {
+        rest_per_address: roomy(q.rest_per_address),
+        rest_per_mailbox: roomy(q.rest_per_mailbox),
+        rest_junk_per_address: roomy(q.rest_junk_per_address),
+        replay_per_mailbox: 100_000,
+        replay_max_entries: 1_000_000,
+        open_invites_per_mailbox: 100_000,
+        invites_per_address: 100_000,
+        max_invites: 1_000_000,
+        groups_per_mailbox: roomy(q.groups_per_mailbox),
+        groups_per_address: 100_000,
+        max_groups: 1_000_000,
+        ..q
     }
 }
 

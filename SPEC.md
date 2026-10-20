@@ -299,12 +299,23 @@ receives in the Welcome (§6.3), and MUST abort if they differ.
 Registration limits, enforced by the relay (`bad_request` otherwise):
 
 - `group_name` and `inviter_name` are 1 to 80 characters, `purpose` is 0 to
-  500 characters. None of them may contain control characters. Clients and
-  landing pages MUST treat all three as attacker-controlled text.
+  500 characters. All three are one-line text (§13.1.2): no control,
+  format (bidi controls, zero-width characters), separator or private-use
+  character, and in NFC. Clients and landing pages MUST still treat all
+  three as attacker-controlled text.
 - `1 ≤ max_uses ≤ 1000`, and `expires_at` is in the future and at most 7 days
   away.
 - `member_count` is supplied by the inviter at registration. It is
   informational, is not updated by the relay and MUST NOT be trusted.
+
+By default a mailbox holds at most 50 open invites (not revoked, expired
+or used up), one creation key (an IPv4 address, or an IPv6 /48) at most 500
+invite rows the relay still holds, and the relay at most 100,000 invite
+rows in all (about 300 MB at the longest texts). Near the global cap the
+per-key limit tightens (§8.3, "Creation limits"). Registering another is
+`quota_exceeded`. Mailboxes are free, so the per-key and global limits are
+the bound; the per-key counts are in memory only, and the relay stores no
+address with an invite.
 
 ### 4.3 Rules
 
@@ -930,14 +941,66 @@ and for `POST /v0/doors`, `owner_mailbox` MUST equal it (else
 `auth_failed`).
 
 - The relay MUST reject a request whose `ts` differs from its clock by more
-  than 300 s.
-- Every signed request is **single use**. The relay MUST keep an in-memory
-  cache of the `(mailbox, sig)` pairs it has accepted and reject a repeat
-  with `auth_failed` while `|ts - now| ≤ 300`. An entry expires when its
-  request would no longer pass the `ts` check.
-- The cache MUST be bounded. It first evicts expired entries; if it is still
-  full, the relay MUST reject new signed requests with `rate_limited` and
-  MUST NOT evict a live entry.
+  than 300 s: the **window** is `ts - 300 ≤ now ≤ ts + 300`.
+- **Effects are idempotent.** A signed request applied a second time
+  inside its window changes no row. Registering an invite or a door whose
+  id the relay holds is `bad_request`: a revoked or used-up invite keeps
+  its row until 7 days after its `expires_at`, and a closed door until its
+  `expires_at`. Once a row is gone its `expires_at` has passed, so a
+  repeat of its registration is refused as well. Revoking a revoked
+  invite and closing a closed door change nothing. A relay MUST keep these
+  properties; the cache below is defence in depth on top of them. (A
+  repeat still counts against the rates and quotas below.)
+- **The replay cache.** A request is **verified** once its signature
+  checks out. Before any other work, in one step, the relay checks `ts`
+  against the cache's time (the highest clock reading the cache has seen,
+  so it only moves forward) and records `(mailbox, sig)` in an in-memory
+  cache; a verified request whose pair is there is rejected with
+  `auth_failed`. The request is then **authorized**: the body's
+  `inviter_mailbox` or `owner_mailbox` is the signer, or the invite or
+  door a `DELETE` names exists and belongs to the signer. Whatever the
+  outcome (unauthorized, or refused by a rate, a quota or a field check),
+  the entry stays, so a refused request can't be replayed to succeed
+  later; its retry is a new request. An entry lives until `ts + 300`, when
+  its request stops passing the `ts` check: at most 600 s.
+- The cache is bounded **per mailbox**, 128 live entries by default. The
+  relay MUST NOT evict a live entry: when a mailbox's share is full of
+  live entries, it rejects that mailbox's verified requests with
+  `rate_limited` until one expires, and MUST NOT refuse another mailbox's
+  requests because of it. The cache as a whole holds at most 100,000
+  entries by default (about 60 MB). Past that, verified requests are
+  served without being recorded.
+- **What holds.** Within one relay process, while the cache has room, a
+  verified request is acted on at most once: its entry stays until its
+  `ts` fails the check at the cache's time. Across restarts: a relay that
+  shuts down cleanly records the highest `ts` it let through, and the next
+  process refuses (`rate_limited`) every signed request up to that `ts`.
+  After a crash, with no such record, the next process refuses every signed
+  request whose `ts` is at most its start time plus 300 s. Either way
+  nothing an earlier process let through is let through again, and the
+  refusal carries `retry_after`, the seconds until a fresh `ts` passes.
+  Past the cache's bound requests go unrecorded, and within their window
+  (at most 600 s after the `ts`) one can be acted on twice, or be refused
+  and acted on later from a captured copy. By the idempotency above, a
+  second application changes no row. A late one applies what its signer
+  asked for after the signer was told it failed, such as an invite whose
+  secret the inviter's daemon has dropped. The window bounds both: past
+  it, a captured request fails the `ts` check.
+- **Rates,** held in memory and never logged. Per source address (IPv6
+  per /64): requests whose signature or `ts` fails, in a bucket of their
+  own (default 60 a minute), and verified `POST`s (registrations, default
+  60 a minute). Per mailbox: authorized requests (default 30 a minute).
+  Over any of them the answer is `rate_limited`, and the request isn't
+  acted on. A full bucket of failed requests never refuses a verified
+  one, and revoking an invite or closing a door counts per mailbox only,
+  so a client can't stop others sharing its address from doing either.
+- **Source address.** Behind a reverse proxy the relay counts the address
+  the operator's own proxy reports: the entry of `X-Forwarded-For` (or
+  RFC 7239 `Forwarded`) that the configured hop count names from the
+  right, from a connection out of the configured proxy addresses. Entries
+  a client writes itself are further left and never used. A relay behind
+  a proxy without that configuration counts every client as the proxy's
+  address.
 - A client MUST use a fresh `ts` for each request, so retries are new
   requests. A reverse proxy MUST NOT rewrite the path.
 
@@ -1087,8 +1150,50 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   `uses_left`. The decrement MUST be atomic: of two concurrent consumes of the
   last use, exactly one succeeds.
 - **`group.create`:** the sender becomes the only member at epoch 0. `epoch`
-  MUST be 0, and a `group_id` that already exists is `bad_request`. In v0 the
-  relay never deletes groups.
+  MUST be 0. The relay records the creator: a repeat from the creator's
+  mailbox (its `accepted` was lost) is answered `accepted` and changes
+  nothing, and a `group_id` that already exists otherwise is
+  `bad_request`. By default a mailbox creates at most 100 groups in 24
+  hours, one creation key at most 500 within the idle period below, and
+  the relay holds at most 100,000 groups (up to about 500 MB with 50
+  members each); past any of them, `group.create` is `quota_exceeded`. A
+  member treats `rate_limited` and `internal` as "not now" and sends the
+  frame again later. A member whose `group.create` is refused otherwise
+  holds a group the relay doesn't: it MUST tell its human and MUST NOT
+  register invites for it.
+- **Creation limits** (invites and groups alike): they count per
+  **creation key**, an IPv4 address or an IPv6 /48 (one site; rates keep
+  the /64), in memory only. A key's limit tightens as the relay fills:
+  - Above 75% of the global cap, a key gets at most its fair share: the
+    room left below the reserve, divided among the keys that hold rows,
+    and never less than 3.
+  - The last 5% of the cap is a reserve: only a key holding fewer than 2
+    rows may use it, so a light user can still start a conversation while
+    others hold the rest.
+  - At the cap, nothing is created. An attacker with thousands of /48s or
+    IPv4 addresses (2,500 for the reserve alone, at the defaults) can
+    still fill the cap, reserve included, two rows per key (§12).
+- **Idle groups:** the relay MAY delete a group's state (its epoch and its
+  members) once the group is **idle**: for 30 days by default, no
+  `commit`, `proposal`, `application` or `welcome_wrapped` for it was
+  accepted. The relay MUST NOT delete a group while any of its member
+  mailboxes is connected, and MUST NOT delete one sooner than the idle
+  period after the last accepted send, so a relay that records the time
+  coarsely waits that much longer (the reference relay records it to
+  within an hour, in the same transaction as the send). The idle period
+  MUST be longer than the message TTL (7 days), so nothing is still queued
+  for a group it deletes. It keeps no record of the deleted `group_id`.
+  - After that, every send for the group gets `unknown_group`, as for a
+    group that never existed.
+  - A member that gets `unknown_group` for a group it is in MUST treat the
+    group as gone from the relay: it stops sending to it, tells its human,
+    and MUST NOT re-create it with `group.create` or rejoin it on its own.
+    The group can't be resumed there; its humans start a new one.
+  - Anyone who knows the `group_id` can then register it again; members
+    who come back get `not_member` instead, and SHOULD tell their human.
+    Only members and the relay know a `group_id`, and both can already
+    stop a group (§12), so this adds no attack.
+  - A member learns that the group is gone only when it sends to it.
 - **Storage:** messages are stored until acked by the recipient, or for the
   TTL (7 days), whichever comes first. `msg_id` is idempotent per sender: a
   duplicate `(sender, msg_id)` returns `accepted` and is not fanned out again,
@@ -1101,6 +1206,14 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   - Group size: 50 instances
   - Mailbox queue: 64 MiB (overflow below)
   - Per-mailbox send rate: 50 messages per second
+  - New groups: 100 per mailbox per 24 hours, 500 per creation key per
+    idle period, 100,000 held in all
+  - Invites (§4.2): 50 open per mailbox, 500 rows held per creation key,
+    100,000 rows held in all
+  - Idle groups are deleted after 30 days
+  - Signed REST requests (§8.1.1): per source address 60 failed and 60
+    registrations a minute; 30 a minute per mailbox; 128 live replay-cache
+    entries per mailbox and 100,000 in all
 - **Queue overflow:** a fan-out MUST queue the message for every recipient
   that has room and MUST NOT fail because some recipient is full. The sender
   gets `accepted`, and a commit still advances the epoch. A recipient whose
@@ -1144,10 +1257,12 @@ Mapping of the cases above:
 | Commit that would take a group above 50 instances | `quota_exceeded` |
 | `join` while the inviter's queue is full | `quota_exceeded` |
 | Send from a non-member; welcome from a non-member | `not_member` |
-| Send to a group that does not exist | `unknown_group` |
+| Send to a group that does not exist, or that the relay deleted as idle (§8.3) | `unknown_group` |
 | Envelope `sender` that is not the authenticated mailbox; malformed fields; `group.create` of an existing group | `bad_request` |
 | Replayed signed REST request | `auth_failed` |
-| Replay cache full | `rate_limited` |
+| Signed REST request over a per-address or per-mailbox rate, from a mailbox whose replay-cache share is full of live entries, or signed before a relay restart (§8.1.1) | `rate_limited` |
+| `POST /v0/invites` or `group.create` past a per-mailbox, per-address or relay-wide limit (§4.2, §8.3) | `quota_exceeded` (HTTP 429 on REST) |
+| `POST /v0/invites` whose `group_name`, `inviter_name` or `purpose` isn't one-line text | `bad_request` |
 
 `queue_overflow` is a marker frame (§8.3), not an error code.
 
@@ -2300,7 +2415,7 @@ Implementations in this repository MUST have:
 
 | Attacker | Capability | Mitigation | Residual risk |
 |---|---|---|---|
-| Honest-but-curious relay | Sees all envelopes | MLS E2E; padding | **Metadata:** membership size and churn, timing, message sizes (bucketed), mailbox ids. A SAS run is two short messages from each of two members within seconds, so the relay can guess when members compare codes |
+| Honest-but-curious relay | Sees all envelopes | MLS E2E; padding | **Metadata:** membership size and churn, timing, message sizes (bucketed), mailbox ids. It keeps each group's member mailboxes until the group has been idle for 30 days (§8.3). A SAS run is two short messages from each of two members within seconds, so the relay can guess when members compare codes |
 | Malicious relay without the invite link | Drops, delays, reorders, replays, injects, forks | Join requires the invite MAC and the AEAD-wrapped Welcome; single-use KeyPackages and the inviter's replay record stop JoinRequest replays (§6.2); MLS signatures and epochs; replay protection via generation counters and `msg_id`; own commits confirmed only by `msg_id` or exact bytes (§8.3); routing-hint checks; SAS runs detect forks, as different codes or as runs that never pair (§11) | Denial of service, SAS runs included; forking that goes undetected if the SAS isn't compared, and with probability at most about 2^-42 (emoji) or 2^-39 (decimal) per SAS run if it is (§11.6) |
 | **Link leaked before use** (chat/email provider, inbox access, LLM logs, tampered landing page) | Joins as a member | Use limits and the "already used" warning; inviter approval; **SAS** | **Becomes a member if approved. Full MITM if the relay colludes and the SAS isn't compared**, and with probability at most about 2^-42 (emoji) or 2^-39 (decimal) per SAS run if it is (§11.6) |
 | Link leaked after exhaustion or expiry | — | The secret only authenticates joins | None |
@@ -2344,6 +2459,16 @@ as long as the keystore isn't copied with it. It does not protect against
 an attacker who can read the daemon's memory or its keystore; for that
 attacker the residual risk above applies. File size and modification times
 stay visible.
+
+**A full relay.** Creations are limited per mailbox, per creation key (an
+IPv4 address or an IPv6 /48) and in all (§8.3, "Creation limits"), so the
+disk a relay spends on invites and groups is bounded whatever the number of
+mailboxes. The global caps are still a shared resource: an attacker with
+thousands of /48s or IPv4 addresses (2,500 for the reserve alone, at the
+defaults) can fill them, reserve included, and until the rows age out nobody
+on that relay can register an invite or a group. That is denial of service,
+which v0 doesn't aim to prevent (below); it costs the attacker one address
+per two rows of the reserve.
 
 **Dropped messages and queue overflow.** A malicious relay can always drop,
 delay or withhold messages; `queue_overflow` does not prevent that and a

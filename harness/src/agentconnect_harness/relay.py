@@ -92,6 +92,12 @@ def run_relay(tmp: Path) -> Generator[RelayProcess]:
             "AC_RELAY_ADDR": f"127.0.0.1:{port}",
             "AC_RELAY_HOST": f"127.0.0.1:{port}",
             "AC_RELAY_DB": str(tmp / f"relay-{port}.db"),
+            # Every node reaches the relay from loopback, so the per-address
+            # limits would be shared by the whole session (SPEC 8.1.1, 8.3).
+            "AC_RELAY_REST_PER_ADDRESS_PER_MIN": "100000",
+            "AC_RELAY_REST_JUNK_PER_ADDRESS_PER_MIN": "100000",
+            "AC_RELAY_INVITES_PER_ADDRESS": "100000",
+            "AC_RELAY_GROUPS_PER_ADDRESS": "100000",
             "RUST_LOG": "info",
             "NO_COLOR": "1",
         }

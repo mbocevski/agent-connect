@@ -1,17 +1,19 @@
-//! REST endpoints (SPEC §8.1) and the door registry (ADR-006).
+//! REST endpoints (SPEC §8.1), signed requests (SPEC §8.1.1) and the door
+//! registry (ADR-006).
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::Serialize;
 
-use crate::auth::verify_rest_auth;
-use crate::proto::ErrorCode;
+use crate::auth::{RestCredentials, verify_rest_auth};
+use crate::proto::{ErrorCode, is_mailbox_id};
 use crate::relay::{NewDoorRequest, NewInviteRequest, Relay, RelayError};
 use crate::store::{InviteRecord, Store};
 
@@ -65,60 +67,127 @@ impl From<RelayError> for RestError {
 struct ErrorBody<'a> {
     code: &'a str,
     detail: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after: Option<u64>,
 }
 
 impl IntoResponse for RestError {
     fn into_response(self) -> Response {
         let status = StatusCode::from_u16(self.0.code.http_status())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (
-            status,
-            Json(ErrorBody {
-                code: self.0.code.as_str(),
-                detail: &self.0.detail,
-            }),
-        )
-            .into_response()
+        let body = Json(ErrorBody {
+            code: self.0.code.as_str(),
+            detail: &self.0.detail,
+            retry_after: self.0.retry_after,
+        });
+        match self.0.retry_after {
+            Some(secs) => (status, [(header::RETRY_AFTER, secs.to_string())], body).into_response(),
+            None => (status, body).into_response(),
+        }
     }
 }
 
-fn authenticate<S: Store>(
+/// A signed request whose signature verified and whose `(mailbox, sig)`
+/// pair is claimed in the replay cache (SPEC §8.1.1), not yet authorized.
+struct Verified {
+    creds: RestCredentials,
+    /// The client address the per-address limits count by.
+    ip: Option<IpAddr>,
+}
+
+impl Verified {
+    fn mailbox(&self) -> &str {
+        &self.creds.mailbox
+    }
+}
+
+fn denied(detail: &str) -> RestError {
+    RestError(RelayError::new(ErrorCode::AuthFailed, detail))
+}
+
+/// Check the signature and timestamp, then claim the request in the
+/// replay cache, with nothing awaited in between. A request whose
+/// signature fails counts in its address's bucket for such requests and
+/// claims nothing.
+fn verify<S: Store>(
     relay: &Relay<S>,
+    peer: Option<&ConnectInfo<SocketAddr>>,
     headers: &HeaderMap,
     method: &Method,
     uri: &Uri,
     body: &[u8],
-) -> Result<String, RestError> {
-    let denied = |d: &str| RestError(RelayError::new(ErrorCode::AuthFailed, d));
-    let value = headers
+) -> Result<Verified, RestError> {
+    let ip = relay.client_ip(peer.map(|c| c.0.ip()), headers);
+    let checked = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| denied("missing Authorization header"))?;
-    let creds = verify_rest_auth(
-        value,
-        method.as_str(),
-        uri.path(),
-        body,
-        relay.host(),
-        relay.now_secs(),
-    )
-    .map_err(denied)?;
-    // Signed requests are single use (SPEC 8.1).
-    relay.check_replay(&creds)?;
-    Ok(creds.mailbox)
+        .ok_or("missing Authorization header")
+        .and_then(|value| {
+            verify_rest_auth(
+                value,
+                method.as_str(),
+                uri.path(),
+                body,
+                relay.host(),
+                relay.now_secs(),
+            )
+        });
+    let creds = checked.map_err(|d| {
+        RestError(relay.refuse_unverified(ip, RelayError::new(ErrorCode::AuthFailed, d)))
+    })?;
+    relay.claim_signed(&creds)?;
+    Ok(Verified { creds, ip })
+}
+
+/// The body names the signer as the invite's inviter or the door's owner
+/// (`field`), else `auth_failed`; a malformed mailbox is `bad_request`.
+fn names_signer(v: &Verified, mailbox: &str, field: &str) -> Result<(), RestError> {
+    if !is_mailbox_id(mailbox) {
+        return Err(RestError(RelayError::new(
+            ErrorCode::BadRequest,
+            format!("malformed {field}"),
+        )));
+    }
+    if mailbox != v.mailbox() {
+        return Err(denied(&format!(
+            "{field} does not match the authenticated mailbox"
+        )));
+    }
+    Ok(())
+}
+
+/// Authorize a verified request: `check` decides. Whatever it decides, the
+/// request keeps its replay-cache entry, so a refused request can't be
+/// replayed to succeed later. An authorized one is counted against its
+/// mailbox (and, for a creation, its address).
+fn authorize<S: Store>(
+    relay: &Relay<S>,
+    v: &Verified,
+    check: Result<(), RestError>,
+    creation: bool,
+) -> Result<(), RestError> {
+    check?;
+    relay.charge_signed(&v.creds, v.ip, creation)?;
+    Ok(())
 }
 
 async fn create_invite<S: Store>(
     State(relay): State<Arc<Relay<S>>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<InviteMeta>), RestError> {
-    let mailbox = authenticate(&relay, &headers, &method, &uri, &body)?;
-    let req: NewInviteRequest = serde_json::from_slice(&body)
-        .map_err(|_| RestError(RelayError::new(ErrorCode::BadRequest, "malformed invite")))?;
-    let record = relay.create_invite(&mailbox, req).await?;
+    let v = verify(&relay, peer.as_deref(), &headers, &method, &uri, &body)?;
+    let req = serde_json::from_slice::<NewInviteRequest>(&body)
+        .map_err(|_| RestError(RelayError::new(ErrorCode::BadRequest, "malformed invite")));
+    let check = req
+        .as_ref()
+        .map_err(|e| RestError(e.0.clone()))
+        .and_then(|r| names_signer(&v, &r.inviter_mailbox, "inviter_mailbox"));
+    authorize(&relay, &v, check, true)?;
+    let record = relay.create_invite_from(v.mailbox(), v.ip, req?).await?;
     Ok((
         StatusCode::CREATED,
         Json(InviteMeta::new(&record, relay.now_secs())),
@@ -135,13 +204,20 @@ async fn get_invite<S: Store>(
 
 async fn delete_invite<S: Store>(
     State(relay): State<Arc<Relay<S>>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(invite_id): Path<String>,
 ) -> Result<StatusCode, RestError> {
-    let mailbox = authenticate(&relay, &headers, &method, &uri, &[])?;
-    relay.revoke_invite(&mailbox, &invite_id).await?;
+    let v = verify(&relay, peer.as_deref(), &headers, &method, &uri, &[])?;
+    let check = match relay.invite(&invite_id).await {
+        Ok(i) if i.inviter_mailbox == v.mailbox() => Ok(()),
+        Ok(_) => Err(denied("only the inviter mailbox may revoke an invite")),
+        Err(e) => Err(RestError(e)),
+    };
+    authorize(&relay, &v, check, false)?;
+    relay.revoke_invite(v.mailbox(), &invite_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -154,15 +230,21 @@ pub struct DoorRegistered {
 
 async fn create_door<S: Store>(
     State(relay): State<Arc<Relay<S>>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<DoorRegistered>), RestError> {
-    let mailbox = authenticate(&relay, &headers, &method, &uri, &body)?;
-    let req: NewDoorRequest = serde_json::from_slice(&body)
-        .map_err(|_| RestError(RelayError::new(ErrorCode::BadRequest, "malformed door")))?;
-    let door = relay.create_door(&mailbox, req).await?;
+    let v = verify(&relay, peer.as_deref(), &headers, &method, &uri, &body)?;
+    let req = serde_json::from_slice::<NewDoorRequest>(&body)
+        .map_err(|_| RestError(RelayError::new(ErrorCode::BadRequest, "malformed door")));
+    let check = req
+        .as_ref()
+        .map_err(|e| RestError(e.0.clone()))
+        .and_then(|r| names_signer(&v, &r.owner_mailbox, "owner_mailbox"));
+    authorize(&relay, &v, check, true)?;
+    let door = relay.create_door(v.mailbox(), req?).await?;
     Ok((
         StatusCode::CREATED,
         Json(DoorRegistered {
@@ -174,13 +256,20 @@ async fn create_door<S: Store>(
 
 async fn delete_door<S: Store>(
     State(relay): State<Arc<Relay<S>>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(door_id): Path<String>,
 ) -> Result<StatusCode, RestError> {
-    let mailbox = authenticate(&relay, &headers, &method, &uri, &[])?;
-    relay.close_door(&mailbox, &door_id).await?;
+    let v = verify(&relay, peer.as_deref(), &headers, &method, &uri, &[])?;
+    let check = match relay.door(&door_id).await {
+        Ok(d) if d.owner_mailbox == v.mailbox() => Ok(()),
+        Ok(_) => Err(denied("only the owner mailbox may close a door")),
+        Err(e) => Err(RestError(e)),
+    };
+    authorize(&relay, &v, check, false)?;
+    relay.close_door(v.mailbox(), &door_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

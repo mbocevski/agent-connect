@@ -14,14 +14,23 @@ use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 use crate::proto::{Kind, ServerFrame};
 use crate::store::{
-    CloseDoorOutcome, ConsumeOutcome, CreateDoorOutcome, CreateGroupOutcome, DirectOutcome,
-    DoorRecord, GroupOutcome, GroupSend, GroupState, InviteRecord, Limits, NewMessage, PurgeStats,
-    RevokeOutcome, Store, StoreError, StoreResult, StoredMessage,
+    CloseDoorOutcome, ConsumeOutcome, CreateDoorOutcome, CreateGroupOutcome, CreateInviteOutcome,
+    DirectOutcome, DoorRecord, GroupOutcome, GroupSend, GroupState, IdleGroup, InviteRecord,
+    Limits, LiveCounts, NewMessage, PurgeStats, RevokeOutcome, Store, StoreError, StoreResult,
+    StoredMessage,
 };
+
+/// How stale a group's `active_at` may get before a send rewrites it: the
+/// idle period is days, so one write an hour per group is enough.
+const TOUCH_EVERY_MS: u64 = 3600 * 1000;
+const _: () = assert!(
+    TOUCH_EVERY_MS as u128 == crate::quota::ACTIVITY_GRANULARITY.as_millis(),
+    "the sweep's margin must cover the write interval"
+);
 
 /// Grace period during which an expired invite stays readable so its landing
 /// page can still say "expired".
-const INVITE_GRACE_MS: u64 = 7 * 24 * 3600 * 1000;
+pub const INVITE_GRACE_MS: u64 = 7 * 24 * 3600 * 1000;
 
 /// A SQLite-backed store.
 #[derive(Debug, Clone)]
@@ -123,6 +132,22 @@ async fn queue_bytes(
     .fetch_one(&mut **tx)
     .await?;
     Ok(u64_of(row.try_get::<i64, _>(0)?))
+}
+
+/// The idle sweep's clock (SPEC §8.3): a group's last accepted send, to
+/// within `TOUCH_EVERY_MS`.
+async fn record_activity(
+    tx: &mut Transaction<'_, Sqlite>,
+    group_id: &str,
+    now_ms: u64,
+) -> StoreResult<()> {
+    sqlx::query("UPDATE groups SET active_at = ? WHERE group_id = ? AND active_at <= ?")
+        .bind(i64_of(now_ms))
+        .bind(group_id)
+        .bind(i64_of(now_ms.saturating_sub(TOUCH_EVERY_MS)))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// Where a dropped group message came from, for the overflow marker.
@@ -321,7 +346,25 @@ impl Store for SqliteStore {
         Ok(CloseDoorOutcome::Closed)
     }
 
-    async fn create_invite(&self, inv: &InviteRecord, now_ms: u64) -> StoreResult<bool> {
+    async fn create_invite(
+        &self,
+        inv: &InviteRecord,
+        max_open: usize,
+        now_ms: u64,
+    ) -> StoreResult<CreateInviteOutcome> {
+        let mut tx = self.pool.begin().await?;
+        let open: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM invites WHERE inviter_mailbox = ? AND expires_at > ? \
+             AND revoked = 0 AND uses_left > 0",
+        )
+        .bind(&inv.inviter_mailbox)
+        .bind(i64_of(now_ms / 1000))
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get(0)?;
+        if u64_of(open) >= u64::try_from(max_open).unwrap_or(u64::MAX) {
+            return Ok(CreateInviteOutcome::TooMany);
+        }
         let res = sqlx::query(
             "INSERT OR IGNORE INTO invites (invite_id, group_name, inviter_name, purpose, \
              expires_at, max_uses, uses_left, member_count, inviter_mailbox, revoked, created_at) \
@@ -337,9 +380,13 @@ impl Store for SqliteStore {
         .bind(inv.member_count.map(i64::from))
         .bind(&inv.inviter_mailbox)
         .bind(i64_of(now_ms))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(res.rows_affected() == 1)
+        if res.rows_affected() != 1 {
+            return Ok(CreateInviteOutcome::Exists);
+        }
+        tx.commit().await?;
+        Ok(CreateInviteOutcome::Created)
     }
 
     async fn get_invite(&self, invite_id: &str) -> StoreResult<Option<InviteRecord>> {
@@ -416,14 +463,25 @@ impl Store for SqliteStore {
     ) -> StoreResult<CreateGroupOutcome> {
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query(
-            "INSERT OR IGNORE INTO groups (group_id, epoch, created_at) VALUES (?, 0, ?)",
+            "INSERT OR IGNORE INTO groups (group_id, epoch, created_at, created_by) \
+             VALUES (?, 0, ?, ?)",
         )
         .bind(group_id)
         .bind(i64_of(now_ms))
+        .bind(creator)
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() != 1 {
-            return Ok(CreateGroupOutcome::Exists);
+            let by: Option<String> =
+                sqlx::query_scalar("SELECT created_by FROM groups WHERE group_id = ?")
+                    .bind(group_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            return Ok(if by.as_deref() == Some(creator) {
+                CreateGroupOutcome::Yours
+            } else {
+                CreateGroupOutcome::Exists
+            });
         }
         sqlx::query("INSERT INTO group_members (group_id, mailbox) VALUES (?, ?)")
             .bind(group_id)
@@ -545,6 +603,9 @@ impl Store for SqliteStore {
                 .await?;
             }
         }
+        // In the same transaction, so a sweep can't delete a group right
+        // after a send it accepted.
+        record_activity(&mut tx, send.group_id, now_ms).await?;
         tx.commit().await?;
         Ok(GroupOutcome::Delivered {
             recipients: fanout.delivered,
@@ -645,5 +706,67 @@ impl Store for SqliteStore {
             invites,
             doors,
         })
+    }
+
+    async fn group_creator(&self, group_id: &str) -> StoreResult<Option<String>> {
+        let by: Option<Option<String>> =
+            sqlx::query_scalar("SELECT created_by FROM groups WHERE group_id = ?")
+                .bind(group_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(by.flatten())
+    }
+
+    async fn live_counts(&self) -> StoreResult<LiveCounts> {
+        let row =
+            sqlx::query("SELECT (SELECT COUNT(*) FROM invites), (SELECT COUNT(*) FROM groups)")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(LiveCounts {
+            invites: u64_of(row.try_get(0)?),
+            groups: u64_of(row.try_get(1)?),
+        })
+    }
+
+    async fn idle_groups(
+        &self,
+        cutoff_ms: u64,
+        after: &str,
+        limit: u32,
+    ) -> StoreResult<Vec<IdleGroup>> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT group_id FROM groups WHERE active_at <= ? AND created_at <= ? \
+             AND group_id > ? ORDER BY group_id LIMIT ?",
+        )
+        .bind(i64_of(cutoff_ms))
+        .bind(i64_of(cutoff_ms))
+        .bind(after)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let group_id: String = r.try_get(0)?;
+            let members = members_of(&mut tx, &group_id).await?;
+            out.push(IdleGroup {
+                group_id,
+                members: members.into_iter().collect(),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn delete_idle_group(&self, group_id: &str, cutoff_ms: u64) -> StoreResult<bool> {
+        // Memberships go with the group (ON DELETE CASCADE).
+        let res = sqlx::query(
+            "DELETE FROM groups WHERE group_id = ? AND active_at <= ? AND created_at <= ?",
+        )
+        .bind(group_id)
+        .bind(i64_of(cutoff_ms))
+        .bind(i64_of(cutoff_ms))
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
     }
 }

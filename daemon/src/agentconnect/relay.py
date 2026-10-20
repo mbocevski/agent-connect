@@ -34,6 +34,10 @@ NONCE_LEN = 32  # SPEC 8.2
 # How far a signed request's ts may run ahead of the clock (many requests
 # in one second, or the last run's); the relay allows 300 s either way.
 REST_TS_LEAD_SECS = 60
+# A relay that just restarted refuses signed requests for at most 300 s and
+# says for how long (SPEC 8.1.1): the longest such wait a signed request sits
+# out before it is signed again.
+RESTART_RETRY_MAX_SECS = 310
 DRAIN_KEY = "_drain"  # set on every frame handed to the daemon
 # Ours, never the relay's: handed to the daemon after the relay's ``drained``,
 # behind every frame of the reconnect drain, with the connection's number.
@@ -60,6 +64,8 @@ class RelayError(Exception):
         self.code = code
         self.detail = detail
         self.current_epoch = current_epoch
+        # Seconds until a retry, when the relay says (REST `retry_after`).
+        self.retry_after: int | None = None
 
 
 FrameHandler = Callable[[dict[str, Any]], Awaitable[None]]
@@ -319,6 +325,22 @@ class RelayRest:
         return f"AgentConnect-Ed25519 {b64(self._instance.public_key)}.{ts}.{b64(sig)}"
 
     async def _call(self, method: str, path: str, body: bytes = b"", signed: bool = True) -> Any:
+        try:
+            return await self._call_once(method, path, body, signed)
+        except RelayError as e:
+            # A relay that just restarted refuses signed requests for a
+            # moment and says for how long (SPEC 8.1.1): sign again, once,
+            # when it ends, rather than fail the human's request.
+            wait = e.retry_after
+            if not signed or e.code != "rate_limited" or wait is None:
+                raise
+            if wait > RESTART_RETRY_MAX_SECS:
+                raise
+            LOG.info("relay_restarting_retry", wait=wait)
+            await self._clock.sleep(wait)
+            return await self._call_once(method, path, body, signed)
+
+    async def _call_once(self, method: str, path: str, body: bytes, signed: bool) -> Any:
         headers = {"content-type": "application/json"}
         if signed:
             headers["authorization"] = self.authorization(method, path, body)
@@ -346,7 +368,11 @@ class RelayRest:
             code = "internal" if resp.status_code >= 400 else "bad_response"  # noqa: PLR2004
             raise RelayError(code, f"HTTP {resp.status_code} without a JSON object")
         if resp.status_code >= 400:  # noqa: PLR2004
-            raise RelayError(str(data.get("code", "internal")), str(data.get("detail", "")))
+            err = RelayError(str(data.get("code", "internal")), str(data.get("detail", "")))
+            retry_after = data.get("retry_after")
+            if isinstance(retry_after, int) and not isinstance(retry_after, bool):
+                err.retry_after = max(1, retry_after)
+            raise err
         return data
 
     async def create_invite(self, meta: dict[str, Any]) -> dict[str, Any]:

@@ -13,12 +13,16 @@ pub mod auth;
 pub mod config;
 pub mod landing;
 pub mod proto;
+pub mod quota;
 pub mod relay;
+mod replay;
 pub mod rest;
+pub mod restart;
 pub mod sqlite;
 pub mod store;
 pub mod ws;
 
+pub use quota::Quotas;
 pub use relay::Relay;
 pub use sqlite::SqliteStore;
 pub use store::{DEFAULT_FRAME_MAX, Limits, Store};

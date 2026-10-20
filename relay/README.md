@@ -21,7 +21,30 @@ docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
 | `AC_RELAY_HOST` | the listen address | The host string clients sign into their authentication (WebSocket `auth`, signed REST requests). Set it to the public host name, with `:port` when not 443. A client that signs another host is refused. |
 | `AC_RELAY_TERMS` | none | A "Terms" link in the invite landing page's footer, e.g. `https://relay.example.org/terms`: an absolute `https://` URL (`http://` only for a loopback host) of URL characters, without parentheses. |
 | `AC_RELAY_ABUSE` | none | A "Report abuse" link in the same footer: `mailto:` and one address, e.g. `mailto:abuse@example.org`, with no query or header fields (`?`, `&`), no second address and no percent-encoding; or a URL as for `AC_RELAY_TERMS`. With neither set the page has no footer. An invalid value stops the relay at start. |
+| `AC_RELAY_REST_JUNK_PER_ADDRESS_PER_MIN` | `60` | Signed REST requests whose signature or timestamp fails, per source address per minute (IPv6: per /64). This bucket refuses only such requests. |
+| `AC_RELAY_REST_PER_ADDRESS_PER_MIN` | `60` | Signed registrations (`POST`) per source address per minute. Revokes and door closes don't count here. |
+| `AC_RELAY_REST_PER_MAILBOX_PER_MIN` | `30` | Authorized signed REST requests per mailbox per minute. |
+| `AC_RELAY_REPLAY_PER_MAILBOX` | `128` | Live replay-cache entries one mailbox may hold. |
+| `AC_RELAY_REPLAY_MAX_ENTRIES` | `100000` | Live replay-cache entries in all (about 600 bytes each). Past it, requests are served unrecorded. |
+| `AC_RELAY_OPEN_INVITES_PER_MAILBOX` | `50` | Open invites (not revoked, expired or used up) one mailbox may hold. |
+| `AC_RELAY_INVITES_PER_ADDRESS` | `500` | Invite rows registered from one creation key (an IPv4 address or an IPv6 /48) that the relay still holds (until `expires_at` plus 7 days). Tighter near the global cap (below). |
+| `AC_RELAY_MAX_INVITES` | `100000` | Invite rows held in all: up to about 3 KB each, so about 300 MB. |
+| `AC_RELAY_GROUPS_PER_MAILBOX_PER_DAY` | `100` | `group.create` frames accepted per mailbox in any 24 hours. |
+| `AC_RELAY_GROUPS_PER_ADDRESS` | `500` | Groups created from one creation key within the idle period. Tighter near the global cap (below). |
+| `AC_RELAY_MAX_GROUPS` | `100000` | Groups held in all: up to about 5 KB each with 50 members, so about 500 MB. |
+| `AC_RELAY_GROUP_IDLE_DAYS` | `30` | Days without an accepted send, and with no member connected, after which a group is deleted (one hour later, for the coarse activity time). 8 to 36500. |
+| `AC_RELAY_CLIENT_IP_HEADER` | none | The header the reverse proxy writes the client address to: `x-forwarded-for`, or `forwarded` (RFC 7239). Needs `AC_RELAY_TRUSTED_PROXIES`. Required behind a proxy (below). |
+| `AC_RELAY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`127.0.0.1/32`, `::1`) of the reverse proxies whose header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6) are refused. Needs `AC_RELAY_CLIENT_IP_HEADER`. |
+| `AC_RELAY_PROXY_HOPS` | `1` | How many proxies append to the header: the client is the entry this many places from the right. Needs `AC_RELAY_CLIENT_IP_HEADER`. |
 | `RUST_LOG` | `info` | `tracing` filter. |
+
+Every limit is a positive integer; the relay refuses to start with a value
+that isn't. The defaults suit a small public relay: with them the invite
+and group tables stay under about 800 MB whatever the number of mailboxes
+or addresses. `/metrics` shows how full they are
+(`agentconnect_relay_invites`, `agentconnect_relay_groups`, and their
+`_max` caps). Per-address counts are in memory only: the relay stores no
+address, and no address is kept with an invite or a group.
 
 Logs never contain `ct`, URL fragments or secrets, and identifiers (mailbox,
 group and invite ids) appear only as a short SHA-256 tag. Door registration,
@@ -38,7 +61,7 @@ closing and knocks log no identifier at all, not even a tag.
 | `POST /v0/doors` | Register a door (signed request, below). |
 | `DELETE /v0/doors/{id}` | Close a door now (signed request, owner only). |
 | `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. With `AC_RELAY_TERMS` or `AC_RELAY_ABUSE` set, a `footer.operator` holds the links. |
-| `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers, plus one gauge, `agentconnect_relay_ws_connections_open`: the WebSocket connections open now, authenticated or not. It has no labels. |
+| `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers (`agentconnect_relay_idle_groups_deleted_total` counts idle groups deleted), and gauges without labels: `agentconnect_relay_ws_connections_open`, the WebSocket connections open now, authenticated or not, and the invite rows and groups held with their caps (`agentconnect_relay_invites`, `agentconnect_relay_groups`, `_max`). |
 
 ### Signed REST requests (SPEC 8.1.1)
 
@@ -58,11 +81,75 @@ mailbox is derived from `SK.pub` exactly as for the WebSocket, and
 `inviter_mailbox` (or `owner_mailbox`) in the body must equal it. A reverse proxy must not rewrite
 the path.
 
-Each signed request is single use: the relay keeps an in-memory cache of
-accepted `(mailbox, signature)` pairs until the request would fall outside the
-window, and answers a repeat with `auth_failed`. The cache holds at most
-10,000 live entries; when it is full, new signed requests get `rate_limited`
-(live entries are never evicted). Use a fresh timestamp for every request.
+Signed requests are single use, and their effects are idempotent (SPEC
+8.1.1): registering an id the relay holds is `bad_request`, and revoking or
+closing twice changes nothing. Once a request's signature verifies, the
+relay checks its timestamp and records its `(mailbox, signature)` pair in
+memory in one step, before any other work, and answers a repeat with
+`auth_failed`. The entry stays whatever the answer, so a refused request
+can't be replayed to succeed later. An entry lives until `ts + 300`, at
+most 10 minutes. Each mailbox holds at most 128 live entries; when its
+share is full, only that mailbox's requests get `rate_limited` until an
+entry expires. Live entries are never evicted; past 100,000 entries in
+all, requests are served without being recorded, and within its window a
+captured copy of one could then be acted on again, or after a refusal,
+late (SPEC 8.1.1). Use a fresh timestamp for every request; a retry is a
+new request.
+
+The cache starts empty with each process. On a clean shutdown (`SIGTERM`
+or Ctrl-C) the relay writes the highest timestamp it let through to
+`<database>.clean-shutdown`, and the next start refuses only signed
+requests up to it, which is seldom anything. After a crash there is no
+such file, and the relay refuses every signed request whose timestamp is
+not after its start plus 300 s, for up to five minutes. Both refusals are
+`rate_limited` with `retry_after` (and a `Retry-After` header): the
+seconds until a fresh timestamp passes. The reference daemon waits that
+long, signs again and retries once, for every signed request (registering
+and revoking invites, opening and closing doors), so the human's request
+takes longer instead of failing. An in-memory database has no file and no
+guard.
+
+Requests whose signature or timestamp fails are limited to 60 a minute per
+source address (IPv6 per /64) in a bucket of their own, which never refuses
+a request whose signature verifies. Registrations (`POST`) are limited to 60
+a minute per source address, and every signed request to 30 a minute per
+mailbox (`rate_limited`). Revoking an invite and closing a door count only
+per mailbox. The counts are in memory and never logged.
+
+### Behind a reverse proxy
+
+The relay speaks plain HTTP, so a public relay runs behind a TLS proxy, and
+behind a proxy `AC_RELAY_CLIENT_IP_HEADER` and `AC_RELAY_TRUSTED_PROXIES`
+are required. Without them every request counts as the proxy's own
+address: everyone shares one set of per-address limits, and one client can
+use up the registrations of all. The relay logs a warning once when a
+request carries `X-Forwarded-For` or `Forwarded` and no header is set. With
+nginx on the same machine:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+```sh
+AC_RELAY_CLIENT_IP_HEADER=x-forwarded-for
+AC_RELAY_TRUSTED_PROXIES=127.0.0.1/32
+```
+
+The header is believed only on connections from the trusted proxies, so a
+client that reaches the port directly can't choose its own bucket. The
+client is the entry `AC_RELAY_PROXY_HOPS` places from the right (one per
+proxy that appends to the header; set it to 2 for a CDN in front of
+nginx). Entries a client writes itself are further left and never used,
+even from inside a trusted block. `ip:port` and `[v6]:port` entries are
+read, and so are RFC 7239 `for=` values with `AC_RELAY_CLIENT_IP_HEADER=forwarded`.
+A header too short for the hop count, or with no address at that place,
+counts as the proxy's address and logs a warning once.
 
 ## Doors and knocks (ADR-006)
 
@@ -103,6 +190,33 @@ nothing else: no door key, no listing, no card text.
 
 ## Behaviour notes
 
+- Invite metadata (`group_name`, `inviter_name`, `purpose`) must be
+  one-line text (SPEC 13.1.2): no control or format characters (so no bidi
+  controls or zero-width characters), no separators other than the space,
+  no private-use characters, and in NFC. Anything else is `bad_request`.
+- Invites and groups are bounded per mailbox, per creation key and in all
+  (the table above). A creation key is an IPv4 address or an IPv6 /48 (one
+  site); the rates above keep the /64. Past 75% of a global cap, a key
+  gets only its fair share of what is left (never below 3), and the last
+  5% is kept for keys holding fewer than 2, so a light user can still
+  start a conversation. Past any limit, `POST /v0/invites` and
+  `group.create` are `quota_exceeded` (HTTP 429 on REST). An invite row
+  counts until the purge removes it, 7 days after its `expires_at`;
+  revoking it doesn't shorten that. An attacker with thousands of /48s or
+  IPv4 addresses can still fill a cap, reserve included (SPEC 12).
+- `group.create` from the mailbox that created the group already (its
+  `accepted` was lost) is answered `accepted` and counts against no
+  limit; from any other mailbox an existing id is `bad_request`.
+- Idle groups are deleted (SPEC 8.3). Once an hour (not in the first hour
+  after a start, so members can reconnect) the purge deletes every group
+  with no accepted `commit`, `proposal`, `application` or `welcome_wrapped`
+  for 30 days and an hour whose members are all disconnected. The last
+  send's time is written with the send, to within an hour. Its epoch and
+  members go; its id is not kept. A member that comes back gets
+  `unknown_group` for every send, and its daemon marks the group out of
+  sync (reason `unknown_group`) and tells its human, without rejoining or
+  re-creating it. A database from before this version counts every group
+  as used at the upgrade.
 - Commits fan out to the members from before the commit (including the sender
   and any member the commit removes); members added by the commit receive a
   Welcome instead. After the commit, removed mailboxes receive nothing new.

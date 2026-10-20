@@ -3,20 +3,28 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agentconnect_core::clock::Clock;
+use axum::http::HeaderMap;
 use serde::Deserialize;
 use tokio::sync::Notify;
 
+use crate::auth::{REST_MAX_SKEW_SECS, RestCredentials};
 use crate::proto::{
     ClientFrame, Envelope, ErrorCode, Kind, ServerFrame, is_id16, is_mailbox_id, log_tag,
 };
+use crate::quota::{
+    ACTIVITY_GRANULARITY, ClientIpWarning, LiveCounts, Quotas, Refusal, address_key, admit,
+    creation_key,
+};
+use crate::replay::{Claim, ReplayCache};
 use crate::store::{
-    CloseDoorOutcome, ConsumeOutcome, CreateDoorOutcome, CreateGroupOutcome, DirectOutcome,
-    DoorRecord, GroupOutcome, GroupSend, InviteRecord, InviteStatus, Limits, NewMessage,
-    PurgeStats, RevokeOutcome, Store, StoredMessage, Window,
+    CloseDoorOutcome, ConsumeOutcome, CreateDoorOutcome, CreateGroupOutcome, CreateInviteOutcome,
+    DirectOutcome, DoorRecord, GroupOutcome, GroupSend, InviteRecord, InviteStatus, Limits,
+    NewMessage, PurgeStats, RevokeOutcome, Store, StoredMessage, Window,
 };
 
 /// Maximum length of `group_name` and `inviter_name`, in characters.
@@ -47,6 +55,13 @@ pub struct Metrics {
     doors_registered: AtomicU64,
     doors_closed: AtomicU64,
     knocks_accepted: AtomicU64,
+    idle_groups_deleted: AtomicU64,
+    /// Gauges: invite rows and groups held, and their caps. The relay
+    /// counts creations here and recounts from the store at each purge.
+    invites_live: AtomicU64,
+    invites_max: AtomicU64,
+    groups_live: AtomicU64,
+    groups_max: AtomicU64,
     /// Gauge: WebSocket connections open now. Only a [`WsOpenGuard`] moves it.
     ws_open: Arc<AtomicU64>,
     errors: [AtomicU64; ErrorCode::ALL.len()],
@@ -103,6 +118,7 @@ impl Metrics {
 
     /// Prometheus text exposition.
     #[must_use]
+    #[allow(clippy::too_many_lines, reason = "one call per counter")]
     pub fn render(&self) -> String {
         let mut out = String::new();
         let mut counter = |name: &str, help: &str, v: &AtomicU64| {
@@ -183,6 +199,38 @@ impl Metrics {
             "agentconnect_relay_knocks_accepted_total",
             "Knocks answered with accepted.",
             &self.knocks_accepted,
+        );
+        counter(
+            "agentconnect_relay_idle_groups_deleted_total",
+            "Groups deleted after the idle period.",
+            &self.idle_groups_deleted,
+        );
+        let mut gauge = |name: &str, help: &str, v: &AtomicU64| {
+            let _ = writeln!(
+                out,
+                "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {}",
+                v.load(Ordering::Relaxed)
+            );
+        };
+        gauge(
+            "agentconnect_relay_invites",
+            "Invite rows held, open or not yet purged.",
+            &self.invites_live,
+        );
+        gauge(
+            "agentconnect_relay_invites_max",
+            "The cap on invite rows held.",
+            &self.invites_max,
+        );
+        gauge(
+            "agentconnect_relay_groups",
+            "Groups held.",
+            &self.groups_live,
+        );
+        gauge(
+            "agentconnect_relay_groups_max",
+            "The cap on groups held.",
+            &self.groups_max,
         );
         let _ = writeln!(
             out,
@@ -289,20 +337,22 @@ impl Rates {
     }
 }
 
+/// One less, never below zero: the purge may have recounted from the store
+/// since the reservation that this gives back.
+fn dec(c: &AtomicU64) {
+    let _ = c.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_sub(1))
+    });
+}
+
 fn window_ms(w: Window) -> u64 {
     u64::try_from(w.per.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Maximum number of live entries in the REST replay cache.
-pub const REPLAY_CACHE_CAP: usize = 10_000;
-
-/// Signatures of recently accepted signed REST requests.
-#[derive(Debug, Default)]
-struct ReplayCache {
-    /// (mailbox, signature) -> last second at which the request would still
-    /// have been inside the accepted window.
-    seen: HashMap<(String, String), u64>,
-}
+/// How often the purge looks for idle groups (SPEC §8.3, "Idle groups").
+const IDLE_SWEEP_EVERY_MS: u64 = 3600 * 1000;
+/// Groups read per page of the idle sweep.
+const IDLE_SWEEP_PAGE: u32 = 500;
 
 /// `POST /v0/invites` body: `InviteMeta` minus status and `uses_left`, plus
 /// the inviter's mailbox (SPEC §8.1).
@@ -352,6 +402,9 @@ pub struct RelayError {
     pub detail: String,
     /// For `epoch_conflict`: the group's current epoch.
     pub current_epoch: Option<u64>,
+    /// For a refusal that ends at a known time: seconds until a retry
+    /// (REST `Retry-After` and `retry_after`).
+    pub retry_after: Option<u64>,
 }
 
 impl RelayError {
@@ -362,6 +415,7 @@ impl RelayError {
             code,
             detail: detail.into(),
             current_epoch: None,
+            retry_after: None,
         }
     }
 }
@@ -371,12 +425,17 @@ fn internal(e: &dyn std::fmt::Display) -> RelayError {
     RelayError::new(ErrorCode::Internal, "internal error")
 }
 
-fn has_control(s: &str) -> bool {
-    s.chars().any(char::is_control)
+/// One-line text (SPEC §4.2, §13.1.2) of at most `max_chars` characters;
+/// may be empty.
+fn text_ok(s: &str, max_chars: usize) -> bool {
+    s.chars().count() <= max_chars && agentconnect_core::listing::is_text(s)
 }
 
-fn text_ok(s: &str, max_chars: usize) -> bool {
-    s.chars().count() <= max_chars && !has_control(s)
+/// What a creation holds against the global and per-address caps.
+#[derive(Debug, Clone, Copy)]
+enum Held {
+    Invite,
+    Group,
 }
 
 /// The relay service.
@@ -385,10 +444,23 @@ pub struct Relay<S: Store> {
     clock: Arc<dyn Clock>,
     host: String,
     limits: Limits,
+    quotas: Quotas,
     hub: Arc<Hub>,
     rates: Mutex<Rates>,
     replays: Mutex<ReplayCache>,
-    replay_cap: usize,
+    /// Invites and groups created per creation key that the relay still
+    /// holds. Memory only, never linked to the rows.
+    live_invites: Mutex<LiveCounts>,
+    live_groups: Mutex<LiveCounts>,
+    /// Signed requests with a `ts` at or below this are refused (0: none):
+    /// set after a restart, when the cache no longer holds what the last
+    /// process accepted.
+    replay_floor_secs: u64,
+    /// Whether each [`ClientIpWarning`] was logged already.
+    warned: [AtomicBool; 2],
+    /// When the purge last looked for idle groups, unix ms. Starts at the
+    /// start time, so members have an hour to reconnect after a restart.
+    idle_swept_at: AtomicU64,
     metrics: Metrics,
 }
 
@@ -396,59 +468,282 @@ impl<S: Store> Relay<S> {
     /// Build a relay. `host` is the string clients sign into their auth
     /// (the relay's public host name).
     pub fn new(store: S, clock: Arc<dyn Clock>, host: impl Into<String>, limits: Limits) -> Self {
+        let started = clock.unix_millis();
         Self {
             store,
             clock,
             host: host.into(),
             limits,
+            quotas: Quotas::default(),
             hub: Arc::default(),
             rates: Mutex::default(),
             replays: Mutex::default(),
-            replay_cap: REPLAY_CACHE_CAP,
+            live_invites: Mutex::default(),
+            live_groups: Mutex::default(),
+            replay_floor_secs: 0,
+            warned: [AtomicBool::new(false), AtomicBool::new(false)],
+            idle_swept_at: AtomicU64::new(started),
             metrics: Metrics::default(),
         }
+        .with_quotas(Quotas::default())
     }
 
-    /// Override the replay-cache capacity (tests).
+    /// Replace the abuse limits (defaults: [`Quotas::default`]).
     #[must_use]
-    pub fn with_replay_cap(mut self, cap: usize) -> Self {
-        self.replay_cap = cap;
+    pub fn with_quotas(mut self, quotas: Quotas) -> Self {
+        let n = |v: usize| u64::try_from(v).unwrap_or(u64::MAX);
+        self.metrics
+            .invites_max
+            .store(n(quotas.max_invites), Ordering::Relaxed);
+        self.metrics
+            .groups_max
+            .store(n(quotas.max_groups), Ordering::Relaxed);
+        self.quotas = quotas;
         self
     }
 
-    /// Record a verified signed REST request and refuse a repeat.
-    ///
-    /// Entries live until the request would have left the accepted window.
-    /// Expired entries are evicted first; if the cache is still full the new
-    /// request is refused rather than evicting a live entry.
+    /// Refuse every signed request whose `ts` is from before this start
+    /// plus the accepted skew (SPEC §8.1.1): the replay cache is per
+    /// process, so this keeps a request accepted by an earlier process from
+    /// being accepted again. For a relay that starts on an existing
+    /// database after a crash; it refuses up to 300 s of signed requests.
+    #[must_use]
+    pub fn with_restart_guard(mut self) -> Self {
+        self.replay_floor_secs = self.now_secs().saturating_add(REST_MAX_SKEW_SECS);
+        self
+    }
+
+    /// After a clean shutdown: refuse every signed request whose `ts` is at
+    /// most `highest_ts`, the highest the earlier process accepted
+    /// (`crate::restart`).
+    #[must_use]
+    pub fn with_replay_floor(mut self, highest_ts: u64) -> Self {
+        self.replay_floor_secs = highest_ts;
+        self
+    }
+
+    /// The highest `ts` of a signed request this process accepted (0: none),
+    /// to persist at a clean shutdown.
+    #[must_use]
+    pub fn highest_accepted_ts(&self) -> u64 {
+        lock(&self.replays).highest_ts().max(self.replay_floor_secs)
+    }
+
+    /// Recount the invite rows and groups the store holds, for the global
+    /// caps. The purge does it too; call it once at start.
     ///
     /// # Errors
     ///
-    /// `auth_failed` for a replay, `rate_limited` when the cache is full.
-    pub fn check_replay(&self, creds: &crate::auth::RestCredentials) -> Result<(), RelayError> {
-        let now = self.now_secs();
-        let mut cache = lock(&self.replays);
-        let key = (creds.mailbox.clone(), creds.sig.clone());
-        if cache.seen.get(&key).is_some_and(|until| *until >= now) {
-            return Err(RelayError::new(
-                ErrorCode::AuthFailed,
-                "request already used",
-            ));
-        }
-        if cache.seen.len() >= self.replay_cap {
-            cache.seen.retain(|_, until| *until >= now);
-            if cache.seen.len() >= self.replay_cap {
-                return Err(RelayError::new(
-                    ErrorCode::RateLimited,
-                    "too many signed requests; retry later",
-                ));
+    /// Storage failures.
+    pub async fn refresh_counts(&self) -> Result<(), RelayError> {
+        let c = self.store.live_counts().await.map_err(|e| internal(&e))?;
+        self.metrics
+            .invites_live
+            .store(c.invites, Ordering::Relaxed);
+        self.metrics.groups_live.store(c.groups, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// The abuse limits.
+    #[must_use]
+    pub fn quotas(&self) -> &Quotas {
+        &self.quotas
+    }
+
+    /// The client address of a request: the peer, or what a trusted proxy
+    /// reports ([`crate::quota::ClientIp`]). Logs once per kind when a
+    /// request suggests a proxy setup the relay isn't configured for. The
+    /// address itself is never logged.
+    #[must_use]
+    pub fn client_ip(&self, peer: Option<IpAddr>, headers: &HeaderMap) -> Option<IpAddr> {
+        let (ip, warning) = self.quotas.client_ip.resolve(peer, headers);
+        if let Some(w) = warning {
+            let (i, msg) = match w {
+                ClientIpWarning::HeaderNotConfigured => (
+                    0,
+                    "a request carries X-Forwarded-For or Forwarded, but \
+                     AC_RELAY_CLIENT_IP_HEADER is not set: behind a proxy every client \
+                     shares the proxy's per-address limits",
+                ),
+                ClientIpWarning::Unreadable => (
+                    1,
+                    "a trusted proxy's client-address header has no address at \
+                     AC_RELAY_PROXY_HOPS from the right; the request counts as the proxy's",
+                ),
+            };
+            if !self.warned[i].swap(true, Ordering::Relaxed) {
+                tracing::warn!("{msg}");
             }
         }
-        cache.seen.insert(
-            key,
-            creds.ts.saturating_add(crate::auth::REST_MAX_SKEW_SECS),
+        ip
+    }
+
+    /// Answer a signed request whose signature or timestamp failed with
+    /// `refusal`, counted in `ip`'s bucket for such requests (SPEC
+    /// §8.1.1). Past that bucket's rate the answer is `rate_limited`. The
+    /// bucket refuses nothing else: a request whose signature verifies never
+    /// looks at it.
+    #[must_use]
+    pub fn refuse_unverified(&self, ip: Option<IpAddr>, refusal: RelayError) -> RelayError {
+        let w = self.quotas.rest_junk_per_address;
+        let key = format!("rj:{}", address_key(ip));
+        if self.rate_check(&key, w.max, window_ms(w)) {
+            refusal
+        } else {
+            RelayError::new(
+                ErrorCode::RateLimited,
+                "too many failed signed requests from this address; retry later",
+            )
+        }
+    }
+
+    /// Record a signed request whose signature verified (SPEC §8.1.1):
+    /// check its timestamp at the cache's own time and claim its
+    /// `(mailbox, sig)` pair, in one step, before anything awaits. Returns
+    /// whether it was recorded (it isn't when the cache as a whole is full).
+    ///
+    /// # Errors
+    ///
+    /// `auth_failed` for a repeat or a timestamp outside the window,
+    /// `rate_limited` when the mailbox's share is full of live entries, or
+    /// in the first 300 s after a restart for a request signed before it.
+    pub fn claim_signed(&self, creds: &RestCredentials) -> Result<bool, RelayError> {
+        if creds.ts <= self.replay_floor_secs {
+            let wait = self
+                .replay_floor_secs
+                .saturating_add(1)
+                .saturating_sub(self.now_secs())
+                .max(1);
+            return Err(RelayError {
+                retry_after: Some(wait),
+                ..RelayError::new(
+                    ErrorCode::RateLimited,
+                    "the relay restarted; sign the request again shortly",
+                )
+            });
+        }
+        let claim = lock(&self.replays).claim(
+            creds,
+            self.now_secs(),
+            self.quotas.replay_per_mailbox,
+            self.quotas.replay_max_entries,
         );
+        match claim {
+            Claim::Fresh => Ok(true),
+            Claim::Unrecorded => Ok(false),
+            Claim::Replay => Err(RelayError::new(
+                ErrorCode::AuthFailed,
+                "request already used",
+            )),
+            Claim::Expired => Err(RelayError::new(
+                ErrorCode::AuthFailed,
+                "timestamp outside the accepted window",
+            )),
+            Claim::Full => Err(RelayError::new(
+                ErrorCode::RateLimited,
+                "too many signed requests from this mailbox; retry later",
+            )),
+        }
+    }
+
+    /// Count an authorized signed request against its mailbox and, for a
+    /// creation (`POST`), against its source address (SPEC §8.1.1).
+    /// Revoking an invite and closing a door count only per mailbox, so no
+    /// one sharing an address can stop them.
+    ///
+    /// # Errors
+    ///
+    /// `rate_limited` past either rate. A refused request keeps its entry
+    /// in the replay cache.
+    pub fn charge_signed(
+        &self,
+        creds: &RestCredentials,
+        ip: Option<IpAddr>,
+        creation: bool,
+    ) -> Result<(), RelayError> {
+        let m = self.quotas.rest_per_mailbox;
+        let a = self.quotas.rest_per_address;
+        let mailbox_key = format!("rm:{}", creds.mailbox);
+        let address_key = format!("rv:{}", address_key(ip));
+        let mut checks = vec![(mailbox_key.as_str(), m.max, window_ms(m))];
+        if creation {
+            checks.push((address_key.as_str(), a.max, window_ms(a)));
+        }
+        if lock(&self.rates).allow_all(&checks, self.now_ms()) {
+            Ok(())
+        } else {
+            Err(RelayError::new(
+                ErrorCode::RateLimited,
+                "too many signed requests; retry later",
+            ))
+        }
+    }
+
+    /// Reserve one more of what a creation holds (invite rows or groups)
+    /// in all and for `ip`'s creation key, until `until_ms`, under the fair
+    /// admission of [`admit`]. `undo` gives it back if the creation fails.
+    fn reserve(&self, what: Held, ip: Option<IpAddr>, until_ms: u64) -> Result<(), RelayError> {
+        let (live, max, per_key, map, noun) = self.held(what);
+        let max = u64::try_from(max).unwrap_or(u64::MAX);
+        let key = creation_key(ip);
+        let now = self.now_ms();
+        let mut map = lock(map);
+        let holds = map.holds(&key, now);
+        let full = |detail: String| Err(RelayError::new(ErrorCode::QuotaExceeded, detail));
+        match admit(
+            live.load(Ordering::Relaxed),
+            max,
+            per_key,
+            holds,
+            map.keys(),
+        ) {
+            Ok(()) => {}
+            Err(Refusal::Full) => {
+                return full(format!(
+                    "the relay holds as many {noun} as it takes; retry later"
+                ));
+            }
+            Err(Refusal::Reserved) => {
+                return full(format!(
+                    "the relay is nearly full of {noun}; this address holds enough of them"
+                ));
+            }
+            Err(Refusal::Key) => return full(format!("too many {noun} from this address")),
+        }
+        // Concurrent creations: the count, not the check, decides the cap.
+        if live.fetch_add(1, Ordering::Relaxed) >= max {
+            dec(live);
+            return full(format!(
+                "the relay holds as many {noun} as it takes; retry later"
+            ));
+        }
+        map.push(&key, until_ms);
         Ok(())
+    }
+
+    fn undo(&self, what: Held, ip: Option<IpAddr>, until_ms: u64) {
+        let (live, _, _, map, _) = self.held(what);
+        dec(live);
+        lock(map).remove(&creation_key(ip), until_ms);
+    }
+
+    fn held(&self, what: Held) -> (&AtomicU64, usize, usize, &Mutex<LiveCounts>, &'static str) {
+        match what {
+            Held::Invite => (
+                &self.metrics.invites_live,
+                self.quotas.max_invites,
+                self.quotas.invites_per_address,
+                &self.live_invites,
+                "invites",
+            ),
+            Held::Group => (
+                &self.metrics.groups_live,
+                self.quotas.max_groups,
+                self.quotas.groups_per_address,
+                &self.live_groups,
+                "groups",
+            ),
+        }
     }
 
     /// The host string signed into authentication.
@@ -534,7 +829,8 @@ impl<S: Store> Relay<S> {
         lock(&self.rates).allow(key, max, window_ms, self.now_ms())
     }
 
-    /// Run periodic maintenance: expire rows and rate-limit windows.
+    /// Run periodic maintenance: expire rows, rate-limit windows and replay
+    /// entries, and once an hour delete idle groups.
     ///
     /// # Errors
     ///
@@ -542,14 +838,95 @@ impl<S: Store> Relay<S> {
     pub async fn purge(&self) -> Result<PurgeStats, RelayError> {
         let now = self.now_ms();
         lock(&self.rates).sweep(now);
-        self.store
+        lock(&self.replays).sweep(now / 1000);
+        lock(&self.live_invites).sweep(now);
+        lock(&self.live_groups).sweep(now);
+        let stats = self
+            .store
             .purge_expired(now)
             .await
-            .map_err(|e| internal(&e))
+            .map_err(|e| internal(&e))?;
+        let last = self.idle_swept_at.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= IDLE_SWEEP_EVERY_MS {
+            self.idle_swept_at.store(now, Ordering::Relaxed);
+            let deleted = self.sweep_idle_groups().await?;
+            if deleted > 0 {
+                tracing::info!(groups = deleted, "idle groups deleted");
+            }
+        }
+        self.refresh_counts().await?;
+        Ok(stats)
+    }
+
+    /// Whether any connection is authenticated as `mailbox` now.
+    fn connected(&self, mailbox: &str) -> bool {
+        lock(&self.hub.waiters).contains_key(mailbox)
+    }
+
+    /// Delete every group that is idle (SPEC §8.3, "Idle groups"): no
+    /// accepted send for [`Quotas::group_idle`] plus
+    /// [`ACTIVITY_GRANULARITY`] (the activity time is that coarse), and no
+    /// member connected. Returns how many were deleted. Their ids are not
+    /// kept.
+    ///
+    /// # Errors
+    ///
+    /// Storage failures.
+    pub async fn sweep_idle_groups(&self) -> Result<u64, RelayError> {
+        let idle_ms = u64::try_from(
+            self.quotas
+                .group_idle
+                .saturating_add(ACTIVITY_GRANULARITY)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        let Some(cutoff) = self.now_ms().checked_sub(idle_ms) else {
+            return Ok(0);
+        };
+        let mut after = String::new();
+        let mut deleted = 0;
+        loop {
+            let page = self
+                .store
+                .idle_groups(cutoff, &after, IDLE_SWEEP_PAGE)
+                .await
+                .map_err(|e| internal(&e))?;
+            let full = page.len() == usize::try_from(IDLE_SWEEP_PAGE).unwrap_or(usize::MAX);
+            for g in &page {
+                // A connected member may still use the group.
+                if g.members.iter().any(|m| self.connected(m)) {
+                    continue;
+                }
+                if self
+                    .store
+                    .delete_idle_group(&g.group_id, cutoff)
+                    .await
+                    .map_err(|e| internal(&e))?
+                {
+                    deleted += 1;
+                    Metrics::inc(&self.metrics.idle_groups_deleted);
+                }
+            }
+            match page.last() {
+                Some(last) if full => after.clone_from(&last.group_id),
+                _ => return Ok(deleted),
+            }
+        }
     }
 
     /// Handle one authenticated client frame. Returns the reply frame, if any.
     pub async fn handle(&self, mailbox: &str, frame: ClientFrame) -> Option<ServerFrame> {
+        self.handle_from(mailbox, None, frame).await
+    }
+
+    /// [`Relay::handle`] for a connection from `ip` (`None`: unknown), which
+    /// `group.create`'s per-address limit counts by.
+    pub async fn handle_from(
+        &self,
+        mailbox: &str,
+        ip: Option<IpAddr>,
+        frame: ClientFrame,
+    ) -> Option<ServerFrame> {
         self.metrics.frame_in();
         let (corr, result) = match frame {
             ClientFrame::Ack { msg_id } => {
@@ -583,7 +960,7 @@ impl<S: Store> Relay<S> {
                 msg_id,
             } => {
                 let corr = msg_id.unwrap_or_else(|| group_id.clone());
-                let r = self.group_create(mailbox, &group_id, epoch).await;
+                let r = self.group_create(mailbox, ip, &group_id, epoch).await;
                 (Some(corr), r.map(|()| String::new()))
             }
             ClientFrame::InviteConsume { invite_id, msg_id } => {
@@ -702,6 +1079,7 @@ impl<S: Store> Relay<S> {
     async fn group_create(
         &self,
         mailbox: &str,
+        ip: Option<IpAddr>,
         group_id: &str,
         epoch: u64,
     ) -> Result<(), RelayError> {
@@ -718,13 +1096,51 @@ impl<S: Store> Relay<S> {
         if !self.rate_check(&format!("mb:{mailbox}"), self.limits.sends_per_sec, 1000) {
             return Err(E::new(ErrorCode::RateLimited, "send rate exceeded"));
         }
-        match self
+        // A repeat by its creator (its `accepted` was lost) is accepted
+        // again, and counts against no limit (SPEC §8.3).
+        if self
+            .store
+            .group_creator(group_id)
+            .await
+            .map_err(|e| internal(&e))?
+            .is_some_and(|by| by == mailbox)
+        {
+            return Ok(());
+        }
+        // A quota, not a rate: a daemon backs off from `rate_limited` for
+        // seconds, and this one lasts up to a day.
+        let quota = self.quotas.groups_per_mailbox;
+        if !self.rate_check(&format!("gc:{mailbox}"), quota.max, window_ms(quota)) {
+            return Err(E::new(
+                ErrorCode::QuotaExceeded,
+                format!(
+                    "a mailbox creates at most {} groups per {} hours",
+                    quota.max,
+                    quota.per.as_secs() / 3600
+                ),
+            ));
+        }
+        // A group counts for its address for the idle period: an older one
+        // is gone unless its members use it.
+        let idle = u64::try_from(
+            self.quotas
+                .group_idle
+                .saturating_add(ACTIVITY_GRANULARITY)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        let until = self.now_ms().saturating_add(idle);
+        self.reserve(Held::Group, ip, until)?;
+        let created = self
             .store
             .create_group(group_id, mailbox, self.now_ms())
             .await
-            .map_err(|e| internal(&e))?
-        {
-            CreateGroupOutcome::Created => Ok(()),
+            .map_err(|e| internal(&e));
+        if !matches!(created, Ok(CreateGroupOutcome::Created)) {
+            self.undo(Held::Group, ip, until);
+        }
+        match created? {
+            CreateGroupOutcome::Created | CreateGroupOutcome::Yours => Ok(()),
             CreateGroupOutcome::Exists => {
                 Err(E::new(ErrorCode::BadRequest, "group already exists"))
             }
@@ -1004,11 +1420,29 @@ impl<S: Store> Relay<S> {
     ///
     /// # Errors
     ///
-    /// `bad_request` for invalid fields or a duplicate id, `auth_failed` if
-    /// `inviter_mailbox` is not the caller.
+    /// See [`Relay::create_invite_from`].
     pub async fn create_invite(
         &self,
         mailbox: &str,
+        req: NewInviteRequest,
+    ) -> Result<InviteRecord, RelayError> {
+        self.create_invite_from(mailbox, None, req).await
+    }
+
+    /// Register an invite on behalf of the authenticated `mailbox`, from
+    /// `ip` (`None`: unknown).
+    ///
+    /// # Errors
+    ///
+    /// `bad_request` for invalid fields (the three texts must be one-line
+    /// text, SPEC §4.2) or a duplicate id, `auth_failed` if
+    /// `inviter_mailbox` is not the caller, `quota_exceeded` if the mailbox
+    /// already holds the maximum number of open invites, or the address or
+    /// the relay as many invite rows as it takes.
+    pub async fn create_invite_from(
+        &self,
+        mailbox: &str,
+        ip: Option<IpAddr>,
         req: NewInviteRequest,
     ) -> Result<InviteRecord, RelayError> {
         use RelayError as E;
@@ -1056,16 +1490,50 @@ impl<S: Store> Relay<S> {
             inviter_mailbox: req.inviter_mailbox,
             revoked: false,
         };
-        if !self
+        let max_open = self.quotas.open_invites_per_mailbox;
+        // The row is held until `expires_at` plus the grace period.
+        let until = record
+            .expires_at
+            .saturating_mul(1000)
+            .saturating_add(crate::sqlite::INVITE_GRACE_MS);
+        self.reserve(Held::Invite, ip, until)?;
+        let created = self
             .store
-            .create_invite(&record, self.now_ms())
+            .create_invite(&record, max_open, self.now_ms())
             .await
-            .map_err(|e| internal(&e))?
-        {
-            return bad("invite already exists");
+            .map_err(|e| internal(&e));
+        if !matches!(created, Ok(CreateInviteOutcome::Created)) {
+            self.undo(Held::Invite, ip, until);
+        }
+        match created? {
+            CreateInviteOutcome::Created => {}
+            CreateInviteOutcome::Exists => return bad("invite already exists"),
+            CreateInviteOutcome::TooMany => {
+                return Err(E::new(
+                    ErrorCode::QuotaExceeded,
+                    format!("a mailbox holds at most {max_open} open invites; revoke one first"),
+                ));
+            }
         }
         Metrics::inc(&self.metrics.invites_created);
         Ok(record)
+    }
+
+    /// Look up a door, for authorizing a signed request on it.
+    ///
+    /// # Errors
+    ///
+    /// `door_not_open` if the relay doesn't hold it.
+    pub async fn door(&self, door_id: &str) -> Result<DoorRecord, RelayError> {
+        let unknown = || RelayError::new(ErrorCode::DoorNotOpen, "unknown door");
+        if !is_id16(door_id) {
+            return Err(unknown());
+        }
+        self.store
+            .get_door(door_id)
+            .await
+            .map_err(|e| internal(&e))?
+            .ok_or_else(unknown)
     }
 
     /// Look up an invite (public).
@@ -1126,6 +1594,14 @@ mod tests {
         assert_eq!(value(&m), 1);
         drop(b);
         assert_eq!(value(&m), 0);
+    }
+
+    #[test]
+    fn a_count_given_back_after_a_recount_stays_at_zero() {
+        let c = AtomicU64::new(1);
+        dec(&c);
+        dec(&c);
+        assert_eq!(c.load(Ordering::Relaxed), 0);
     }
 
     #[test]

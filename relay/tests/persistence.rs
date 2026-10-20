@@ -3,8 +3,8 @@
 use agentconnect_relay::SqliteStore;
 use agentconnect_relay::proto::Kind;
 use agentconnect_relay::store::{
-    CreateGroupOutcome, DirectOutcome, GroupOutcome, GroupSend, InviteRecord, Limits, NewMessage,
-    RevokeOutcome, Store,
+    CreateGroupOutcome, CreateInviteOutcome, DirectOutcome, GroupOutcome, GroupSend, InviteRecord,
+    Limits, NewMessage, RevokeOutcome, Store,
 };
 
 const NOW: u64 = 1_735_689_600_000;
@@ -43,10 +43,11 @@ async fn state_survives_a_restart_and_migrations_are_idempotent() {
     let limits = Limits::default();
     {
         let s = SqliteStore::open(spec).await.unwrap();
-        assert!(
-            s.create_invite(&invite(NOW / 1000 + 3600), NOW)
+        assert_eq!(
+            s.create_invite(&invite(NOW / 1000 + 3600), 10, NOW)
                 .await
-                .unwrap()
+                .unwrap(),
+            CreateInviteOutcome::Created
         );
         assert_eq!(
             s.create_group(GID, A, NOW).await.unwrap(),
@@ -115,8 +116,8 @@ async fn purge_removes_only_expired_rows() {
     let long_gone = invite(NOW / 1000 - 10);
     let mut recent = invite(NOW / 1000 + 100);
     recent.invite_id = "inv-2".into();
-    s.create_invite(&long_gone, NOW).await.unwrap();
-    s.create_invite(&recent, NOW).await.unwrap();
+    s.create_invite(&long_gone, 10, NOW).await.unwrap();
+    s.create_invite(&recent, 10, NOW).await.unwrap();
 
     // The old message has expired; the invite grace period ends 7 days
     // before `t`, i.e. just after NOW.
@@ -134,15 +135,17 @@ async fn purge_removes_only_expired_rows() {
 #[tokio::test]
 async fn revoke_and_duplicate_creates() {
     let s = SqliteStore::in_memory().await.unwrap();
-    assert!(
-        s.create_invite(&invite(NOW / 1000 + 60), NOW)
+    assert_eq!(
+        s.create_invite(&invite(NOW / 1000 + 60), 10, NOW)
             .await
-            .unwrap()
+            .unwrap(),
+        CreateInviteOutcome::Created
     );
-    assert!(
-        !s.create_invite(&invite(NOW / 1000 + 60), NOW)
+    assert_eq!(
+        s.create_invite(&invite(NOW / 1000 + 60), 10, NOW)
             .await
-            .unwrap()
+            .unwrap(),
+        CreateInviteOutcome::Exists
     );
     assert_eq!(
         s.revoke_invite("inv-1", B).await.unwrap(),
@@ -189,4 +192,239 @@ async fn ack_removes_only_the_acknowledged_mailbox_copy() {
     assert!(!s.ack(A, "w1").await.unwrap());
     assert!(s.pending(A, 0, 10, NOW).await.unwrap().is_empty());
     assert_eq!(s.pending(B, 0, 10, NOW).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn only_open_invites_count_toward_the_per_mailbox_quota() {
+    let s = SqliteStore::in_memory().await.unwrap();
+    let numbered = |n: u32, expires_at: u64| InviteRecord {
+        invite_id: format!("inv-{n}"),
+        ..invite(expires_at)
+    };
+    let later = NOW / 1000 + 60;
+    for n in 0..3 {
+        assert_eq!(
+            s.create_invite(&numbered(n, later), 3, NOW).await.unwrap(),
+            CreateInviteOutcome::Created
+        );
+    }
+    assert_eq!(
+        s.create_invite(&numbered(3, later), 3, NOW).await.unwrap(),
+        CreateInviteOutcome::TooMany
+    );
+    // Another mailbox has its own quota.
+    let other = InviteRecord {
+        inviter_mailbox: B.into(),
+        ..numbered(4, later)
+    };
+    assert_eq!(
+        s.create_invite(&other, 3, NOW).await.unwrap(),
+        CreateInviteOutcome::Created
+    );
+    // Revoked, used up and expired invites are not open.
+    s.revoke_invite("inv-0", A).await.unwrap();
+    assert_eq!(
+        s.create_invite(&numbered(5, later), 3, NOW).await.unwrap(),
+        CreateInviteOutcome::Created
+    );
+    for _ in 0..3 {
+        s.consume_invite("inv-1", A, NOW).await.unwrap();
+    }
+    assert_eq!(
+        s.create_invite(&numbered(6, later), 3, NOW).await.unwrap(),
+        CreateInviteOutcome::Created
+    );
+    let after_expiry = (later + 1) * 1000;
+    assert_eq!(
+        s.create_invite(&numbered(7, later + 600), 3, after_expiry)
+            .await
+            .unwrap(),
+        CreateInviteOutcome::Created
+    );
+    // The quota is checked before the id: a full mailbox hears TooMany.
+    assert_eq!(
+        s.create_invite(&numbered(9, later), 0, NOW).await.unwrap(),
+        CreateInviteOutcome::TooMany
+    );
+}
+
+#[tokio::test]
+async fn idle_groups_are_listed_by_last_use_and_deleted_only_while_idle() {
+    const DAY: u64 = 24 * 3600 * 1000;
+    let s = SqliteStore::in_memory().await.unwrap();
+    let limits = Limits::default();
+    let gid = |n: u8| format!("{GID:.21}{n}");
+    for n in 0..4 {
+        s.create_group(&gid(n), A, NOW).await.unwrap();
+    }
+    // Group 1 has a member besides its creator; group 2 is used later.
+    let commit = message("c1");
+    let send = GroupSend {
+        kind: Kind::Commit,
+        group_id: &gid(1),
+        sender: A,
+        epoch: 0,
+        add: &[B.to_owned()],
+        remove: &[],
+        to: &[],
+        msg: &commit,
+    };
+    s.deliver_group(&send, &limits, NOW).await.unwrap();
+    used(&s, &gid(2), "a2", NOW + 10 * DAY).await;
+
+    // Nothing is idle at its creation time.
+    assert!(s.idle_groups(NOW - 1, "", 10).await.unwrap().is_empty());
+    let cutoff = NOW + 5 * DAY;
+    let idle = s.idle_groups(cutoff, "", 10).await.unwrap();
+    let ids: Vec<_> = idle.iter().map(|g| g.group_id.clone()).collect();
+    assert_eq!(ids, [gid(0), gid(1), gid(3)]);
+    assert_eq!(idle[1].members, [A.to_owned(), B.to_owned()]);
+    // Keyset paging.
+    let page = s.idle_groups(cutoff, &gid(0), 1).await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].group_id, gid(1));
+
+    assert!(!s.delete_idle_group(&gid(2), cutoff).await.unwrap());
+    used(&s, &gid(3), "a3", NOW + 6 * DAY).await;
+    assert!(
+        !s.delete_idle_group(&gid(3), cutoff).await.unwrap(),
+        "used since"
+    );
+
+    assert!(s.delete_idle_group(&gid(1), cutoff).await.unwrap());
+    assert!(s.get_group(&gid(1)).await.unwrap().is_none());
+    assert!(!s.delete_idle_group(&gid(1), cutoff).await.unwrap());
+    // Its memberships went with it, so the id starts afresh.
+    assert_eq!(
+        s.create_group(&gid(1), B, cutoff).await.unwrap(),
+        CreateGroupOutcome::Created
+    );
+    assert_eq!(s.get_group(&gid(1)).await.unwrap().unwrap().members, [B]);
+    let app = message("a1");
+    let send = GroupSend {
+        kind: Kind::Application,
+        group_id: &gid(0),
+        sender: A,
+        epoch: 0,
+        add: &[],
+        remove: &[],
+        to: &[],
+        msg: &app,
+    };
+    assert!(s.delete_idle_group(&gid(0), cutoff).await.unwrap());
+    assert_eq!(
+        s.deliver_group(&send, &limits, cutoff).await.unwrap(),
+        GroupOutcome::UnknownGroup
+    );
+
+    // A send within the hour of the last recorded one is not written: the
+    // time is that coarse, which the relay's sweep allows for.
+    used(&s, &gid(2), "a4", NOW + 10 * DAY + 1000).await;
+    assert!(
+        s.delete_idle_group(&gid(2), NOW + 10 * DAY + 500)
+            .await
+            .unwrap()
+    );
+}
+
+/// An application message from `A`, accepted.
+async fn used(s: &SqliteStore, group_id: &str, msg_id: &str, at: u64) {
+    let m = message(msg_id);
+    let send = GroupSend {
+        kind: Kind::Application,
+        group_id,
+        sender: A,
+        epoch: 0,
+        add: &[],
+        remove: &[],
+        to: &[],
+        msg: &m,
+    };
+    let out = s
+        .deliver_group(&send, &Limits::default(), at)
+        .await
+        .unwrap();
+    assert!(matches!(out, GroupOutcome::Delivered { .. }), "{out:?}");
+}
+
+#[tokio::test]
+async fn a_send_between_the_sweeps_listing_and_its_delete_keeps_the_group() {
+    // Review probe P8: the activity time is written in the send's own
+    // transaction, so the delete's guard sees it.
+    let s = SqliteStore::in_memory().await.unwrap();
+    s.create_group(GID, A, NOW).await.unwrap();
+    let cutoff = NOW + 1;
+    assert_eq!(s.idle_groups(cutoff, "", 10).await.unwrap().len(), 1);
+    used(&s, GID, "late", cutoff + 10).await;
+    assert!(!s.delete_idle_group(GID, cutoff).await.unwrap());
+    assert!(s.get_group(GID).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn the_upgrade_counts_every_existing_group_as_used_now() {
+    // Review probe P3: before migration 0004 no activity was recorded. A
+    // group created long ago and used the day before the upgrade must not
+    // look idle after it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("relay.db");
+    let opts = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+    let mut old = sqlx::migrate!("./migrations");
+    old.migrations = old
+        .migrations
+        .iter()
+        .filter(|m| m.version < 4)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    old.run(&pool).await.unwrap();
+    let long_ago = 1_000_000_000_000_i64; // 2001: far longer ago than any idle period
+    sqlx::query("INSERT INTO groups (group_id, epoch, created_at) VALUES (?, 3, ?)")
+        .bind(GID)
+        .bind(long_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let s = SqliteStore::open(path.to_str().unwrap()).await.unwrap();
+    // Idle at the upgrade only by a cutoff after it: the group counts as
+    // used when the migration ran.
+    let at_upgrade = before - 1000;
+    assert!(s.idle_groups(at_upgrade, "", 10).await.unwrap().is_empty());
+    assert!(!s.delete_idle_group(GID, at_upgrade).await.unwrap());
+    assert_eq!(s.get_group(GID).await.unwrap().unwrap().current_epoch, 3);
+    // A group from before the creator was recorded has none.
+    assert_eq!(s.group_creator(GID).await.unwrap(), None);
+    assert_eq!(
+        s.create_group(GID, A, before).await.unwrap(),
+        CreateGroupOutcome::Exists
+    );
+}
+
+#[tokio::test]
+async fn a_group_records_its_creator_and_a_repeat_by_it_is_its_own() {
+    // Verification finding V4: a lost `accepted` for group.create.
+    let s = SqliteStore::in_memory().await.unwrap();
+    assert_eq!(s.group_creator(GID).await.unwrap(), None);
+    assert_eq!(
+        s.create_group(GID, A, NOW).await.unwrap(),
+        CreateGroupOutcome::Created
+    );
+    assert_eq!(s.group_creator(GID).await.unwrap().as_deref(), Some(A));
+    assert_eq!(
+        s.create_group(GID, A, NOW + 1).await.unwrap(),
+        CreateGroupOutcome::Yours
+    );
+    assert_eq!(
+        s.create_group(GID, B, NOW + 1).await.unwrap(),
+        CreateGroupOutcome::Exists
+    );
+    assert_eq!(s.get_group(GID).await.unwrap().unwrap().members, [A]);
 }

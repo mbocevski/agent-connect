@@ -930,6 +930,7 @@ class GroupService:
         except RelayError as err:
             # A stale proposal: the next commit we process triggers a resend.
             LOG.info("proposal_failed", code=err.code)
+            await e.on_group_refused(group.group_id, err.code)
             return "failed"
         return "done"
 
