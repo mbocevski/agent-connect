@@ -275,14 +275,24 @@ jobs:
   # Trusted publishing (OIDC): no token is stored anywhere. PyPI attaches its
   # own attestations (PEP 740) to each file. Runs only on a tag, after every
   # build, the PyPI file checks and the image builds passed.
+  #
+  # One environment per package (`pypi-core`, `pypi-cli`, `pypi-sdk`): PyPI
+  # allows only one pending publisher per repository, workflow and
+  # environment, so a new project needs its own environment. One package at
+  # a time, core first, since the CLI and the SDK depend on it.
   pypi:
+    name: pypi (${{ matrix.package }})
     if: needs.version.outputs.publish == 'true'
     needs: [version, pypi-dist, image]
+    strategy:
+      max-parallel: 1
+      matrix:
+        package: [core, cli, sdk]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
-      name: pypi
-      url: https://pypi.org/project/agentconnect-cli/${{ needs.version.outputs.version }}/
+      name: pypi-${{ matrix.package }}
+      url: https://pypi.org/project/agentconnect-${{ matrix.package }}/${{ needs.version.outputs.version }}/
     permissions:
       id-token: write
     steps:
@@ -290,9 +300,16 @@ jobs:
         with:
           name: pypi-dist
           path: pypi
+      - name: This package's files
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir upload
+          mv pypi/agentconnect_"$PACKAGE"-* upload/
+          ls -l upload
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
-          packages-dir: pypi/
+          packages-dir: upload/
           print-hash: true
 
   # One multi-architecture index per image, tagged with the version (no `v`,

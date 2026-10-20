@@ -259,7 +259,8 @@ locks and Unix sockets).
   `macosx_*_x86_64` wheel on macOS. The daemon and CLI (`agentconnect-cli`)
   and the SDK (`agentconnect-sdk`) are pure Python and ship once.
 - **PyPI.** Tags publish the three packages through trusted publishing
-  (OIDC, the `pypi` environment), never with a stored token. The daemon's
+  (OIDC, one environment per package: `pypi-core`, `pypi-cli`,
+  `pypi-sdk`), never with a stored token. The daemon's
   distribution is `agentconnect-cli`: `agent-connect` belongs to another
   project and PyPI refuses `agentconnect` as too close to it. The command
   and the import package stay `agentconnect`.
