@@ -109,7 +109,7 @@ test-nightly: nightly-mutants nightly-py
 nightly-mutants *args:
     cargo mutants -p agentconnect-core --no-shuffle {{ args }}
 
-# One shard of it, as the nightly matrix runs it: just nightly-mutants-shard 3/16
+# One shard of it, as the nightly matrix runs it: just nightly-mutants-shard 3/24
 nightly-mutants-shard shard *args:
     cargo mutants -p agentconnect-core --no-shuffle --shard {{ shard }} {{ args }}
 
