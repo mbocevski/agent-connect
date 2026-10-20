@@ -161,8 +161,11 @@ The adapter replaces any `metadata.instance` the agent put on the event.
 
 **`input-required`.** When the agent asks for input, the requester answers
 with an `a2a.message` that carries the same `taskId` and `contextId`. The
-adapter continues the agent's task. A `taskId` from another member, or from
-another group, starts a new task instead. The Python SDK's `Group.reply`
+adapter continues the agent's task, also after a restart: the adapter keeps
+its agent's tasks in the daemon's encrypted database, the newest 64 for
+each requesting instance, so one member can't push another's out. A
+`taskId` from another member, or from another group, starts a new task
+instead. The Python SDK's `Group.reply`
 to the `input-required` status sends such a message
 ([sdk.md](../sdk.md#api)).
 
@@ -247,6 +250,12 @@ and rate limits apply to them.
 
 ### Tasks
 
+- Only a member the request asked answers it (SPEC
+  [§9.3](../../SPEC.md#93-floor-control-and-triggering)): the facade for
+  one member takes that member's answers only, and the group facade those
+  of the members its request triggered. Every member reads the request; an
+  answer from anyone else is context and never stands in for the member
+  asked, nor binds the task.
 - A reply `Message` ends the request in message mode.
 - Status and artifact events from the first instance that answers make up
   the facade's task. Events from other members, and from the other
@@ -310,7 +319,17 @@ SPEC §10.2 applies to everything the adapter and the facade send:
 - Each member may send 30 messages a minute, and a group 120.
 - Streamed task updates (`a2a.task_status`, `a2a.task_artifact`) have their
   own budget: 300 a minute per task. A task's first update counts as one
-  ordinary message. Updates over the budget are not sent.
+  ordinary message. Updates over the budget are not sent, except the task
+  asking for input or ending, once per state for the request it answers:
+  those always go. That holds only for the task of a request this instance
+  received and that asked it; any other update has the budget. The requester
+  grants that budget only because the updates answer its own request
+  (`reply_to`, as the adapter sets it), and is triggered only by the
+  `input-required`, `auth-required` and final states; the rest of the
+  stream reaches it as context. Every other member gets the stream as
+  context at the ordinary message rates, so it may miss some of a fast
+  stream. The facade is unaffected: its client gets every event of the
+  task it asked for.
 - Parts may be `text` or `data`. A reply with a `file` part (`raw` or
   `url`) is not sent. Inbound messages with one never reach the adapter.
 

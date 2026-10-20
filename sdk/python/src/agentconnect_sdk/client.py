@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import secrets
@@ -127,6 +128,15 @@ def _task_of(msg: Message) -> tuple[str, str] | None:
     return task_id, context_id if isinstance(context_id, str) and context_id else ""
 
 
+def _task_for(msg: Message) -> str:
+    """The task an answer to ``msg`` is about: its own ``taskId``, else one
+    derived from its ``msg_id``, the same for every answer to it."""
+    own = msg.a2a.get("taskId")
+    if isinstance(own, str) and own:
+        return own
+    return "task-" + hashlib.sha256(msg.msg_id.encode()).hexdigest()[:16]
+
+
 class Group:
     """One group, bound to the client that opened it."""
 
@@ -196,12 +206,14 @@ class Group:
     ) -> str:
         """Send an A2A ``TaskStatusUpdateEvent`` for the task ``msg`` started
         (``state``: a :class:`TaskState`). ``task_id`` defaults to the
-        message's own ``taskId``, else a new one."""
+        message's own ``taskId``, else one derived from ``msg``, so every
+        update answering one message is about one task (the requester grants
+        one task per request, SPEC section 9.3)."""
         status: dict[str, Any] = {"state": state}
         if text is not None:
             status["message"] = _agent_message(self.id, text)
         body = {
-            "taskId": task_id or str(msg.a2a.get("taskId") or secrets.token_hex(8)),
+            "taskId": task_id or _task_for(msg),
             "contextId": self.id,
             "status": status,
         }
@@ -218,7 +230,8 @@ class Group:
         append: bool = False,
         last_chunk: bool = True,
     ) -> str:
-        """Send an A2A ``TaskArtifactUpdateEvent`` (a result for a task)."""
+        """Send an A2A ``TaskArtifactUpdateEvent`` (a result for a task).
+        ``task_id`` defaults as for :meth:`reply_status`."""
         artifact: dict[str, Any] = {
             "artifactId": artifact_id or secrets.token_hex(8),
             "parts": _parts(content),
@@ -226,7 +239,7 @@ class Group:
         if name is not None:
             artifact["name"] = name
         body = {
-            "taskId": task_id or str(msg.a2a.get("taskId") or secrets.token_hex(8)),
+            "taskId": task_id or _task_for(msg),
             "contextId": self.id,
             "artifact": artifact,
             "append": append,

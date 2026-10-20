@@ -5,11 +5,13 @@ The SPEC defaults (:data:`SPEC_LIMITS`):
 * Messages are at most 256 KiB (the canonical JSON of the inner message).
 * Each sender instance may send 30 messages per minute, all instances of one
   identity together 3 times that, and a group 120.
-* Updates for a task (``a2a.task_status``, ``a2a.task_artifact`` with a
-  ``taskId``) have their own budget: 300 per minute per task and sender
+* Updates for a task this instance asked for (``a2a.task_status``,
+  ``a2a.task_artifact`` with a ``taskId``, answering a message it sent)
+  have their own budget: 300 per minute per task and sender
   instance, 3 times that for all of one identity's tasks, and 1200 for the
   group's. The first update of a task in the window counts as an ordinary
-  message, so opening tasks is held to the message rates.
+  message, so opening tasks is held to the message rates. Other task
+  updates get the message rates, in windows of their own.
 * A2A parts may be ``text`` or ``data``; ``file`` parts are disabled.
 * Only the kinds of §7.2/§7.3 are delivered; unknown kinds are ignored.
 
@@ -271,15 +273,24 @@ class RateLimiter:
         *,
         identity: str | None = None,
         direction: str = "in",
+        requested: bool = True,
     ) -> bool:
         """Count one inner message against its budget (SPEC 10.2).
 
-        A task update counts against its task's budget (per sender instance),
+        A task update that isn't ``requested`` (it answers no message this
+        instance sent, SPEC 9.3) counts against the message rates, in windows
+        of its own: it never triggers the agent, and an honest task for
+        another member mustn't use up its sender's messages. Any other
+        task update counts against its task's budget (per sender instance),
         against all of the identity's task updates (``identity_rate_multiple``
         times the task budget) and against the group's
         (``group_task_per_minute``). The first update of a task in the window
         also counts as an ordinary message. Anything else counts against the
         message rates."""
+        if kind in TASK_UPDATE_KINDS and not requested:
+            return self.allow(
+                group_id, sender, limits, identity=identity, direction=f"{direction}\0context"
+            )
         task = body.get("taskId") if kind in TASK_UPDATE_KINDS and isinstance(body, dict) else None
         if not isinstance(task, str) or not 0 < len(task) <= MAX_TASK_ID:
             return self.allow(group_id, sender, limits, identity=identity, direction=direction)

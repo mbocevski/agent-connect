@@ -155,6 +155,15 @@ async def test_a_long_stream_is_not_cut_off_but_a_flood_is(
         WAIT,
     )
     assert len(from_peer(a, b, "a2a.task_artifact")) == chunks
+    # They answer a's own request: all of them reach a, on the task budget,
+    # as context; the end triggers it (SPEC 9.3).
+    assert not any(d.addressed_to_me for d in from_peer(a, b, "a2a.task_artifact"))
+    ends = [
+        d
+        for d in from_peer(a, b, "a2a.task_status")
+        if d.body["status"]["state"] == "TASK_STATE_COMPLETED"
+    ]
+    assert [d.addressed_to_me for d in ends] == [True]
     # An ordinary flood from the same member is still cut off.
     sent, code = 0, ""
     try:
@@ -189,10 +198,11 @@ async def test_input_required_round_trip(cluster: Cluster, streaming: bool) -> N
         await a.adapter.wait_for(lambda: bool(asked()), WAIT)
         question = asked()[0]
         task_id = question.body["taskId"]
+        assert question.addressed_to_me, "it answers a's own request"
         assert question.body["status"]["message"]["parts"] == [{"text": "which one?"}]
 
         # The follow-up reuses taskId and contextId: the agent continues it.
-        await send(gid, body("the blue one", gid, task_id=task_id))
+        follow_up = await send(gid, body("the blue one", gid, task_id=task_id))
         seen = await executor.wait_for(2)
         assert seen[1].continued
         assert seen[1].task_id == task_id
@@ -207,6 +217,9 @@ async def test_input_required_round_trip(cluster: Cluster, streaming: bool) -> N
 
         await a.adapter.wait_for(lambda: bool(done()), WAIT)
         assert done()[0].body["taskId"] == task_id
+        # It answers the follow-up, which named the task: a is triggered.
+        assert done()[0].inner["reply_to"] == [str(follow_up)]
+        assert done()[0].addressed_to_me
         assert done()[0].body["status"]["message"]["parts"] == [{"text": "thanks, the blue one"}]
     finally:
         await agent.stop()
@@ -233,11 +246,12 @@ async def test_only_the_requester_cancels_the_task(cluster: Cluster) -> None:
         await a.adapter.wait_for(lambda: bool(state(a, "TASK_STATE_WORKING")), WAIT)
         working = state(a, "TASK_STATE_WORKING")[0]
         task_id = working.body["taskId"]
-        # The progress reaches the whole group; only the requester is addressed.
+        # The progress reaches the whole group, addressed to the requester;
+        # it is progress, so it triggers nobody (SPEC 9.3).
         assert (working.to, working.inner["addressee"], working.addressed_to_me) == (
             ["*"],
             [a.me],
-            True,
+            False,
         )
         await c.adapter.wait_for(lambda: bool(state(c, "TASK_STATE_WORKING")), WAIT)
         assert not state(c, "TASK_STATE_WORKING")[0].addressed_to_me
@@ -261,6 +275,7 @@ async def test_only_the_requester_cancels_the_task(cluster: Cluster) -> None:
         await send(gid, convert.cancel_body(task_id), to=[b.me], kind="a2a.task_cancel")
         await a.adapter.wait_for(lambda: bool(state(a, "TASK_STATE_CANCELED")), WAIT)
         assert executor.canceled == [task_id]
+        assert state(a, "TASK_STATE_CANCELED")[0].addressed_to_me, "a asked for the task"
     finally:
         await agent.stop()
 

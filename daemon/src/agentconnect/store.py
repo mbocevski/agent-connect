@@ -283,6 +283,58 @@ CREATE TABLE IF NOT EXISTS hops (
     at INTEGER NOT NULL,
     PRIMARY KEY (group_id, msg_id)
 );
+CREATE TABLE IF NOT EXISTS task_requests (
+    group_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    task_id TEXT,
+    asked TEXT NOT NULL,
+    instance TEXT,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, msg_id)
+);
+CREATE INDEX IF NOT EXISTS task_requests_at ON task_requests (at);
+CREATE TABLE IF NOT EXISTS request_tasks (
+    group_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    responder TEXT NOT NULL,
+    instance TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    triggered TEXT NOT NULL DEFAULT '[]',
+    ended INTEGER NOT NULL DEFAULT 0,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, msg_id, responder)
+);
+CREATE INDEX IF NOT EXISTS request_tasks_at ON request_tasks (at);
+CREATE INDEX IF NOT EXISTS request_tasks_task ON request_tasks (group_id, task_id);
+CREATE TABLE IF NOT EXISTS answered_tasks (
+    group_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS answered_tasks_at ON answered_tasks (at);
+CREATE TABLE IF NOT EXISTS asked_requests (
+    group_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    task_id TEXT,
+    sent TEXT NOT NULL DEFAULT '[]',
+    ended INTEGER NOT NULL DEFAULT 0,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, msg_id)
+);
+CREATE INDEX IF NOT EXISTS asked_requests_at ON asked_requests (at);
+CREATE TABLE IF NOT EXISTS a2a_agent_tasks (
+    task_id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    requester TEXT NOT NULL,
+    instance TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS a2a_agent_tasks_at ON a2a_agent_tasks (at);
+CREATE INDEX IF NOT EXISTS a2a_agent_tasks_peer
+    ON a2a_agent_tasks (group_id, requester, instance, at);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1187,6 +1239,11 @@ class Store:
                 "listed_peers",
                 "floor_state",
                 "floor_writes",
+                "task_requests",
+                "request_tasks",
+                "answered_tasks",
+                "asked_requests",
+                "a2a_agent_tasks",
                 "sas_answered",
                 "sas_sent",
                 "sas_warnings",
@@ -2418,6 +2475,249 @@ class Store:
     def forget_hops(self, before: int) -> None:
         self._db.execute("DELETE FROM hops WHERE at < ?", (before,))
         self._db.execute("DELETE FROM sent_via WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM task_requests WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM answered_tasks WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM asked_requests WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM request_tasks WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM a2a_agent_tasks WHERE at < ?", (before,))
+
+    def record_request(  # noqa: PLR0913
+        self,
+        group_id: str,
+        msg_id: str,
+        *,
+        task_id: str | None,
+        asked: Sequence[str],
+        instance: str | None,
+        now: int,
+    ) -> None:
+        """Remember a message this instance sent that a peer may answer with
+        a task (SPEC 9.3): the task it names, if any, the identities it asked
+        and, with an instance hint, the one instance."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO task_requests "
+            "(group_id, msg_id, task_id, asked, instance, at) VALUES (?, ?, ?, ?, ?, ?)",
+            (group_id, msg_id, task_id, json.dumps(sorted(set(asked))), instance, now),
+        )
+
+    def request_asks(self, group_id: str, msg_id: str, identity: str, instance: str) -> bool:
+        """Whether the request ``msg_id`` asked that instance of ``identity``."""
+        row = self._one(
+            "SELECT asked, instance FROM task_requests WHERE group_id = ? AND msg_id = ?",
+            group_id,
+            msg_id,
+        )
+        return row is not None and identity in json.loads(row[0]) and row[1] in (None, instance)
+
+    def task_owner(self, group_id: str, task_id: str) -> tuple[str, str] | None:
+        """The member running ``task_id`` for this instance (identity and
+        instance), if exactly one is known (SPEC 9.3)."""
+        rows = self._all(
+            "SELECT DISTINCT responder, instance FROM request_tasks "
+            "WHERE group_id = ? AND task_id = ? LIMIT 2",
+            group_id,
+            task_id,
+        )
+        return (str(rows[0][0]), str(rows[0][1])) if len(rows) == 1 else None
+
+    def grant_task(  # noqa: PLR0913
+        self,
+        group_id: str,
+        refs: Sequence[str],
+        *,
+        responder: str,
+        instance: str,
+        task_id: str,
+        now: int,
+    ) -> str | None:
+        """The request among ``refs`` that grants a task update from
+        ``responder`` (``instance``) about ``task_id`` (SPEC 9.3), or
+        ``None``. A request asked the responder; it grants one task per asked
+        member: the one it named, else the first the member answers it with,
+        bound to the instance that answered (recorded here)."""
+        for ref in refs:
+            row = self._one(
+                "SELECT task_id, asked, instance FROM task_requests "
+                "WHERE group_id = ? AND msg_id = ?",
+                group_id,
+                ref,
+            )
+            if row is None:
+                continue
+            named, asked, hint = row
+            if responder not in json.loads(asked) or hint not in (None, instance):
+                continue
+            grant = self._one(
+                "SELECT task_id, instance FROM request_tasks "
+                "WHERE group_id = ? AND msg_id = ? AND responder = ?",
+                group_id,
+                ref,
+                responder,
+            )
+            if grant is None:
+                if named not in (None, task_id):
+                    continue
+                self._db.execute(
+                    "INSERT INTO request_tasks "
+                    "(group_id, msg_id, responder, instance, task_id, at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (group_id, ref, responder, instance, task_id, now),
+                )
+                return ref
+            if (grant[0], grant[1]) == (task_id, instance):
+                return ref
+        return None
+
+    def task_triggers(self, group_id: str, request: str, responder: str, state: str) -> bool:
+        """Whether entering ``state`` (one the requester acts on) triggers:
+        the granted task hasn't ended and hasn't triggered on ``state``
+        before (SPEC 9.3)."""
+        row = self._one(
+            "SELECT triggered, ended FROM request_tasks "
+            "WHERE group_id = ? AND msg_id = ? AND responder = ?",
+            group_id,
+            request,
+            responder,
+        )
+        return row is not None and not row[1] and state not in json.loads(row[0])
+
+    def task_entered(
+        self, group_id: str, request: str, responder: str, state: str, *, terminal: bool
+    ) -> None:
+        """The granted task entered ``state`` (and the receiver took the
+        update): it triggers on it at most once, and a terminal state ends
+        the task."""
+        row = self._one(
+            "SELECT triggered FROM request_tasks "
+            "WHERE group_id = ? AND msg_id = ? AND responder = ?",
+            group_id,
+            request,
+            responder,
+        )
+        if row is None:
+            return
+        states = sorted({*json.loads(row[0]), state})
+        self._db.execute(
+            "UPDATE request_tasks SET triggered = ?, ended = MAX(ended, ?) "
+            "WHERE group_id = ? AND msg_id = ? AND responder = ?",
+            (json.dumps(states), int(terminal), group_id, request, responder),
+        )
+
+    def granting_request(
+        self, group_id: str, refs: Sequence[str], responder: str, task_id: str
+    ) -> str | None:
+        """The request among ``refs`` that granted ``task_id`` to ``responder``."""
+        for ref in refs:
+            row = self._one(
+                "SELECT 1 FROM request_tasks WHERE group_id = ? AND msg_id = ? "
+                "AND responder = ? AND task_id = ?",
+                group_id,
+                ref,
+                responder,
+                task_id,
+            )
+            if row is not None:
+                return ref
+        return None
+
+    def record_answered(self, group_id: str, task_id: str, msg_id: str, now: int) -> None:
+        """This instance runs ``task_id`` for the request ``msg_id`` (the
+        first task update it sent names it)."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO answered_tasks (group_id, task_id, msg_id, at) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, task_id, msg_id, now),
+        )
+
+    def record_asked(self, group_id: str, msg_id: str, *, task_id: str | None, now: int) -> None:
+        """Remember a request this instance received that asked it (SPEC
+        9.3), and the task it names, if any: this instance's answer to it may
+        trigger its requester."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO asked_requests (group_id, msg_id, task_id, at) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, msg_id, task_id, now),
+        )
+
+    def answer_triggers(self, group_id: str, msg_id: str, task_id: str, state: str) -> bool:
+        """Whether this instance's update of ``task_id`` entering ``state``
+        (one the requester acts on) answers the received request ``msg_id``
+        as the requester's grant takes it (SPEC 9.3): the request asked this
+        instance, ``task_id`` is its task (the one it named, else the first
+        this instance answered it with, or none yet), which hasn't ended or
+        entered ``state`` before."""
+        row = self._one(
+            "SELECT task_id, sent, ended FROM asked_requests WHERE group_id = ? AND msg_id = ?",
+            group_id,
+            msg_id,
+        )
+        return (
+            row is not None
+            and row[0] in (None, task_id)
+            and not row[2]
+            and state not in json.loads(row[1])
+        )
+
+    def answered_asked(
+        self, group_id: str, msg_id: str, task_id: str, state: str | None, *, terminal: bool
+    ) -> None:
+        """This instance sent an update of ``task_id`` answering the
+        received request ``msg_id``: the first task answering it becomes its
+        task, and a ``state`` that triggers the requester
+        (:meth:`answer_triggers`) is used; a terminal one ends the task."""
+        self._db.execute(
+            "UPDATE asked_requests SET task_id = ? "
+            "WHERE group_id = ? AND msg_id = ? AND task_id IS NULL",
+            (task_id, group_id, msg_id),
+        )
+        if state is not None:
+            self._db.execute(
+                "UPDATE asked_requests SET sent = json_insert(sent, '$[#]', ?), "
+                "ended = MAX(ended, ?) WHERE group_id = ? AND msg_id = ? AND task_id = ?",
+                (state, int(terminal), group_id, msg_id, task_id),
+            )
+
+    def answered_request(self, group_id: str, task_id: str) -> str | None:
+        row = self._one(
+            "SELECT msg_id FROM answered_tasks WHERE group_id = ? AND task_id = ?",
+            group_id,
+            task_id,
+        )
+        return None if row is None else str(row[0])
+
+    def a2a_task_put(  # noqa: PLR0913
+        self,
+        task_id: str,
+        *,
+        group_id: str,
+        requester: str,
+        instance: str,
+        msg_id: str,
+        now: int,
+        keep: int,
+    ) -> None:
+        """The A2A adapter's map of its agent's tasks (who asked, where),
+        kept so follow-ups continue a task after a restart. Each requesting
+        instance keeps its newest ``keep``, so no peer can push another's
+        out."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO a2a_agent_tasks "
+            "(task_id, group_id, requester, instance, msg_id, at) VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, group_id, requester, instance, msg_id, now),
+        )
+        self._db.execute(
+            "DELETE FROM a2a_agent_tasks WHERE group_id = ? AND requester = ? AND instance = ? "
+            "AND task_id NOT IN (SELECT task_id FROM a2a_agent_tasks WHERE group_id = ? "
+            "AND requester = ? AND instance = ? ORDER BY at DESC, rowid DESC LIMIT ?)",
+            (group_id, requester, instance, group_id, requester, instance, keep),
+        )
+
+    def a2a_task(self, task_id: str) -> tuple[str, str, str, str] | None:
+        row = self._one(
+            "SELECT group_id, requester, instance, msg_id FROM a2a_agent_tasks WHERE task_id = ?",
+            task_id,
+        )
+        return None if row is None else (str(row[0]), str(row[1]), str(row[2]), str(row[3]))
 
     def pending_deliveries(
         self,

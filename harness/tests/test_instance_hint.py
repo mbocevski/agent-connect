@@ -167,10 +167,15 @@ async def test_an_sdk_reply_triggers_only_the_instance_that_asked(cluster: Clust
     group = a.sdk.group(gid)
     for answer in (
         await group.reply(msg, "pong"),
-        await group.reply_status(msg, "TASK_STATE_WORKING", "on it"),
-        await group.reply_artifact(msg, "result"),
+        await group.reply_status(msg, "TASK_STATE_INPUT_REQUIRED", "which one?"),
     ):
         assert await heard([x1, x2], answer) == {"x1": False, "x2": True}
+    # Progress on the task is context for both (SPEC 9.3); its end triggers
+    # the instance that asked only.
+    progress = await group.reply_artifact(msg, "result")
+    assert await heard([x1, x2], progress) == {"x1": False, "x2": False}
+    done = await group.reply_status(msg, "TASK_STATE_COMPLETED")
+    assert await heard([x1, x2], done) == {"x1": False, "x2": True}
     # Group.send takes the hint too, and refuses a malformed one.
     direct = await group.send("to x1", to=[x1.me], instance=inst(x1))
     assert await heard([x1, x2], direct) == {"x1": True, "x2": False}

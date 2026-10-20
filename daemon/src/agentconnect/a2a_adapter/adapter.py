@@ -72,16 +72,19 @@ from agentconnect.adapter import (
     OutboundSend,
     Sender,
 )
+from agentconnect.clock import Clock, unix_seconds
 from agentconnect.tasks import cancel_and_wait
 
 if TYPE_CHECKING:
     from agentconnect.config import Config
+    from agentconnect.store import Store
 
 LOG = log.get("a2a")
 FACADE_TOKEN_FILE = "a2a-facade-token"  # noqa: S105 - a file name
 SEEN_FILE = "a2a-seen.db"
 MAX_CONTEXT_ENTRY = 64 * 1024  # bytes of JSON; bigger context entries are summarised
-MAX_TASKS = 1024  # local agent tasks remembered for follow-ups and cancels
+MAX_TASKS = 1024  # local agent tasks kept in memory (a cache of the database's)
+TASKS_PER_PEER = 64  # tasks kept per requesting instance in the database
 CARD_TIMEOUT = 5.0
 
 
@@ -122,6 +125,7 @@ class TaskRef:
 
     group_id: str
     requester: str
+    instance: str
     trigger: str
 
 
@@ -157,9 +161,55 @@ class A2AAdapter:
         self._peers: dict[str, set[str]] = {}
         self._context: dict[str, deque[dict[str, Any]]] = {}
         self._tasks: OrderedDict[str, TaskRef] = OrderedDict()
+        # The daemon's encrypted store, where the task map outlives a restart,
+        # and the runtime's clock for its entries.
+        self._store: Store | None = None
+        self._clock: Clock | None = None
         self._running: set[asyncio.Task[None]] = set()
         self.facade: Facade | None = None
         self.facade_token: str | None = None
+
+    def bind_store(self, store: Store) -> None:
+        """The daemon's database: the local agent's tasks are kept there,
+        so a follow-up or a cancel after a restart still finds its task."""
+        self._store = store
+
+    def bind_clock(self, clock: Clock) -> None:
+        """The runtime's clock, which stamps the task map's entries."""
+        self._clock = clock
+
+    def _task(self, task_id: str) -> TaskRef | None:
+        """One of the local agent's tasks, in memory or, after a restart,
+        in the daemon's database."""
+        ref = self._tasks.get(task_id)
+        if ref is None and self._store is not None:
+            row = self._store.a2a_task(task_id)
+            ref = None if row is None else TaskRef(*row)
+        return ref
+
+    def asked(self, d: Delivery, request: str) -> bool:
+        """Whether the request ``request`` this daemon sent asked the member
+        (and instance) that sent ``d`` (SPEC 9.3, the daemon's record of its
+        requests). Without the daemon's store (tests), every member."""
+        return self._store is None or self._store.request_asks(
+            d.group_id, request, d.sender.identity, d.sender.instance_id
+        )
+
+    def _keep_task(self, task_id: str, ref: TaskRef) -> None:
+        self._tasks[task_id] = ref
+        self._tasks.move_to_end(task_id)
+        while len(self._tasks) > MAX_TASKS:
+            self._tasks.popitem(last=False)
+        if self._store is not None and self._clock is not None:
+            self._store.a2a_task_put(
+                task_id,
+                group_id=ref.group_id,
+                requester=ref.requester,
+                instance=ref.instance,
+                msg_id=ref.trigger,
+                now=unix_seconds(self._clock),
+                keep=TASKS_PER_PEER,
+            )
 
     @property
     def _seen(self) -> Seen:
@@ -352,7 +402,7 @@ class A2AAdapter:
         if framed:
             msg.parts.append(Part(text=d.framed_text()))
         msg.parts.extend(peer.parts)
-        ref = self._tasks.get(peer.task_id) if peer.task_id else None
+        ref = self._task(peer.task_id) if peer.task_id else None
         if ref is not None and ref.group_id == d.group_id and ref.requester == d.sender.identity:
             msg.task_id = peer.task_id  # a follow-up on one of the agent's tasks
         meta: dict[str, Any] = {
@@ -440,11 +490,10 @@ class A2AAdapter:
 
     async def _emit(self, d: Delivery, addressee: list[str], resp: StreamResponse) -> None:
         task_id = convert.task_id_of(resp)
-        if task_id:
-            self._tasks[task_id] = TaskRef(d.group_id, d.sender.identity, d.msg_id)
-            self._tasks.move_to_end(task_id)
-            while len(self._tasks) > MAX_TASKS:
-                self._tasks.popitem(last=False)
+        if task_id and task_id not in self._tasks:
+            self._keep_task(
+                task_id, TaskRef(d.group_id, d.sender.identity, d.sender.instance_id, d.msg_id)
+            )
         if self._send is None:
             return
         for kind, body in convert.stream_to_inner(resp, d.group_id):
@@ -469,7 +518,7 @@ class A2AAdapter:
         ignored, and so is one delivered as context (past the loop guard, or
         addressed to another member): it has no command's standing."""
         request = convert.parse_cancel(d.body)
-        ref = None if request is None else self._tasks.get(request.id)
+        ref = None if request is None else self._task(request.id)
         if (
             not d.addressed_to_me
             or request is None

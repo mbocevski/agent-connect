@@ -75,17 +75,26 @@ from agentconnect.identity import (
     open_core_client,
 )
 from agentconnect.keystore import DataDirLock, Keystore, open_keystore
-from agentconnect.limits import DRAIN_RATE_MULTIPLE, KNOWN_KINDS, DrainBudget
+from agentconnect.limits import (
+    DRAIN_RATE_MULTIPLE,
+    KNOWN_KINDS,
+    MAX_TASK_ID,
+    TASK_UPDATE_KINDS,
+    DrainBudget,
+)
 from agentconnect.policy import (
     HUMAN_ONLY_KINDS,
+    TERMINAL_STATES,
     Decision,
     Inbound,
     Outbound,
     PolicyError,
     SafetyPolicy,
     Verdict,
+    acts_on,
     drop,
     task_of,
+    task_state,
     verification_holds,
 )
 from agentconnect.relay import (
@@ -309,6 +318,35 @@ def _core_error(e: Exception) -> str:
     if kind == "unauthorized":
         return "unauthorized_commit"
     return "rejected"
+
+
+# What a peer answers with task updates (SPEC 9.3): a message, which may
+# start or continue a task, and a cancel, which the canceled status answers.
+REQUEST_KINDS = frozenset({"a2a.message", "a2a.task_cancel"})
+
+
+def _request_task(kind: str, body: dict[str, Any]) -> str | None:
+    """The task an own request names: a follow-up's ``taskId``, a cancel's
+    ``id``; ``None`` for a new request."""
+    task = body.get("id" if kind == "a2a.task_cancel" else "taskId")
+    return task if isinstance(task, str) and 0 < len(task) <= MAX_TASK_ID else None
+
+
+def _named(inner: dict[str, Any]) -> list[str]:
+    """The identities a message names: its ``addressee``, else its ``to``
+    unless that is ``["*"]``."""
+    addressee, to = inner.get("addressee"), inner.get("to")
+    if isinstance(addressee, list):
+        return [str(a) for a in addressee]
+    if isinstance(to, list) and "*" not in to:
+        return [str(t) for t in to]
+    return []
+
+
+def _refs(inner: dict[str, Any]) -> list[str]:
+    """The ``reply_to`` entries the runtime reads (SPEC 7.2: at most 16)."""
+    refs = inner.get("reply_to")
+    return [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)] if isinstance(refs, list) else []
 
 
 KNOCK_REQUEST_PREFIX = "kn-"  # knock request ids, 19 characters (agentconnect.runtime.knocks)
@@ -732,6 +770,9 @@ class Engine:
             bind = getattr(adapter, "bind_store", None)
             if bind is not None:
                 bind(self.store)  # optional hook: adapters that keep a durable feed
+            bind_clock = getattr(adapter, "bind_clock", None)
+            if bind_clock is not None:
+                bind_clock(self.clock)  # optional hook: adapters that stamp what they keep
             await adapter.on_outbound(self._outbound_for(adapter.name))
         self.running = True
         if bool(self.store.kv_get(SAS_RESET_NOTICE)):
@@ -969,9 +1010,15 @@ class Engine:
         answers (Capabilities.answers). The others get it as context, so
         two answering adapters don't both reply."""
         names = self.adapter_names(group_id)
-        reply_to = delivery.inner.get("reply_to")
-        for msg_id in reply_to if isinstance(reply_to, list) else []:
-            via = self.store.sent_via(group_id, str(msg_id))
+        refs = _refs(delivery.inner)
+        task = task_of(delivery.inner)
+        if task is not None:
+            # A task update is for the adapter whose request granted it
+            # (SPEC 9.3), not whichever sent another message it names.
+            granted = self.store.granting_request(group_id, refs, delivery.sender.identity, task)
+            refs = [] if granted is None else [granted]
+        for msg_id in refs:
+            via = self.store.sent_via(group_id, msg_id)
             if via in names:
                 return via
         answering = [n for n in names if self.adapters[n].capabilities().answers]
@@ -1948,6 +1995,55 @@ class Engine:
                 hop = max(hop, max(known) + 1)
         return hop
 
+    def _granting(
+        self, group_id: str, identity: str, instance: str, inner: dict[str, Any]
+    ) -> str | None:
+        """SPEC 9.3: the request of this instance that a received task update
+        answers (named in ``reply_to``, asked this member and grants it this
+        task, :meth:`Store.grant_task`), or ``None``."""
+        task = task_of(inner)
+        if task is None:
+            return None
+        return self.store.grant_task(
+            group_id,
+            _refs(inner),
+            responder=identity,
+            instance=instance,
+            task_id=task,
+            now=self.now(),
+        )
+
+    def _request_asks(
+        self, group: GroupRow, kind: str, inner: dict[str, Any]
+    ) -> tuple[list[str], str | None]:
+        """Whom a request this instance sends asks (SPEC 9.3): the members it
+        triggers under the floor rules, and its instance hint. One that names
+        a task asks only the member running it, when this instance knows it,
+        else only the members it names."""
+        raw = inner.get("body")
+        body: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        metadata = body.get("metadata")
+        hint = metadata.get("instance") if isinstance(metadata, dict) else None
+        hint = hint if isinstance(hint, str) else None
+        moderator, holder = self.floor.triggers(group.group_id, group.policy)
+        floor = str(group.policy.get("floor", "free"))
+        asked = [
+            m.identity
+            for m in self.store.members(group.group_id)
+            if m.identity != self.me
+            and addressed_to_me(floor, inner, m.identity, hint or "", moderator, holder)
+        ]
+        task = _request_task(kind, body)
+        if task is None:
+            return asked, hint
+        owner = self.store.task_owner(group.group_id, task)
+        if owner is None:
+            named = _named(inner)
+            return [m for m in asked if m in named], hint
+        if owner[0] not in asked or hint not in (None, owner[1]):
+            return [], hint
+        return [owner[0]], owner[1]
+
     def _card_problem(self, inner: dict[str, Any]) -> str:
         """Why a received Agent Card can't be used, or ``""``. A card the A2A
         types can't parse is ``malformed`` (its signature couldn't be checked,
@@ -1972,11 +2068,13 @@ class Engine:
         shaped = normalize("a2a.agent_card", inner["body"])
         return shaped is not None and self.store.cards(group_id).get(identity) != shaped
 
-    def _triggered(self, group_id: str, hop: int, msg_id: str) -> None:
+    def _triggered(self, group_id: str, hop: int, msg_id: str, sender: str) -> None:
         """The default "message replied to" for this instance's next agent
-        message in the group (see _reply_hop)."""
+        message in the group (see _reply_hop), and for a task update to
+        ``sender`` (see queue_message)."""
         self.store.kv_set(f"trigger_hop/{group_id}", str(hop))
         self.store.kv_set(f"trigger_msg/{group_id}", msg_id)
+        self.store.kv_set(f"trigger_from/{group_id}/{sender}", msg_id)
 
     def _make_delivery(
         self, group: GroupRow, msg_id: str, event: dict[str, Any], *, replayed: bool = False
@@ -2007,6 +2105,26 @@ class Engine:
             moderator,
             holder,
         )
+        # SPEC 9.3: a task update triggers only the instance that asked for
+        # the task, and only then has the task budget (SPEC 10.2).
+        task_update = inner["kind"] in TASK_UPDATE_KINDS
+        granting = (
+            self._granting(group.group_id, identity, str(sender["instance_id_hex"]), inner)
+            if task_update
+            else None
+        )
+        requested = granting is not None
+        # SPEC 9.3: a granted task triggers only on entering a state the
+        # requester acts on, once per state, and not after it ended; its
+        # other updates are progress, delivered as context.
+        state = task_state(inner) if requested else None
+        trigger = (
+            granting is not None
+            and acts_on(state)
+            and self.store.task_triggers(group.group_id, granting, identity, str(state))
+        )
+        if task_update and not trigger:
+            addressed = False
         # One decision: SPEC 7.2 (unknown kinds are ignored), 7.3, 9.3, 10.2
         # (size, parts, rates; a replayed journal entry was counted when the
         # core first processed it), 10.3 and require_approval.
@@ -2025,6 +2143,9 @@ class Engine:
                 drain_exempt=lambda: self._drain_exempt(group.group_id, identity),
                 card_changed=self._card_changed(group.group_id, identity, inner),
                 card_problem=self._card_problem(inner),
+                requested=requested,
+                progress=requested and not trigger,
+                trigger=trigger,
             )
         )
         if (
@@ -2046,16 +2167,36 @@ class Engine:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=decision.reason)
             return None, decision, kind, guard_hop
         self.store.record_hop(group.group_id, msg_id, hop, self.now())
+        if inner["kind"] in REQUEST_KINDS and addressed and identity != self.me:
+            # SPEC 9.3: the requester's grant, as this instance's answer
+            # sees it (_own_trigger).
+            raw = inner.get("body")
+            self.store.record_asked(
+                group.group_id,
+                msg_id,
+                task_id=_request_task(inner["kind"], raw if isinstance(raw, dict) else {}),
+                now=self.now(),
+            )
         if inner["kind"] in HUMAN_ONLY_KINDS:
             self._reset_loop_guard(group.group_id)
         if decision.verdict is Verdict.DELIVER:
-            self._triggered(group.group_id, hop, msg_id)
+            self._triggered(group.group_id, hop, msg_id, identity)
         # A held message triggers once approved if it would trigger now.
         triggers = decision.verdict is Verdict.DELIVER or (
             decision.verdict is Verdict.HOLD_FOR_APPROVAL
             and addressed
             and hop <= _max_turns(policy)
         )
+        if granting is not None and trigger and triggers:
+            # SPEC 9.3: the state is used only when it triggers (now, or once
+            # approved); one delivered as context can trigger if entered again.
+            self.store.task_entered(
+                group.group_id,
+                granting,
+                identity,
+                str(state),
+                terminal=state in TERMINAL_STATES,
+            )
         body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
         # Controls, cards and cancels reach adapters in their schema's shape
         # only: unknown fields stripped, card text capped (agentconnect.schemas).
@@ -2113,6 +2254,67 @@ class Engine:
         if not refs and last != "":
             refs = [last]
         return hop, refs
+
+    def _record_task_links(
+        self, group: GroupRow, msg_id: str, kind: str, inner: dict[str, Any], refs: list[str]
+    ) -> None:
+        """Inside :meth:`queue_message`'s transaction. A request: what a
+        peer may answer with task updates that trigger this instance, and who
+        (SPEC 9.3). A task update: the request this instance's task answers,
+        for its updates sent without ``reply_to``."""
+        if kind in REQUEST_KINDS:
+            asked, hint = self._request_asks(group, kind, inner)
+            self.store.record_request(
+                group.group_id,
+                msg_id,
+                task_id=_request_task(kind, inner["body"]),
+                asked=asked,
+                instance=hint,
+                now=self.now(),
+            )
+        task = task_of(inner)
+        if task is not None and refs:
+            self.store.record_answered(group.group_id, task, refs[0], self.now())
+            state = self._own_trigger(group.group_id, inner)
+            self.store.answered_asked(
+                group.group_id, refs[0], task, state, terminal=state in TERMINAL_STATES
+            )
+
+    def _own_trigger(self, group_id: str, inner: dict[str, Any]) -> str | None:
+        """The state, if this instance's task update triggers its requester
+        as the requester's grant takes it (SPEC 9.3): its first ``reply_to``
+        is a request this instance received that asked it, the task is that
+        request's, and the state is one the requester acts on, entered for
+        the first time and before the task ended. At most three per received
+        request, so the send is never refused for the task's budget and the
+        requester always learns the outcome; anything else has the rates."""
+        state, task, refs = task_state(inner), task_of(inner), _refs(inner)
+        if not acts_on(state) or task is None or not refs:
+            return None
+        if not self.store.answer_triggers(group_id, refs[0], task, str(state)):
+            return None
+        return state
+
+    def _task_request(
+        self, group_id: str, kind: str, body: dict[str, Any], addressee: list[str] | None
+    ) -> list[str] | None:
+        """``reply_to`` for an agent's task update sent without one: the
+        request whose task it is (the first update of the task named it),
+        else the last message from the ``addressee`` that triggered this
+        instance; ``None`` leaves it to :meth:`_reply_hop` (and any other
+        kind)."""
+        if kind not in TASK_UPDATE_KINDS:
+            return None
+        task = body.get("taskId")
+        if isinstance(task, str) and task:
+            known = self.store.answered_request(group_id, task)
+            if known is not None:
+                return [known]
+        if addressee is not None and len(addressee) > 0:
+            last = self.store.kv_get(f"trigger_from/{group_id}/{addressee[0]}")
+            if last is not None and last != "":
+                return [last]
+        return None
 
     def _reset_loop_guard(self, group_id: str) -> None:
         """A human ``control.resume`` (sent or received) resets the counter."""
@@ -2678,18 +2880,7 @@ class Engine:
             if not self.store.set_held_status(hold_id, "approved"):
                 raise DaemonError("not_found", "no such held message")
             if item["direction"] == "in":
-                row = self.store.inbox_row(int(item["inbox_seq"] or 0))
-                if row is not None and row.state == "held" and row.delivery is not None:
-                    delivery = Delivery.from_json(row.delivery)
-                    self.store.set_inbox_state(row.seq, "pending")
-                    for key in [k for k in self._cursors if k[0] == group_id]:
-                        del self._cursors[key]
-                    self._cursor_gen[group_id] = self._cursor_gen.get(group_id, 0) + 1
-                    if delivery.addressed_to_me:
-                        self._triggered(group_id, delivery.hop, delivery.msg_id)
-                    self.safety.transcribe(
-                        group_id, "in", item["sender"], item["msg_id"], delivery.inner
-                    )
+                self._release_inbound(item)
             else:
                 payload = item["payload"] or {}
                 self._enqueue("app", group_id, payload)
@@ -2705,12 +2896,47 @@ class Engine:
                 events = [] if sent is None else [sent]
             if item["task_id"] is not None and item["direction"] == "in":
                 self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=True)
+                # The task's updates held behind this one (its request for
+                # input, its end) follow the human's decision (SPEC 9.3).
+                for queued in self._task_holds(item):
+                    if self.store.set_held_status(str(queued["hold_id"]), "approved"):
+                        self._release_inbound(queued)
+                        self._audit_hold(queued, "approved")
             self._audit_hold(item, "approved")
         self._notify_soon(events)
         self._delivery_wake.set()
         self._held_wake.set()
         self._pulse()
         return {"hold_id": hold_id, "group_id": group_id, "status": "approved"}
+
+    def _release_inbound(self, item: dict[str, Any]) -> None:
+        """Inside a transaction: an approved inbound message goes to the
+        adapters, triggering the agent if it would have when it arrived."""
+        group_id = str(item["group_id"])
+        row = self.store.inbox_row(int(item["inbox_seq"] or 0))
+        if row is None or row.state != "held" or row.delivery is None:
+            return
+        delivery = Delivery.from_json(row.delivery)
+        self.store.set_inbox_state(row.seq, "pending")
+        for key in [k for k in self._cursors if k[0] == group_id]:
+            del self._cursors[key]
+        self._cursor_gen[group_id] = self._cursor_gen.get(group_id, 0) + 1
+        if delivery.addressed_to_me:
+            self._triggered(group_id, delivery.hop, delivery.msg_id, delivery.sender.identity)
+        self.safety.transcribe(group_id, "in", item["sender"], item["msg_id"], delivery.inner)
+
+    def _task_holds(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        """The other held inbound updates of ``item``'s task (its sender's,
+        in its group), in the order they arrived."""
+        return [
+            other
+            for other in self.store.held_items()
+            if other["hold_id"] != item["hold_id"]
+            and other["direction"] == "in"
+            and other["group_id"] == item["group_id"]
+            and other["sender"] == item["sender"]
+            and other["task_id"] == item["task_id"]
+        ]
 
     def _audit_hold(self, item: dict[str, Any], decision: str) -> None:
         self.safety.audit(
@@ -2741,6 +2967,10 @@ class Engine:
                     self.store.set_inbox_state(row.seq, "dropped")
             if item["task_id"] is not None and item["direction"] == "in":
                 self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=False)
+                # A task the human rejected (or let expire) ends there: the
+                # updates held behind its first go with it (SPEC 9.3).
+                for queued in self._task_holds(item):
+                    events.extend(self._drop_hold(queued, status, code))
             self._audit_hold(item, status)
             if status == "expired":
                 events.append(
@@ -4121,7 +4351,10 @@ class Engine:
         elif origin == "human":
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
-            hop, refs = self._reply_hop(group.group_id, reply_to)
+            hop, refs = self._reply_hop(
+                group.group_id,
+                reply_to or self._task_request(group.group_id, kind, body, addressee),
+            )
         # A control or cancel goes out in its schema's shape only. A card goes
         # out exactly as built (a signature covers it): it must already fit.
         shaped = normalize(kind, body)
@@ -4140,6 +4373,7 @@ class Engine:
                 size,
                 internal=internal,
                 grant=floor_grant,
+                trigger=self._own_trigger(group.group_id, inner) is not None,
             )
         )
         if decision.verdict is Verdict.DROP:
@@ -4161,6 +4395,7 @@ class Engine:
             payload["floor"] = True  # this instance's own: taken when sealed
         with self.store.tx():
             self.store.record_hop(group.group_id, msg_id, hop, self.now())
+            self._record_task_links(group, msg_id, kind, inner, refs)
             self.safety.audit(
                 group.group_id,
                 "out",

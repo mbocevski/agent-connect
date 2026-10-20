@@ -111,6 +111,22 @@ def test_task_updates_have_their_own_budget(fake_clock: FakeClock) -> None:
     assert rl.allow_inner("g", "a", "a2a.task_status", update)
 
 
+def test_unrequested_task_updates_get_the_message_rate_in_windows_of_their_own(
+    fake_clock: FakeClock,
+) -> None:
+    rl = RateLimiter(fake_clock)
+    update = {"taskId": "t1", "status": {"state": "TASK_STATE_WORKING"}}
+    for n in range(SENDER_PER_MINUTE):
+        assert rl.allow_inner("g", "a", "a2a.task_status", update | {"n": n}, requested=False)
+    assert not rl.allow_inner("g", "a", "a2a.task_artifact", update, requested=False)
+    # The sender's messages and the task budget are untouched.
+    assert rl.allow_inner("g", "a", "a2a.message", {"parts": []})
+    assert rl.allow_inner("g", "a", "a2a.task_status", update)
+    # Only task updates can be unrequested.
+    for _ in range(SENDER_PER_MINUTE - 2):
+        assert rl.allow_inner("g", "a", "a2a.message", {"parts": []}, requested=False)
+
+
 def test_the_drain_exemption_is_bounded_per_sender_and_in_all() -> None:
     budget = DrainBudget(total=5)
     assert [budget.take("a", 2) for _ in range(3)] == [True, True, False]
