@@ -11,9 +11,10 @@ use agentconnect_directory::owner::HttpsFetcher;
 use agentconnect_directory::postgres::connect_options;
 use agentconnect_directory::verify::{CoreVerifier, Verifier};
 use agentconnect_directory::{
-    Directory, HttpConfig, MemoryStore, PgStore, Settings, Store, app, log_filter,
+    Directory, HttpConfig, MemoryStore, PgStore, Settings, Store, app, logging,
 };
 use axum::http::HeaderName;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 fn invalid(e: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, e.into())
@@ -85,7 +86,7 @@ async fn serve<S: Store>(
         home: config.home.clone(),
     };
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
-    tracing::info!(addr = %config.addr, "directory listening");
+    tracing::info!(addr = %listener.local_addr()?, "directory listening");
     axum::serve(
         listener,
         app(dir, http).into_make_service_with_connect_info::<SocketAddr>(),
@@ -99,9 +100,9 @@ async fn serve<S: Store>(
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let spec = std::env::var("RUST_LOG").ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(log_filter(spec.as_deref()))
-        .init();
+    // Colours only on a terminal, so log files and collectors get plain text.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    logging::subscriber(spec.as_deref(), ansi, std::io::stdout).init();
 
     let config = Config::from_env().map_err(invalid)?;
     // Every signature, token and canonical-form check, under the pinned

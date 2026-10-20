@@ -19,6 +19,7 @@ pub mod card;
 pub mod config;
 pub mod directory;
 pub mod http;
+pub mod logging;
 pub mod mcp;
 pub mod memory;
 pub mod metrics;
@@ -31,13 +32,6 @@ pub mod verify;
 
 pub use directory::{Directory, Settings};
 
-/// The log filter: `spec` (normally `RUST_LOG`) or `info`, with the MCP
-/// library held to errors, since its warnings quote request headers.
-#[must_use]
-pub fn log_filter(spec: Option<&str>) -> tracing_subscriber::EnvFilter {
-    let base = spec.filter(|s| !s.trim().is_empty()).unwrap_or("info");
-    tracing_subscriber::EnvFilter::new(format!("{base},rmcp=error"))
-}
 pub use http::{HttpConfig, app};
 pub use memory::MemoryStore;
 pub use postgres::PgStore;

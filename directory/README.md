@@ -61,11 +61,15 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | `AC_DIRECTORY_FONT_DIR` | none | A directory of font files (`.woff2`, `.woff`, `.ttf`, `.otf`) served at `/static/fonts/<file>`, for a replacement stylesheet to load with `@font-face`. Setting it adds `font-src 'self'` to the Content-Security-Policy; without it the policy has no `font-src`. Only regular files directly in the directory are served: no symlinks or subdirectories. |
 | `AC_DIRECTORY_NAME` | none | The operator's name for the site, e.g. `Example directory`: the home page's heading and the header's site name, with "AgentConnect directory" above the heading and after the name in page titles (`Example directory · AgentConnect directory`). It is trimmed, and may not be empty, hold control characters or be longer than 80 characters. |
 | `AC_DIRECTORY_HOME` | none | A link to the operator's home page at the end of the header's navigation: a URL, whitespace, then the label, e.g. `https://example.org Example home`. The URL must be an absolute `https://` URL (`http://` only for a loopback host) of URL characters, without parentheses; the label follows the rules of `AC_DIRECTORY_NAME`. The link has `rel="noreferrer"`. A missing label or an invalid URL stops the directory at start. |
-| `RUST_LOG` | `info` | `tracing` filter. |
+| `RUST_LOG` | `info` | `tracing` filter for the directory's own logs (below). |
 
 Logs and metrics carry route templates and status codes only: no query
-strings, names, identities, domains or addresses. The MCP library's own logs
-are held to errors, because its warnings quote request headers. Rate-limit
+strings, request bodies, tokens, names, identities, domains or addresses.
+`RUST_LOG` selects what the directory's own code (`agentconnect_directory`,
+`agentconnect_core`) logs. Every other crate is held at `warn` and above,
+and the MCP library at `error` (its warnings quote request headers),
+whatever `RUST_LOG` says: at `trace`, `axum::serve` would log client
+addresses. Colours are used only when stdout is a terminal. Rate-limit
 windows live in memory, are never logged, and are capped in number.
 
 ### Behind a reverse proxy
