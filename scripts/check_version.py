@@ -7,9 +7,10 @@ usage: check_version.py [<version>]
 defaults to the version in daemon/pyproject.toml. The script checks the
 three published Python packages (their versions, the exact pins between
 them and `__version__`), the Rust workspace version (the SemVer spelling,
-`0.1.0-alpha.1`) and the install command in the README, which the release
-verification jobs run verbatim. It prints the version and exits 1 on any
-mismatch.
+`0.1.0-alpha.1`), the install command in the README, which the release
+verification jobs run verbatim, and the packages' READMEs (their PyPI
+pages), whose links must be absolute and point at the release tag. It
+prints the version and exits 1 on any mismatch.
 """
 
 from __future__ import annotations
@@ -24,6 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 # PEP 440 versions the releases use: X.Y.Z with an optional aN, bN or rcN.
 PEP440 = re.compile(r"^(\d+\.\d+\.\d+)(?:(a|b|rc)(\d+))?$")
 SEMVER_PRE = {"a": "alpha", "b": "beta", "rc": "rc"}
+# The packages' READMEs are their PyPI pages: relative links break there, so
+# they link the repository at the release tag.
+PYPI_READMES = ("core-py/README.md", "daemon/README.md", "sdk/python/README.md")
+BLOB = re.compile(r"https://github\.com/mbocevski/agent-connect/blob/([^/)\s]+)/")
+RELATIVE_LINK = re.compile(r"\]\((?!https?://|mailto:|#)([^)]*)\)")
 
 
 def install_command(version: str) -> str:
@@ -92,6 +98,15 @@ def problems(version: str) -> list[str]:
     readme = (ROOT / "README.md").read_text(encoding="utf-8").splitlines()
     if install_command(version) not in readme:
         found.append(f"README.md has no line {install_command(version)!r}")
+    for rel in PYPI_READMES:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        refs = sorted(set(BLOB.findall(text)) - {f"v{version}"})
+        relative = RELATIVE_LINK.findall(text)
+        if refs or relative:
+            found.append(
+                f"{rel} (a PyPI page) links {refs + relative}, expected only "
+                f"absolute links to blob/v{version}/"
+            )
     return found
 
 

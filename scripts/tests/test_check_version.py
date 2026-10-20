@@ -29,6 +29,9 @@ FILES = [
     "daemon/src/agentconnect/__init__.py",
     "sdk/python/pyproject.toml",
     "sdk/python/src/agentconnect_sdk/__init__.py",
+    "core-py/README.md",
+    "daemon/README.md",
+    "sdk/python/README.md",
 ]
 
 
@@ -74,7 +77,7 @@ def test_a_copy_of_the_tree_passes(tree: Path) -> None:
 
 def test_another_version_fails_everywhere(tree: Path) -> None:
     found = check_version.problems("9.9.9")
-    assert len(found) == 9, found
+    assert len(found) == 12, found
 
 
 @pytest.mark.parametrize(
@@ -94,6 +97,13 @@ def test_another_version_fails_everywhere(tree: Path) -> None:
             "\nuv tool install agentconnect-cli=={v}\n",
             "\nuv tool install agentconnect-cli\n",
             "README.md",
+        ),
+        ("daemon/README.md", "/blob/v{v}/SPEC.md", "/blob/main/SPEC.md", "'main'"),
+        (
+            "sdk/python/README.md",
+            "(https://github.com/mbocevski/agent-connect/blob/v{v}/docs/sdk.md)",
+            "(../../docs/sdk.md)",
+            "'../../docs/sdk.md'",
         ),
     ],
 )

@@ -180,7 +180,8 @@ Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
 
 1. In a release PR, set the version in `core-py`, `daemon` and `sdk/python`
    (`pyproject.toml`, the pins between them and `__version__`), in the root
-   `Cargo.toml`, and in the README's install command, then update the lock
+   `Cargo.toml`, in the README's install command and in the `blob/vX.Y.Z/`
+   links of the packages' READMEs (their PyPI pages), then update the lock
    files: `uv lock`, `cargo update --workspace`, and `cargo update -p` for
    the path crates in each `*/fuzz/Cargo.lock`. `scripts/check_version.py`
    (in `just test`) fails until the versions all agree.
