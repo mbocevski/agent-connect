@@ -25,6 +25,12 @@ ALLOWED_PHRASES: tuple[str, ...] = (
     "Claude Agent SDK",
     "Claude Code Channels",
     "Claude Code support",
+    # An agent tool as an MCP client of `agentconnect mcp` (docs/adapters/mcp.md):
+    # its command, its section and the list of clients. Narrow on purpose, so
+    # an attribution line naming the tool is still rejected.
+    "claude mcp add",
+    "### Claude Code",
+    "such as Claude Code,",
     # The Claude Agent SDK's package and the example directory named after it.
     "claude-agent-sdk",
     "claude_agent_sdk",

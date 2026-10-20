@@ -61,9 +61,9 @@ jobs:
       - name: Python packages and sdists
         if: matrix.pure
         run: |
-          uv build --all-packages --sdist --out-dir dist
-          uv build --package agentconnect --wheel --out-dir dist
-          uv build --package agentconnect-sdk --wheel --out-dir dist
+          uv build --package agentconnect-core --sdist --out-dir dist
+          uv build --package agentconnect-cli --sdist --wheel --out-dir dist
+          uv build --package agentconnect-sdk --sdist --wheel --out-dir dist
       - name: Checksums
         run: (cd dist && sha256sum -- * | sort -k2 > ../SHA256SUMS)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

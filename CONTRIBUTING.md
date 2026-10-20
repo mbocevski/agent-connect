@@ -174,6 +174,25 @@ Rules, determinism helpers, coverage policy and the flaky-test policy are in
 
 ## Releases
 
-Tag `vX.Y.Z` on `main` after moving `[Unreleased]` entries into a version
-section. The `release` workflow builds, signs (Sigstore) and attests (SLSA
-provenance) the artifacts. Verify a release with `just release-verify X.Y.Z`.
+Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
+(`v0.1.0a1`) and the Rust workspace carries the SemVer spelling
+(`0.1.0-alpha.1`).
+
+1. In a release PR, set the version in `core-py`, `daemon` and `sdk/python`
+   (`pyproject.toml`, the pins between them and `__version__`), in the root
+   `Cargo.toml`, and in the README's install command, then update the lock
+   files: `uv lock`, `cargo update --workspace`, and `cargo update -p` for
+   the path crates in each `*/fuzz/Cargo.lock`. `scripts/check_version.py`
+   (in `just test`) fails until the versions all agree.
+2. In the same PR, `just changelog-cut X.Y.Z` turns `[Unreleased]` into
+   `[X.Y.Z] - <today>`. A preview that needs a data reset or a new relay
+   says so at the top of its section.
+3. After it merges, run the `release` workflow by hand on `main` (the dry
+   run: everything except publishing), then tag `vX.Y.Z` on `main`.
+
+The tag builds the artifacts on every platform, signs them (Sigstore) and
+attests them (SLSA provenance), publishes the three Python packages to PyPI
+through trusted publishing and the relay and directory images to ghcr.io,
+creates the GitHub Release with the CHANGELOG section, the install command
+and the image digests, and then installs the published CLI on clean Linux
+and macOS machines. Verify a release with `just release-verify X.Y.Z`.

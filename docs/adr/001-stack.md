@@ -238,26 +238,37 @@ decision of 2026-10-17; the last one is the current state.
 
 ### 5. Platforms
 
-Tier 1 is Linux x86_64. Linux arm64 and macOS arm64 are supported too.
-Intel Macs and Windows are not (the daemon uses `fcntl` locks and Unix
-sockets).
+Tier 1 is Linux x86_64. Linux arm64, macOS arm64 and, from 0.1.0a1, macOS
+x86_64 (Intel) are supported too. Windows is not (the daemon uses `fcntl`
+locks and Unix sockets).
 
 | Platform | CI | Release artifacts | Reproducibility check |
 |---|---|---|---|
-| Linux x86_64 | `ci.yml`, required | relay, core wheel, Python packages | yes |
-| Linux arm64 | `platforms`, `image`, not required | relay, core wheel | yes |
+| Linux x86_64 | `ci.yml`, required | relay, directory, images, core wheel, Python packages | yes |
+| Linux arm64 | `platforms`, `image`, not required | relay, directory, images, core wheel | yes |
 | macOS arm64 | `platforms`, not required | core wheel | no |
+| macOS x86_64 | `release.yml` only (build and post-publish install check) | core wheel | no |
 
 - **Native runners, no emulation.** arm64 builds use `ubuntu-24.04-arm`,
-  macOS builds `macos-15`. QEMU would turn the OpenSSL and libcrux builds
-  into a 30-minute job and add an emulator to the trust base.
+  macOS arm64 builds `macos-15` and macOS x86_64 builds `macos-15-intel`,
+  GitHub's Intel image. QEMU would turn the OpenSSL and libcrux builds into
+  a 30-minute job and add an emulator to the trust base.
 - **Wheels.** `agentconnect-core` is one abi3 wheel (`abi3-py312`) per
   platform, built by maturin: manylinux 2.28 on Linux (in the maturin
-  container for the runner's own architecture), a plain `macosx_*_arm64`
-  wheel on macOS. The daemon and SDK are pure Python and ship once.
-- **Container.** `relay/Dockerfile` is architecture-neutral. CI builds it for
-  `linux/amd64` and `linux/arm64`, each on a native runner, and publishes
-  nothing; releases don't publish images yet.
+  container for the runner's own architecture), a plain `macosx_*_arm64` or
+  `macosx_*_x86_64` wheel on macOS. The daemon and CLI (`agentconnect-cli`)
+  and the SDK (`agentconnect-sdk`) are pure Python and ship once.
+- **PyPI.** Tags publish the three packages through trusted publishing
+  (OIDC, the `pypi` environment), never with a stored token. The daemon's
+  distribution is `agentconnect-cli`: `agent-connect` belongs to another
+  project and PyPI refuses `agentconnect` as too close to it. The command
+  and the import package stay `agentconnect`.
+- **Container.** `relay/Dockerfile` and `directory/Dockerfile` are
+  architecture-neutral. CI builds them for `linux/amd64` and `linux/arm64`,
+  each on a native runner, and publishes nothing. A release tag pushes both
+  images to ghcr.io as one multi-architecture index each, tagged with the
+  version without the `v` (`0.1.0a1`) and never `latest`, signed with
+  cosign and attested.
 - **No system libraries.** SQLCipher, OpenSSL (vendored) and libcrux compile
   from source and link statically. On macOS CI runs `otool -L` on the relay
   and the extension module, prints the result, and fails if either links

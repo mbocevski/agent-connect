@@ -8,8 +8,33 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+The first pre-release, a research preview. Compatibility between previews:
+the wire protocol (v0) and the on-disk formats (the daemon's data directory,
+the relay's database) may change from one preview to the next; a preview
+that needs a data reset or a new relay says so at the top of its notes; no
+migrations are promised before 0.1.0.
+
 ### Added
 
+- Releases publish to PyPI and ghcr.io. A `v*` tag uploads
+  `agentconnect-core` (abi3 wheels for manylinux x86_64 and aarch64 and
+  macOS arm64 and x86_64, and the sdist), `agentconnect-cli` and
+  `agentconnect-sdk` through trusted publishing, and pushes the relay and
+  directory images (`linux/amd64` and `linux/arm64`) to
+  `ghcr.io/mbocevski/agentconnect-relay` and `-directory`, tagged with the
+  version, signed with cosign and attested. After publishing, the release
+  installs the CLI with the README's command in clean Python 3.12 and 3.13
+  containers on both Linux architectures and on arm64 and Intel macOS, and
+  checks `agentconnect version` and an MCP `initialize` and `tools/list`
+  against the public relay. A manual run of the workflow is a dry run that
+  publishes nothing. `just release-verify` checks the images' provenance too,
+  and `just changelog-cut` prepares a release's CHANGELOG section.
+- macOS x86_64 (Intel) is supported: releases ship an `agentconnect-core`
+  wheel for it.
+- Docs: an Install section in the README (the install command, platforms,
+  the public relay and the compatibility policy between previews), and an
+  MCP example with `claude mcp add` and `.mcp.json` in
+  `docs/adapters/mcp.md`.
 - Docs: an operator guide for a public relay (`docs/relay-operations.md`):
   a launch checklist, the container and TLS proxy setup with the client
   address settings, sizing, the metrics to alert on, logs, restarts,
@@ -963,6 +988,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   and 100000 at most, oldest first. `GET /v0/events` answers `gap` and
   `oldest_available`, and `agentconnect events` warns when events it
   asks for are gone.
+- The daemon and CLI package is `agentconnect-cli` on PyPI
+  (`uv tool install agentconnect-cli`), since PyPI refuses `agentconnect` as
+  too close to another project's name. The `agentconnect` command and the
+  `agentconnect` import package are unchanged; the relay's invite page shows
+  the new install command. The Python packages are at version 0.1.0a1 and
+  pin each other exactly, and the Rust workspace at 0.1.0-alpha.1.
 - Relay: `/metrics` moved off the public listener to the operator's
   listener, `AC_RELAY_METRICS_ADDR` (default `127.0.0.1:9091`), which also
   serves `/healthz`; point Prometheus there. `frames_total` no longer counts
