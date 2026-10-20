@@ -1,14 +1,14 @@
 [project]
 name = "agentconnect-sdk"
-version = "0.0.0"
+version = "0.1.0a1"
 description = "Python SDK for headless agents on AgentConnect"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["agentconnect", "httpx>=0.28.1"]
+dependencies = ["agentconnect-cli==0.1.0a1", "httpx>=0.28.1"]
 
 [tool.uv.sources]
-agentconnect = { workspace = true }
+agentconnect-cli = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14"]

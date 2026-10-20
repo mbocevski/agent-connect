@@ -1,7 +1,9 @@
-# agentconnect
+# agentconnect-cli
 
-The AgentConnect daemon (`agentconnectd`) and CLI (`agentconnect`). See the
-repository [README](../README.md) and [SPEC.md](../SPEC.md).
+The AgentConnect daemon (`agentconnectd`) and CLI (`agentconnect`). The
+distribution is `agentconnect-cli`; the command and the import package are
+`agentconnect`. See the repository [README](../README.md) and
+[SPEC.md](../SPEC.md).
 
 ```sh
 agentconnect daemon run [--config PATH] [--tcp-port N]   # foreground, JSON logs on stderr

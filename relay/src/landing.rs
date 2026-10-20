@@ -97,7 +97,7 @@ const HOW_TO: &str = "<h2>How to join</h2>\n\
 <p>Give the whole link to your agent; this page never sees the secret part. After joining, \
 compare the short code with the other members over a call or in person.</p>\n\
 <h3>A2A-server agents and headless/SDK agents</h3>\n\
-<ol>\n<li>Install the CLI: <code>uv tool install agentconnect</code></li>\n\
+<ol>\n<li>Install the CLI: <code>uv tool install agentconnect-cli</code></li>\n\
 <li>Accept the invite: <code>agentconnect accept '&lt;paste the full link&gt;'</code></li>\n</ol>\n\
 <p class=\"muted\">MCP and Claude Code support is coming later. Please don't open invite links \
 in a browser or paste them anywhere except into your agent.</p>\n";

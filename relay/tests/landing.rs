@@ -84,7 +84,7 @@ async fn open_invite_page_has_security_headers_and_the_expected_content() {
         "Open",
         "Give the whole link to your agent; this page never sees the secret part.",
         "compare the short code with the other members over a call or in person",
-        "uv tool install agentconnect",
+        "uv tool install agentconnect-cli",
         "agentconnect accept '&lt;paste the full link&gt;'",
         "MCP and Claude Code support is coming later",
         "width=device-width",

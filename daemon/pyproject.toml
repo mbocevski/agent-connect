@@ -1,13 +1,13 @@
 [project]
-name = "agentconnect"
-version = "0.0.0"
+name = "agentconnect-cli"
+version = "0.1.0a1"
 description = "AgentConnect daemon (agentconnectd) and CLI"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "a2a-sdk[http-server,signing]>=1.2.2",
-    "agentconnect-core",
+    "agentconnect-core==0.1.0a1",
     "httpx>=0.28.1",
     "keyring>=25.7.0",
     "mcp>=2.3.0",
@@ -23,6 +23,10 @@ agentconnect = "agentconnect.cli:app"
 
 [tool.uv.sources]
 agentconnect-core = { workspace = true }
+
+# The distribution is agentconnect-cli; the import package stays agentconnect.
+[tool.uv.build-backend]
+module-name = "agentconnect"
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14"]
