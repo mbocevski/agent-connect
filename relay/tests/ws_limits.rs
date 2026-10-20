@@ -407,7 +407,11 @@ async fn unfinished_request_headers_time_out() {
         .unwrap();
     let mut answer = Vec::new();
     ok.read_to_end(&mut answer).await.unwrap();
-    assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+    assert!(
+        answer.starts_with(b"HTTP/1.1 200"),
+        "no 200 answer ({} bytes)",
+        answer.len()
+    );
     settle(&h, "agentconnect_relay_http_connections_open", 0).await;
 
     let mut slow = h.duplex(4096);
@@ -580,7 +584,11 @@ async fn at_the_accept_limit_a_new_connection_closes_the_oldest_stalled_one() {
         .await
         .unwrap()
         .unwrap();
-    assert!(answer.starts_with(b"HTTP/1.1 200"), "{answer:?}");
+    assert!(
+        answer.starts_with(b"HTTP/1.1 200"),
+        "no 200 answer ({} bytes)",
+        answer.len()
+    );
     let mut rest = Vec::new();
     tokio::time::timeout(GUARD, first.read_to_end(&mut rest))
         .await
