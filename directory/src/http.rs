@@ -492,12 +492,27 @@ async fn font<S: Store>(State(app): State<Shared<S>>, Path(file): Path<String>) 
 
 async fn well_known<S: Store>(State(app): State<Shared<S>>) -> Response {
     let s = app.dir.settings();
-    let body = json!({
+    let mut body = json!({
         "v": 0,
         "directory": s.host,
         "relays": s.relays,
         "token_keys": app.dir.token_keys(),
     });
+    // SPEC §13.2.7: `terms` is an https URL and `abuse` one too or a mailto
+    // address; a field without a value (or, for a loopback `http://` link
+    // allowed on the pages, without that form) is left out, never null.
+    let links = &app.config.links;
+    let https = |u: &&String| u.starts_with("https://");
+    if let Some(terms) = links.terms.as_ref().filter(https) {
+        body["terms"] = json!(terms);
+    }
+    if let Some(abuse) = links
+        .abuse
+        .as_ref()
+        .filter(|u| https(u) || u.starts_with("mailto:"))
+    {
+        body["abuse"] = json!(abuse);
+    }
     respond(StatusCode::OK, JSON_TYPE, CACHE_PUBLIC, body.to_string())
 }
 
