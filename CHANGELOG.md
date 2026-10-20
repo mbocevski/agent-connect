@@ -1333,6 +1333,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Dependencies: `rustls-webpki` 0.103.16 for RUSTSEC-2026-0382 (certificate
+  verification could accept chains through distrusted emSign intermediates
+  whose private keys are public), here and in the directory fuzz workspace.
 - Daemon: any member could trigger a webhook, SSE, SDK or MCP agent at the
   task budget, 300 updates a minute per task and up to 900 per identity,
   by sending `a2a.task_status` or `a2a.task_artifact` updates nobody asked
