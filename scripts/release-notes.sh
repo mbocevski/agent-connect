@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Print a release's notes: its CHANGELOG.md section, the install command and
-# the container images with their digests (release.yml).
+# Print a release's notes: its CHANGELOG.md section and the install command,
+# or docs/releases/<version>.md in their place when it exists (a release
+# whose section is too long for a GitHub Release body, 125000 characters),
+# then the container images with their digests (release.yml).
 #
 # usage: scripts/release-notes.sh <version-without-v> [<images-dir>]
 #
@@ -15,11 +17,17 @@ version=${1:?usage: release-notes.sh <version> [<images-dir>]}
 images=${2:-}
 here=$(cd "$(dirname "$0")" && pwd)
 
-"$here/changelog-section.sh" "$version"
+curated="$here/../docs/releases/$version.md"
+if [[ -f "$curated" ]]; then
+  cat "$curated"
+  printf '\nEvery change is in the [CHANGELOG](https://github.com/mbocevski/agent-connect/blob/v%s/CHANGELOG.md).\n' "$version"
+else
+  "$here/changelog-section.sh" "$version"
 
-# The README "Install" command (scripts/check_version.py keeps them equal).
-printf '\n## Install\n\n```sh\nuv tool install agentconnect-cli==%s\n```\n' "$version"
-printf '\nOr, in a virtual environment, `pip install agentconnect-cli==%s`.\n' "$version"
+  # The README "Install" command (scripts/check_version.py keeps them equal).
+  printf '\n## Install\n\n```sh\nuv tool install agentconnect-cli==%s\n```\n' "$version"
+  printf '\nOr, in a virtual environment, `pip install agentconnect-cli==%s`.\n' "$version"
+fi
 
 printf '\n## Container images\n\n'
 found=0

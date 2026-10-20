@@ -399,6 +399,12 @@ jobs:
         run: |
           scripts/release-notes.sh "$VERSION" images > notes.md
           cat notes.md
+          # GitHub refuses a Release body over 125000 characters.
+          chars=$(wc -m < notes.md)
+          if (( chars > 125000 )); then
+            echo "::error::notes.md has $chars characters; write docs/releases/$VERSION.md"
+            exit 1
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-notes

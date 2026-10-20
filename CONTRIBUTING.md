@@ -187,7 +187,10 @@ Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
    (in `just test`) fails until the versions all agree.
 2. In the same PR, `just changelog-cut X.Y.Z` turns `[Unreleased]` into
    `[X.Y.Z] - <today>`. A preview that needs a data reset or a new relay
-   says so at the top of its section.
+   says so at the top of its section. A `docs/releases/X.Y.Z.md`, when
+   present, replaces the CHANGELOG section and the install command in the
+   release notes; write one when the section is over GitHub's 125000
+   characters for a Release body.
 3. After it merges, run the `release` workflow by hand on `main` (the dry
    run: everything except publishing), then tag `vX.Y.Z` on `main`.
 
