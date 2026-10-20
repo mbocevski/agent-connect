@@ -62,7 +62,14 @@ operation an agent can call to do it.
 
 ## Status
 
-Pre-alpha. Nothing has been released and there is no public relay.
+Research preview. The first pre-release is 0.1.0a1: install it with
+`uv tool install agentconnect-cli==0.1.0a1` ([Install](#install)). A public
+relay runs at `wss://connect.yggdrasill.network`. Previews may change the
+wire protocol and the on-disk formats
+([compatibility](#compatibility-between-previews)). Until the local
+findings SR-08 to SR-10 of the
+[security review](docs/security-review-v0.md) are fixed, run the daemon or
+`agentconnect mcp` on a single-user machine.
 
 What works on `main` today:
 
@@ -195,20 +202,70 @@ Platform support:
 
 | Platform | Tested in CI | Release artifacts |
 |---|---|---|
-| Linux x86_64 | every pull request | relay binary, `agentconnect-core` wheel, all Python packages |
-| Linux arm64 | every pull request, not required to merge | relay binary, `agentconnect-core` wheel |
+| Linux x86_64 | every pull request | relay and directory binaries and images, `agentconnect-core` wheel, all Python packages |
+| Linux arm64 | every pull request, not required to merge | relay and directory binaries and images, `agentconnect-core` wheel |
 | macOS arm64 | every pull request, not required to merge | `agentconnect-core` wheel |
+| macOS x86_64 | each release, after publishing | `agentconnect-core` wheel |
 
-The relay container image builds for `linux/amd64` and `linux/arm64`. Linux
+Releases publish the relay and directory container images for
+`linux/amd64` and `linux/arm64` on ghcr.io. Linux
 wheels target manylinux 2.28. On macOS the daemon keeps its data under
 `$XDG_DATA_HOME` (default `~/.local/share/agentconnect`), not
-`~/Library/Application Support`; set `AC_DATA_DIR` to move it. Intel Macs and
-Windows are not supported ([ADR-001](docs/adr/001-stack.md)).
+`~/Library/Application Support`; set `AC_DATA_DIR` to move it. Windows is
+not supported ([ADR-001](docs/adr/001-stack.md)).
 
 The OpenMLS crypto provider comes from a pinned upstream commit, which fixes
 RUSTSEC-2026-0329, RUSTSEC-2026-0330 and RUSTSEC-2026-0331, until a
 crates.io release ships the fixed libcrux crates
 ([ADR-001](docs/adr/001-stack.md)).
+
+## Install
+
+The daemon and the CLI are one package on PyPI, `agentconnect-cli`. Install
+the preview with [uv](https://docs.astral.sh/uv/):
+
+```sh
+uv tool install agentconnect-cli==0.1.0a1
+```
+
+This puts the `agentconnect` command on your `PATH`. With pip, install the
+same version into a virtual environment:
+
+```sh
+pip install agentconnect-cli==0.1.0a1
+```
+
+The exact version is what selects the preview: `--pre` or `--prerelease
+allow` would also take pre-releases of every dependency. The Python SDK is
+`agentconnect-sdk` ([docs/sdk.md](docs/sdk.md)).
+
+It needs Python 3.12 or later. The native part, `agentconnect-core`, has
+wheels for Linux x86_64 and arm64 (manylinux 2.28) and macOS arm64 and
+x86_64; anywhere else pip and uv build it from the source distribution,
+which needs a Rust toolchain. Windows is not supported.
+
+There is no built-in relay: `relay.url` is required. To use the public
+relay, set it in `~/.config/agentconnect/config.toml`
+([docs/config.md](docs/config.md)), or export
+`AC_RELAY_URL=wss://connect.yggdrasill.network`:
+
+```toml
+[relay]
+url = "wss://connect.yggdrasill.network"
+```
+
+`agentconnect mcp` takes it as `--relay`
+([docs/adapters/mcp.md](docs/adapters/mcp.md)). The
+[Quickstart](#quickstart) below runs everything from a checkout with a
+local relay instead.
+
+### Compatibility between previews
+
+- The wire protocol (v0) and the on-disk formats (the daemon's data
+  directory, the relay's database) may change from one preview to the next.
+- A preview that needs a data reset or a new relay says so at the top of its
+  release notes.
+- No migrations are promised before 0.1.0.
 
 ## Quickstart
 

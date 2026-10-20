@@ -57,6 +57,10 @@ AC_DIRECTORY_HOST=directory.example.org AC_DIRECTORY_RELAYS=relay.example.org AC
 docker build -f directory/Dockerfile -t agentconnect-directory .   # from the repo root
 ```
 
+Releases publish the image for `linux/amd64` and `linux/arm64` as
+`ghcr.io/mbocevski/agentconnect-directory:<version>`, signed and with build
+provenance; the release notes give its digest.
+
 ## Configuration
 
 | Variable | Default | Meaning |
