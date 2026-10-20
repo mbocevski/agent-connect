@@ -1038,6 +1038,38 @@ and for `POST /v0/doors`, `owner_mailbox` MUST equal it (else
    as the `msg_id` of the matching `accepted` or `error` frame, and when it is
    absent MUST echo the `group_id` or `invite_id`. An `epoch_conflict` error
    MUST carry `"current_epoch": <u64>`; other errors MUST NOT rely on it.
+4. **Connection limits.** A relay MAY cap WebSocket connections per
+   source address and while they authenticate, refusing the upgrade with
+   HTTP 503, and in total. At the total it SHOULD let a connection that
+   authenticates take the place of the oldest connection of the source
+   holding the most (code 1013, `relay_full`), and give it `rate_limited`
+   and close code 1013 only when that source is its own, so that a few
+   sources can't hold every slot. A source is the client's address (an IPv4
+   address, an IPv6 /64), behind a reverse proxy the one the proxy reports
+   (§8.1.1, "Source address"). An HTTP-phase cap counts a connection before
+   its headers are read, so by its TCP peer; a relay SHOULD give a trusted
+   proxy no per-source share there, only the total. Past a per-mailbox cap it SHOULD
+   close that mailbox's oldest connection (code 1000, `replaced`) rather
+   than refuse the new one, which is the one known to be alive. Per-address
+   state is in memory only and never logged. A relay MAY limit the frames
+   one connection sends: a frame over the limit is answered with
+   `rate_limited` and the detail `frame rate exceeded`, carrying its
+   `msg_id` when the frame has one, and is not processed. A relay SHOULD
+   NOT refuse an `ack` that way (a lost ack leaves a delivered message
+   queued); it delays it instead. The relay pings each connection and MAY
+   close one that sends no whole message and answers no ping for a while
+   (code 1001); a pong that doesn't answer its ping doesn't count. While a
+   client is in the middle of a message, the relay SHOULD count the bytes
+   arriving instead, and MAY close a connection whose message arrives
+   slower than a minimum rate. It MAY drop a connection that doesn't read
+   what it is sent, and close (code 1009) connections holding unfinished
+   input when its read buffers pass a budget, from the source holding the
+   most first, so that many small partial messages from one source don't
+   push out another's one large message. Clients MUST
+   answer pings and reconnect with backoff after any of these. A
+   `rate_limited` with the detail `frame rate exceeded` or `send rate
+   exceeded` means the frame was refused before it was processed, so a
+   client MAY send it again later, a `knock` included (§8.3).
 
 ### 8.3 Delivery Service rules
 
@@ -1137,6 +1169,16 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
     queue is full.
   - Otherwise the knock is queued for the door's `owner_mailbox` and
     delivered like any message.
+  - The relay SHOULD answer before it writes the knock and SHOULD write
+    knocks on a clock of its own, forwarded and dropped ones through the
+    same path (the reference relay queues both and writes every 250 ms,
+    with a bounded share of the queue per source address and per door;
+    a knock past a share is dropped behind its `accepted`),
+    so neither the answer's timing nor the store's load right after it
+    tells them apart. A knocker that keeps measuring the relay's latency
+    across the next write can still tell, by the cost of the write itself
+    (§12). `accepted` is not a delivery promise: a knock the relay holds
+    in memory before writing it can be lost if the relay crashes.
   - A knock retried within 10 minutes is `rate_limited`, whether or not the
     first was delivered. After that, a repeat of the same `msg_id` is
     `accepted` but not delivered twice (the `msg_id` rule under "Storage").
@@ -1231,9 +1273,14 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   instance that stays unresponsive. A direct send to a full mailbox (a `join`
   to the inviter) is instead refused with `quota_exceeded`.
 - **Logging:** the relay MUST NOT log `ct`, and MUST NOT log fragments or
-  secrets. Identifiers in logs SHOULD be hashed. Door and knock paths MUST
-  NOT log any identifier, hashed or not: a listing links a door id to an
-  identity, and a hash of a public id is no protection.
+  secrets, nor client addresses. Identifiers in logs SHOULD be replaced
+  by a keyed hash under a key the relay draws at random when it starts
+  and never stores, so outsiders can't compute it and logs from two runs
+  can't be joined. Door and knock paths MUST NOT log any identifier,
+  hashed or not: a listing links a door id to an identity, and a hash of a
+  public id is no protection. Lines about a connection opening or closing
+  MUST NOT carry the mailbox either, since they sit next to the knock
+  lines.
 
 ### 8.4 Error codes
 
@@ -1263,6 +1310,7 @@ Mapping of the cases above:
 | Signed REST request over a per-address or per-mailbox rate, from a mailbox whose replay-cache share is full of live entries, or signed before a relay restart (§8.1.1) | `rate_limited` |
 | `POST /v0/invites` or `group.create` past a per-mailbox, per-address or relay-wide limit (§4.2, §8.3) | `quota_exceeded` (HTTP 429 on REST) |
 | `POST /v0/invites` whose `group_name`, `inviter_name` or `purpose` isn't one-line text | `bad_request` |
+| A connection that authenticates at the relay's total cap while its own source holds the most; a frame over the per-connection frame rate (§8.2) | `rate_limited` |
 
 `queue_overflow` is a marker frame (§8.3), not an error code.
 
@@ -2434,6 +2482,8 @@ Implementations in this repository MUST have:
 | Relay and directory colluding (same operator) | Joins reads of a listing to knocks on its door, and knocks to their mailboxes | Knocks are sealed (§6.6), so the relay sees a sender mailbox, a door and a time. Directories log no addresses (§13.2) | Who knocked on whom and when, if both sides keep data they're told not to keep. **Metadata**, as for the relay |
 | Stale door (expired, rotated or closed) | A cached or replayed listing points at a door that is gone, or at an old door key | Door `expires_at` is at most 7 days and the knocker checks it. The relay answers `door_not_open`. The owner drops knocks for doors expired more than 1 h ago. The listing `seq` and tombstones, per identity, and the name's token high-water mark stop older listings and superseded keys from being re-published (§13.2.2) | A knock to a closed door fails openly. A cached listing can show a door as open until its signed expiry. A listing without a door can be re-served until its token expires, without being knockable |
 | Knock flooder | Sends many knocks to tire the owner's human, or to crowd out real knocks | Relay limits per (door, sender), per sender, and per door, where overflow is dropped silently (§8.3). Owner caps: one pending knock per identity per door, 32 per door (§6.6.3). The 1 h lapse. Local policy (§10.6) drops | Denial of service on a popular door. Mailboxes are free, so the relay limits slow Sybils down rather than stop them |
+| Many-address attacker against a public relay | Opens connections and requests from many addresses (IPv6 /64s are cheap) to fill the relay's connection caps, its HTTP slots and its knock queue | Per-source shares of every cap; at a total cap a newcomer replaces the oldest connection of the source holding the most; deadlines on every stage of a connection; a relay-wide read budget shed by source (§8.2) | Denial of service: an attacker with enough addresses can still fill the total caps, and honest clients then compete with it for slots. Deploy a public relay behind a proxy or provider with connection-level DDoS protection. Behind a proxy that isn't configured as trusted, every client is one source; behind a trusted one, its HTTP-phase connections share only the total cap |
+| Knocker timing the relay | Knocks, then measures how fast the relay answers its other frames, to learn whether its knock was forwarded or dropped (a busy door, a full owner queue) | The answer comes before the write; forwarded and dropped knocks are queued alike and written on the relay's own clock (§8.3); public metrics don't separate them | A knocker that keeps probing across the relay's next write can still see the write's cost, which grows with the owner's queue. It learns whether that door was busy or its owner's queue full, not who the owner is |
 | Prompt injection through card text | Card name, description, skills and examples are attacker-controlled and are read by agents through MCP, Markdown, `llms.txt` and knocks | Cards are untrusted content (§10.1, §10.5). Directories MUST present card text as data (§13.2). Single-line fields with length caps (§13.1). No links from card text are rendered. Knock approval is human. Knocking only asks to talk | Behavioural: an agent that obeys card text anyway. Can't be solved with cryptography |
 
 **Encrypted-at-rest storage.** A daemon keeps its MLS state (epoch secrets,

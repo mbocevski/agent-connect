@@ -38,10 +38,27 @@ pub fn mailbox_id_from_key(sig_key: &[u8]) -> String {
     id
 }
 
-/// A short, stable, non-reversible tag for an identifier, for logs.
+/// The key behind [`log_tag`]: random, drawn once per process and never
+/// stored, so tags can't be computed by someone who holds an id and don't
+/// match across restarts.
+static LOG_TAG_KEY: std::sync::LazyLock<[u8; 32]> =
+    std::sync::LazyLock::new(crate::auth::random_bytes);
+
+/// A short tag for an identifier, for logs: the first 4 bytes of
+/// HMAC-SHA256 under a per-process random key, in hex. Stable within one
+/// process, so log lines about one group can be followed; unrelated across
+/// restarts and to anyone without the key.
 #[must_use]
 pub fn log_tag(id: &str) -> String {
-    let digest = Sha256::digest(id.as_bytes());
+    log_tag_with(&LOG_TAG_KEY, id)
+}
+
+/// [`log_tag`] under an explicit key.
+fn log_tag_with(key: &[u8; 32], id: &str) -> String {
+    use hmac::{Hmac, KeyInit, Mac as _};
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("any key length works");
+    mac.update(id.as_bytes());
+    let digest = mac.finalize().into_bytes();
     digest[..4].iter().fold(String::new(), |mut out, b| {
         use std::fmt::Write as _;
         let _ = write!(out, "{b:02x}");
@@ -336,6 +353,28 @@ pub enum ClientFrame {
     },
 }
 
+impl ClientFrame {
+    /// The `msg_id` the reply to this frame carries (SPEC §8.2): the
+    /// envelope's, or for `group.create` and `invite.consume` the optional
+    /// `msg_id` and else the group or invite id. `None` for `auth` and
+    /// `ack`, which get no reply.
+    #[must_use]
+    pub fn correlation(&self) -> Option<String> {
+        match self {
+            ClientFrame::Auth { .. } | ClientFrame::Ack { .. } => None,
+            ClientFrame::Send { env }
+            | ClientFrame::Join { env, .. }
+            | ClientFrame::Knock { env, .. } => Some(env.msg_id.clone()),
+            ClientFrame::GroupCreate {
+                group_id, msg_id, ..
+            } => Some(msg_id.clone().unwrap_or_else(|| group_id.clone())),
+            ClientFrame::InviteConsume { invite_id, msg_id } => {
+                Some(msg_id.clone().unwrap_or_else(|| invite_id.clone()))
+            }
+        }
+    }
+}
+
 /// Frames sent by the relay (SPEC §8.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t")]
@@ -483,6 +522,69 @@ mod tests {
             routing: None,
             ct: b64_encode(b"ciphertext"),
         }
+    }
+
+    #[test]
+    fn log_tags_are_keyed_per_process() {
+        let id = mailbox_id_from_key(&crate::auth::random_bytes::<32>());
+        let tag = log_tag(&id);
+        assert_eq!(tag.len(), 8);
+        assert!(tag.bytes().all(|b| b.is_ascii_hexdigit()));
+        // Stable within the process, so one group's lines can be followed.
+        assert_eq!(log_tag(&id), tag);
+        assert_ne!(log_tag(&format!("{id}x")), tag);
+        // Not the unkeyed hash prefix anyone holding the id could compute.
+        let unkeyed =
+            Sha256::digest(id.as_bytes())[..4]
+                .iter()
+                .fold(String::new(), |mut out, b| {
+                    use std::fmt::Write as _;
+                    let _ = write!(out, "{b:02x}");
+                    out
+                });
+        assert_ne!(tag, unkeyed);
+        // Another key (another process) gives an unrelated tag.
+        let a = crate::auth::random_bytes::<32>();
+        let b = crate::auth::random_bytes::<32>();
+        assert_eq!(log_tag_with(&a, &id), log_tag_with(&a, &id));
+        assert_ne!(log_tag_with(&a, &id), log_tag_with(&b, &id));
+    }
+
+    #[test]
+    fn correlation_follows_the_reply_rules() {
+        let e = env(Kind::Application);
+        let send = ClientFrame::Send { env: e.clone() };
+        assert_eq!(send.correlation(), Some(e.msg_id.clone()));
+        let knock = ClientFrame::Knock {
+            door_id: id16(3),
+            env: e.clone(),
+        };
+        assert_eq!(knock.correlation(), Some(e.msg_id.clone()));
+        let join = ClientFrame::Join {
+            invite_id: id16(4),
+            env: e.clone(),
+        };
+        assert_eq!(join.correlation(), Some(e.msg_id));
+        let create = |msg_id| ClientFrame::GroupCreate {
+            group_id: id16(5),
+            epoch: 0,
+            msg_id,
+        };
+        assert_eq!(create(None).correlation(), Some(id16(5)));
+        assert_eq!(create(Some("c".into())).correlation(), Some("c".into()));
+        let consume = |msg_id| ClientFrame::InviteConsume {
+            invite_id: id16(6),
+            msg_id,
+        };
+        assert_eq!(consume(None).correlation(), Some(id16(6)));
+        assert_eq!(consume(Some("i".into())).correlation(), Some("i".into()));
+        let ack = ClientFrame::Ack { msg_id: id16(7) };
+        assert_eq!(ack.correlation(), None);
+        let auth = ClientFrame::Auth {
+            sig_key: String::new(),
+            sig: String::new(),
+        };
+        assert_eq!(auth.correlation(), None);
     }
 
     #[test]

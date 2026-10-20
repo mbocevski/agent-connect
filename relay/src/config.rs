@@ -1,12 +1,15 @@
 //! Environment configuration.
 
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::time::Duration;
 
 use axum::http::HeaderName;
 
 use crate::quota::{ACTIVITY_GRANULARITY, Cidr, ClientIp, Quotas};
-use crate::store::{Limits, Window};
+use crate::server::ServerLimits;
+use crate::store::{DEFAULT_FRAME_MAX, Limits, Window};
+use crate::ws::WsLimits;
 
 use agentconnect_core::operator::OperatorLinks;
 
@@ -16,6 +19,8 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:8080";
 pub const DEFAULT_DB: &str = "agentconnect-relay.db";
 /// The longest idle period `AC_RELAY_GROUP_IDLE_DAYS` takes (100 years).
 pub const MAX_IDLE_DAYS: u64 = 36_500;
+/// Default address of the operator's listener (`/metrics`, `/healthz`).
+pub const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:9091";
 
 /// Relay configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +40,24 @@ pub struct Config {
     /// `AC_RELAY_CLIENT_IP_HEADER`, `AC_RELAY_TRUSTED_PROXIES`,
     /// `AC_RELAY_PROXY_HOPS`; relay/README.md).
     pub quotas: Quotas,
+    /// WebSocket connection limits: `AC_RELAY_MAX_CONNECTIONS`,
+    /// `AC_RELAY_MAX_UNAUTHENTICATED`, `AC_RELAY_MAX_CONNECTIONS_PER_SOURCE`,
+    /// `AC_RELAY_MAX_CONNECTIONS_PER_MAILBOX`, `AC_RELAY_AUTH_TIMEOUT_SECS`,
+    /// `AC_RELAY_DRAIN_BATCH_BYTES`, `AC_RELAY_SEND_TIMEOUT_SECS`,
+    /// `AC_RELAY_PING_INTERVAL_SECS`, `AC_RELAY_IDLE_TIMEOUT_SECS`,
+    /// `AC_RELAY_MIN_UPLOAD_BYTES_PER_SEC`, `AC_RELAY_READ_BUFFER_BYTES`,
+    /// `AC_RELAY_FRAMES_PER_SEC` and `AC_RELAY_FRAME_BURST`.
+    pub ws: WsLimits,
+    /// HTTP limits: `AC_RELAY_HEADER_TIMEOUT_SECS`,
+    /// `AC_RELAY_REQUEST_TIMEOUT_SECS`, `AC_RELAY_WRITE_TIMEOUT_SECS`,
+    /// `AC_RELAY_MAX_BODY_BYTES`, `AC_RELAY_MAX_HTTP_CONNECTIONS`,
+    /// `AC_RELAY_MAX_HTTP_CONNECTIONS_PER_SOURCE` and
+    /// `AC_RELAY_SHUTDOWN_GRACE_SECS`.
+    pub server: ServerLimits,
+    /// `AC_RELAY_METRICS_ADDR`: the operator's listener for `/metrics` and
+    /// `/healthz`, on loopback by default. The public listener has no
+    /// `/metrics`.
+    pub metrics_addr: SocketAddr,
 }
 
 /// A positive integer from `var`, or `default` when unset.
@@ -52,6 +75,36 @@ fn count(
             .filter(|n| *n > 0)
             .ok_or_else(|| format!("{var} is not a positive integer: {v}")),
     }
+}
+
+/// A whole number from `key`, at least `min`; `default` when unset or empty.
+fn number<T>(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: T,
+    min: T,
+) -> Result<T, String>
+where
+    T: FromStr + PartialOrd + std::fmt::Display + Copy,
+{
+    let Some(text) = get(key).filter(|v| !v.is_empty()) else {
+        return Ok(default);
+    };
+    match text.parse::<T>() {
+        Ok(v) if v >= min => Ok(v),
+        _ => Err(format!(
+            "{key} must be a whole number of at least {min}: {text}"
+        )),
+    }
+}
+
+/// Whole seconds from `key`, at least one.
+fn seconds(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &str,
+    default: Duration,
+) -> Result<Duration, String> {
+    number(get, key, default.as_secs(), 1).map(Duration::from_secs)
 }
 
 fn quotas(get: &impl Fn(&str) -> Option<String>) -> Result<Quotas, String> {
@@ -146,8 +199,9 @@ impl Config {
     ///
     /// Returns a message if `AC_RELAY_ADDR` is not a socket address,
     /// `AC_RELAY_HOST` is not a valid host, `AC_RELAY_TERMS` or
-    /// `AC_RELAY_ABUSE` is set but invalid, or a limit is not a positive
-    /// integer.
+    /// `AC_RELAY_ABUSE` is set but invalid, a limit is not a positive
+    /// integer in range (the idle timeout must be longer than the ping
+    /// interval), or `AC_RELAY_METRICS_ADDR` is not a socket address.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let addr_text = get("AC_RELAY_ADDR").unwrap_or_else(|| DEFAULT_ADDR.to_owned());
         let addr: SocketAddr = addr_text
@@ -160,12 +214,71 @@ impl Config {
         let host = agentconnect_core::identity::canonical_relay_host(&host)
             .map_err(|_| format!("AC_RELAY_HOST is not a valid relay host: {host}"))?;
         let links = OperatorLinks::from_lookup("AC_RELAY", &get)?;
+        let d = WsLimits::default();
+        let n = |key: &str, default: usize| number(&get, key, default, 1);
+        let ws = WsLimits {
+            max_connections: n("AC_RELAY_MAX_CONNECTIONS", d.max_connections)?,
+            max_unauthenticated: n("AC_RELAY_MAX_UNAUTHENTICATED", d.max_unauthenticated)?,
+            max_per_source: n("AC_RELAY_MAX_CONNECTIONS_PER_SOURCE", d.max_per_source)?,
+            max_per_mailbox: n("AC_RELAY_MAX_CONNECTIONS_PER_MAILBOX", d.max_per_mailbox)?,
+            auth_timeout: seconds(&get, "AC_RELAY_AUTH_TIMEOUT_SECS", d.auth_timeout)?,
+            drain_batch_bytes: number(
+                &get,
+                "AC_RELAY_DRAIN_BATCH_BYTES",
+                d.drain_batch_bytes,
+                DEFAULT_FRAME_MAX as u64,
+            )?,
+            send_timeout: seconds(&get, "AC_RELAY_SEND_TIMEOUT_SECS", d.send_timeout)?,
+            ping_interval: seconds(&get, "AC_RELAY_PING_INTERVAL_SECS", d.ping_interval)?,
+            idle_timeout: seconds(&get, "AC_RELAY_IDLE_TIMEOUT_SECS", d.idle_timeout)?,
+            min_upload_rate: number(
+                &get,
+                "AC_RELAY_MIN_UPLOAD_BYTES_PER_SEC",
+                d.min_upload_rate,
+                1,
+            )?,
+            read_buffer_bytes: number(
+                &get,
+                "AC_RELAY_READ_BUFFER_BYTES",
+                d.read_buffer_bytes,
+                (DEFAULT_FRAME_MAX as u64) * 4,
+            )?,
+            frames_per_sec: number(&get, "AC_RELAY_FRAMES_PER_SEC", d.frames_per_sec, 1)?,
+            frame_burst: number(&get, "AC_RELAY_FRAME_BURST", d.frame_burst, 1)?,
+        };
+        if ws.idle_timeout <= ws.ping_interval {
+            return Err(
+                "AC_RELAY_IDLE_TIMEOUT_SECS must be longer than AC_RELAY_PING_INTERVAL_SECS".into(),
+            );
+        }
+        let d = ServerLimits::default();
+        let server = ServerLimits {
+            header_timeout: seconds(&get, "AC_RELAY_HEADER_TIMEOUT_SECS", d.header_timeout)?,
+            request_timeout: seconds(&get, "AC_RELAY_REQUEST_TIMEOUT_SECS", d.request_timeout)?,
+            write_timeout: seconds(&get, "AC_RELAY_WRITE_TIMEOUT_SECS", d.write_timeout)?,
+            max_body_bytes: number(&get, "AC_RELAY_MAX_BODY_BYTES", d.max_body_bytes, 1024)?,
+            max_http_connections: n("AC_RELAY_MAX_HTTP_CONNECTIONS", d.max_http_connections)?
+                .min(u32::MAX as usize),
+            max_http_per_source: n(
+                "AC_RELAY_MAX_HTTP_CONNECTIONS_PER_SOURCE",
+                d.max_http_per_source,
+            )?,
+            shutdown_grace: seconds(&get, "AC_RELAY_SHUTDOWN_GRACE_SECS", d.shutdown_grace)?,
+        };
+        let metrics_text =
+            get("AC_RELAY_METRICS_ADDR").unwrap_or_else(|| DEFAULT_METRICS_ADDR.to_owned());
+        let metrics_addr: SocketAddr = metrics_text.parse().map_err(|_| {
+            format!("AC_RELAY_METRICS_ADDR is not a socket address: {metrics_text}")
+        })?;
         Ok(Self {
             addr,
             db: get("AC_RELAY_DB").unwrap_or_else(|| DEFAULT_DB.to_owned()),
             host,
             links,
             quotas: quotas(&get)?,
+            ws,
+            server,
+            metrics_addr,
         })
     }
 
@@ -379,6 +492,94 @@ abuse@example.org",
                 Config::from_lookup(lookup(&[(var, value)])).unwrap_err(),
                 err,
                 "{var}={value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_limits_default_and_override() {
+        let c = Config::from_lookup(lookup(&[])).unwrap();
+        assert_eq!(c.ws, WsLimits::default());
+        assert_eq!(c.server, ServerLimits::default());
+        assert_eq!(c.metrics_addr.to_string(), DEFAULT_METRICS_ADDR);
+        assert!(c.metrics_addr.ip().is_loopback());
+        let c = Config::from_lookup(lookup(&[
+            ("AC_RELAY_MAX_CONNECTIONS", "50"),
+            ("AC_RELAY_MAX_UNAUTHENTICATED", "7"),
+            ("AC_RELAY_MAX_CONNECTIONS_PER_SOURCE", "3"),
+            ("AC_RELAY_MAX_CONNECTIONS_PER_MAILBOX", "2"),
+            ("AC_RELAY_AUTH_TIMEOUT_SECS", "4"),
+            ("AC_RELAY_DRAIN_BATCH_BYTES", "8388608"),
+            ("AC_RELAY_SEND_TIMEOUT_SECS", "5"),
+            ("AC_RELAY_PING_INTERVAL_SECS", "10"),
+            ("AC_RELAY_IDLE_TIMEOUT_SECS", "25"),
+            ("AC_RELAY_MIN_UPLOAD_BYTES_PER_SEC", "512"),
+            ("AC_RELAY_READ_BUFFER_BYTES", "67108864"),
+            ("AC_RELAY_FRAMES_PER_SEC", "20"),
+            ("AC_RELAY_FRAME_BURST", "40"),
+            ("AC_RELAY_HEADER_TIMEOUT_SECS", "3"),
+            ("AC_RELAY_REQUEST_TIMEOUT_SECS", "6"),
+            ("AC_RELAY_WRITE_TIMEOUT_SECS", "7"),
+            ("AC_RELAY_MAX_BODY_BYTES", "4096"),
+            ("AC_RELAY_MAX_HTTP_CONNECTIONS", "64"),
+            ("AC_RELAY_MAX_HTTP_CONNECTIONS_PER_SOURCE", "8"),
+            ("AC_RELAY_SHUTDOWN_GRACE_SECS", "2"),
+            ("AC_RELAY_METRICS_ADDR", "10.0.0.2:9100"),
+            ("AC_RELAY_DB", ""),
+        ]))
+        .unwrap();
+        assert_eq!(
+            c.ws,
+            WsLimits {
+                max_connections: 50,
+                max_unauthenticated: 7,
+                max_per_source: 3,
+                max_per_mailbox: 2,
+                auth_timeout: Duration::from_secs(4),
+                drain_batch_bytes: 8 << 20,
+                send_timeout: Duration::from_secs(5),
+                ping_interval: Duration::from_secs(10),
+                idle_timeout: Duration::from_secs(25),
+                min_upload_rate: 512,
+                read_buffer_bytes: 64 << 20,
+                frames_per_sec: 20,
+                frame_burst: 40,
+            }
+        );
+        assert_eq!(
+            c.server,
+            ServerLimits {
+                header_timeout: Duration::from_secs(3),
+                request_timeout: Duration::from_secs(6),
+                write_timeout: Duration::from_secs(7),
+                max_body_bytes: 4096,
+                max_http_connections: 64,
+                max_http_per_source: 8,
+                shutdown_grace: Duration::from_secs(2),
+            }
+        );
+        assert_eq!(c.metrics_addr.to_string(), "10.0.0.2:9100");
+    }
+
+    #[test]
+    fn rejects_limits_out_of_range() {
+        for (key, value) in [
+            ("AC_RELAY_MAX_CONNECTIONS", "0"),
+            ("AC_RELAY_MAX_CONNECTIONS_PER_MAILBOX", "-1"),
+            ("AC_RELAY_DRAIN_BATCH_BYTES", "65536"),
+            ("AC_RELAY_SEND_TIMEOUT_SECS", "0"),
+            ("AC_RELAY_FRAMES_PER_SEC", "many"),
+            ("AC_RELAY_FRAME_BURST", "4294967296"),
+            ("AC_RELAY_HEADER_TIMEOUT_SECS", "1.5"),
+            ("AC_RELAY_IDLE_TIMEOUT_SECS", "30"),
+            ("AC_RELAY_READ_BUFFER_BYTES", "1048576"),
+            ("AC_RELAY_MAX_BODY_BYTES", "10"),
+            ("AC_RELAY_METRICS_ADDR", "loopback"),
+        ] {
+            let e = Config::from_lookup(lookup(&[(key, value)])).unwrap_err();
+            assert!(
+                e.contains("AC_RELAY_IDLE_TIMEOUT_SECS") || e.contains(key),
+                "{key}: {e}"
             );
         }
     }

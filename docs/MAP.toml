@@ -40,11 +40,12 @@ internal = [
     "core/src/operator.rs",
     # core-py: bindings; the checks they call are in core.
     "core-py/src/**",
-    # relay: process entry point and storage.
+    # relay: process entry point, storage and the deadline clock.
     "relay/src/lib.rs",
     "relay/src/main.rs",
     "relay/src/sqlite.rs",
     "relay/src/store.rs",
+    "relay/src/timer.rs",
     # daemon: plumbing behind the CLI, the API and the adapters.
     "daemon/src/agentconnect/__init__.py",
     "daemon/src/agentconnect/adapter.py",
@@ -204,13 +205,16 @@ name = "relay-protocol"
 code = [
     "relay/src/auth.rs",
     "relay/src/config.rs",
+    "relay/src/conn.rs",
     "relay/src/landing.rs",
+    "relay/src/logging.rs",
     "relay/src/proto.rs",
     "relay/src/quota.rs",
     "relay/src/relay.rs",
     "relay/src/replay.rs",
     "relay/src/restart.rs",
     "relay/src/rest.rs",
+    "relay/src/server.rs",
     "relay/src/ws.rs",
 ]
 docs = ["SPEC.md", "relay/README.md"]

@@ -155,7 +155,7 @@ async fn join_is_forwarded_to_the_inviter_mailbox() {
     let pending = h
         .relay
         .store()
-        .pending(&inviter.mailbox, 0, 100, h.relay.now_ms())
+        .pending(&inviter.mailbox, 0, 100, u64::MAX, h.relay.now_ms())
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);

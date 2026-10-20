@@ -84,7 +84,7 @@ async fn idle_groups_are_deleted_once_no_member_is_connected() {
     h.clock.advance(10 * DAY + MARGIN + Duration::from_secs(1));
 
     // `quiet` is idle, but its member b is connected.
-    let b_online = h.relay.register(&b);
+    let b_online = h.relay.register(&b, usize::MAX).0;
     assert_eq!(h.relay.sweep_idle_groups().await.unwrap(), 0);
     drop(b_online);
     assert_eq!(h.relay.sweep_idle_groups().await.unwrap(), 1);
@@ -123,7 +123,7 @@ async fn the_periodic_purge_runs_the_idle_sweep_hourly() {
     assert!(h.relay.store().get_group(&first).await.unwrap().is_some());
 
     h.clock.advance(h.relay.quotas().group_idle + MARGIN);
-    let c_online = h.relay.register(&c);
+    let c_online = h.relay.register(&c, usize::MAX).0;
     h.relay.purge().await.unwrap();
     drop(c_online);
     assert!(h.relay.store().get_group(&first).await.unwrap().is_none());
@@ -148,7 +148,7 @@ async fn the_sweep_pages_through_many_idle_groups() {
     }
     h.clock
         .advance(h.relay.quotas().group_idle + MARGIN + Duration::from_secs(1));
-    let online = h.relay.register(&a);
+    let online = h.relay.register(&a, usize::MAX).0;
     assert_eq!(h.relay.sweep_idle_groups().await.unwrap(), 0);
     drop(online);
     assert_eq!(h.relay.sweep_idle_groups().await.unwrap(), 501);

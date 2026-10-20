@@ -76,7 +76,7 @@ async fn state_survives_a_restart_and_migrations_are_idempotent() {
     let g = s.get_group(GID).await.unwrap().unwrap();
     assert_eq!(g.current_epoch, 1);
     assert_eq!(g.members, vec![A.to_owned(), B.to_owned()]);
-    let pending = s.pending(A, 0, 10, NOW).await.unwrap();
+    let pending = s.pending(A, 0, 10, u64::MAX, NOW).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].msg_id, "m1");
     // Idempotency survives too.
@@ -128,7 +128,7 @@ async fn purge_removes_only_expired_rows() {
     assert_eq!(stats.invites, 1);
     assert!(s.get_invite("inv-1").await.unwrap().is_none());
     assert!(s.get_invite("inv-2").await.unwrap().is_some());
-    assert_eq!(s.pending(B, 0, 10, t).await.unwrap().len(), 1);
+    assert_eq!(s.pending(B, 0, 10, u64::MAX, t).await.unwrap().len(), 1);
     assert_eq!(s.purge_expired(t).await.unwrap(), Default::default());
 }
 
@@ -190,8 +190,61 @@ async fn ack_removes_only_the_acknowledged_mailbox_copy() {
     s.deliver_group(&send, &limits, NOW).await.unwrap();
     assert!(s.ack(A, "w1").await.unwrap());
     assert!(!s.ack(A, "w1").await.unwrap());
-    assert!(s.pending(A, 0, 10, NOW).await.unwrap().is_empty());
-    assert_eq!(s.pending(B, 0, 10, NOW).await.unwrap().len(), 1);
+    assert!(s.pending(A, 0, 10, u64::MAX, NOW).await.unwrap().is_empty());
+    assert_eq!(s.pending(B, 0, 10, u64::MAX, NOW).await.unwrap().len(), 1);
+}
+
+/// A message of exactly `size` stored bytes.
+fn sized(id: &str, size: usize) -> NewMessage {
+    let head = format!(r#"{{"msg_id":"{id}","pad":""#);
+    let pad = "x".repeat(size - head.len() - 2);
+    NewMessage {
+        msg_id: id.into(),
+        sender: A.into(),
+        json: format!(r#"{head}{pad}"}}"#),
+    }
+}
+
+#[tokio::test]
+async fn pending_stops_at_the_byte_cap_but_returns_at_least_one_message() {
+    let s = SqliteStore::in_memory().await.unwrap();
+    let limits = Limits::default();
+    for (i, size) in [400, 300, 300, 2000, 100].iter().enumerate() {
+        let m = sized(&format!("m{i}"), *size);
+        assert_eq!(m.json.len(), *size);
+        assert_eq!(
+            s.deliver_direct(B, &m, &limits, NOW).await.unwrap(),
+            DirectOutcome::Delivered
+        );
+    }
+    let ids = |b: &[agentconnect_relay::store::StoredMessage]| {
+        b.iter().map(|m| m.msg_id.clone()).collect::<Vec<_>>()
+    };
+    // 400 + 300 + 300 fit in 1000; the 2000-byte message does not.
+    let first = s.pending(B, 0, 10, 1000, NOW).await.unwrap();
+    assert_eq!(ids(&first), ["m0", "m1", "m2"]);
+    // 999 bytes: the third message would pass the cap.
+    assert_eq!(
+        ids(&s.pending(B, 0, 10, 999, NOW).await.unwrap()),
+        ["m0", "m1"]
+    );
+    // A message larger than the cap still goes out, alone.
+    let after = first.last().unwrap().seq;
+    let big = s.pending(B, after, 10, 1000, NOW).await.unwrap();
+    assert_eq!(ids(&big), ["m3"]);
+    let rest = s.pending(B, big[0].seq, 10, 1000, NOW).await.unwrap();
+    assert_eq!(ids(&rest), ["m4"]);
+    // The count limit still applies under a large byte cap.
+    assert_eq!(
+        ids(&s.pending(B, 0, 2, u64::MAX, NOW).await.unwrap()),
+        ["m0", "m1"]
+    );
+    assert!(
+        s.pending(B, rest[0].seq, 10, 1000, NOW)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

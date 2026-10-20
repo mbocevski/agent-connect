@@ -76,8 +76,9 @@ contract:
 
 # Postgres for the directory's store comes from compose.test.yaml (loopback only);
 # the demos and the malicious relay double run in demo/compose.yaml.
-# Integration tier: the directory's Postgres store, the docker demos, the malicious relay
+# Integration tier: the directory's Postgres store, the relay binary's connection limits on real time, the docker demos, the malicious relay
 test-int: demo-image
+    cargo nextest run -p agentconnect-relay --locked --run-ignored only
     docker compose -f compose.test.yaml up -d --wait
     status=0; AC_DIRECTORY_TEST_DB=postgres://directory@127.0.0.1:55432/directory?sslmode=disable cargo nextest run -p agentconnect-directory --locked --run-ignored only || status=$?; docker compose -f compose.test.yaml down; exit "$status"
     uv run --all-packages --frozen pytest -q integration/tests

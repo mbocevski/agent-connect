@@ -19,6 +19,7 @@ ed25519-dalek = "3.0.0"
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["http1", "server"] }
 hyper-rustls = { version = "0.27.10", default-features = false, features = [
     "http1",
     "native-tokio",

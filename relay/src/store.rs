@@ -494,12 +494,16 @@ pub trait Store: Send + Sync + 'static {
         now_ms: u64,
     ) -> impl Future<Output = StoreResult<DirectOutcome>> + Send;
 
-    /// Unexpired messages for `mailbox` with `seq > after_seq`, oldest first.
+    /// Unexpired messages for `mailbox` with `seq > after_seq`, oldest first:
+    /// at most `limit` of them, and no more than `max_bytes` of stored
+    /// envelopes, except that the first message is returned whatever its
+    /// size.
     fn pending(
         &self,
         mailbox: &str,
         after_seq: i64,
         limit: u32,
+        max_bytes: u64,
         now_ms: u64,
     ) -> impl Future<Output = StoreResult<Vec<StoredMessage>>> + Send;
 

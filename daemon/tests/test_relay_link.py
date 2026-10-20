@@ -7,12 +7,14 @@ import asyncio
 import json
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable
+from http import HTTPStatus
 from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.http11 import Request, Response
 
 import agentconnect_core as ac
 from agentconnect.backoff import Backoff
@@ -39,16 +41,28 @@ class FakeRelay:
     def __init__(self) -> None:
         self.script: Script | None = None
         self.port = 0
+        # Upgrades to refuse with 503, as the relay does at its connection cap.
+        self.refuse_upgrades = 0
+        self.upgrades = 0
 
     async def handler(self, ws: ServerConnection) -> None:
         if self.script is not None:
             await self.script(ws)
 
+    def process_request(self, ws: ServerConnection, _request: Request) -> Response | None:
+        self.upgrades += 1
+        if self.refuse_upgrades > 0:
+            self.refuse_upgrades -= 1
+            return ws.respond(HTTPStatus.SERVICE_UNAVAILABLE, "too many connections\n")
+        return None
+
 
 @pytest_asyncio.fixture
 async def fake_relay() -> AsyncIterator[FakeRelay]:
     relay = FakeRelay()
-    async with serve(relay.handler, "127.0.0.1", 0) as server:
+    async with serve(
+        relay.handler, "127.0.0.1", 0, process_request=relay.process_request
+    ) as server:
         relay.port = int(next(iter(server.sockets)).getsockname()[1])
         yield relay
 
@@ -284,6 +298,104 @@ async def test_link_retries_on_failed_authentication(
     fake_clock.advance(60)
     await asyncio.wait_for(task, 5)
     assert link.connections == 0
+
+
+async def test_link_answers_relay_pings_while_its_handler_is_busy(
+    fake_relay: FakeRelay, rng: random.Random, fake_clock: FakeClock
+) -> None:
+    """The relay pings every connection and closes one that stays silent
+    (relay/README.md, "Connection limits"). The link answers pings on its
+    own, also while the daemon is still handling an earlier frame."""
+    inst = instance(rng)
+    busy = asyncio.Event()
+    release = asyncio.Event()
+    ponged: list[bool] = []
+
+    async def script(ws: ServerConnection) -> None:
+        assert await handshake(ws, inst, rng.randbytes(32), "relay.test")
+        await ws.send(json.dumps({"t": "deliver", "env": {}}))
+        await busy.wait()
+        for _ in range(3):
+            waiter = await ws.ping()
+            await asyncio.wait_for(waiter, 5)
+            ponged.append(True)
+        release.set()
+        await ws.recv()
+
+    fake_relay.script = script
+
+    async def on_frame(_frame: dict[str, Any]) -> None:
+        busy.set()
+        await release.wait()
+
+    link = RelayLink(
+        f"ws://127.0.0.1:{fake_relay.port}/v0/ws",
+        "relay.test",
+        inst,
+        fake_clock,
+        on_frame,
+        backoff=Backoff(rng=rng),
+    )
+    task = asyncio.ensure_future(link.run())
+    await asyncio.wait_for(release.wait(), 5)
+    assert ponged == [True, True, True]
+    assert link.connected
+    await link.stop()
+    await asyncio.wait_for(task, 5)
+    assert link.connections == 1
+
+
+@pytest.mark.parametrize("cap", ["total", "mailbox"])
+async def test_link_retries_after_the_relay_refuses_a_connection_at_a_cap(
+    fake_relay: FakeRelay, rng: random.Random, fake_clock: FakeClock, cap: str
+) -> None:
+    """The relay's connection caps: past the total an upgrade gets HTTP 503,
+    past the per-mailbox cap the authenticated connection gets
+    `rate_limited` and close code 1013. Either way the link backs off and
+    tries again."""
+    inst = instance(rng)
+    sessions = 0
+    if cap == "total":
+        fake_relay.refuse_upgrades = 1
+
+    async def script(ws: ServerConnection) -> None:
+        nonlocal sessions
+        sessions += 1
+        if cap == "mailbox" and sessions == 1:
+            await ws.send(json.dumps({"t": "challenge", "nonce": b64(rng.randbytes(32))}))
+            await ws.recv()
+            error = {"t": "error", "code": "rate_limited", "detail": "too many connections"}
+            await ws.send(json.dumps(error))
+            await ws.close(1013, "too_many_connections")
+            return
+        assert await handshake(ws, inst, rng.randbytes(32), "relay.test")
+        await ws.recv()
+
+    fake_relay.script = script
+    watch = Watch()
+
+    async def ignore(_frame: dict[str, Any]) -> None:
+        return None
+
+    link = RelayLink(
+        f"ws://127.0.0.1:{fake_relay.port}/v0/ws",
+        "relay.test",
+        inst,
+        fake_clock,
+        ignore,
+        backoff=Backoff(rng=rng),
+        on_state=watch.poke,
+    )
+    task = asyncio.ensure_future(link.run())
+    await watch.until(lambda: fake_clock.sleepers > 0)
+    assert not link.connected
+    assert not task.done()
+    fake_clock.advance(60)
+    await asyncio.wait_for(link.wait_connected(), 5)
+    assert fake_relay.upgrades == 2
+    assert link.connections == 1
+    await link.stop()
+    await asyncio.wait_for(task, 5)
 
 
 async def test_rest_signs_every_request_with_a_fresh_ts(

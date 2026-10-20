@@ -76,6 +76,10 @@ from agentconnect.store import GroupRow, Store
 
 LOG = log.get("agentconnect.knocks")
 
+# `rate_limited` details that mean the relay refused the frame unprocessed:
+# its per-connection frame rate and the mailbox's send rate (SPEC 8.2, 8.3).
+NOT_PROCESSED = frozenset({"frame rate exceeded", "send rate exceeded"})
+
 LAPSE_SECS = ac.KNOCK_LIFETIME_SECS  # SPEC 6.6.4: the approval lapses at ts + 3600
 GIVE_UP_SECS = ac.KNOCK_LIFETIME_SECS + ac.KNOCK_FUTURE_SECS  # SPEC 6.6.6: ts + 3900
 ADD_MARGIN_SECS = 60  # no Add, and no Welcome, this close to a deadline
@@ -1112,6 +1116,12 @@ class KnockService:
         try:
             await engine._request(payload["frame"], str(payload["msg_id"]), on_sent=written)
         except RelayError as e:
+            if e.code == "rate_limited" and e.detail in NOT_PROCESSED:
+                # The relay refused the frame before looking at the knock
+                # (SPEC 8.2): nothing was charged or delivered. Not now;
+                # the outbox pauses and sends it again.
+                LOG.info("knock_retry", code=e.code)
+                raise RateLimitedError(None, e.code) from None
             # The relay answers any retry within 10 minutes with
             # rate_limited, whether or not the first copy was delivered.
             if not (e.code == "rate_limited" and resent):

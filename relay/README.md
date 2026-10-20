@@ -36,7 +36,8 @@ docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
 | `AC_RELAY_CLIENT_IP_HEADER` | none | The header the reverse proxy writes the client address to: `x-forwarded-for`, or `forwarded` (RFC 7239). Needs `AC_RELAY_TRUSTED_PROXIES`. Required behind a proxy (below). |
 | `AC_RELAY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`127.0.0.1/32`, `::1`) of the reverse proxies whose header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6) are refused. Needs `AC_RELAY_CLIENT_IP_HEADER`. |
 | `AC_RELAY_PROXY_HOPS` | `1` | How many proxies append to the header: the client is the entry this many places from the right. Needs `AC_RELAY_CLIENT_IP_HEADER`. |
-| `RUST_LOG` | `info` | `tracing` filter. |
+| `AC_RELAY_METRICS_ADDR` | `127.0.0.1:9091` | The operator's listener: `/metrics` and `/healthz`. The public listener has no `/metrics`. In a container, set it to an address only your monitoring network reaches. Two relays on one host collide on the default port, and a relay that can't bind it exits at start: give each its own. |
+| `RUST_LOG` | `info` | `tracing` filter for the relay's own logs (below). |
 
 Every limit is a positive integer; the relay refuses to start with a value
 that isn't. The defaults suit a small public relay: with them the invite
@@ -46,9 +47,120 @@ or addresses. `/metrics` shows how full they are
 `_max` caps). Per-address counts are in memory only: the relay stores no
 address, and no address is kept with an invite or a group.
 
-Logs never contain `ct`, URL fragments or secrets, and identifiers (mailbox,
-group and invite ids) appear only as a short SHA-256 tag. Door registration,
-closing and knocks log no identifier at all, not even a tag.
+Connection limits (below), all in memory, none of them logged:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AC_RELAY_MAX_HTTP_CONNECTIONS` | `512` | TCP connections still in the HTTP phase (not WebSockets yet). At the limit a new one closes the oldest connection of the source holding the most; accepting never pauses. |
+| `AC_RELAY_MAX_HTTP_CONNECTIONS_PER_SOURCE` | `8` | HTTP-phase connections one source may hold. Past it a new one is closed at once. A daemon makes one REST request at a time and holds its WebSocket outside this count, so 8 leaves room for a few daemons behind one address, and it takes 64 sources to reach the total. |
+| `AC_RELAY_HEADER_TIMEOUT_SECS` | `10` | How long a client has to send a request's headers, also the next request's on a kept-alive connection. Then the connection is closed. |
+| `AC_RELAY_REQUEST_TIMEOUT_SECS` | `30` | How long a request may take once its headers are in: reading the body and handling it. Then the answer is 408 and the connection closes. |
+| `AC_RELAY_WRITE_TIMEOUT_SECS` | `30` | How long a write of an HTTP response may make no progress before the connection is dropped. |
+| `AC_RELAY_MAX_BODY_BYTES` | `65536` | The largest request body (413 past it). |
+| `AC_RELAY_SHUTDOWN_GRACE_SECS` | `10` | On SIGTERM or SIGINT, how long the relay waits for requests in flight and for queued knocks to be written before it exits. |
+| `AC_RELAY_MAX_CONNECTIONS` | `1024` | Authenticated WebSocket connections. At the limit a connection that authenticates closes the oldest connection of the source holding the most (code 1013, `relay_full`); if that source is its own, it gets `rate_limited` and close code 1013 instead. |
+| `AC_RELAY_MAX_UNAUTHENTICATED` | `128` | WebSocket connections waiting to authenticate, in a pool of their own. Past it an upgrade gets HTTP 503. |
+| `AC_RELAY_MAX_CONNECTIONS_PER_SOURCE` | `32` | WebSocket connections one source may hold, authenticated or not. Past it an upgrade gets HTTP 503. |
+| `AC_RELAY_MAX_CONNECTIONS_PER_MAILBOX` | `4` | Authenticated connections per mailbox. A new one past it closes that mailbox's oldest connection (code 1000, `replaced`): the newest is the one known to be alive. |
+| `AC_RELAY_AUTH_TIMEOUT_SECS` | `5` | How long a client has to answer the challenge. |
+| `AC_RELAY_SEND_TIMEOUT_SECS` | `30` | How long one send to a WebSocket client may take. A client that stops reading is dropped after it. |
+| `AC_RELAY_PING_INTERVAL_SECS` | `30` | How often the relay pings each WebSocket client. |
+| `AC_RELAY_IDLE_TIMEOUT_SECS` | `90` | How long a WebSocket client may send no whole message and answer no ping before it is closed (code 1001). Pongs nobody asked for don't count. Longer than the ping interval. |
+| `AC_RELAY_MIN_UPLOAD_BYTES_PER_SEC` | `4096` | While a client sends a message, the slowest it may go, measured over each idle timeout. A message must also be done within the idle timeout plus the frame limit at this rate. |
+| `AC_RELAY_READ_BUFFER_BYTES` | `134217728` (128 MiB) | Relay-wide bytes read from WebSocket clients and not yet handed on as whole messages. Past it connections are closed (code 1009), from the source holding the most first and its largest connection first. At least 8 MiB. |
+| `AC_RELAY_DRAIN_BATCH_BYTES` | `4194304` (4 MiB) | Most bytes of queued envelopes loaded per batch when sending a mailbox's queue; at least one message always is. At least 2 MiB (the frame limit). |
+| `AC_RELAY_FRAMES_PER_SEC` | `100` | Sustained client frames per second, per connection, after authentication. |
+| `AC_RELAY_FRAME_BURST` | `200` | Frames a connection may send at once above that rate. |
+
+### Logging
+
+Logs never contain `ct`, URL fragments, secrets or client addresses.
+Identifiers (group, sender and invite ids) appear only as a short tag: the
+first 4 bytes of HMAC-SHA256 under a key drawn at random when the process
+starts and never stored. Tags let you follow one group through a run's logs,
+but they differ after a restart and can't be computed from an id. Connection
+lines (`connected`, `disconnected`) carry no tag, and door registration,
+closing and knocks log no identifier at all.
+
+`RUST_LOG` selects what the relay's own code (`agentconnect_relay`,
+`agentconnect_core`) logs. Every other crate is held at `warn` and above,
+whatever `RUST_LOG` says: at `trace`, `tungstenite` would log whole
+WebSocket frames, `ct` included, and the HTTP stack client addresses. A
+`RUST_LOG` that names only other crates (`tungstenite=trace`) turns the
+relay's own lines off, `relay listening` included, since that is how the
+filter syntax works; add `info` to keep them (`info,tungstenite=trace`).
+
+### Connection limits
+
+A source is the client's IPv4 address or its IPv6 /64. The relay keeps only
+an opaque per-process key for it, never the address, and only in memory.
+
+**Behind a reverse proxy, set the client address header** ("Behind a
+reverse proxy", below). Without it every client counts as one source, the
+proxy's address, and the per-source limits apply to all clients together.
+With it, the WebSocket limits count the address the proxy reports, grouped
+as the per-address rates are. The HTTP-phase limits can't: a connection is
+counted before its headers are read, so by its TCP peer, and a trusted
+proxy has no per-source share there, only the total.
+
+- **HTTP phase.** Every stage has a deadline: the headers, the request (body
+  and handling), and each write of the answer. One source holds at most its
+  share of the HTTP slots, and at the total a new connection closes the
+  oldest connection of the source holding the most rather than wait, so
+  connections that stall after their headers, or pipeline requests and never
+  read the answers, can't keep everyone else out, from one source or from
+  many. An idle kept-alive connection is closed at the header timeout; a
+  reverse proxy's upstream keep-alive should be shorter than that, or it may
+  reuse a connection the relay is closing.
+- **WebSockets.** Sockets that haven't authenticated wait in their own pool
+  and go at the auth deadline. Authenticated connections are capped per
+  source, and at the total a newcomer takes the place of the oldest
+  connection of the source holding the most, so free mailboxes from a few
+  sources can't take every slot.
+- **Liveness.** The relay pings every connection. Only a whole message or
+  the answer to the relay's own ping counts as activity; while a client is
+  in the middle of a message, the bytes must keep arriving at the minimum
+  upload rate instead. A daemon on a slow link uploading a large message is
+  not closed as idle, and one that sends the first fragment of a message
+  and then only pongs is closed at the next check.
+- **Frames.** Client frames pass two token buckets per connection, each at
+  `AC_RELAY_FRAMES_PER_SEC` with `AC_RELAY_FRAME_BURST`: one for acks and
+  one for everything else, control frames included. The size limit and the
+  rate are checked before a frame is parsed. A frame over the rate is
+  answered with `{"t": "error", "code": "rate_limited", "detail": "frame
+  rate exceeded"}`, carrying the frame's `msg_id` when it has one, and is
+  not processed. An ack over the rate is never refused, since a lost ack
+  would leave a delivered message queued: the relay waits for its token
+  instead, which slows the client down. Pings over the rate close the
+  connection (1008).
+- **Memory.** A client that stops reading holds at most one batch of its
+  queue (`AC_RELAY_DRAIN_BATCH_BYTES`, or one message if larger) and one
+  write buffer (the largest message plus 128 KiB) until its send times out;
+  a connection that is replaced or closed drops its batch before its close
+  frame goes out. That is about 6 MiB per authenticated connection with the
+  defaults, so about 6 GiB at the 1024 cap. On the read side,
+  `AC_RELAY_READ_BUFFER_BYTES` bounds the bytes counted across connections;
+  in memory that is up to about twice as much (measured: 32 connections
+  holding 2 MiB unfinished messages each, 67 MiB counted, grew the relay's
+  RSS by about 120 MiB), so about 256 MiB with the defaults. Lower the
+  connection caps on a smaller host.
+- **File descriptors.** The defaults allow about 512 HTTP and 1152
+  WebSocket connections, plus the store and the listeners: about 1700
+  descriptors. Set `LimitNOFILE=` (systemd) or `--ulimit nofile=` (docker)
+  to at least 4096; under the common soft limit of 1024 the relay runs out
+  of descriptors before it reaches its caps, and logs `accept failed`.
+- **Knocks.** One source holds at most 64 of the knock queue's 1024 places
+  and one door at most 16; past either, a knock is dropped behind its
+  `accepted`, as for a busy door.
+- **What remains.** These limits share the relay out between sources; they
+  don't make it unlimited. An attacker with many addresses (IPv6 /64s are
+  cheap) can still fill the total caps, and while it keeps doing so honest
+  clients compete with it for slots. Deploy a public relay behind a proxy
+  or provider with connection-level DDoS protection.
+- **Shutdown.** On SIGTERM or SIGINT the relay stops accepting, closes
+  WebSocket sessions with 1001 `shutting_down`, writes the knocks it has
+  answered and not written yet, and waits for HTTP requests in flight for
+  at most `AC_RELAY_SHUTDOWN_GRACE_SECS`.
 
 ## Endpoints
 
@@ -61,7 +173,7 @@ closing and knocks log no identifier at all, not even a tag.
 | `POST /v0/doors` | Register a door (signed request, below). |
 | `DELETE /v0/doors/{id}` | Close a door now (signed request, owner only). |
 | `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. With `AC_RELAY_TERMS` or `AC_RELAY_ABUSE` set, a `footer.operator` holds the links. |
-| `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers (`agentconnect_relay_idle_groups_deleted_total` counts idle groups deleted), and gauges without labels: `agentconnect_relay_ws_connections_open`, the WebSocket connections open now, authenticated or not, and the invite rows and groups held with their caps (`agentconnect_relay_invites`, `agentconnect_relay_groups`, `_max`). |
+| `GET /healthz` | Health. Also on the operator's listener, with `GET /metrics`: Prometheus metrics with no identifiers and no addresses (below). The public listener has no `/metrics`. |
 
 ### Signed REST requests (SPEC 8.1.1)
 
@@ -121,8 +233,9 @@ per mailbox. The counts are in memory and never logged.
 The relay speaks plain HTTP, so a public relay runs behind a TLS proxy, and
 behind a proxy `AC_RELAY_CLIENT_IP_HEADER` and `AC_RELAY_TRUSTED_PROXIES`
 are required. Without them every request counts as the proxy's own
-address: everyone shares one set of per-address limits, and one client can
-use up the registrations of all. The relay logs a warning once when a
+address: everyone shares one set of per-address limits and one source's
+share of the WebSocket connections, and one client can use up the
+registrations of all. The relay logs a warning once when a
 request carries `X-Forwarded-For` or `Forwarded` and no header is set. With
 nginx on the same machine:
 
@@ -151,6 +264,38 @@ read, and so are RFC 7239 `for=` values with `AC_RELAY_CLIENT_IP_HEADER=forwarde
 A header too short for the hop count, or with no address at that place,
 counts as the proxy's address and logs a warning once.
 
+### Metrics
+
+`/metrics` is served only on the operator's listener (`AC_RELAY_METRICS_ADDR`,
+loopback by default). Every metric is named `agentconnect_relay_*` and
+carries no mailbox, group, invite or door id and no address. The only labels
+are fixed values. No metric moves differently for a forwarded knock and a
+dropped one (SPEC 8.3): knock deliveries stay out of the byte counters, and
+acks, which an online owner sends for each knock it receives, are not
+counted as frames.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `connections_total` | counter | WebSocket connections opened. |
+| `auth_failures_total` | counter | Failed WebSocket authentications, timeouts included. |
+| `frames_total` | counter | Client frames handled, acks not included. |
+| `accepted_total`, `duplicates_total`, `deliveries_total`, `queue_overflows_total`, `commits_total`, `joins_forwarded_total`, `invites_created_total`, `invites_consumed_total`, `doors_registered_total`, `doors_closed_total`, `knocks_accepted_total` | counter | Delivery Service events. Forwarded and dropped knocks are one number. |
+| `errors_total{code}` | counter | Errors returned, by SPEC 8.4 code. |
+| `idle_groups_deleted_total` | counter | Idle groups deleted (SPEC 8.3, "Idle groups"). |
+| `invites`, `invites_max`, `groups`, `groups_max` | gauge | Invite rows and groups held, and their caps. |
+| `ws_connections_open` | gauge | WebSocket connections open now, authenticated or not. |
+| `ws_connections_unauthenticated` | gauge | WebSocket connections open now that haven't authenticated. |
+| `http_connections_open` | gauge | TCP connections open now that are not WebSockets, on both listeners. |
+| `connections_evicted_total{cap}` | counter | Connections closed at a total cap to admit one from another source: `http` or `ws`. |
+| `connections_refused_total{reason}` | counter | Connections refused at a cap: `total`, `unauthenticated`, `source` (WebSocket) or `http_source`. |
+| `connections_replaced_total` | counter | Connections closed because a newer one for the same mailbox passed the per-mailbox cap. |
+| `connections_shed_total` | counter | Connections closed because the read budget was exceeded. |
+| `connection_timeouts_total{kind}` | counter | Connections closed by a deadline: `header`, `request`, `auth`, `idle`, `upload` (a message arriving too slowly) or `send`. |
+| `frames_rate_limited_total` | counter | Client frames over the frame rate: refused, or delayed for acks. |
+| `read_bytes_held` | gauge | Bytes read from WebSocket clients and not yet handed on as whole messages. |
+| `drain_bytes_total` | counter | Bytes of queued messages other than knocks sent to connections, on reconnect and live. |
+| `drain_bytes_loaded` | gauge | Bytes of queued messages other than knocks loaded into memory for sending now. |
+
 ## Doors and knocks (ADR-006)
 
 A door is a public handle that maps to its owner's mailbox; it is how a
@@ -176,6 +321,16 @@ nothing else: no door key, no listing, no card text.
   its `door_id` equals the frame's, and `ct` (never decoded) is at most
   16 KiB (`too_large`). The knock reaches the owner as a normal `deliver`,
   stored until acked or for the message TTL, like any delivery.
+- An accepted knock, forwarded or dropped, goes to a bounded queue (1024
+  knocks, at most 64 from one source and 16 for one door; past any of them
+  a knock is dropped behind its `accepted`, like one to a busy door). A single worker writes the queue every 250 ms, so neither the
+  answer nor the store's load right after it depends on whether the knock
+  was forwarded. What remains: the worker's write at its next tick takes
+  store time only for a forwarded knock, and a knocker that keeps measuring
+  the store's latency across that tick can tell (with a 60,000-message owner
+  queue, about 46 ms against 7 ms). A knock answered `accepted` is held in
+  memory until that tick, so a crash can lose it; `accepted` for a knock
+  was never a delivery promise.
 - Answers: `door_not_open` for an unknown, expired or closed door;
   `rate_limited` past 1 knock per (door, sender mailbox) per 10 minutes or
   20 knocks per sender mailbox per hour across doors; `accepted` otherwise.
@@ -240,7 +395,12 @@ nothing else: no door key, no listing, no card text.
 ## Testing
 
 `just test` runs everything in-process on loopback with a `FakeClock`; no
-sleeps. `relay/fuzz/` holds `cargo-fuzz` targets for the frame parser and the
+sleeps. Connection deadlines (header, auth, idle, ping, stalled send, frame
+pacing) run on a manual timer (`timer::ManualTimer`) that a test advances,
+and `tests/ws_limits.rs` drives slow readers over in-memory connections with
+a small buffer. `tests/trace_logs.rs` runs the binary at `RUST_LOG=trace`.
+The same limits on real time and the binary's memory under 20 stalled
+connections (`tests/limits_int.rs`) run in `just test-int`. `relay/fuzz/` holds `cargo-fuzz` targets for the frame parser and the
 `knock` frame (nightly toolchain, not part of `just test`):
 
 ```sh

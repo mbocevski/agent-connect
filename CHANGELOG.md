@@ -24,6 +24,55 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   with no query or header fields. The relay and the directory share this
   check, and an invalid value stops them at start. Unset, nothing is
   rendered and every page is byte for byte as before.
+- Relay: connection limits for a public deployment, each with an
+  environment key (relay/README.md, "Connection limits"). In the HTTP phase:
+  a header-read timeout (`AC_RELAY_HEADER_TIMEOUT_SECS`, 10 s), a deadline
+  on each request's body and handling (`AC_RELAY_REQUEST_TIMEOUT_SECS`,
+  30 s, 408 past it), a write-stall timeout (`AC_RELAY_WRITE_TIMEOUT_SECS`,
+  30 s), a body cap (`AC_RELAY_MAX_BODY_BYTES`, 64 KiB, 413 past it), and
+  caps on HTTP-phase connections in total (`AC_RELAY_MAX_HTTP_CONNECTIONS`,
+  512; at it a new connection closes the oldest of the source holding the
+  most, and accepting never pauses) and per source, an IPv4 address or IPv6
+  /64 (`AC_RELAY_MAX_HTTP_CONNECTIONS_PER_SOURCE`, 8). For WebSockets: caps
+  on sockets waiting to authenticate (`AC_RELAY_MAX_UNAUTHENTICATED`, 128,
+  with a 5 s `AC_RELAY_AUTH_TIMEOUT_SECS`) and per source
+  (`AC_RELAY_MAX_CONNECTIONS_PER_SOURCE`, 32), HTTP 503 past them, and on
+  authenticated connections (`AC_RELAY_MAX_CONNECTIONS`, 1024), at which a
+  newcomer closes the oldest connection of the source holding the most
+  (1013, `relay_full`) unless that source is its own; pings
+  every `AC_RELAY_PING_INTERVAL_SECS` (30 s) with an idle timeout
+  (`AC_RELAY_IDLE_TIMEOUT_SECS`, 90 s, close code 1001) that only whole
+  messages and answers to the relay's pings reset; a minimum rate for a
+  message being received (`AC_RELAY_MIN_UPLOAD_BYTES_PER_SEC`, 4 KiB/s); a
+  relay-wide budget for unfinished input (`AC_RELAY_READ_BUFFER_BYTES`,
+  128 MiB, past which connections are closed with 1009, from the source
+  holding the most first); a timeout on each send (`AC_RELAY_SEND_TIMEOUT_SECS`, 30 s); a byte
+  cap on each batch of a mailbox's queue (`AC_RELAY_DRAIN_BATCH_BYTES`,
+  4 MiB); and a per-connection frame rate (`AC_RELAY_FRAMES_PER_SEC`, 100,
+  with `AC_RELAY_FRAME_BURST`, 200). A frame over the rate gets
+  `rate_limited` (detail `frame rate exceeded`) with its `msg_id` and isn't
+  processed; an ack over it is delayed, never refused. Past the per-mailbox
+  cap (`AC_RELAY_MAX_CONNECTIONS_PER_MAILBOX`, 4) a new connection closes
+  the mailbox's oldest (code 1000, `replaced`). Sources are kept as opaque
+  per-process keys, in memory only. On SIGTERM or SIGINT the relay stops
+  within `AC_RELAY_SHUTDOWN_GRACE_SECS` (10 s), closing WebSocket sessions
+  with 1001 and writing the knocks it has answered before the clean-shutdown
+  marker. One source holds at most 64 of the knock queue's 1024 places and
+  one door at most 16. Behind a reverse proxy, the WebSocket caps count the
+  client address that `AC_RELAY_CLIENT_IP_HEADER` resolves, grouped by IPv4
+  address or IPv6 /64 as the per-address rates are; the HTTP phase can only
+  count the TCP peer, so a trusted proxy has no per-source share there,
+  only the total. New
+  metrics, none with an identifier or address:
+  `connections_refused_total{reason}`, `connections_replaced_total`,
+  `connections_shed_total`, `connections_evicted_total{cap}`,
+  `connection_timeouts_total{kind}`,
+  `frames_rate_limited_total`, `read_bytes_held`, `drain_bytes_total`,
+  `drain_bytes_loaded`, `ws_connections_unauthenticated`,
+  and `http_connections_open`. SPEC §8.2 describes what clients see. These
+  limits share the relay out between sources; an attacker with many
+  addresses can still fill the total caps (SPEC §12), so deploy a public
+  relay behind connection-level DDoS protection.
 - Runtime, daemon and CLI: a group delivers its messages and events to
   several adapters (docs/config.md, "Several adapters"), such as the A2A
   facade next to a webhook agent, whose replies the facade never saw
@@ -885,6 +934,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Relay: `/metrics` moved off the public listener to the operator's
+  listener, `AC_RELAY_METRICS_ADDR` (default `127.0.0.1:9091`), which also
+  serves `/healthz`; point Prometheus there. `frames_total` no longer counts
+  acks, and the byte metrics leave knock deliveries out, so no public
+  number moves differently for a forwarded knock and a dropped one (SPEC
+  §8.3).
+- Relay: an accepted knock, forwarded or dropped, is now written by a
+  worker every 250 ms instead of right after its answer, so the store's load
+  after a knock no longer tells the two apart. A knock is delivered up to
+  250 ms later than before, and one the relay holds when it crashes is lost
+  (`accepted` was never a delivery promise; SPEC §8.3).
 - CLI and local API: `agentconnect verify <group> [<member>] [--instance]`
   compares codes with one member at a time, both humans at once, and shows
   the code with both instance labels; after 60 s without the other side it
@@ -1140,6 +1200,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Fixed
 
+- Daemon: a knock the relay refused unprocessed, over its frame rate or the
+  mailbox's send rate, was failed for good on a first send and counted as
+  sent on a resend. It is now sent again after the outbox's backoff.
 - Runtime: after an approved join's Add, a Welcome the relay answered
   `rate_limited` or `internal` failed the commit's outbox row, so the
   joiner was in the MLS group but never got its Welcome. Such a Welcome
@@ -1332,6 +1395,43 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `purpose` reached the landing page and reordered what the human read.
   All three must now be one-line text (SPEC §4.2, §13.1.2), else
   `bad_request`.
+- Relay: a client could take the relay's memory by gigabytes. Reconnecting
+  loaded up to 256 messages of the queue at once, a whole 64 MiB, and held
+  them while the client didn't read; 20 such connections for one mailbox
+  took the relay from 43 MiB to 1.37 GB. Now a batch holds at most 4 MiB
+  (or one message), a mailbox has at most 4 connections, a send that
+  doesn't complete in 30 s drops the connection, and the WebSocket write
+  buffer is bounded. Unfinished incoming messages, up to 4 MiB each and kept
+  alive with pongs, also held memory for good (200 connections held
+  1.6 GB); now a message may be at most the frame limit plus 64 KiB, must
+  keep arriving at the minimum rate, and counts against a relay-wide read
+  budget. Connections had no header-read timeout, no limit and no idle
+  timeout, and frames had no rate limit; see "Added".
+- Relay: one client could lock everyone out. 512 connections that sent a
+  request's headers and then stalled on the body, or pipelined requests and
+  never read the answers, held every HTTP slot for good; 1024 WebSockets of
+  free mailboxes from one address held the WebSocket cap. Requests and
+  writes now have deadlines, and each source gets only its share of the
+  HTTP and WebSocket slots; sockets that haven't authenticated have their
+  own pool. At the total caps, a newcomer now takes the place of the
+  busiest source's oldest connection, so many sources reopening stalled
+  connections can't keep a rolling lockout going either. Behind a reverse
+  proxy, the WebSocket shares count the client address the proxy reports.
+- Relay: at `RUST_LOG=trace`, `tungstenite` logged whole WebSocket frames
+  with `ct`, and `axum::serve` logged client addresses, although
+  relay/README.md said logs never contain `ct`. Crates other than the
+  relay's own are now held at `warn` whatever `RUST_LOG` says, and the
+  relay serves HTTP itself without logging addresses.
+- Relay: log tags were an unkeyed 32-bit SHA-256 prefix, so anyone holding
+  an id could find it in the logs, and `connected` lines carried the
+  mailbox tag next to the knock lines. Tags are now keyed with HMAC-SHA256
+  under a key drawn when the process starts, so they can't be computed and
+  differ across restarts, and connection lines carry no tag.
+- Relay: a knock was answered after it was queued, so the answer's timing
+  told the knocker whether a busy door or a full queue had dropped it. The
+  answer now goes out first, and both kinds are queued alike and written on
+  the relay's own clock. A knocker that keeps timing the relay across the
+  next write can still tell (SPEC §12).
 - A2A adapter: deliveries were deduplicated by `msg_id` alone, so a member
   that sent a message under another member's `msg_id` first made the
   adapter skip the other member's message as a redelivery. They are now
