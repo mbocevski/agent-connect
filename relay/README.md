@@ -421,8 +421,14 @@ nothing else: no door key, no listing, no card text.
   budget (`AC_RELAY_SENDER_BUDGET_BYTES`, in all, and half of it in one
   group) a sender's messages are refused with `over_budget` until
   recipients ack, are removed, or the messages expire. When a commit
-  removes a member, what is still queued for it in that group goes (the
-  removing commit excepted), with its charges. Knocks are not charged to
+  removes a member, the senders are no longer charged for what is still
+  queued for it in that group, before the commit itself is judged; the
+  messages stay queued for it until it acks them or they expire, so a
+  forged remove hint can release charges but never deletes anyone's
+  messages. The half-share rule means one group's queued messages for a
+  mailbox is at most 32 MiB of its group part (8 MiB of its non-member
+  part), and one sender's undelivered messages in one group at most
+  64 MiB of its budget. Knocks are not charged to
   their sender, so the budget can't tell a knocker when the owner acked
   its knock; joins and group traffic are, so a sender can learn by
   probing its budget when its slowest recipient fetched a message.

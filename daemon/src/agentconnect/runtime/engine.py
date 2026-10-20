@@ -3664,17 +3664,17 @@ class Engine:
         instance's adapters accept. Whatever the adapters (a webhook or SSE
         agent has no Agent Card), it is also this instance's first send in
         the group, and only from then on does the relay count the group's
-        traffic to it as member traffic (SPEC 8.3, "Limits")."""
-        names = self.adapter_names(group_id)
+        traffic to it as member traffic (SPEC 8.3, "Limits"). `adapters`
+        stays empty: the operator's adapter names are its own business."""
         accepts: list[str] = []
-        for name in names:
+        for name in self.adapter_names(group_id):
             for kind in self.adapters[name].capabilities().accepts:
                 if kind not in accepts:
                     accepts.append(kind)
         try:
             self.send_message(
                 group_id,
-                {"adapters": names, "accepts": accepts},
+                {"adapters": [], "accepts": accepts},
                 kind="control.capabilities",
                 internal=True,
             )

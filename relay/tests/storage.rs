@@ -153,13 +153,13 @@ async fn assert_counters(pool: &SqlitePool) {
         ),
         (
             "SELECT sender, 0, '', bytes FROM sender_usage ORDER BY 1",
-            "SELECT sender, 0, '', SUM(size) FROM payloads WHERE sender != '' \
+            "SELECT sender, 0, '', SUM(size) FROM payloads WHERE sender != '' AND charged = 1 \
              GROUP BY sender ORDER BY 1",
         ),
         (
             "SELECT sender, 0, group_id, bytes FROM sender_group_usage ORDER BY 1, 3",
-            "SELECT sender, 0, group_id, SUM(size) FROM payloads WHERE sender != '' \
-             GROUP BY sender, group_id ORDER BY 1, 3",
+            "SELECT sender, 0, group_id, SUM(size) FROM payloads \
+             WHERE sender != '' AND charged = 1 GROUP BY sender, group_id ORDER BY 1, 3",
         ),
     ];
     for (counters, rows_of) in pairs {
@@ -185,6 +185,18 @@ async fn assert_counters(pool: &SqlitePool) {
     assert_eq!(
         mixed, 0,
         "a queue row and its payload name different groups"
+    );
+    let wrong: i64 = pool
+        .fetch_one(
+            "SELECT COUNT(*) FROM payloads p WHERE p.charged != EXISTS \
+             (SELECT 1 FROM messages m WHERE m.payload = p.id AND m.charged = 1)",
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        wrong, 0,
+        "a payload is charged exactly while a charged row holds it"
     );
 }
 
@@ -670,26 +682,133 @@ async fn members_that_never_ack_pin_one_groups_share_until_they_are_removed() {
     assert!(delivered(
         &g2.go(s, &msg(&sender, "x", 9_000), &limits, NOW).await
     ));
-    // Removing both releases what they kept.
+    // Removing both releases the charges for what they kept. The messages
+    // themselves stay queued for them (the relay can't verify a removal).
     let mut rm = Send::new(Kind::Commit, GID, &sender, e1);
     rm.remove = vec![m1.clone(), m2.clone()];
     assert!(delivered(
         &rm.go(s, &msg(&sender, "rm", 10), &limits, NOW).await
     ));
     for q in [&m1, &m2] {
-        let left: Vec<String> = s
-            .pending(q, 0, 100, u64::MAX, NOW)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|m| m.msg_id)
-            .collect();
-        assert_eq!(left, vec!["rm".to_owned()], "only the removing commit");
+        let left = s.pending(q, 0, 100, u64::MAX, NOW).await.unwrap();
+        assert!(left.len() >= 3, "its kept messages and the removing commit");
+        assert_eq!(left.last().unwrap().msg_id, "rm");
     }
     let g1 = Send::new(Kind::Application, GID, &sender, e1 + 1);
     assert!(delivered(
         &g1.go(s, &msg(&sender, "y", 9_000), &limits, NOW).await
     ));
+    assert_counters(&inspect(&d.path).await).await;
+}
+
+/// Verification V2: the relay can't check a commit's routing hints, so a
+/// member can attach `remove=[victim]` to an ordinary Update. That must not
+/// erase what is queued for the victim: it only stops counting those
+/// copies against their senders' budgets.
+#[tokio::test]
+async fn a_forged_remove_hint_releases_charges_but_deletes_no_messages() {
+    let d = db().await;
+    let s = &d.store;
+    let limits = Limits::default();
+    let (honest, victim, mallory) = (mb(1), mb(2), mb(3));
+    let epoch = group(s, GID, &honest, &[victim.clone(), mallory.clone()]).await;
+    let app = Send::new(Kind::Application, GID, &honest, epoch);
+    for i in 0..3 {
+        let m = msg(&honest, &format!("m{i}"), 500);
+        assert!(delivered(&app.go(s, &m, &limits, NOW).await));
+        s.ack(&mallory, &format!("m{i}")).await.unwrap();
+    }
+    let pool = inspect(&d.path).await;
+    let charged = |who: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE((SELECT bytes FROM sender_usage WHERE sender = ?), 0)",
+            )
+            .bind(who)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let honest_static: &'static str = Box::leak(honest.clone().into_boxed_str());
+    assert!(charged(honest_static).await > 1500);
+    let mut forged = Send::new(Kind::Commit, GID, &mallory, epoch);
+    forged.remove = vec![victim.clone()];
+    assert!(delivered(
+        &forged
+            .go(s, &msg(&mallory, "upd", 3000), &limits, NOW)
+            .await
+    ));
+    // Everything queued for the victim is still there, the forged commit
+    // after it.
+    let ids: Vec<String> = s
+        .pending(&victim, 0, 100, u64::MAX, NOW)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.msg_id)
+        .collect();
+    assert_eq!(ids, ["m0", "m1", "m2", "upd"]);
+    // Only the honest sender's charges for them went.
+    assert_eq!(charged(honest_static).await, 0);
+    // The victim acks: the rows and payloads go, with no charge left over.
+    for id in &ids {
+        s.ack(&victim, id).await.unwrap();
+    }
+    assert!(
+        s.pending(&victim, 0, 100, u64::MAX, NOW)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_counters(&pool).await;
+}
+
+/// Verification V3: a removal is judged after the charges it releases. Two
+/// members that never ack, each keeping half of the owner's messages, pin
+/// the owner's whole share of the group; the commit that removes them must
+/// still go through, and the owner's next Update after it.
+#[tokio::test]
+async fn a_removal_is_judged_after_the_charges_it_releases() {
+    let d = db().await;
+    let s = &d.store;
+    let limits = Limits {
+        sender_max_bytes: 100_000,
+        ..Limits::default()
+    };
+    let (owner, x1, x2, friend) = (mb(1), mb(2), mb(3), mb(4));
+    let epoch = group(s, GID, &owner, &[x1.clone(), x2.clone(), friend.clone()]).await;
+    let app = Send::new(Kind::Application, GID, &owner, epoch);
+    let mut sent = 0;
+    for (size, prefix) in [(9_000, "m"), (1_000, "n"), (10, "t")] {
+        for i in 0..200 {
+            let id = format!("{prefix}{i}");
+            if !delivered(&app.go(s, &msg(&owner, &id, size), &limits, NOW).await) {
+                break;
+            }
+            sent += 1;
+            s.ack(&friend, &id).await.unwrap();
+            s.ack(if i % 2 == 0 { &x1 } else { &x2 }, &id)
+                .await
+                .unwrap();
+        }
+    }
+    assert!(sent > 5);
+    let full = app.go(s, &msg(&owner, "full", 3_000), &limits, NOW).await;
+    assert_eq!(
+        full,
+        GroupOutcome::OverBudget,
+        "the owner's share is used up"
+    );
+    // An honest remove commit with an update path: a few kB.
+    let mut rm = Send::new(Kind::Commit, GID, &owner, epoch);
+    rm.remove = vec![x1.clone(), x2.clone()];
+    let o = rm.go(s, &msg(&owner, "rm", 3_000), &limits, NOW).await;
+    assert!(delivered(&o), "{o:?}");
+    let update = Send::new(Kind::Commit, GID, &owner, epoch + 1);
+    let o = update.go(s, &msg(&owner, "upd", 3_000), &limits, NOW).await;
+    assert!(delivered(&o), "{o:?}");
     assert_counters(&inspect(&d.path).await).await;
 }
 

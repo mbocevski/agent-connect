@@ -814,7 +814,7 @@ What it stores, and for how long:
 | `invites` | `invite_id`, `group_name`, `inviter_name`, `purpose`, `expires_at`, `max_uses`, `uses_left`, `member_count`, `inviter_mailbox`, `revoked`, `created_at` | `expires_at` + 7 days |
 | `groups` | `group_id`, `epoch`, `created_at`, `active_at` | until idle for 30 days with no member connected (SR-43, fixed in #71) |
 | `group_members` | `group_id`, `mailbox` | until a commit's `routing.remove` names it, or its group is deleted |
-| `messages` | `seq`, `mailbox`, `msg_id`, `payload`, `group_id`, `size`, `bucket`, `expires_at`, `marker` | until acked, its mailbox removed from the group, or at most 7 days |
+| `messages` | `seq`, `mailbox`, `msg_id`, `payload`, `group_id`, `size`, `bucket`, `expires_at`, `marker` | until acked, or at most 7 days |
 | `payloads` | `id`, `sender`, `group_id`, `size`, `env` (the envelope with `ct`) | until its last queue row goes (since #73) |
 | `mailbox_usage`, `group_usage`, `sender_usage`, `sender_group_usage` | byte counters per mailbox queue part, per (mailbox, part, group), per sender and per (sender, group) | while non-zero (since #73) |
 | `welcome_due` | `group_id`, `mailbox`, `added_by`, `expires_at` | until the Welcome, a removal or 7 days (since #73) |

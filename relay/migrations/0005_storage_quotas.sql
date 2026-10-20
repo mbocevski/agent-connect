@@ -19,7 +19,10 @@ CREATE TABLE payloads (
     sender TEXT NOT NULL,               -- the charged sender; '' is uncharged
     group_id TEXT NOT NULL,             -- '' for join requests and knocks
     env TEXT NOT NULL,
-    size INTEGER NOT NULL
+    size INTEGER NOT NULL,
+    -- 1 while a charged queue row holds it, so it counts against its
+    -- sender's budget (rows of a removed member are not charged)
+    charged INTEGER NOT NULL DEFAULT 1
 ) STRICT;
 
 -- The old rows keep their seq, and each becomes its own payload. Knocks and
@@ -46,6 +49,7 @@ CREATE TABLE queue (
     size INTEGER NOT NULL,
     bucket INTEGER NOT NULL,
     marker INTEGER NOT NULL DEFAULT 0,
+    charged INTEGER NOT NULL DEFAULT 1, -- 0 once its mailbox is removed from the group
     expires_at INTEGER NOT NULL         -- unix milliseconds
 ) STRICT;
 

@@ -378,7 +378,8 @@ your handler sees each message and each event once.
   `commit_failed`, code `attempts_exhausted`); `rate_limited`,
   `storage_full` and `over_budget` answers don't count toward that, however
   long they last. Right after joining a group, the runtime sends it a
-  `control.capabilities` message (what your adapters accept), so the relay
+  `control.capabilities` message (the part kinds your adapters accept, and
+  not their names), so the relay
   counts the group's traffic to you as member traffic; the other members'
   agents get it as context.
 - **Don't block the event loop.** Embedded handlers run on the same asyncio

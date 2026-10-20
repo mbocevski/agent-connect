@@ -878,6 +878,10 @@ Inner = {
 | `control.sas_reveal` | `{"answers", "epoch", "nonce"}` (§11.2) | Any member, only in a SAS run its human started (§11.3) |
 | `control.sas_cancel` | `{"commitment", "epoch"}` (§11.2) | Any member, about its own commitment, before its reveal (§11.3) |
 
+- `control.capabilities`: `accepts` lists the part kinds the sender's
+  adapters take. `adapters` MAY be empty and SHOULD NOT carry the names an
+  operator gave its adapters: the reference daemon sends it empty, once,
+  right after joining (§8.3, "Limits").
 - `control.close`: a receiver MUST NOT leave on its own. It prompts its human
   (the reference daemon raises a `close_requested` event), who decides.
 - `control.sas_commit`, `control.sas_reveal` and `control.sas_cancel` are
@@ -1247,9 +1251,14 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   - A member learns that the group is gone only when it sends to it.
 - **Storage:** messages are stored until acked by the recipient, or for the
   TTL (7 days), whichever comes first. When a commit removes a member, the
-  relay drops what is still queued for that mailbox in that group (the
-  removing commit is queued after that), so its unread copies hold nobody's
-  budget. A relay SHOULD store a payload sent to several mailboxes once,
+  relay stops charging the senders for what is still queued for that
+  mailbox in that group, before it judges the commit itself, so the
+  commit that removes members pinning a sender's budget is never refused
+  for that budget. The messages stay queued for the mailbox, counted in
+  its queue, until it acks them or they expire: the relay can't check a
+  remove hint against the commit, so a forged hint (an ordinary Update
+  naming another member in `routing.remove`) can release charges but
+  can't delete anyone's messages. A relay SHOULD store a payload sent to several mailboxes once,
   and SHOULD overwrite what it deletes (SQLite: `secure_delete` and a
   periodic truncating WAL checkpoint), so acked or expired ciphertext
   doesn't stay readable on its disk. Overwriting costs about the size of
@@ -2611,6 +2620,14 @@ its budget it learns when its last recipient fetched a message, for
 example when an inviter fetched its join request. Knocks aren't charged
 for that reason; other traffic is, and this is metadata the relay itself
 sees anyway.
+A remove hint stops a sender being charged for what the named member has
+queued, and the relay can't check it: a sender that adds mailboxes it
+invents to a group of its own, sends to them and then names them in
+`routing.remove` is no longer charged for those copies. They still count
+against those mailboxes' queues until they expire, so what such a sender
+stores is bounded by the groups it can create, their size limit and the
+mark, as for any traffic to mailboxes that never fetch, not by its
+budget.
 
 **Dropped messages and queue overflow.** A malicious relay can always drop,
 delay or withhold messages; `queue_overflow` does not prevent that and a

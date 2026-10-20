@@ -773,6 +773,6 @@ async def test_a_joiner_sends_its_capabilities_whatever_its_adapter(
     await a.adapter.wait_for(lambda: bool(caps()), WAIT)
     (got,) = caps()
     assert got.sender.identity == b.me
-    assert got.body["adapters"] == b.daemon.adapter_names(gid)
+    assert got.body["adapters"] == [], "nothing of the operator's configuration"
     assert "text" in got.body["accepts"]
     assert not got.addressed_to_me  # context: it triggers nobody

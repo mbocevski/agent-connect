@@ -696,20 +696,16 @@ async fn release(tx: &mut SqliteConnection, rows: &[Released]) -> StoreResult<()
         charge_mailbox(tx, mailbox, Bucket::of_code(bucket), group_id, -bytes).await?;
     }
     for id in payloads {
-        let gone = sqlx::query(
+        // The deleted rows may have been the last charged ones.
+        uncharge_if_unheld(tx, id).await?;
+        sqlx::query(
             "DELETE FROM payloads WHERE id = ? \
-             AND NOT EXISTS (SELECT 1 FROM messages WHERE payload = ?) \
-             RETURNING sender, group_id, size",
+             AND NOT EXISTS (SELECT 1 FROM messages WHERE payload = ?)",
         )
         .bind(id)
         .bind(id)
-        .fetch_optional(&mut *tx)
+        .execute(&mut *tx)
         .await?;
-        if let Some(r) = gone {
-            let sender: String = r.try_get(0)?;
-            let group_id: String = r.try_get(1)?;
-            charge_sender(tx, &sender, &group_id, -r.try_get::<i64, _>(2)?).await?;
-        }
     }
     Ok(())
 }
@@ -820,30 +816,50 @@ fn recipients_of(send: &GroupSend<'_>, members: &BTreeMap<String, bool>) -> Vec<
     }
 }
 
-/// Drop what is still queued for the members a commit removes, in that
-/// group, with its charges: they are no longer members, and their unread
-/// copies must not pin anyone's budget until the TTL. The commit itself
-/// is queued for them afterwards.
-async fn drop_removed(
+/// Stop charging the senders for what is still queued for the members a
+/// commit removes, in that group: their unread copies must not pin anyone's
+/// budget until the TTL. The rows themselves stay until the mailbox acks
+/// them or they expire, and they still count against its queue part: the
+/// relay can't check a remove hint against the commit's MLS content, so a
+/// forged hint may release charges but must not delete anyone's messages.
+async fn uncharge_removed(
     tx: &mut SqliteConnection,
     send: &GroupSend<'_>,
     members: &BTreeMap<String, bool>,
 ) -> StoreResult<()> {
+    let mut payloads = BTreeSet::new();
     for m in send.remove.iter().filter(|m| members.contains_key(*m)) {
-        let rows = sqlx::query(
-            "DELETE FROM messages WHERE group_id = ? AND mailbox = ? \
-             RETURNING mailbox, bucket, group_id, size, payload",
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "UPDATE messages SET charged = 0 \
+             WHERE group_id = ? AND mailbox = ? AND charged = 1 RETURNING payload",
         )
         .bind(send.group_id)
         .bind(m)
         .fetch_all(&mut *tx)
         .await?;
-        release(tx, &released_rows(&rows)?).await?;
-        sqlx::query("DELETE FROM overflow WHERE mailbox = ? AND group_id = ?")
-            .bind(m)
-            .bind(send.group_id)
-            .execute(&mut *tx)
-            .await?;
+        payloads.extend(rows);
+    }
+    for id in payloads {
+        uncharge_if_unheld(tx, id).await?;
+    }
+    Ok(())
+}
+
+/// Stop charging a payload's sender once no charged queue row holds it.
+async fn uncharge_if_unheld(tx: &mut SqliteConnection, id: i64) -> StoreResult<()> {
+    let gone = sqlx::query(
+        "UPDATE payloads SET charged = 0 WHERE id = ? AND charged = 1 \
+         AND NOT EXISTS (SELECT 1 FROM messages WHERE payload = ? AND charged = 1) \
+         RETURNING sender, group_id, size",
+    )
+    .bind(id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(r) = gone {
+        let sender: String = r.try_get(0)?;
+        let group_id: String = r.try_get(1)?;
+        charge_sender(tx, &sender, &group_id, -r.try_get::<i64, _>(2)?).await?;
     }
     Ok(())
 }
@@ -1214,6 +1230,11 @@ impl Store for SqliteStore {
         if send.kind == Kind::WelcomeWrapped && !welcomes_due(&mut tx, send, now_ms).await? {
             return Ok(GroupOutcome::NotAwaitingWelcome);
         }
+        // A removal is judged after the charges it releases, so the commit
+        // that removes members pinning the sender's budget can go out.
+        if send.kind == Kind::Commit {
+            uncharge_removed(&mut tx, send, &members).await?;
+        }
         let size = len_of(&send.msg.json);
         match admit(
             &mut tx,
@@ -1228,9 +1249,6 @@ impl Store for SqliteStore {
             Ok(()) => {}
             Err(Refusal::StorageFull) => return Ok(GroupOutcome::StorageFull),
             Err(Refusal::OverBudget) => return Ok(GroupOutcome::OverBudget),
-        }
-        if send.kind == Kind::Commit {
-            drop_removed(&mut tx, send, &members).await?;
         }
 
         // Sending in the group is what makes the sender's own queue count

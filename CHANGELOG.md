@@ -1468,8 +1468,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   - Each sender may have 128 MiB of undelivered messages stored, and half
     of it in one group, so members that never ack in one group can't stop
     it everywhere; over it, sends get the new code `over_budget`. When a
-    commit removes a member, what is still queued for it in that group is
-    dropped with its charges.
+    commit removes a member, the senders are no longer charged for what is
+    still queued for it in that group, before the commit itself is judged,
+    so the removal is never refused for that budget; the messages stay
+    queued until acked or expired, so a forged remove hint deletes
+    nothing.
   - Past a storage high-water mark (4 GiB by default) new messages get the
     new code `storage_full`. Commits that add nobody (Updates, removals,
     policy changes), with a `ct` of at most 128 KiB, may use a 64 MiB
