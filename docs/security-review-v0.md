@@ -67,9 +67,9 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); SR-12 fixed in #89; the rest open, follow-up task |
+| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); SR-11 fixed in #87; SR-12 fixed in #89; the rest open, follow-up task |
 | Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; the rest open, follow-up task |
-| Info | 20 | Notes; 7 accepted |
+| Info | 20 | Notes; 7 accepted; SR-54 fixed in #87 |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
   truncation of a value that the last committer of an epoch chooses. An
@@ -91,7 +91,7 @@ the protocol changes. Everything else is measured against
 - The other Medium findings are local attacks on the daemon's loopback
   transports (SR-08 to SR-10), and authenticated peer messages that stall a
   receiver's inbound queue or trigger its agent beyond the message rates
-  (SR-11; SR-12, fixed in #89).
+  (SR-11, fixed in #87; SR-12, fixed in #89).
 - `cargo audit`, `cargo deny check` and `pip-audit` found no vulnerable
   dependency. Nine fuzz targets, three of them new, ran for 10 minutes each
   without a crash.
@@ -462,7 +462,16 @@ before a 2xx counts as an ack; document the risk for TCP receivers.
   `store.py:1974-1979`, `engine.py:1390-1391`, `engine.py:1715`,
   `engine.py:3436`, `limits.py:124-148`, `engine.py:1413-1421`,
   `engine.py:1032`).
-- **Status:** open (T-11).
+- **Status:** fixed in #87. Every inner message is bounded before
+  anything reads it (SPEC §7.2): a `hop` from 0 to 2^32 − 1, at most 64
+  levels of nesting, a `to` and an `addressee` of at most 50 entries of at
+  most 128 characters; anything else is `malformed`, and replies never
+  carry a hop past 2^32 − 1. A message that fails in the daemon's own
+  handling for a reason that would repeat fails alone: recorded as failed,
+  its journal entry consumed, the relay acked, an audit row with reason
+  `processing_failed` and a `message_failed` event for the human.
+  Transient failures are still retried. The core's parsers already stop
+  at `serde_json`'s 128 levels (`core/tests/deep_json.rs`).
 - **Confirmed.**
 
 `_received_hop` accepts any integer, while SPEC §7.2 makes `hop` a u32.
@@ -601,7 +610,7 @@ store written the old way.
 | SR-51 | daemon | `a2a.local_agent_url` allows plain `http` to a non-loopback host, unlike `webhook.callback_url` (`config.py:753-758`). | Open (T-51) |
 | SR-52 | daemon | In the same-user modes the agent process can read `human-token`; in separate-OS-user mode all agent users share `webhook-secret`. | Accepted: documented in ADR-005 and `docs/isolation.md`. |
 | SR-53 | daemon | Small free-text fields in controls (`control.pause.reason`, `control.capabilities` words, `control.close.reason`) are never held for approval and reach webhook and SSE consumers as context (`schemas.py:126-130`). | Open (T-53) |
-| SR-54 | daemon | Inbound `addressee` over 50 entries still triggers the listed members, and `to` is bounded only by the message size (`engine.py:410-413`). | Open, with T-11 |
+| SR-54 | daemon | Inbound `addressee` over 50 entries still triggers the listed members, and `to` is bounded only by the message size (`engine.py:410-413`). | Fixed in #87: both are malformed past 50 entries or 128 characters an entry (SPEC §7.2) |
 | SR-55 | daemon | Approving a peer task's first update lets its later updates through unseen for up to 600 s. | Accepted: documented in `docs/safety.md`. |
 | SR-56 | daemon | A modified peer daemon can send `origin: "human"`, hop 0 or `control.resume` and reset the receiver's loop guard. | Accepted: SPEC §12 residual, documented in `docs/safety.md`. |
 | SR-57 | relay | A malicious relay can inject a `queue_overflow` marker and stop a member's sends in a group until it re-syncs. | Accepted: relay denial of service is a v0 non-goal. |
@@ -639,7 +648,7 @@ there is a negative test (the attack fails).
 | Link leaked after exhaustion | The secret authenticates joins only; closed invites refused; secrets deleted | `engine.py` (`_on_join_request`, `_forget_invite_requests`) | `harness/tests/test_daemon_flows.py::test_an_exhausted_invite_is_not_reused`; `harness/tests/test_expiry.py::test_expired_invites_and_joins_lose_their_secrets` | Covered |
 | Malicious member | Roles and policy checked by every receiver | `core/src/policy.rs`, `group.rs` (`inspect_commit`) | `core/src/group/tests.rs::member_removing_another_member_is_rejected`, `::non_owner_policy_change_is_rejected`; `core/src/group/group_mode_tests.rs::unauthorized_commits_are_rejected_and_fork_only_the_committer`; `harness/tests/test_group_roles.py::test_a_policy_change_beyond_the_committers_role_is_rejected_by_every_member` | Covered |
 | | Removal starts a new epoch | `group.rs` (`remove`, `remove_instances`) | `core/tests/group.rs::removed_member_cannot_decrypt_next_epoch`; `relay/tests/delivery.rs::a_removed_member_gets_the_removing_commit_then_nothing` | Covered |
-| | Endpoint policy (§10) | see "Prompt-injected peer" | | Weakened by SR-11 (SR-12 fixed in #89) |
+| | Endpoint policy (§10) | see "Prompt-injected peer" | | Covered (SR-11 fixed in #87, SR-12 fixed in #89) |
 | Removed member | Forward secrecy across epochs | OpenMLS; `group.rs` (`is_active`) | `core/tests/group.rs::removed_member_cannot_decrypt_next_epoch`, `::member_that_missed_its_removal_cannot_decrypt_either` | Partial (test gap 3) |
 | | Previous epoch kept for one epoch only | `core/src/mls.rs` (`MAX_PAST_EPOCHS = 1`) | `core/src/group/tests.rs::grace_window_sender_must_have_been_a_member_then` (positive only) | Gap (test gap 4) |
 | Quantum adversary | One hybrid suite, no negotiation | `core/src/lib.rs`, `core/src/mls.rs` (`CS`, `precheck_key_package`) | `core/tests/key_package.rs::wrong_ciphersuite_is_rejected`; `core/src/mls.rs::derive_hpke_keypair_matches_the_hpke_pq_known_answer` | Covered |
@@ -649,7 +658,7 @@ there is a negative test (the attack fails).
 | Compromised host | Encrypted-at-rest storage | see the last rows | | Covered, except SR-27 |
 | | Updates heal after re-key | `group.rs` (`update`) | `core/tests/group.rs::update_commits_converge_and_change_sas` | Positive only (test gap 6) |
 | Prompt-injected peer agent | Untrusted framing and scope (§10.1) | `daemon/.../payloads.py`, `adapter.py` | `harness/tests/test_safety_policy.py::test_scope_and_framing_reach_the_webhook_sse_and_the_sdk`; `daemon/tests/test_a2a_adapter.py::test_peer_metadata_cannot_override_the_framing` | Covered |
-| | Limits (§10.2), lower only, silent drops | `daemon/.../limits.py`, `policy.py` | `harness/tests/test_limits_e2e.py::test_receivers_drop_what_breaks_the_limits`, `::test_receivers_rate_limit_a_flooding_sender`; `daemon/tests/test_policy.py::test_limits_can_only_be_lowered`; `harness/tests/test_unsolicited_task_updates.py` | Covered; SR-11 (SR-12 fixed in #89) |
+| | Limits (§10.2), lower only, silent drops | `daemon/.../limits.py`, `policy.py` | `harness/tests/test_limits_e2e.py::test_receivers_drop_what_breaks_the_limits`, `::test_receivers_rate_limit_a_flooding_sender`; `daemon/tests/test_policy.py::test_limits_can_only_be_lowered`; `harness/tests/test_unsolicited_task_updates.py`; `harness/tests/test_poison_messages.py` | Covered (SR-11 fixed in #87, SR-12 fixed in #89) |
 | | Approval hooks and SAS verification human-only | `runtime/api.py` (`ROUTE_SPECS`), `mcp/tools.py` | `daemon/tests/test_human_only_routes.py::test_every_route_is_classified_and_the_deciding_ones_need_the_human_token`; `daemon/tests/test_no_auto_approve.py::test_the_agent_api_has_no_deciding_method`; `harness/tests/test_mcp.py::test_the_tools_are_the_agent_scope_only` | Covered |
 | | Control and card bodies stripped; cards checked against pinned keys only | `engine.py`, `schemas.py`, `a2a_adapter/cards.py` | `harness/tests/test_safety_policy.py::test_content_under_control_or_card_kinds_never_reaches_the_agent`, `::test_a_signed_card_reaches_a_peer_unchanged_and_a_forged_one_is_dropped` | Covered |
 | Agent loops | Loop guard | `engine.py` (`_received_hop`, `_reply_hop`, `_loop_guard`) | `harness/tests/test_loop_guard.py::test_replies_carry_hop_and_the_guard_pauses`, `::test_an_agent_resume_is_ignored`, `::test_a_hop_below_the_referenced_messages_is_raised` | Covered; SR-33 |
@@ -782,7 +791,8 @@ What a malicious member can do, with a modified daemon:
    its own instances, whatever the policy says.
 6. Stop the group by sending a commit the honest members reject (SPEC §12
    residual).
-7. Wedge a receiver's inbound queue with one malformed message (SR-11).
+7. Wedge a receiver's inbound queue with one malformed message (SR-11,
+   fixed in #87).
 8. Send `control.close` (owner only), `control.pause`, `control.leave`,
    `control.capabilities`, and, with a modified daemon, `control.resume`
    with `origin: "human"` (SR-56).
@@ -947,8 +957,8 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   register writes, `repeated_violations`, hop records, the loop-guard
   reset, `close_requested`, holds, transcript rows, adapter deliveries,
   stored cards, A2A agent calls and task continuation or cancellation, and
-  facade replies. The gaps are SR-11, SR-33 to SR-38 and SR-53 (SR-12 is
-  fixed in #89).
+  facade replies. The gaps are SR-33 to SR-38 and SR-53 (SR-11 is fixed in
+  #87, SR-12 in #89).
 - **SAS verification stays human.** `set_verified` is reachable only from
   the human-token verify route, which requires the epoch shown and refuses
   `stale_epoch`; the CLI re-reads the epoch and the code before it records
@@ -1070,7 +1080,7 @@ One line per open item, ready to file.
   directory and socket owner before connecting.
 - **T-10 (Medium, SR-10):** Daemon: Unix-socket callbacks, or a receiver
   MAC before a 2xx counts as an ack; required in separate-OS-user mode.
-- **T-11 (Medium, SR-11, SR-54):** Daemon: bound `hop` to u32, limit body
+- **T-11 (Medium, SR-11, SR-54, fixed in #87):** Daemon: bound `hop` to u32, limit body
   depth and size of `to` and `addressee`, and fail a poison message per
   message (ack, consume, tell the human).
 - **T-12 (Medium, SR-12, fixed in #89):** Daemon: task budget and triggering only for
