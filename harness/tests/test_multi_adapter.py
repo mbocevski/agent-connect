@@ -102,7 +102,31 @@ async def pair(cluster: Cluster, other: RecordingAdapter, **kw: Any) -> tuple[No
     gid = a.daemon.create_group("Team", "Plan the release")
     await a.idle()
     await cluster.invite(a, b, gid)
+    await announced(a, b, gid)
     return a, b, gid
+
+
+async def announced(a: Node, b: Node, gid: str, adapter: RecordingAdapter | None = None) -> None:
+    """Wait until ``a``'s recording adapter (or ``adapter``) has ``b``'s
+    ``control.capabilities``, which ``b`` sends as it joins: a test's own
+    messages then come after it."""
+    into = a.adapter if adapter is None else adapter
+
+    def got() -> bool:
+        return any(
+            d.kind == "control.capabilities" and d.sender.identity == b.me and d.group_id == gid
+            for d in into.deliveries
+        )
+
+    await into.wait_for(got, WAIT)
+
+
+def messages_of(node: Node, gid: str) -> set[str]:
+    """The msg_ids of the messages (not controls) the node's recording
+    adapter has from the group."""
+    return {
+        d.msg_id for d in node.adapter.deliveries if d.group_id == gid and d.kind == "a2a.message"
+    }
 
 
 def watch_acks(node: Node) -> set[str]:
@@ -168,9 +192,10 @@ async def test_a_failing_adapter_holds_up_and_loses_nothing_for_another(
     assert a.adapter.of_type("member_joined")
     # The relay was acked once the messages were recorded, although one
     # adapter hasn't taken them.
-    ids = {d.msg_id for d in a.adapter.deliveries if d.group_id == gid}
+    ids = messages_of(a, gid)
     await until(lambda: ids <= acked)
-    assert len(a.daemon.store.pending_deliveries()) == 3
+    # The three messages and b's control.capabilities from its join.
+    assert len(a.daemon.store.pending_deliveries()) == len(ids) + 1 == 4
     # The endpoint comes back: it gets what it missed, in order, once.
     stuck.working = True
     await advance(300)
@@ -228,6 +253,8 @@ async def test_a_crash_after_one_adapter_took_a_message(
     gid = a.daemon.create_group("Team", "Plan the release")
     await a.idle()
     await cluster.invite(a, b, gid)
+    await announced(a, b, gid)
+    await a.wait(lambda: not a.daemon.store.pending_deliveries())
     a.daemon.failpoints.arm("delivery.after_adapter", "crash" if mode == "crash" else "raise")
     b.daemon.send_message(gid, {"text": "one"})
     await until(lambda: "delivery.after_adapter" in a.daemon.failpoints.fired)
@@ -469,7 +496,7 @@ async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
     await a.wait(a.daemon.caught_up)
     assert application_frames(a) > seen
     assert len(recorded(a, "delivery_stalled")) == 1
-    ids = {d.msg_id for d in a.adapter.deliveries if d.group_id == gid}
+    ids = messages_of(a, gid)
     kept = ids - acked
     assert kept, "the relay kept the copies past the limit"
     # The adapter catches up: the pending messages drain, what the relay
@@ -495,8 +522,12 @@ async def test_an_adapter_taken_out_gets_nothing_more_of_its_batch(
     cluster: Cluster, advance: Advance
 ) -> None:
     gated = Gated()
-    gated.retry_next = 1  # one RETRY first, so its next batch holds all three
+    gated.go.set()
     a, b, gid = await pair(cluster, gated)
+    await announced(a, b, gid, gated)
+    gated.go.clear()
+    gated.waiting = 0
+    gated.retry_next = 1  # one RETRY first, so its next batch holds all three
     for text in TEXTS:
         b.daemon.send_message(gid, {"text": text})
     assert await a.wait_texts(gid, 3) == TEXTS
@@ -567,8 +598,12 @@ async def test_a_reply_triggers_the_adapter_that_sent_the_message_it_answers(
     b.daemon.send_message(gid, {"text": "for anyone"}, origin="human")
     await a.wait_texts(gid, 2)
     await facade.wait_for(lambda: len(facade.texts(gid)) == 2, WAIT)
-    first = {_text_of(d.body): d.addressed_to_me for d in a.adapter.deliveries}
-    other = {_text_of(d.body): d.addressed_to_me for d in facade.deliveries}
+    first = {
+        _text_of(d.body): d.addressed_to_me for d in a.adapter.deliveries if d.kind == "a2a.message"
+    }
+    other = {
+        _text_of(d.body): d.addressed_to_me for d in facade.deliveries if d.kind == "a2a.message"
+    }
     first.pop("", None)
     other.pop("", None)
     assert first == {"for the facade client": False, "for anyone": True}
@@ -627,6 +662,8 @@ async def test_an_approved_held_message_reaches_an_adapter_that_was_mid_delivery
     gated = Gated()
     gated.go.set()
     a, b, gid = await pair(cluster, gated)
+    await announced(a, b, gid, gated)
+    gated.waiting = 0
     a.daemon.update_safety(gid, {"require_approval": "inbound"})
     b.daemon.send_message(gid, {"text": "held"})
     await a.wait(lambda: len(a.daemon.held_messages()) == 1)

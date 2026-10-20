@@ -9,7 +9,7 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 |---|---|---|---|---|
 | `just test` | Rust and Python unit, property and contract tests (`just contract`), multi-node harness scenarios | < 60 s | loopback only | pre-push, CI |
 | `just test-int` | docker compose integration: Postgres for the directory store (`compose.test.yaml`), and the demos and the malicious relay double (`demo/compose.yaml`, `integration/tests`); the relay binary's connection limits on real time and its memory under stalled connections (`relay/tests/limits_int.rs`, `#[ignore]`d in the fast tier) | < 10 min once the image is built | docker | CI (`integration` job, not part of `ci-ok`) |
-| `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests; fuzzing and criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
+| `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests, the relay's load tests and the wire sizes its caps rely on (`just nightly-relay-load`: sender budget, stall resistance, the purge, the largest Welcome and commits); fuzzing and criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
 | `just ci` | exactly the PR pipeline: `lint`, `test`, `cov` (gates and ratchet), `changelog-check`, `docs-check` | minutes | none | PR CI (`ci-ok`) |
 
 `just test` must stay under 60 seconds on a laptop. If it gets slower, move

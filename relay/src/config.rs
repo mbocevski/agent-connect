@@ -58,6 +58,26 @@ pub struct Config {
     /// `/healthz`, on loopback by default. The public listener has no
     /// `/metrics`.
     pub metrics_addr: SocketAddr,
+    /// `AC_RELAY_NON_MEMBER_QUEUE_BYTES`: per-mailbox queue for traffic
+    /// from non-members.
+    pub non_member_queue_max_bytes: u64,
+    /// `AC_RELAY_SENDER_BUDGET_BYTES`: undelivered bytes one sender may
+    /// have stored.
+    pub sender_max_bytes: u64,
+    /// `AC_RELAY_STORAGE_HIGH_WATER_BYTES`: storage in use at which new
+    /// messages are refused.
+    pub storage_high_water: u64,
+}
+
+/// A byte count from the environment, or `default` when unset.
+fn bytes(get: &impl Fn(&str) -> Option<String>, key: &str, default: u64) -> Result<u64, String> {
+    match get(key) {
+        None => Ok(default),
+        Some(v) => v
+            .trim()
+            .parse()
+            .map_err(|_| format!("{key} is not a byte count: {v}")),
+    }
 }
 
 /// A positive integer from `var`, or `default` when unset.
@@ -201,7 +221,8 @@ impl Config {
     /// `AC_RELAY_HOST` is not a valid host, `AC_RELAY_TERMS` or
     /// `AC_RELAY_ABUSE` is set but invalid, a limit is not a positive
     /// integer in range (the idle timeout must be longer than the ping
-    /// interval), or `AC_RELAY_METRICS_ADDR` is not a socket address.
+    /// interval), `AC_RELAY_METRICS_ADDR` is not a socket address, or a byte
+    /// count is not a whole number.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let addr_text = get("AC_RELAY_ADDR").unwrap_or_else(|| DEFAULT_ADDR.to_owned());
         let addr: SocketAddr = addr_text
@@ -270,6 +291,7 @@ impl Config {
         let metrics_addr: SocketAddr = metrics_text.parse().map_err(|_| {
             format!("AC_RELAY_METRICS_ADDR is not a socket address: {metrics_text}")
         })?;
+        let limits = Limits::default();
         Ok(Self {
             addr,
             db: get("AC_RELAY_DB").unwrap_or_else(|| DEFAULT_DB.to_owned()),
@@ -279,7 +301,34 @@ impl Config {
             ws,
             server,
             metrics_addr,
+            non_member_queue_max_bytes: bytes(
+                &get,
+                "AC_RELAY_NON_MEMBER_QUEUE_BYTES",
+                limits.non_member_queue_max_bytes,
+            )?,
+            sender_max_bytes: bytes(
+                &get,
+                "AC_RELAY_SENDER_BUDGET_BYTES",
+                limits.sender_max_bytes,
+            )?,
+            storage_high_water: bytes(
+                &get,
+                "AC_RELAY_STORAGE_HIGH_WATER_BYTES",
+                limits.storage_high_water,
+            )?,
         })
+    }
+
+    /// The operating limits: the defaults with this configuration's
+    /// overrides.
+    #[must_use]
+    pub fn limits(&self) -> Limits {
+        Limits {
+            non_member_queue_max_bytes: self.non_member_queue_max_bytes,
+            sender_max_bytes: self.sender_max_bytes,
+            storage_high_water: self.storage_high_water,
+            ..Limits::default()
+        }
     }
 
     /// Read the configuration from the process environment.
@@ -408,6 +457,37 @@ mod tests {
         assert_eq!(c.quotas.group_idle, Duration::from_hours(8 * 24));
         let c = Config::from_lookup(lookup(&[("AC_RELAY_GROUP_IDLE_DAYS", "36500")])).unwrap();
         assert_eq!(c.quotas.group_idle, Duration::from_hours(36_500 * 24));
+    }
+
+    #[test]
+    fn storage_limits_default_and_can_be_set() {
+        let c = Config::from_lookup(lookup(&[])).unwrap();
+        let d = Limits::default();
+        assert_eq!(
+            c.limits().non_member_queue_max_bytes,
+            d.non_member_queue_max_bytes
+        );
+        assert_eq!(c.limits().sender_max_bytes, d.sender_max_bytes);
+        assert_eq!(c.limits().storage_high_water, d.storage_high_water);
+        let c = Config::from_lookup(lookup(&[
+            ("AC_RELAY_NON_MEMBER_QUEUE_BYTES", "1000"),
+            ("AC_RELAY_SENDER_BUDGET_BYTES", "2000"),
+            ("AC_RELAY_STORAGE_HIGH_WATER_BYTES", " 3000 "),
+        ]))
+        .unwrap();
+        let l = c.limits();
+        assert_eq!(
+            (
+                l.non_member_queue_max_bytes,
+                l.sender_max_bytes,
+                l.storage_high_water
+            ),
+            (1000, 2000, 3000)
+        );
+        assert_eq!(l.queue_max_bytes, d.queue_max_bytes);
+        let err =
+            Config::from_lookup(lookup(&[("AC_RELAY_SENDER_BUDGET_BYTES", "1G")])).unwrap_err();
+        assert_eq!(err, "AC_RELAY_SENDER_BUDGET_BYTES is not a byte count: 1G");
     }
 
     #[test]

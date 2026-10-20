@@ -77,6 +77,9 @@ What works on `main` today:
   page without JavaScript, which can link the operator's terms and abuse
   contact, with connection caps, timeouts and a frame rate limit for a
   public deployment ([relay/README.md](relay/README.md)).
+  Each payload is stored once; traffic from non-members has its own part
+  of a mailbox queue, and a per-sender budget and a storage high-water
+  mark bound what one mailbox can store.
   <!-- component: relay -->
 - **Runtime and daemon** (`daemon/`, Python): identity and keys, the relay
   connection, durable inbound and outbound queues and the local control API,

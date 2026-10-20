@@ -481,7 +481,7 @@ async fn the_knock_worker_writes_on_its_own_tick() {
 #[tokio::test]
 async fn a_full_owner_queue_is_answered_with_accepted() {
     let h = Harness::with_limits(Limits {
-        queue_max_bytes: 1000,
+        non_member_queue_max_bytes: 1000,
         sends_per_sec: 100_000,
         ..Limits::default()
     })

@@ -11,6 +11,7 @@ const NOW: u64 = 1_735_689_600_000;
 const GID: &str = "AAAAAAAAAAAAAAAAAAAAAA";
 const A: &str = "mailbox-a-0000000000";
 const B: &str = "mailbox-b-0000000000";
+const C: &str = "mailbox-c-0000000000";
 
 fn invite(expires_at: u64) -> InviteRecord {
     InviteRecord {
@@ -62,6 +63,7 @@ async fn state_survives_a_restart_and_migrations_are_idempotent() {
             remove: &[],
             to: &[],
             msg: &message("m1"),
+            ct_bytes: 0,
         };
         assert!(matches!(
             s.deliver_group(&send, &limits, NOW).await.unwrap(),
@@ -81,7 +83,7 @@ async fn state_survives_a_restart_and_migrations_are_idempotent() {
     assert_eq!(pending[0].msg_id, "m1");
     // Idempotency survives too.
     assert_eq!(
-        s.deliver_direct(B, &message("m1"), &limits, NOW)
+        s.deliver_direct(Kind::JoinRequest, B, &message("m1"), &limits, NOW)
             .await
             .unwrap(),
         DirectOutcome::Duplicate
@@ -106,12 +108,18 @@ async fn purge_removes_only_expired_rows() {
     let s = SqliteStore::in_memory().await.unwrap();
     let limits = Limits::default();
     let ttl = limits.message_ttl.as_millis() as u64;
-    s.deliver_direct(B, &message("old"), &limits, NOW)
+    s.deliver_direct(Kind::JoinRequest, B, &message("old"), &limits, NOW)
         .await
         .unwrap();
-    s.deliver_direct(B, &message("new"), &limits, NOW + ttl / 2)
-        .await
-        .unwrap();
+    s.deliver_direct(
+        Kind::JoinRequest,
+        B,
+        &message("new"),
+        &limits,
+        NOW + ttl / 2,
+    )
+    .await
+    .unwrap();
     // Expired a week ago (plus the grace period) vs still readable.
     let long_gone = invite(NOW / 1000 - 10);
     let mut recent = invite(NOW / 1000 + 100);
@@ -175,7 +183,20 @@ async fn ack_removes_only_the_acknowledged_mailbox_copy() {
     let s = SqliteStore::in_memory().await.unwrap();
     let limits = Limits::default();
     s.create_group(GID, A, NOW).await.unwrap();
-    let to = [A.to_owned(), B.to_owned()];
+    let to = [C.to_owned(), B.to_owned()];
+    let add = GroupSend {
+        kind: Kind::Commit,
+        group_id: GID,
+        sender: A,
+        epoch: 0,
+        add: &to,
+        remove: &[],
+        to: &[],
+        msg: &message("c1"),
+        ct_bytes: 0,
+    };
+    s.deliver_group(&add, &limits, NOW).await.unwrap();
+    assert!(s.ack(A, "c1").await.unwrap());
     let m = message("w1");
     let send = GroupSend {
         kind: Kind::WelcomeWrapped,
@@ -186,11 +207,12 @@ async fn ack_removes_only_the_acknowledged_mailbox_copy() {
         remove: &[],
         to: &to,
         msg: &m,
+        ct_bytes: 0,
     };
     s.deliver_group(&send, &limits, NOW).await.unwrap();
-    assert!(s.ack(A, "w1").await.unwrap());
-    assert!(!s.ack(A, "w1").await.unwrap());
-    assert!(s.pending(A, 0, 10, u64::MAX, NOW).await.unwrap().is_empty());
+    assert!(s.ack(C, "w1").await.unwrap());
+    assert!(!s.ack(C, "w1").await.unwrap());
+    assert!(s.pending(C, 0, 10, u64::MAX, NOW).await.unwrap().is_empty());
     assert_eq!(s.pending(B, 0, 10, u64::MAX, NOW).await.unwrap().len(), 1);
 }
 
@@ -213,7 +235,9 @@ async fn pending_stops_at_the_byte_cap_but_returns_at_least_one_message() {
         let m = sized(&format!("m{i}"), *size);
         assert_eq!(m.json.len(), *size);
         assert_eq!(
-            s.deliver_direct(B, &m, &limits, NOW).await.unwrap(),
+            s.deliver_direct(Kind::JoinRequest, B, &m, &limits, NOW)
+                .await
+                .unwrap(),
             DirectOutcome::Delivered
         );
     }
@@ -321,6 +345,7 @@ async fn idle_groups_are_listed_by_last_use_and_deleted_only_while_idle() {
         remove: &[],
         to: &[],
         msg: &commit,
+        ct_bytes: 0,
     };
     s.deliver_group(&send, &limits, NOW).await.unwrap();
     used(&s, &gid(2), "a2", NOW + 10 * DAY).await;
@@ -363,6 +388,7 @@ async fn idle_groups_are_listed_by_last_use_and_deleted_only_while_idle() {
         remove: &[],
         to: &[],
         msg: &app,
+        ct_bytes: 0,
     };
     assert!(s.delete_idle_group(&gid(0), cutoff).await.unwrap());
     assert_eq!(
@@ -392,6 +418,7 @@ async fn used(s: &SqliteStore, group_id: &str, msg_id: &str, at: u64) {
         remove: &[],
         to: &[],
         msg: &m,
+        ct_bytes: 0,
     };
     let out = s
         .deliver_group(&send, &Limits::default(), at)

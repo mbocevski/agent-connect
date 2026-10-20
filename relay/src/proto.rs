@@ -17,6 +17,19 @@ pub const MAX_WELCOME_RECIPIENTS: usize = 50;
 pub const MAX_ROUTING_HINTS: usize = 50;
 /// Largest `ct` of a `knock` envelope, in decoded bytes (16 KiB).
 pub const MAX_KNOCK_CT: usize = 16 * 1024;
+/// Largest `ct` of a `join_request` envelope, in decoded bytes (16 KiB). A
+/// JoinRequest with an 80-character display name is about 4.5 KB.
+pub const MAX_JOIN_CT: usize = 16 * 1024;
+/// Largest `ct` of a `welcome_wrapped` envelope, in decoded bytes (256 KiB).
+/// The Welcome that brings a group to 50 members is about 90 KB, most of it
+/// the ratchet tree.
+pub const MAX_WELCOME_CT: usize = 256 * 1024;
+/// Largest `ct` of a commit that may use the storage reserve above the
+/// high-water mark (it adds nobody), in decoded bytes (128 KiB). An Update
+/// in a 50-member group whose tree is sparse sends a path secret to every
+/// other member: about 67 KB, the most measured; removals measured up to
+/// 47 KB.
+pub const MAX_RESERVE_COMMIT_CT: usize = 128 * 1024;
 
 /// Encode bytes as base64url without padding.
 #[must_use]
@@ -104,6 +117,11 @@ pub enum ErrorCode {
     TooLarge,
     /// A queue or group size limit was hit.
     QuotaExceeded,
+    /// Relay storage is at its high-water mark: retry later.
+    StorageFull,
+    /// The sender has its budget of undelivered messages stored: retry
+    /// once recipients have fetched some.
+    OverBudget,
     /// The frame is malformed.
     BadRequest,
     /// Server-side failure.
@@ -112,7 +130,7 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Every code, in a stable order.
-    pub const ALL: [ErrorCode; 11] = [
+    pub const ALL: [ErrorCode; 13] = [
         ErrorCode::AuthFailed,
         ErrorCode::EpochConflict,
         ErrorCode::NotMember,
@@ -122,6 +140,8 @@ impl ErrorCode {
         ErrorCode::RateLimited,
         ErrorCode::TooLarge,
         ErrorCode::QuotaExceeded,
+        ErrorCode::StorageFull,
+        ErrorCode::OverBudget,
         ErrorCode::BadRequest,
         ErrorCode::Internal,
     ];
@@ -139,6 +159,8 @@ impl ErrorCode {
             ErrorCode::RateLimited => "rate_limited",
             ErrorCode::TooLarge => "too_large",
             ErrorCode::QuotaExceeded => "quota_exceeded",
+            ErrorCode::StorageFull => "storage_full",
+            ErrorCode::OverBudget => "over_budget",
             ErrorCode::BadRequest => "bad_request",
             ErrorCode::Internal => "internal",
         }
@@ -153,7 +175,8 @@ impl ErrorCode {
             ErrorCode::UnknownGroup | ErrorCode::InviteNotOpen | ErrorCode::DoorNotOpen => 404,
             ErrorCode::EpochConflict => 409,
             ErrorCode::TooLarge => 413,
-            ErrorCode::RateLimited | ErrorCode::QuotaExceeded => 429,
+            ErrorCode::RateLimited | ErrorCode::QuotaExceeded | ErrorCode::OverBudget => 429,
+            ErrorCode::StorageFull => 503,
             ErrorCode::BadRequest => 400,
             ErrorCode::Internal => 500,
         }
@@ -405,7 +428,8 @@ pub enum ServerFrame {
         group_id: String,
         /// The first dropped message.
         msg_id: String,
-        /// That message's epoch (absent for a Welcome).
+        /// That message's epoch. Optional on the wire; this relay always
+        /// sets it (Welcomes are refused rather than dropped).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u64>,
     },
@@ -460,8 +484,25 @@ impl ServerFrame {
 /// length is looked at: the relay never decodes a knock.
 #[must_use]
 pub fn knock_ct_fits(ct: &str) -> bool {
+    ct_fits(ct, MAX_KNOCK_CT)
+}
+
+/// True if base64url `ct` decodes to at most `max` bytes, judged by its
+/// length alone.
+#[must_use]
+pub fn ct_fits(ct: &str, max: usize) -> bool {
     // Unpadded base64url carries 6 bits per character.
-    ct.len().saturating_mul(3) / 4 <= MAX_KNOCK_CT
+    ct.len().saturating_mul(3) / 4 <= max
+}
+
+/// The `ct` cap of an envelope kind, with its name for the error.
+fn ct_cap(kind: Kind) -> Option<(usize, &'static str)> {
+    match kind {
+        Kind::Knock => Some((MAX_KNOCK_CT, "knock ct exceeds 16 KiB")),
+        Kind::JoinRequest => Some((MAX_JOIN_CT, "join_request ct exceeds 16 KiB")),
+        Kind::WelcomeWrapped => Some((MAX_WELCOME_CT, "welcome_wrapped ct exceeds 256 KiB")),
+        Kind::Commit | Kind::Proposal | Kind::Application => None,
+    }
 }
 
 /// Parse a client text frame, enforcing the size limit first.
@@ -476,10 +517,15 @@ pub fn parse_client_frame(text: &str, max_len: usize) -> Result<ClientFrame, (Er
     }
     let frame: ClientFrame = serde_json::from_str(text)
         .map_err(|_| (ErrorCode::BadRequest, "malformed frame".to_owned()))?;
+    if let ClientFrame::Send { env }
+    | ClientFrame::Join { env, .. }
+    | ClientFrame::Knock { env, .. } = &frame
+        && let Some((max, detail)) = ct_cap(env.kind)
+        && !ct_fits(&env.ct, max)
+    {
+        return Err((ErrorCode::TooLarge, detail.into()));
+    }
     match &frame {
-        ClientFrame::Knock { env, .. } if !knock_ct_fits(&env.ct) => {
-            return Err((ErrorCode::TooLarge, "knock ct exceeds 16 KiB".into()));
-        }
         ClientFrame::Send { env }
         | ClientFrame::Join { env, .. }
         | ClientFrame::Knock { env, .. } => env
@@ -613,7 +659,7 @@ mod tests {
             ErrorCode::ALL.iter().map(|c| c.as_str()).collect();
         assert_eq!(names.len(), ErrorCode::ALL.len());
         for code in ErrorCode::ALL {
-            assert!((400..=500).contains(&code.http_status()));
+            assert!((400..=503).contains(&code.http_status()));
             let json = serde_json::to_string(&code).unwrap();
             assert_eq!(json, format!("\"{}\"", code.as_str()));
         }
@@ -764,6 +810,65 @@ mod tests {
             parse_client_frame(&no_door, max).unwrap_err().0,
             ErrorCode::BadRequest
         );
+    }
+
+    #[test]
+    fn welcome_and_join_request_ct_are_capped_before_decoding() {
+        let max = crate::store::DEFAULT_FRAME_MAX;
+        let welcome = |n: usize| {
+            let e = Envelope {
+                epoch: None,
+                to: vec![mailbox_id_from_key(b"new")],
+                ct: b64_encode(&vec![1; n]),
+                ..env(Kind::WelcomeWrapped)
+            };
+            format!(
+                r#"{{"t":"send","env":{}}}"#,
+                serde_json::to_string(&e).unwrap()
+            )
+        };
+        assert!(parse_client_frame(&welcome(MAX_WELCOME_CT), max).is_ok());
+        let err = parse_client_frame(&welcome(MAX_WELCOME_CT + 1), max).unwrap_err();
+        assert_eq!(
+            err,
+            (
+                ErrorCode::TooLarge,
+                "welcome_wrapped ct exceeds 256 KiB".into()
+            )
+        );
+
+        let join = |n: usize| {
+            let e = Envelope {
+                group_id: None,
+                epoch: None,
+                ct: b64_encode(&vec![1; n]),
+                ..env(Kind::JoinRequest)
+            };
+            format!(
+                r#"{{"t":"join","invite_id":"{}","env":{}}}"#,
+                id16(5),
+                serde_json::to_string(&e).unwrap()
+            )
+        };
+        assert!(parse_client_frame(&join(MAX_JOIN_CT), max).is_ok());
+        let err = parse_client_frame(&join(MAX_JOIN_CT + 1), max).unwrap_err();
+        assert_eq!(
+            err,
+            (ErrorCode::TooLarge, "join_request ct exceeds 16 KiB".into())
+        );
+
+        // Other kinds keep only the frame limit.
+        let big = Envelope {
+            ct: b64_encode(&vec![1; MAX_WELCOME_CT + 1]),
+            ..env(Kind::Application)
+        };
+        let f = format!(
+            r#"{{"t":"send","env":{}}}"#,
+            serde_json::to_string(&big).unwrap()
+        );
+        assert!(parse_client_frame(&f, max).is_ok());
+        assert!(ct_fits("", 0));
+        assert!(!ct_fits("AAAAAA", 3));
     }
 
     #[test]

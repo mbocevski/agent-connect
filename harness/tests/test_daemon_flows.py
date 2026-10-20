@@ -96,9 +96,10 @@ async def test_cards_wait_for_the_verification_gate(cluster: Cluster) -> None:
     b.adapter = b.recorder(card={"name": "Mallory pretending"})
     await b.restart()
     await cluster.invite(a, b, gid)
-    # b's card has reached a, but a's human hasn't verified b: neither the
-    # card nor the self-chosen name is kept or shown yet.
-    await a.wait(lambda: a.daemon.status()["inbox_pending"] == 1)
+    # b's capabilities and card have reached a, but a's human hasn't
+    # verified b: neither the card nor the self-chosen name is kept or shown
+    # yet.
+    await a.wait(lambda: a.daemon.status()["inbox_pending"] == 2)
     assert a.daemon.store.cards(gid) == {}
     names = {m["identity"]: m["display_name"] for m in a.daemon.group_info(gid)["members"]}
     assert names[b.me] == "b"

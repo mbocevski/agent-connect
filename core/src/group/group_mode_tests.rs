@@ -1567,3 +1567,61 @@ fn a_welcome_whose_tree_repeats_an_instance_id_is_refused() {
         Err(Error::InvalidGroupContext(REPEATED_INSTANCE))
     );
 }
+
+/// The relay caps what it stores by envelope kind (SPEC 8.3, relay
+/// `proto.rs`): a Welcome's `ct` at 256 KiB, a `join_request`'s at 16 KiB,
+/// and a commit that may use the storage reserve (it adds nobody) at
+/// 128 KiB. This builds the largest of each a full group makes: the
+/// Welcome for the 50th member once every member has committed an update
+/// path (the full ratchet tree), Updates in a sparse tree (a path secret
+/// for every other member) and removals. Slow: `just nightly-relay-load`.
+#[test]
+#[ignore = "slow: just nightly-relay-load"]
+fn wire_sizes_fit_the_relay_caps() {
+    const WELCOME_CAP: usize = 256 * 1024;
+    const JOIN_CAP: usize = 16 * 1024;
+    const RESERVE_COMMIT_CAP: usize = 128 * 1024;
+    let clock = Arc::new(FakeClock::default());
+    let labels: Vec<String> = (0..49).map(|i| format!("w{i}")).collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let mut m = Members::of(&refs, &clock);
+    let mut commits = 0;
+    for i in [1, 24, 48] {
+        let out = m.gs[i].update(&m.cs[i]).unwrap();
+        commits = commits.max(out.commit.len());
+        m.apply(i, &out);
+    }
+    for i in 0..m.gs.len() {
+        let out = m.gs[i].update(&m.cs[i]).unwrap();
+        commits = commits.max(out.commit.len());
+        m.apply(i, &out);
+    }
+    let joiner = client("w-last", &clock);
+    let inv = Invite::create(
+        m.cs[0].rng(),
+        m.cs[0].clock(),
+        "r.example",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let req = joiner
+        .create_join_request(inv.secret(), &"n".repeat(80))
+        .unwrap();
+    let join = req.to_json().unwrap().len();
+    let v = m.cs[0].verify_join_request(&req, &inv).unwrap();
+    let out = m.gs[0].add_member(&m.cs[0], &v, &inv, true).unwrap();
+    let welcome = out.welcome.as_ref().unwrap().len();
+    m.gs[0].discard_pending_commit(&m.cs[0]).unwrap();
+    for k in (2..40).step_by(4) {
+        let id = m.id(k);
+        let out = m.gs[0].remove(&m.cs[0], &id).unwrap();
+        commits = commits.max(out.commit.len());
+        m.apply(0, &out);
+    }
+    println!(
+        "wire sizes: Welcome {welcome} B, join_request {join} B, largest commit without adds {commits} B"
+    );
+    assert!(welcome <= WELCOME_CAP, "Welcome {welcome} B");
+    assert!(join <= JOIN_CAP, "join_request {join} B");
+    assert!(commits <= RESERVE_COMMIT_CAP, "commit {commits} B");
+}

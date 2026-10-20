@@ -42,7 +42,7 @@ async fn door_and_knock_logs_carry_no_identifiers() {
     tracing::callsite::rebuild_interest_cache();
 
     let h = Harness::with_limits(Limits {
-        queue_max_bytes: 1500,
+        non_member_queue_max_bytes: 1500,
         sends_per_sec: 100_000,
         ..Limits::default()
     })

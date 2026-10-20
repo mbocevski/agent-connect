@@ -58,8 +58,25 @@ pub struct Limits {
     pub frame_max: usize,
     /// Maximum instances per group.
     pub group_max: usize,
-    /// Maximum queued bytes per mailbox.
+    /// Maximum queued bytes per mailbox for group traffic: the groups the
+    /// mailbox has sent in.
     pub queue_max_bytes: u64,
+    /// Maximum queued bytes per mailbox for traffic from non-members:
+    /// Welcomes, join requests, knocks, and the traffic of a group the
+    /// mailbox hasn't sent in yet. Kept apart so it never displaces group
+    /// traffic.
+    pub non_member_queue_max_bytes: u64,
+    /// Maximum bytes of undelivered payloads one sender may have stored,
+    /// and at most half of it in one group. Knocks are not charged (their
+    /// own limits apply).
+    pub sender_max_bytes: u64,
+    /// Storage high-water mark in bytes of used database pages: at or
+    /// above it, new messages are refused.
+    pub storage_high_water: u64,
+    /// Bytes above the mark that commits adding nobody may still use (an
+    /// Update, a removal), each with a `ct` of at most
+    /// [`crate::proto::MAX_RESERVE_COMMIT_CT`].
+    pub storage_reserve: u64,
     /// Maximum sends per second per mailbox.
     pub sends_per_sec: usize,
     /// Maximum join requests per minute per invite.
@@ -86,6 +103,10 @@ impl Default for Limits {
             frame_max: DEFAULT_FRAME_MAX,
             group_max: 50,
             queue_max_bytes: 64 << 20,
+            non_member_queue_max_bytes: 16 << 20,
+            sender_max_bytes: 128 << 20,
+            storage_high_water: 4 << 30,
+            storage_reserve: 64 << 20,
             sends_per_sec: 50,
             joins_per_min: 10,
             message_ttl: Duration::from_hours(168),
@@ -330,6 +351,8 @@ pub struct GroupSend<'a> {
     pub to: &'a [String],
     /// The message.
     pub msg: &'a NewMessage,
+    /// The envelope's `ct`, in decoded bytes (judged by its length).
+    pub ct_bytes: usize,
 }
 
 /// Outcome of a group-bound send.
@@ -359,6 +382,16 @@ pub enum GroupOutcome {
     },
     /// The commit would exceed the group size limit.
     GroupFull,
+    /// A Welcome names a mailbox that no commit of the sender's added, or
+    /// one that already had its Welcome.
+    NotAwaitingWelcome,
+    /// A Welcome recipient's non-member queue can't take it. Nothing was
+    /// queued; the sender may try again later.
+    QueueFull,
+    /// The sender's stored, undelivered payloads would pass its budget.
+    OverBudget,
+    /// Storage is at or above its high-water mark.
+    StorageFull,
 }
 
 /// Outcome of a direct (non-group) send.
@@ -370,6 +403,10 @@ pub enum DirectOutcome {
     Duplicate,
     /// The recipient's queue would exceed its quota.
     QuotaExceeded,
+    /// The sender's stored, undelivered payloads would pass its budget.
+    OverBudget,
+    /// Storage is at or above its high-water mark.
+    StorageFull,
 }
 
 /// Outcome of registering a group.
@@ -394,6 +431,8 @@ pub struct PurgeStats {
     pub invites: u64,
     /// Expired doors.
     pub doors: u64,
+    /// Added mailboxes whose Welcome never came.
+    pub welcomes_due: u64,
 }
 
 /// The relay's persistent state. All times are unix milliseconds supplied by
@@ -477,6 +516,12 @@ pub trait Store: Send + Sync + 'static {
     /// check, queue for every recipient, (for commits) advance the epoch
     /// and apply the routing hints, and record the group's activity time
     /// (to within [`crate::quota::ACTIVITY_GRANULARITY`]), all atomically.
+    ///
+    /// The payload is stored once and charged to the sender's budget; each
+    /// recipient's queue is charged its full size, in the member bucket if
+    /// the recipient has sent in the group and in the non-member bucket
+    /// otherwise (Welcomes always). A Welcome goes only to mailboxes that a
+    /// commit of the sender's added and that haven't had theirs.
     fn deliver_group(
         &self,
         send: &GroupSend<'_>,
@@ -484,15 +529,20 @@ pub trait Store: Send + Sync + 'static {
         now_ms: u64,
     ) -> impl Future<Output = StoreResult<GroupOutcome>> + Send;
 
-    /// Queue a message for one mailbox (join requests, knocks), idempotent on
-    /// `(sender, msg_id)`.
+    /// Queue a `join_request` or `knock` for one mailbox, in its non-member
+    /// bucket, idempotent on `(sender, msg_id)`. A knock isn't charged to
+    /// the sender's budget.
     fn deliver_direct(
         &self,
+        kind: Kind,
         recipient: &str,
         msg: &NewMessage,
         limits: &Limits,
         now_ms: u64,
     ) -> impl Future<Output = StoreResult<DirectOutcome>> + Send;
+
+    /// Bytes of storage in use, the measure the high-water mark applies to.
+    fn storage_bytes(&self) -> impl Future<Output = StoreResult<u64>> + Send;
 
     /// Unexpired messages for `mailbox` with `seq > after_seq`, oldest first:
     /// at most `limit` of them, and no more than `max_bytes` of stored
@@ -510,7 +560,8 @@ pub trait Store: Send + Sync + 'static {
     /// Remove an acknowledged message from a mailbox.
     fn ack(&self, mailbox: &str, msg_id: &str) -> impl Future<Output = StoreResult<bool>> + Send;
 
-    /// Delete expired rows.
+    /// Delete expired rows, then let the backend reclaim what they used
+    /// (SQLite: a WAL checkpoint).
     fn purge_expired(&self, now_ms: u64) -> impl Future<Output = StoreResult<PurgeStats>> + Send;
 
     /// How many invite rows and groups the store holds.

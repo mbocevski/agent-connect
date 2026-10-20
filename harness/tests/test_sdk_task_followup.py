@@ -110,7 +110,11 @@ async def test_which_replies_name_a_task(cluster: Cluster, sockdir: Path, mode: 
         }
         peer.daemon.send_message(gid, artifact, kind="a2a.task_artifact")
         await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 2, WAIT)
-        bodies = {d.body["parts"][0]["text"]: d.body for d in peer.adapter.deliveries}
+        bodies = {
+            d.body["parts"][0]["text"]: d.body
+            for d in peer.adapter.deliveries
+            if d.kind != "control.capabilities"
+        }
         assert "taskId" not in bodies["re plain"]
         assert bodies["re plain"]["contextId"] == gid
         assert (bodies["re artifact"]["taskId"], bodies["re artifact"]["contextId"]) == (

@@ -640,7 +640,13 @@ async fn ordinary_deliveries_still_count_their_bytes() {
     let size = msg.json.len() as u64;
     h.relay
         .store()
-        .deliver_direct(&mailbox, &msg, h.relay.limits(), h.relay.now_ms())
+        .deliver_direct(
+            agentconnect_relay::proto::Kind::JoinRequest,
+            &mailbox,
+            &msg,
+            h.relay.limits(),
+            h.relay.now_ms(),
+        )
         .await
         .unwrap();
     let mut c = h.client(1).await;

@@ -7,10 +7,11 @@ Three workers run on one event loop:
 * **outbox**: sends queued work in order (group creation, joins,
   application messages, commits, proposals, Welcomes). Rows of one group
   go out in the order they were queued, so local commits are serialised.
-  A row the relay refuses for now (``internal``, a Welcome's
-  ``quota_exceeded``) waits out a backoff and holds up only its own group
-  (``Engine._next_row``); ``rate_limited`` is the mailbox's send budget,
-  shared by every group, so it pauses the whole outbox. Two waits still
+  A row the relay refuses for now (``internal``, ``over_budget``, a
+  Welcome's ``quota_exceeded``) waits out a backoff and holds up only its
+  own group (``Engine._next_row``); ``rate_limited`` (the mailbox's send
+  rate) and ``storage_full`` (the relay's storage) are shared by every
+  group, so they pause the whole outbox. Two waits still
   hold up every group: a commit that lost an epoch conflict waits in its
   row for the winning commit (``Engine._await_epoch``, up to
   ``REBUILD_WAIT_SECS``), and a request the relay doesn't answer waits
@@ -256,8 +257,16 @@ class RateLimitedError(TransientError):
 
 
 MAX_TRANSIENT_RETRIES = 8
+# Relay answers that pause the whole outbox (SPEC 8.4): the mailbox's send
+# rate, and the relay's storage at its high-water mark. Neither counts as a
+# try: the same frame goes again after the shared backoff, however long.
+PAUSE_RELAY_ERRORS = frozenset({"rate_limited", "storage_full"})
+# The sender's budget of undelivered messages (in all, or the group's
+# share): only the row's own lane waits, uncounted, until recipients have
+# fetched enough (SPEC 8.3, "Limits").
+WAIT_RELAY_ERRORS = frozenset({"over_budget"})
 # Relay errors that say "not now" rather than "no" (SPEC 8.4).
-RETRYABLE_RELAY_ERRORS = frozenset({"rate_limited", "internal"})
+RETRYABLE_RELAY_ERRORS = PAUSE_RELAY_ERRORS | WAIT_RELAY_ERRORS | {"internal"}
 # Answers to a Welcome that say "not now": it is sent again, as a knock's is.
 RETRY_WELCOME = RETRYABLE_RELAY_ERRORS | {"quota_exceeded"}
 WELCOME_NOT_SENT = "welcome_not_sent"
@@ -2527,6 +2536,7 @@ class Engine:
             # SPEC §6.3: the invite secret goes once the join succeeded.
             self._defer(lambda: self.keystore.delete(f"join/{invite_id}"))
             await self.emit(group_id, "joined", invite_id=invite_id)
+            await self.send_capabilities(group_id)
             await self._send_card(group_id, ["*"])
             return "done"
 
@@ -3065,8 +3075,10 @@ class Engine:
         ``MAX_COMMIT_ATTEMPTS`` times per run), and not a cadence Update's
         answers, which count toward the Update's own row. The counts start
         again when the daemon does."""
-        if code == "rate_limited":
+        if code in PAUSE_RELAY_ERRORS:
             raise RateLimitedError(group_id, code) from None
+        if code in WAIT_RELAY_ERRORS:
+            raise TransientError(group_id, code) from None
         tries = self._refusals.get(seq, 0) + 1
         if tries >= MAX_COMMIT_ATTEMPTS:
             self._refusals.pop(seq, None)
@@ -3209,9 +3221,13 @@ class Engine:
             await self._request(frame, msg_id)
         except RelayError as e:
             LOG.info("relay_request_failed", t=frame.get("t"), code=e.code)
-            if e.code == "rate_limited":
-                # The mailbox's send budget (group.create, join): not now.
+            if e.code in PAUSE_RELAY_ERRORS:
+                # The mailbox's send rate (group.create, join), or the
+                # relay's storage: not now, for the whole outbox.
                 raise RateLimitedError(None, e.code) from None
+            if e.code in WAIT_RELAY_ERRORS:
+                # The mailbox's budget (a join): this row waits.
+                raise TransientError(None, e.code) from None
             if frame.get("t") == "group.create":
                 group_id = str(frame.get("group_id"))
                 if e.code in RETRYABLE_RELAY_ERRORS:
@@ -3580,7 +3596,7 @@ class Engine:
                     # whole outbox's, for the mailbox's rate_limited), until
                     # the deadline above.
                     LOG.info("welcome_retry", code=e.code)
-                    if e.code == "rate_limited":
+                    if e.code in PAUSE_RELAY_ERRORS:
                         raise RateLimitedError(group.group_id, e.code) from None
                     raise TransientError(group.group_id, e.code) from None
                 LOG.info("welcome_not_sent", code=e.code)
@@ -3642,6 +3658,28 @@ class Engine:
                         }
                     },
                 )
+
+    async def send_capabilities(self, group_id: str) -> None:
+        """SPEC 7.3: right after joining, tell the group what this
+        instance's adapters accept. Whatever the adapters (a webhook or SSE
+        agent has no Agent Card), it is also this instance's first send in
+        the group, and only from then on does the relay count the group's
+        traffic to it as member traffic (SPEC 8.3, "Limits")."""
+        names = self.adapter_names(group_id)
+        accepts: list[str] = []
+        for name in names:
+            for kind in self.adapters[name].capabilities().accepts:
+                if kind not in accepts:
+                    accepts.append(kind)
+        try:
+            self.send_message(
+                group_id,
+                {"adapters": names, "accepts": accepts},
+                kind="control.capabilities",
+                internal=True,
+            )
+        except DaemonError as e:
+            LOG.warning("capabilities_not_sent", code=e.code)
 
     async def _send_card(self, group_id: str, to: list[str]) -> None:
         # The first of the group's adapters that has an Agent Card speaks for it.

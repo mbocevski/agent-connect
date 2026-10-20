@@ -1139,10 +1139,19 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   catching up.
 - **Welcome** (`welcome_wrapped`): the envelope MUST carry `group_id` and
   1 to 50 `to` mailboxes, and the sender MUST be a member of that group
-  (`unknown_group` / `not_member` otherwise). It is delivered to each `to`
-  mailbox. If a mailbox doesn't exist yet, the relay creates it.
+  (`unknown_group` / `not_member` otherwise). Its `ct` is at most 256 KiB
+  once decoded (`too_large`). Every `to` mailbox MUST be one that an
+  accepted commit of the same sender added (`routing.add`), that is still
+  a member and that hasn't had its Welcome yet: one Welcome per Add,
+  within the message TTL (`bad_request` otherwise). It is delivered to
+  each `to` mailbox, or, if one of them can't take it ("Limits"), to none,
+  and refused with `quota_exceeded`; the sender retries. If a mailbox
+  doesn't exist yet, the relay creates it. (Informative: the Welcome that
+  brings a group to 50 members is about 147 KB once every member has
+  committed an update path, the full ratchet tree.)
 - **`join`:** forwarded to the invite's `inviter_mailbox` if the invite is
-  open. It is rate-limited per invite: 10 per minute by default.
+  open. Its `ct` is at most 16 KiB once decoded (`too_large`). It is
+  rate-limited per invite: 10 per minute by default.
 - **Doors and `knock`:** the relay keeps a door registry
   `{door_id → (owner_mailbox, expires_at, open)}`, filled by
   `POST /v0/doors` and closed by `DELETE /v0/doors/{door_id}` (§8.1). A
@@ -1237,7 +1246,16 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
     stop a group (§12), so this adds no attack.
   - A member learns that the group is gone only when it sends to it.
 - **Storage:** messages are stored until acked by the recipient, or for the
-  TTL (7 days), whichever comes first. `msg_id` is idempotent per sender: a
+  TTL (7 days), whichever comes first. When a commit removes a member, the
+  relay drops what is still queued for that mailbox in that group (the
+  removing commit is queued after that), so its unread copies hold nobody's
+  budget. A relay SHOULD store a payload sent to several mailboxes once,
+  and SHOULD overwrite what it deletes (SQLite: `secure_delete` and a
+  periodic truncating WAL checkpoint), so acked or expired ciphertext
+  doesn't stay readable on its disk. Overwriting costs about the size of
+  what is deleted again in writes, so a relay SHOULD delete expired
+  messages in small batches (the reference relay: 16 MiB a transaction)
+  rather than hold its writer for one large delete. `msg_id` is idempotent per sender: a
   duplicate `(sender, msg_id)` returns `accepted` and is not fanned out again,
   and a send that is rejected does not consume its `msg_id`. A different
   sender may reuse the same `msg_id`.
@@ -1246,7 +1264,18 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
     application message (the 1 MiB bucket, §7.1), which is about 1.4 MiB
     once base64url-encoded in an envelope.
   - Group size: 50 instances
-  - Mailbox queue: 64 MiB (overflow below)
+  - Mailbox queue: 64 MiB for **group traffic**, plus a separate 16 MiB
+    for **non-member traffic** (overflow below). Non-member traffic is
+    every Welcome, `join_request` and knock, and the traffic of a group
+    the mailbox was added to but hasn't sent anything in yet: a routing
+    hint can name any mailbox, so until the mailbox sends in the group the
+    relay can't tell a joiner from a stranger's target. Non-member traffic
+    MUST NOT take room from group traffic. Within each part, one group
+    (join requests and knocks together count as one) holds at most half,
+    so neither a stranger nor a co-member can take the whole part from a
+    mailbox's other groups. A member SHOULD send in a group right after
+    joining it (the reference daemon sends `control.capabilities`, §7.3),
+    so its group traffic moves to the group part.
   - Per-mailbox send rate: 50 messages per second
   - New groups: 100 per mailbox per 24 hours, 500 per creation key per
     idle period, 100,000 held in all
@@ -1256,22 +1285,47 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
   - Signed REST requests (§8.1.1): per source address 60 failed and 60
     registrations a minute; 30 a minute per mailbox; 128 live replay-cache
     entries per mailbox and 100,000 in all
-- **Queue overflow:** a fan-out MUST queue the message for every recipient
-  that has room and MUST NOT fail because some recipient is full. The sender
+  - Per-sender budget: 128 MiB of stored, undelivered messages, each
+    payload counted once until its last recipient acks it, is removed
+    from the group, or the message expires; at most half of it in one
+    group (join requests count as one group), so members that never ack
+    in one group can't stop the sender everywhere. Over it, sends are
+    refused with `over_budget`. Knocks are not charged (their own limits
+    apply), so the budget can't tell a knocker whether the owner has
+    acked its knock. Join requests are charged; a joiner can learn, by
+    sizing a send to just past its budget, when the inviter fetched its
+    request, and a member when a group's slowest member fetched its
+    messages (§12).
+  - Storage high-water mark (operator-set): at or above it the relay
+    refuses every new message with `storage_full`; acks and invite, door
+    and group requests go on, and a knock is answered `accepted` and
+    dropped. A commit that adds nobody (an Update, a removal, a policy
+    change) whose `ct` is at most 128 KiB once decoded may still use a
+    reserve of 64 MiB above the mark, charged to the sender's budget as
+    any message, so a group can shed a member and renew its keys while
+    the relay is full. (Informative: an Update in a 50-member group with
+    a sparse tree sends a path secret to every other member, about 67 KB.)
+- **Queue overflow:** a fan-out of group traffic MUST queue the message for
+  every recipient that has room and MUST NOT fail because some recipient
+  is full. The sender
   gets `accepted`, and a commit still advances the epoch. A recipient whose
   queue cannot take the message misses it. The first time that happens the
   relay queues one `queue_overflow` frame for that mailbox, exempt from the
   limit and ordered after the messages it did queue:
   `{"t": "queue_overflow", "group_id", "msg_id", "epoch"}`, where `msg_id` and
-  `epoch` are those of the first dropped message (`epoch` is absent for a
-  Welcome). The relay sends at most one marker per overflow episode. The
-  episode ends when the mailbox has room again, and a later overflow starts a
-  new one. The marker is removed by `ack` of its `msg_id`.
+  `epoch` are those of the first dropped message. An overflow episode is
+  per (mailbox, queue part, group): every group that loses messages gets
+  its own marker, and another group's episode can't use it up. The relay
+  sends at most one marker per episode; the episode ends when that
+  group's share of the part has room again, and a later overflow starts
+  a new one. Markers are exempt from the caps up to a reserve of 256 KiB
+  per part (about 1,700 markers); a drop past that reserve goes
+  unmarked. The marker is removed by `ack` of its `msg_id`.
   A member that receives a marker has missed handshake or application
   messages and MUST NOT assume it is in sync: it SHOULD alert its human and
   re-sync (rejoin with a new invite), and the group's admins SHOULD remove an
   instance that stays unresponsive. A direct send to a full mailbox (a `join`
-  to the inviter) is instead refused with `quota_exceeded`.
+  to the inviter) and a Welcome are instead refused with `quota_exceeded`.
 - **Logging:** the relay MUST NOT log `ct`, and MUST NOT log fragments or
   secrets, nor client addresses. Identifiers in logs SHOULD be replaced
   by a keyed hash under a key the relay draws at random when it starts
@@ -1286,7 +1340,16 @@ The relay keeps, per group: `{current_epoch, members: set(mailbox_id)}`.
 
 `auth_failed`, `epoch_conflict`, `not_member`, `unknown_group`,
 `invite_not_open`, `door_not_open`, `rate_limited`, `too_large`,
-`quota_exceeded`, `bad_request`, `internal`.
+`quota_exceeded`, `storage_full`, `over_budget`, `bad_request`,
+`internal`.
+
+`rate_limited`, `storage_full`, `over_budget` and `internal` say "not
+now": a client sends the same frame again later, after a backoff, and they
+cost it no try. `storage_full` is relay-wide and `rate_limited` is the
+mailbox's, so a client pauses all its sends for them; `over_budget` may be
+one group's share of the budget, so a client holds up only that group.
+`quota_exceeded` is final, except for a Welcome (the recipient's queue
+may drain) and as §4.2 and the creation limits say.
 
 Mapping of the cases above:
 
@@ -1299,10 +1362,13 @@ Mapping of the cases above:
 | `knock` over the per-(door, sender) or per-sender limit (§8.3) | `rate_limited` |
 | `POST /v0/doors` with 4 doors already open for the mailbox | `quota_exceeded` (HTTP 429) |
 | `POST /v0/doors` with a registered (or closed) `door_id`, or an `expires_at` that is past or more than 7 days away | `bad_request` |
-| `knock` whose decoded `ct` is over 16 KiB | `too_large` |
+| `knock` or `join_request` whose decoded `ct` is over 16 KiB; `welcome_wrapped` whose decoded `ct` is over 256 KiB | `too_large` |
 | `knock` envelope inside `send` or `join`; a frame and envelope `door_id` that differ | `bad_request` |
 | Commit that would take a group above 50 instances | `quota_exceeded` |
-| `join` while the inviter's queue is full | `quota_exceeded` |
+| `join` while the inviter's queue is full; a Welcome a recipient's queue can't take | `quota_exceeded` |
+| A sender over its budget, in all or in the group | `over_budget` (HTTP 429) |
+| Any new message at or above the storage high-water mark (but a commit that adds nobody, within the reserve and with a `ct` of at most 128 KiB) | `storage_full` (HTTP 503) |
+| Welcome to a mailbox that no accepted commit of the sender added, that was removed again, or that already had its Welcome | `bad_request` |
 | Send from a non-member; welcome from a non-member | `not_member` |
 | Send to a group that does not exist, or that the relay deleted as idle (§8.3) | `unknown_group` |
 | Envelope `sender` that is not the authenticated mailbox; malformed fields; `group.create` of an existing group | `bad_request` |
@@ -2444,8 +2510,9 @@ Implementations in this repository MUST have:
   to the latest run.
 - **Older peers.** A daemon built to the earlier text ignores the new
   control kinds (§7.2). There is no detection of such a peer.
-  `control.capabilities` (§7.3) isn't sent by current implementations, and
-  v0 has no deployed daemons on the earlier text. A run with an older peer
+  `control.capabilities` (§7.3) is sent once on joining (§8.3, "Limits")
+  and carries no version, and v0 has no deployed daemons on the earlier
+  text. A run with an older peer
   therefore shows as a run that never pairs, with the warning of §11.5.
   A notice such as "the peer's daemon is too old" would also be an excuse
   that an attacker in the middle could trigger at will, by not advertising
@@ -2519,6 +2586,31 @@ defaults) can fill them, reserve included, and until the rows age out nobody
 on that relay can register an invite or a group. That is denial of service,
 which v0 doesn't aim to prevent (below); it costs the attacker one address
 per two rows of the reserve.
+
+**A full relay's storage.** The queue limits, the per-sender budget and
+the storage high-water mark (§8.3, "Limits") bound what one mailbox can
+store, not what many can: mailboxes cost nothing, so about 32 throwaway
+mailboxes at the default budget fill a 4 GiB mark with messages to
+mailboxes that never fetch them. The mark is a switch for the whole
+relay: once it is reached, every member's messages are refused with
+`storage_full` until enough is fetched or expires (up to the 7-day TTL),
+and commits that add nobody use the 64 MiB reserve until that is full
+too. Members keep their messages queued and send them later, so nothing
+is lost, but a group can't add members, and once the reserve is full it
+can't renew its keys either: post-compromise security waits, for an
+Update postponed by the mark, as long as the relay stays full. Knocks are
+bounded by their rates and their owner's queue, not by a budget. An
+operator who offers a relay to the public SHOULD put connection and
+request limits per source address (and DDoS protection) in front of it,
+and size the mark so that the reserve, the WAL and a migration fit the
+free space. Deleting what was stored rewrites it (`secure_delete`), so a
+sender that sends and fetches its own large messages makes the relay
+write about three times what it receives; only the send rate bounds that.
+The budget also tells a sender something: by sizing a send to just past
+its budget it learns when its last recipient fetched a message, for
+example when an inviter fetched its join request. Knocks aren't charged
+for that reason; other traffic is, and this is metadata the relay itself
+sees anyway.
 
 **Dropped messages and queue overflow.** A malicious relay can always drop,
 delay or withhold messages; `queue_overflow` does not prevent that and a

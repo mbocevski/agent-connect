@@ -119,9 +119,10 @@ async def human() -> AsyncIterator[Callable[[Node], Awaitable[Human]]]:
 
 
 async def test_a_flooding_peer_is_rate_limited_reported_and_removed(
-    group: GroupFixture, human: Callable[[Node], Awaitable[Human]]
+    group: GroupFixture, advance: Advance, human: Callable[[Node], Awaitable[Human]]
 ) -> None:
     (owner, flooder), gid = await group(2)
+    await past_the_joins(owner, gid, 1, advance)
     owner.daemon.update_safety(gid, {"sender_per_minute": 5, "violation_threshold": 4})
     ids = [raw_send(flooder, gid, {"text": f"spam {i}"}) for i in range(12)]
     assert await settled(owner, flooder, ids[-1]) == "dropped"
@@ -159,7 +160,7 @@ async def test_an_oversize_message_is_dropped_and_audited_without_its_body(
     rows = [
         r
         for r in a.daemon.store.audit(gid)
-        if r["direction"] == "in" and r["kind"] != "a2a.agent_card"
+        if r["direction"] == "in" and r["kind"] not in ("a2a.agent_card", "control.capabilities")
     ]
     assert [(r["msg_id"], r["decision"], r["reason"]) for r in rows] == [
         (big, "drop", "too_large"),
@@ -490,6 +491,19 @@ async def test_the_safety_api_refuses_bad_requests(
         assert (status, err["code"]) == (404, "not_found")
 
 
+async def past_the_joins(receiver: Node, gid: str, joiners: int, advance: Advance) -> None:
+    """Each joiner's `control.capabilities` (sent on joining) counts against
+    its rate: wait until the receiver has them all, then move past the
+    rate window, so a test's own messages start from an empty one."""
+
+    def announced() -> int:
+        audit = receiver.daemon.store.audit(gid)
+        return sum(1 for r in audit if r["kind"] == "control.capabilities")
+
+    await receiver.wait(lambda: announced() >= joiners)
+    await advance(61)
+
+
 async def replicas_and_receiver(cluster: Cluster, n: int) -> tuple[Node, list[Node], str]:
     """A receiver and ``n`` instances of one other identity, all joined."""
     receiver = await cluster.node("receiver")
@@ -502,6 +516,7 @@ async def replicas_and_receiver(cluster: Cluster, n: int) -> tuple[Node, list[No
         replica = await cluster.node(f"r{i}", identity_of=first)
         await cluster.invite(receiver, replica, gid)
         replicas.append(replica)
+    await past_the_joins(receiver, gid, n, cluster.advance)
     receiver.daemon.update_safety(gid, {"sender_per_minute": 3, "identity_rate_multiple": 2})
     return receiver, replicas, gid
 
