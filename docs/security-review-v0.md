@@ -67,8 +67,8 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 12 | 11 open, follow-up task; SR-61 fixed in #72 |
-| Low | 28 | SR-14 fixed in #74 and #77; the rest open, follow-up task |
+| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; the rest open, follow-up task |
+| Low | 28 | SR-14 fixed in #74 and #77; SR-19 fixed in #71; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
@@ -105,10 +105,9 @@ These must be fixed, or explicitly accepted by the maintainer, before a
 relay is offered to the public:
 
 1. SR-01 (fixed in #67).
-2. SR-02 (one client locks every user out of revoking invites and closing
-   doors).
+2. SR-02 (fixed in #71).
 3. SR-03, SR-04 and SR-07 (disk exhaustion and forced re-syncs by a
-   stranger).
+   stranger; SR-07 fixed in #71).
 4. SR-05, SR-06 and SR-13 (one connection stalls the relay; memory
    exhaustion; no connection caps or timeouts).
 5. SR-14 (trace logs carry `ct` and client addresses, against
@@ -199,8 +198,27 @@ change, so this review doesn't edit it.
   invite, for as long as it refills the cache.
 - **Component:** relay (`relay.rs:297`, `relay.rs:428-452`,
   `rest.rs:85-109`), SPEC §8.1.1.
-- **Status:** open (T-02). The SPEC itself requires the global refusal, so
-  the fix changes §8.1.1.
+- **Status:** fixed in #71. Once a request's signature verifies, its
+  timestamp is checked and its `(mailbox, sig)` pair recorded in one step,
+  at the cache's own forward-only time, and the entry stays whatever the
+  answer, so a refused request can't be replayed to succeed later. Each
+  mailbox has a bounded share (a full
+  share refuses only that mailbox; live entries are never evicted), and
+  the cache as a whole is bounded: past it, requests are served
+  unrecorded, which is harmless because every signed effect is idempotent
+  (SPEC §8.1.1 states it and the relay keeps it, along with the residual
+  of a refused request applied late, bounded by the 600 s window). A clean
+  shutdown records the highest accepted `ts` and the next start refuses
+  only up to it; after a crash the relay refuses requests signed before
+  its start plus 300 s, with `retry_after`, which the runtime waits out
+  and retries once.
+  Requests whose signature fails are limited per address in a bucket of
+  their own that never refuses a verified request, registrations per
+  address, and everything per mailbox; revokes and door closes count only
+  per mailbox. The client address behind a proxy uses a trusted-hop count
+  (the SR-22 fix), reads `ip:port` and RFC 7239 `Forwarded`, and the relay
+  warns once when a forwarded request meets no configuration. The
+  accepted future skew stays 300 s.
 - **Confirmed.**
 
 `REPLAY_CACHE_CAP` is 10,000 entries for the whole relay. An entry lives
@@ -304,7 +322,25 @@ and time out a send that doesn't progress.
   a second from one mailbox.
 - **Component:** relay (`relay.rs:718`, `relay.rs:1009-1069`,
   `sqlite.rs:616-648`), SPEC §8.3 ("the relay never deletes groups").
-- **Status:** open (T-07).
+- **Status:** fixed in #71. Mailboxes are free, so creations are bounded per
+  mailbox, per creation key (an IPv4 address or an IPv6 /48; in memory only,
+  no address is stored) and in all: open invites per mailbox, invite rows
+  held per key and in all, groups per mailbox per day, per key per idle
+  period and in all (`quota_exceeded`), with `/metrics` gauges for the rows
+  held and the caps. So that the global caps aren't a relay-wide lockout,
+  each key gets only its fair share past 75% of a cap, and the last 5% is
+  kept for keys holding fewer than two rows; an attacker with thousands of
+  /48s or IPv4 addresses (2,500 for the reserve alone, at the defaults) can
+  still fill a cap, which SPEC §12 states. `group.create` is idempotent for
+  its creator, and the runtime retries `internal`. The defaults keep the two
+  tables under about 800 MB. SPEC §8.3 has a rule for idle groups: the relay
+  deletes a group with no accepted send for the idle period (plus the hour
+  its activity time is coarse to) and no member connected, writing the time
+  in the send's transaction; existing groups count as used at the upgrade.
+  Members that come back get `unknown_group`, and the runtime marks the
+  group out of sync and tells the human without rejoining; a refused
+  `group.create` marks the group `not_created`, refuses its invites and
+  fails an approved knock waiting on it. Every limit is configurable.
 - **Confirmed.**
 
 `group.create` is limited only by the per-mailbox send rate, and group
@@ -475,7 +511,7 @@ store written the old way.
 | SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Open (T-16) |
 | SR-17 | relay | Join requests have only the 2 MiB frame cap, and the per-invite budget of 10 a minute is shared by anyone who knows the public `invite_id`: junk joins fill the inviter's queue in about 3.5 minutes and use up the real joiner's budget. | `relay.rs:756-827`, `proto.rs:249`. Confirmed. | Open (T-17) |
 | SR-18 | relay | Deleted rows stay in the database file: `secure_delete` is off, so acked ciphertext and expired door mappings remain readable on disk. | `sqlite.rs:59-64`. Probe found acked ciphertext in the file after a checkpoint. Confirmed. | Open (T-18) |
-| SR-19 | relay, web | Invite registration rejects only Cc characters, so bidi controls and zero-width characters in `group_name`, `inviter_name` and `purpose` reach the landing page unaltered (escaped, but reordering what the human reads). The CLI already replaces them. | `relay.rs:374-380`, `landing.rs:29-41`. Probe: U+202E accepted and rendered raw. Confirmed. | Open (T-19) |
+| SR-19 | relay, web | Invite registration rejects only Cc characters, so bidi controls and zero-width characters in `group_name`, `inviter_name` and `purpose` reach the landing page unaltered (escaped, but reordering what the human reads). The CLI already replaces them. | `relay.rs:374-380`, `landing.rs:29-41`. Probe: U+202E accepted and rendered raw. Confirmed. | Fixed in #71: the three fields must be one-line text (SPEC §4.2, §13.1.2). |
 | SR-20 | directory | `/search` and MCP `search_agents` results omit the verbatim signed listing that SPEC §13.2.6 requires in machine-readable results; only `get_card` has it. | `api.rs:24-61`, `http.rs:273-283`, `mcp.rs:93-110`. Confirmed. | Open (T-20) |
 | SR-21 | directory | The client's HTTP method is logged verbatim at info, so any client can write arbitrary text (an address, a name) into the logs. | `http.rs:682`, `http.rs:714`. Probe: `method=ME-203.0.113.9-alice`. Confirmed. | Open (T-21) |
 | SR-22 | directory | The `X-Forwarded-For` walk skips every address in the trusted proxy blocks, so a client behind a shared CDN range that is listed as a proxy picks its own key and bypasses the per-address limits. | `http.rs:618-653`, `ratelimit.rs:179-189`. Confirmed with a trusted loopback peer; the CDN case by reading. | Open (T-22) |
@@ -504,8 +540,8 @@ store written the old way.
 |---|---|---|---|
 | SR-41 | relay | Envelope validation is lenient: `to` is accepted unchecked on `application`, `commit`, `proposal` and `join_request`, and `epoch` and `group_id` on kinds that SPEC §7.1 doesn't give them (`proto.rs:229-258`). Receivers check what they act on. | Open (T-41) |
 | SR-42 | relay, directory | `/metrics` is on the public listener (the relay always, the directory unless `AC_DIRECTORY_METRICS_ADDR` is set). No identifiers and only fixed labels; on a quiet relay the counters can be matched to one user's actions. | Open (T-42) |
-| SR-43 | relay | Group rows and memberships are kept indefinitely, which gives a mailbox social graph over time; `overflow` rows are never purged. SPEC §12 doesn't state the retention. | Open, with SR-07 |
-| SR-44 | relay | The replay check reads the clock twice (`rest.rs:103`, `relay.rs:429`); a request at exactly `ts = now - 300` could be replayed in the microseconds between the reads. | Open (T-44) |
+| SR-43 | relay | Group rows and memberships are kept indefinitely, which gives a mailbox social graph over time; `overflow` rows are never purged. SPEC §12 doesn't state the retention. | Partly fixed in #71: idle groups and their memberships are deleted after 30 days (SPEC §8.3, §12). `overflow` rows are still kept. |
+| SR-44 | relay | The replay check reads the clock twice (`rest.rs:103`, `relay.rs:429`); a request at exactly `ts = now - 300` could be replayed in the microseconds between the reads. | Fixed in #71: the cache checks the timestamp and records the request in one step, at its own forward-only time. |
 | SR-45 | directory | Owner-revocation entries in the withdrawals feed are unsigned JSON written by the directory, so a mirror can't verify them as SPEC §13.2.5 says (`directory.rs:892-906`). Censorship only. | Open (T-45) |
 | SR-46 | directory | Search responses are `Cache-Control: public, max-age=60`, so a CDN in front caches and logs search terms keyed by URL (`http.rs:247`, `http.rs:279`). | Open (T-46) |
 | SR-47 | directory | Each `llms.txt` request parses up to 10,000 cards (`directory.rs:408-434`); CPU amplification on a large directory. | Accepted: availability is a v0 non-goal; the per-address limit bounds it. |
@@ -740,8 +776,8 @@ What it stores, and for how long:
 | Table | Columns | Kept |
 |---|---|---|
 | `invites` | `invite_id`, `group_name`, `inviter_name`, `purpose`, `expires_at`, `max_uses`, `uses_left`, `member_count`, `inviter_mailbox`, `revoked`, `created_at` | `expires_at` + 7 days |
-| `groups` | `group_id`, `epoch`, `created_at` | forever (SR-43) |
-| `group_members` | `group_id`, `mailbox` | until a commit's `routing.remove` names it |
+| `groups` | `group_id`, `epoch`, `created_at`, `active_at` | until idle for 30 days with no member connected (SR-43, fixed in #71) |
+| `group_members` | `group_id`, `mailbox` | until a commit's `routing.remove` names it, or its group is deleted |
 | `messages` | `seq`, `mailbox`, `msg_id`, `size`, `expires_at`, `marker`, `env` (the envelope with `ct`) | until acked, at most 7 days |
 | `seen` | `sender`, `msg_id`, `expires_at` | 7 days |
 | `overflow` | `mailbox` | until the next enqueue that fits |
@@ -799,8 +835,8 @@ cache-control: no-store
   don't send the fragment, and the relay logs no path, User-Agent or
   Referer for `/i/{id}`, even at trace level.
 - Every `InviteMeta` field is escaped (probed with `<script>`, `onerror`
-  and a meta refresh); SR-19 is the remaining text issue, SR-49 the page's
-  wording.
+  and a meta refresh); SR-19 (fixed in #71) was the remaining text issue,
+  SR-49 is the page's wording.
 
 Directory HTML pages:
 
@@ -953,7 +989,7 @@ One line per open item, ready to file.
   choose the code: commit-then-reveal nonces inside the group, with SPEC
   §11, vectors, CLI and daemon changes; state the residual in SPEC §1 and
   §12 until it lands.
-- **T-02 (Medium, SR-02):** Relay: record signed REST requests only after
+- **T-02 (Medium, SR-02):** (done in #71) Relay: record signed REST requests only after
   validation, give each mailbox a bounded share of the replay cache, limit
   per source address, and drop the global refusal from SPEC §8.1.1.
 - **T-03 (Medium, SR-03):** Relay: store each payload once, accept Welcomes
@@ -965,7 +1001,7 @@ One line per open item, ready to file.
   index), index on `(mailbox, msg_id)`, per-connection frame rate limit.
 - **T-06 (Medium, SR-06):** Relay: cap drain batches by bytes, cap
   connections per mailbox and in total, time out stalled sends.
-- **T-07 (Medium, SR-07, SR-43):** Relay: quotas for open invites and new
+- **T-07 (Medium, SR-07, SR-43):** (done in #71) Relay: quotas for open invites and new
   groups per mailbox, REST limits per mailbox and address, and a SPEC rule
   for deleting idle groups and stale memberships.
 - **T-08 (Medium, SR-08):** Daemon: stop sending bearer tokens over
@@ -994,7 +1030,7 @@ One line per open item, ready to file.
   the non-member sub-quota.
 - **T-18 (Low, SR-18):** Relay: `secure_delete` and periodic WAL
   checkpoints.
-- **T-19 (Low, SR-19):** Relay: apply the one-line text rule to
+- **T-19 (Low, SR-19):** (done in #71) Relay: apply the one-line text rule to
   `InviteMeta` strings at registration (SPEC §4.2).
 - **T-20 (Low, SR-20):** Directory: put the verbatim signed listing in
   `/search` and MCP `search_agents` results.
@@ -1042,7 +1078,7 @@ One line per open item, ready to file.
   give the kind.
 - **T-42 (Info, SR-42):** Relay and directory: serve `/metrics` on a
   separate listener by default.
-- **T-44 (Info, SR-44):** Relay: read the clock once per replay check.
+- **T-44 (Info, SR-44):** (done in #71) Relay: read the clock once per replay check.
 - **T-45 (Info, SR-45):** Directory: make owner-revocation feed entries
   verifiable by mirrors, or say in SPEC §13.2.5 that they aren't.
 - **T-46 (Info, SR-46):** Directory: `Cache-Control: private` or

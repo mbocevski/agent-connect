@@ -349,3 +349,53 @@ async def test_rest_maps_transport_and_body_errors(
         with pytest.raises(RelayError) as err:
             await rest.invite_meta(path)
         assert err.value.code == code
+
+
+async def test_rest_signs_again_once_when_a_restarted_relay_says_when(
+    rng: random.Random, fake_clock: FakeClock
+) -> None:
+    # A relay that just restarted answers rate_limited with retry_after
+    # (SPEC 8.1.1): the request is signed again once, after that wait.
+    inst = instance(rng)
+    seen: list[httpx.Request] = []
+    refusals = [{"code": "rate_limited", "detail": "restarted", "retry_after": 7}]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if refusals:
+            return httpx.Response(429, json=refusals.pop())
+        return httpx.Response(204)
+
+    rest = RelayRest(
+        "http://relay.test/", "relay.test", inst, fake_clock, httpx.MockTransport(handle)
+    )
+    task = asyncio.ensure_future(rest.revoke_invite("i"))
+    for _ in range(100):
+        if fake_clock.sleepers:
+            break
+        await asyncio.sleep(0)
+    assert len(seen) == 1
+    fake_clock.advance(7)
+    await asyncio.wait_for(task, 5)
+    assert len(seen) == 2
+    stamps = [int(r.headers["authorization"].split(" ")[1].split(".")[1]) for r in seen]
+    assert stamps[1] > stamps[0]
+
+    # Only once, only for that hint, and never for a long one.
+    for refusal in (
+        [{"code": "rate_limited", "detail": "x", "retry_after": 1}] * 2,
+        [{"code": "rate_limited", "detail": "a mailbox's rate"}],
+        [{"code": "rate_limited", "detail": "x", "retry_after": 3600}],
+        [{"code": "quota_exceeded", "detail": "x", "retry_after": 1}],
+    ):
+        refusals[:] = refusal
+        task = asyncio.ensure_future(rest.revoke_invite("i"))
+        for _ in range(50):
+            if task.done():
+                break
+            if fake_clock.sleepers:
+                fake_clock.advance(1)
+            await asyncio.sleep(0)
+        with pytest.raises(RelayError) as err:
+            await asyncio.wait_for(task, 5)
+        assert err.value.code == refusal[0]["code"]

@@ -1324,6 +1324,49 @@ class Engine:
         self.store.update_group(group_id, out_of_sync=True, out_of_sync_reason=reason)
         await self.emit(group_id, "out_of_sync", reason=reason, **data)
 
+    async def on_group_refused(self, group_id: str, code: str) -> None:
+        """The relay refused a send to a group this instance is in.
+
+        - ``unknown_group``: the relay doesn't hold the group. It deleted it
+          after the idle period, or never registered it (SPEC 8.3, "Idle
+          groups"). It can't be resumed there, so the group goes out of sync
+          and the human hears of it. Nothing rejoins or re-creates it: the
+          humans start a new group.
+        - ``not_member``: the relay's group doesn't have this instance,
+          though the MLS group does. Someone registered the id again after
+          the relay deleted the group, or the relay misbehaves (or a commit
+          removing this instance is still on its way). The human hears of
+          it, once per epoch; the group stays as it is."""
+        group = self.store.group(group_id)
+        if group is None or group.status != "active" or group.out_of_sync:
+            return
+        if code == "unknown_group":
+            LOG.warning("group_unknown_at_relay", group=log.hid(group_id))
+            await self.mark_out_of_sync(group_id, "unknown_group")
+        elif code == "not_member":
+            LOG.warning("not_member_at_relay", group=log.hid(group_id))
+            await self.emit(
+                group_id,
+                "relay_misbehaviour",
+                cause=f"not_member/{group_id}/{group.epoch}",
+                reason="not_member",
+            )
+
+    async def on_group_create_refused(self, group_id: str, code: str) -> None:
+        """The relay refused to register a group this instance created
+        (``quota_exceeded`` at its limits, or any other definitive refusal).
+        The group exists only here:
+        it goes out of sync with reason ``not_created`` and the refusal's
+        code, which tells the human, and takes no invites. It is not
+        reported as a group the relay deleted. (``rate_limited`` and
+        ``internal`` are tried again first; a repeat the relay already took
+        is answered ``accepted``.)"""
+        group = self.store.group(group_id)
+        if group is None or group.out_of_sync:
+            return
+        LOG.warning("group_not_created", group=log.hid(group_id), code=code)
+        await self.mark_out_of_sync(group_id, "not_created", code=code)
+
     # -- group state ----------------------------------------------------------
 
     def _refresh(self, group_id: str) -> None:
@@ -3169,6 +3212,18 @@ class Engine:
             if e.code == "rate_limited":
                 # The mailbox's send budget (group.create, join): not now.
                 raise RateLimitedError(None, e.code) from None
+            if frame.get("t") == "group.create":
+                group_id = str(frame.get("group_id"))
+                if e.code in RETRYABLE_RELAY_ERRORS:
+                    # Not now (`internal`): the same frame again after a
+                    # backoff, until the row's tries run out. A repeat the
+                    # relay already took is answered `accepted` (SPEC 8.3).
+                    self._refused_for_now(row.seq, group_id, e.code)
+                await self.on_group_create_refused(group_id, e.code)
+            env = frame.get("env")
+            if isinstance(env, dict) and isinstance(env.get("group_id"), str):
+                # A group-bound send queued as a frame (a leave proposal).
+                await self.on_group_refused(env["group_id"], e.code)
             if frame.get("t") == "join":
                 invite_id = str(frame.get("invite_id"))
                 self.store.finish_join(invite_id, "failed")
@@ -3258,6 +3313,7 @@ class Engine:
                     return "failed"
                 LOG.info("send_failed", code=e.code)
                 self._fail_codes[row.seq] = e.code
+                await self.on_group_refused(group.group_id, e.code)
                 return "failed"
             self.store.bump_messages(group.group_id)
             if payload.get("floor"):
@@ -3328,6 +3384,9 @@ class Engine:
             current = self.store.group(group.group_id)
             if current is None or current.status != "active" or current.out_of_sync:
                 self._fail_codes[row.seq] = "out_of_sync"
+                # An approval waiting on this Add fails now, not never.
+                reason = None if current is None else current.out_of_sync_reason
+                self._fail_intent(intent, reason or "out_of_sync")
                 return "failed"
             if "env" not in payload and not self._build_commit(row, group, payload):
                 return "failed"
@@ -3359,6 +3418,7 @@ class Engine:
                         LOG.info("commit_rejected", code=e.code)
                         self._fail_codes[row.seq] = e.code
                         self._fail_intent(intent, e.code)
+                        await self.on_group_refused(group.group_id, e.code)
                         return "failed"
                     LOG.info("epoch_conflict", group=log.hid(group.group_id))
                     # In the row: every lane waits, usually only until the
@@ -3678,6 +3738,12 @@ class Engine:
                 msg = "that is this instance: pin the replica's, which `identity import` printed"
                 raise DaemonError("bad_request", msg)
         group = self._group_or_raise(group_id)
+        if group.out_of_sync:
+            # Its commits can't land, so no one could join through it.
+            raise DaemonError(
+                "out_of_sync",
+                f"the group is out of sync ({group.out_of_sync_reason}): start a new group",
+            )
         policy = group.policy
         allowed = {
             "owner": {policy.get("owner")},

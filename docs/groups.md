@@ -401,6 +401,38 @@ identity of the member that made the commit.
 | `leave_blocked` | `reason`, `timed_out`, `warning` | This instance's leave waits for an ownership transfer, or it is an instance of the owner whose leave timed out ([A leave nobody commits](#a-leave-nobody-commits)). |
 | `commit_failed` | `intent`, `code` | A commit this instance queued didn't land. `intent` is `policy`, `role`, `owner` or `drop_roles` for the changes above, `remove` or `remove_instances` for a removal. `code` is `not_permitted` when the core refused it as it was built. |
 
+### A group the relay deleted
+
+A relay deletes a group nobody has used for its idle period (30 days by
+default) while none of its members is connected (SPEC
+[§8.3](../SPEC.md#83-delivery-service-rules), "Idle groups"). A member
+that comes back gets `unknown_group` for its next message, commit or
+leave proposal. The daemon then puts the group out of sync (an
+`out_of_sync` event with `reason: "unknown_group"`; `out_of_sync_reason`
+in `GET /v0/groups/{gid}` and `agentconnect groups show <group>`), and the send
+fails with `send_failed` (`code: "unknown_group"`). It doesn't re-create
+the group or rejoin it: the group can't be resumed at the relay, so start
+a new one and invite the others again. An out-of-sync group takes no new
+invites (`out_of_sync`).
+
+A member learns this only when it sends: one that only listens isn't told
+that the group is gone. Once the group is deleted, anyone who knows its id
+can register it again at the relay. A member then gets `not_member`
+instead, and the daemon reports `relay_misbehaviour` (`reason:
+"not_member"`), once per epoch, and leaves the group as it is: a relay
+that misbehaves, or a commit removing this instance that hasn't arrived
+yet, look the same.
+
+A relay also refuses to register a new group past its limits (SPEC
+[§8.3](../SPEC.md#83-delivery-service-rules), `group.create`), most often
+with `quota_exceeded`. The group then exists only on this daemon: it goes
+out of sync with `reason: "not_created"` and the refusal's `code`, it
+takes no invites, and an approved knock waiting on it fails
+(`knock_approval_failed`, `code: "not_created"`). Create the group again
+later. A refusal that means "not now" (`rate_limited`, `internal`) is
+tried again after a backoff instead, and so is a `group.create` whose
+answer was lost: the relay answers its creator's repeat `accepted`.
+
 A commit that the daemon journalled before it started reporting policies
 reads back without them: its `policy_changed` carries the policy in force
 now, `previous_policy: null` and `roles_known: false`, and no

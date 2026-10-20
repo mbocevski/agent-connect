@@ -209,6 +209,35 @@ pub enum CreateDoorOutcome {
     TooMany,
 }
 
+/// Outcome of registering an invite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateInviteOutcome {
+    /// Registered.
+    Created,
+    /// An invite with that id exists.
+    Exists,
+    /// The inviter already holds the maximum number of open invites.
+    TooMany,
+}
+
+/// Rows the store holds, for the relay's global caps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveCounts {
+    /// Invite rows, open or not yet purged.
+    pub invites: u64,
+    /// Groups.
+    pub groups: u64,
+}
+
+/// A group the idle sweep may delete: no accepted send since the cutoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleGroup {
+    /// The group.
+    pub group_id: String,
+    /// Its member mailboxes, sorted.
+    pub members: Vec<String>,
+}
+
 /// Outcome of closing a door.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseDoorOutcome {
@@ -350,6 +379,8 @@ pub enum CreateGroupOutcome {
     Created,
     /// A group with that id already exists.
     Exists,
+    /// The caller registered that id already: a repeat.
+    Yours,
 }
 
 /// Rows removed by [`Store::purge_expired`].
@@ -368,12 +399,15 @@ pub struct PurgeStats {
 /// The relay's persistent state. All times are unix milliseconds supplied by
 /// the caller's `Clock`.
 pub trait Store: Send + Sync + 'static {
-    /// Insert an invite. Returns false if the id already exists.
+    /// Insert an invite unless its id exists or `invite.inviter_mailbox`
+    /// already holds `max_open` open invites (not revoked, expired or used
+    /// up), atomically.
     fn create_invite(
         &self,
         invite: &InviteRecord,
+        max_open: usize,
         now_ms: u64,
-    ) -> impl Future<Output = StoreResult<bool>> + Send;
+    ) -> impl Future<Output = StoreResult<CreateInviteOutcome>> + Send;
 
     /// Fetch an invite.
     fn get_invite(
@@ -418,7 +452,14 @@ pub trait Store: Send + Sync + 'static {
         caller: &str,
     ) -> impl Future<Output = StoreResult<CloseDoorOutcome>> + Send;
 
-    /// Register a group at epoch 0 with `creator` as its only member.
+    /// The mailbox that registered a group, if the store knows it.
+    fn group_creator(
+        &self,
+        group_id: &str,
+    ) -> impl Future<Output = StoreResult<Option<String>>> + Send;
+
+    /// Register a group at epoch 0 with `creator` as its only member, and
+    /// record `creator` with it. A repeat by the same creator is `Yours`.
     fn create_group(
         &self,
         group_id: &str,
@@ -433,8 +474,9 @@ pub trait Store: Send + Sync + 'static {
     ) -> impl Future<Output = StoreResult<Option<GroupState>>> + Send;
 
     /// Apply the Delivery Service rules (SPEC §8.3) to a group-bound send:
-    /// check, queue for every recipient and (for commits) advance the epoch
-    /// and apply the routing hints, all atomically.
+    /// check, queue for every recipient, (for commits) advance the epoch
+    /// and apply the routing hints, and record the group's activity time
+    /// (to within [`crate::quota::ACTIVITY_GRANULARITY`]), all atomically.
     fn deliver_group(
         &self,
         send: &GroupSend<'_>,
@@ -466,4 +508,24 @@ pub trait Store: Send + Sync + 'static {
 
     /// Delete expired rows.
     fn purge_expired(&self, now_ms: u64) -> impl Future<Output = StoreResult<PurgeStats>> + Send;
+
+    /// How many invite rows and groups the store holds.
+    fn live_counts(&self) -> impl Future<Output = StoreResult<LiveCounts>> + Send;
+
+    /// Up to `limit` groups created and last used at or before `cutoff_ms`,
+    /// ordered by id and after `after` (keyset paging), with their members.
+    fn idle_groups(
+        &self,
+        cutoff_ms: u64,
+        after: &str,
+        limit: u32,
+    ) -> impl Future<Output = StoreResult<Vec<IdleGroup>>> + Send;
+
+    /// Delete a group and its memberships if it is still idle at
+    /// `cutoff_ms`. Returns whether it was deleted.
+    fn delete_idle_group(
+        &self,
+        group_id: &str,
+        cutoff_ms: u64,
+    ) -> impl Future<Output = StoreResult<bool>> + Send;
 }

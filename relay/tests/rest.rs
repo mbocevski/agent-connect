@@ -235,54 +235,6 @@ async fn a_replayed_signed_request_is_refused_but_a_fresh_one_is_not() {
 }
 
 #[tokio::test]
-async fn replay_entries_expire_with_the_accepted_window() {
-    use agentconnect_relay::auth::RestCredentials;
-    let h = Harness::start().await;
-    let creds = RestCredentials {
-        mailbox: mailbox_of(&signing_key(1)),
-        sig: "sig".into(),
-        ts: h.now_secs(),
-    };
-    assert!(h.relay.check_replay(&creds).is_ok());
-    h.clock.advance(Duration::from_secs(300));
-    assert!(
-        h.relay.check_replay(&creds).is_err(),
-        "still inside the window"
-    );
-    h.clock.advance(Duration::from_secs(1));
-    assert!(
-        h.relay.check_replay(&creds).is_ok(),
-        "entry expired with the window"
-    );
-}
-
-#[tokio::test]
-async fn the_replay_cache_is_bounded_and_never_evicts_live_entries() {
-    let h = Harness::with_replay_cap(2).await;
-    let key = signing_key(1);
-    let get_invite_del = |n: u64| {
-        let path = format!("/v0/invites/{}", fresh_id());
-        signed_request(&key, "DELETE", &path, b"", h.now_secs() + n, HOST)
-    };
-    // Both are well-formed signed requests; the invites do not exist (404),
-    // but each one occupies a cache slot.
-    assert_eq!(call(&h, get_invite_del(0)).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(call(&h, get_invite_del(1)).await.0, StatusCode::NOT_FOUND);
-    let (status, err) = call(&h, get_invite_del(2)).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(err["code"], "rate_limited");
-    // The first two are still protected from replay at the cap.
-    let first = {
-        let path = "/v0/invites/x".to_owned();
-        signed_request(&key, "DELETE", &path, b"", h.ts(), HOST)
-    };
-    assert_eq!(call(&h, first).await.0, StatusCode::TOO_MANY_REQUESTS);
-    // Once the window has passed the expired entries make room.
-    h.clock.advance(Duration::from_secs(400));
-    assert_eq!(call(&h, get_invite_del(0)).await.0, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
 async fn healthz_and_metrics() {
     let h = Harness::start().await;
     let (status, body) = call(&h, Request::get("/healthz").body(Body::empty()).unwrap()).await;

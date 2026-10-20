@@ -1,10 +1,13 @@
 //! WebSocket endpoint `/v0/ws` (SPEC §8.2).
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::Extension;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 
 use crate::auth::{random_bytes, verify_ws_auth};
@@ -25,11 +28,15 @@ const HARD_MAX_MESSAGE: usize = 2 * DEFAULT_FRAME_MAX;
 /// Upgrade handler.
 pub async fn ws_handler<S: Store>(
     State(relay): State<Arc<Relay<S>>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // For `group.create`'s per-address limit (SPEC §8.3); never logged.
+    let ip = relay.client_ip(peer.map(|c| c.0.0.ip()), &headers);
     ws.max_message_size(HARD_MAX_MESSAGE)
         .max_frame_size(HARD_MAX_MESSAGE)
-        .on_upgrade(move |socket| session(relay, socket))
+        .on_upgrade(move |socket| session(relay, socket, ip))
 }
 
 async fn send_frame(socket: &mut WebSocket, frame: &ServerFrame) -> bool {
@@ -114,7 +121,7 @@ async fn flush<S: Store>(
     }
 }
 
-async fn session<S: Store>(relay: Arc<Relay<S>>, mut socket: WebSocket) {
+async fn session<S: Store>(relay: Arc<Relay<S>>, mut socket: WebSocket, ip: Option<IpAddr>) {
     relay.metrics().connection();
     // Held until the session future ends or is dropped, on any path.
     let _open = relay.metrics().ws_open();
@@ -150,7 +157,7 @@ async fn session<S: Store>(relay: Arc<Relay<S>>, mut socket: WebSocket) {
                 let reply = match incoming {
                     Some(Ok(Message::Text(text))) => {
                         match parse_client_frame(text.as_str(), relay.limits().frame_max) {
-                            Ok(frame) => relay.handle(&mailbox, frame).await,
+                            Ok(frame) => relay.handle_from(&mailbox, ip, frame).await,
                             Err((code, detail)) => {
                                 Some(relay.error_frame(None, RelayError::new(code, detail)))
                             }

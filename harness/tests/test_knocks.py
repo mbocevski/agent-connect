@@ -733,3 +733,24 @@ async def test_a_welcome_refused_for_now_goes_once_after_a_restart(
     assert len(tried) == 3  # once before the restart, once after, then taken
     assert len(set(tried)) == 1
     assert bob.adapter.texts(gid) == ["one", "two", "three", "four"]
+
+
+async def test_an_approval_whose_group_the_relay_refused_fails_and_tells_the_human(
+    cluster: Cluster, directory: DirectoryProcess, rng: random.Random
+) -> None:
+    # Review probe H1, for a knock: the approval's group.create is refused
+    # (quota_exceeded). The approval fails, the human hears why, and the
+    # knocker gets nothing.
+    owner, ref = await listed(cluster, directory, rng)
+    k = await knocker(cluster, directory)
+    sent = await k.runtime.agent.knock(ref)
+    (request,) = await pending(owner)
+    owner.proxy.fail_next("group.create", "quota_exceeded")
+    kid = owner.daemon.approve(request["request_id"])["group_id"]
+    await owner.wait(lambda: bool(events(owner, "knock_approval_failed")))
+    await owner.idle()
+    (failed,) = events(owner, "knock_approval_failed")
+    assert failed["data"]["code"] == "not_created"
+    assert owner.daemon.store.group(kid) is None
+    await k.idle()
+    assert knock_event(k, "joined", str(sent["knock_id"])) is None

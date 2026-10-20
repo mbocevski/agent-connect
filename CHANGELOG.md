@@ -1259,6 +1259,79 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   merged its own removal still held the previous epoch's. Deleting a group
   now deletes every OpenMLS row keyed by it, and opening a store deletes the
   key pairs that earlier versions left for groups that no longer exist.
+- Relay: one client could fill the relay's single 10,000-entry cache of
+  signed REST requests (requests that ended in `bad_request` took a slot
+  too), after which every user got `rate_limited` when registering or
+  revoking an invite or opening or closing a door. Now, once a request's
+  signature verifies, its timestamp is checked and its `(mailbox,
+  signature)` pair recorded in one step, before anything else, and it
+  stays whatever the answer, so a refused request can't be replayed to
+  succeed later. Each
+  mailbox has its own share of the cache (128 live entries,
+  `AC_RELAY_REPLAY_PER_MAILBOX`), and a full share refuses only that
+  mailbox; live entries are never evicted. The cache as a whole holds
+  100,000 entries (`AC_RELAY_REPLAY_MAX_ENTRIES`); past that, requests are
+  served unrecorded, and within its window a captured one could be acted
+  on twice (which changes no row: every signed effect is idempotent) or
+  late after a refusal. On a clean shutdown (`SIGTERM` or Ctrl-C) the
+  relay writes the highest timestamp it let through next to the database,
+  and the next start refuses only signed requests up to it; after a crash
+  it refuses those from before its start plus 300 s. Both refusals carry
+  `retry_after` (and `Retry-After`), and the runtime waits that long and
+  signs once more, so registering or revoking an invite and opening or
+  closing a door take longer after a restart instead of failing. Requests
+  whose signature fails are limited per source
+  address in a bucket of their own (60 a minute,
+  `AC_RELAY_REST_JUNK_PER_ADDRESS_PER_MIN`) that never refuses a verified
+  request; registrations are limited per address (60 a minute,
+  `AC_RELAY_REST_PER_ADDRESS_PER_MIN`), and every signed request per
+  mailbox (30 a minute, `AC_RELAY_REST_PER_MAILBOX_PER_MIN`). Revokes and
+  door closes count only per mailbox. Behind a reverse proxy,
+  `AC_RELAY_CLIENT_IP_HEADER` (`x-forwarded-for` or `forwarded`),
+  `AC_RELAY_TRUSTED_PROXIES` and `AC_RELAY_PROXY_HOPS` make the limits
+  count clients rather than the proxy; the client is the entry the hop
+  count names from the right, so entries a client writes itself are never
+  used, and the relay warns once when a request is forwarded and nothing
+  is configured (relay/README.md). SPEC §8.1.1 drops the global refusal
+  and states what the cache guarantees and when.
+- Relay: invites and groups could be created without limit, and groups
+  were never deleted, so a client could fill the relay's disk. Mailboxes
+  are free, so creations are now limited per mailbox, per creation key
+  (an IPv4 address or an IPv6 /48) and in all: 50 open invites per
+  mailbox, 500 invite rows held per key and 100,000 in all
+  (`AC_RELAY_OPEN_INVITES_PER_MAILBOX`, `AC_RELAY_INVITES_PER_ADDRESS`,
+  `AC_RELAY_MAX_INVITES`); 100 groups per mailbox in 24 hours, 500 per key
+  within the idle period and 100,000 in all
+  (`AC_RELAY_GROUPS_PER_MAILBOX_PER_DAY`, `AC_RELAY_GROUPS_PER_ADDRESS`,
+  `AC_RELAY_MAX_GROUPS`). So that a full relay doesn't lock everyone out,
+  past 75% of a cap each key gets only its fair share of what is left, and
+  the last 5% is kept for keys holding fewer than two rows. Past any limit
+  the answer is `quota_exceeded`. Per-key counts are in memory only; the
+  relay stores no address. `group.create` from the mailbox that created
+  the group already (its reply was lost) is answered `accepted`. `/metrics` shows the invite rows and groups
+  held and their caps. Once an hour the relay deletes the groups that had
+  no accepted send for 30 days and an hour (`AC_RELAY_GROUP_IDLE_DAYS`, 8
+  to 36500) and none of whose members is connected; the time of the last
+  send is written with it. A database from before this version counts
+  every group as used at the upgrade. A member that comes back gets
+  `unknown_group` (SPEC §8.3, "Idle groups"). `/metrics` counts the
+  deletions (`agentconnect_relay_idle_groups_deleted_total`).
+- Runtime: a group the relay no longer holds (`unknown_group`, for a
+  message, a commit or a leave proposal) goes out of sync with that reason
+  and the send fails, so the human hears of it; the runtime doesn't
+  re-create the group or rejoin it. A `group.create` the relay refused
+  (`quota_exceeded` at its limits) was dropped silently and the group
+  later looked deleted: `rate_limited` and `internal` are now tried again
+  after a backoff, and for any other refusal the group goes
+  out of sync with reason `not_created` and the refusal's code, an
+  approved knock waiting on it fails, and an out-of-sync group takes no
+  invites. `not_member` for a group this instance is in raises
+  `relay_misbehaviour` (`reason: "not_member"`) once per epoch.
+- Relay: invite registration refused only control characters, so bidi
+  controls and zero-width characters in `group_name`, `inviter_name` and
+  `purpose` reached the landing page and reordered what the human read.
+  All three must now be one-line text (SPEC §4.2, §13.1.2), else
+  `bad_request`.
 - A2A adapter: deliveries were deduplicated by `msg_id` alone, so a member
   that sent a message under another member's `msg_id` first made the
   adapter skip the other member's message as a redelivery. They are now

@@ -206,7 +206,10 @@ code = [
     "relay/src/config.rs",
     "relay/src/landing.rs",
     "relay/src/proto.rs",
+    "relay/src/quota.rs",
     "relay/src/relay.rs",
+    "relay/src/replay.rs",
+    "relay/src/restart.rs",
     "relay/src/rest.rs",
     "relay/src/ws.rs",
 ]
