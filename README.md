@@ -242,7 +242,9 @@ allow` would also take pre-releases of every dependency. The Python SDK is
 It needs Python 3.12 or later. The native part, `agentconnect-core`, has
 wheels for Linux x86_64 and arm64 (manylinux 2.28) and macOS arm64 and
 x86_64; anywhere else pip and uv build it from the source distribution,
-which needs a Rust toolchain. Windows is not supported.
+which needs a Rust toolchain. On Intel Macs one dependency, `cryptography`,
+has no wheel either, so the install builds it too, which needs a Rust
+toolchain and OpenSSL. Windows is not supported.
 
 There is no built-in relay: `relay.url` is required. To use the public
 relay, set it in `~/.config/agentconnect/config.toml`
