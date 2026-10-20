@@ -11,15 +11,23 @@ import pytest
 from agentconnect.clock import FakeClock
 from agentconnect.limits import (
     GROUP_PER_MINUTE,
+    MAX_DEPTH,
     MAX_MESSAGE_BYTES,
+    MAX_RECIPIENT_LEN,
+    MAX_RECIPIENTS,
     MAX_TASK_ID,
     SENDER_PER_MINUTE,
     TASK_PER_MINUTE,
+    U32_MAX,
     DrainBudget,
     Limits,
     RateLimiter,
     content_problem,
+    inner_problem,
+    parse_inner,
     part_kind,
+    too_deep,
+    valid_hop,
 )
 
 
@@ -71,6 +79,68 @@ def inner(kind: str, body: Any) -> dict[str, Any]:
 )
 def test_content_problems(message: dict[str, Any], size: int, problem: str | None) -> None:
     assert content_problem(message, size) == problem
+
+
+def deep(levels: int) -> Any:
+    """``levels`` nested arrays and objects, alternating."""
+    value: Any = 0
+    for n in range(levels):
+        value = [value] if n % 2 else {"a": value}
+    return value
+
+
+def test_depth_is_measured_without_recursing() -> None:
+    assert not too_deep(1, 0)
+    assert not too_deep(deep(MAX_DEPTH))
+    assert too_deep(deep(MAX_DEPTH + 1))
+    assert too_deep({"a": 1, "b": deep(MAX_DEPTH)})
+    # Far past the interpreter's recursion limit.
+    assert too_deep(deep(100_000))
+
+
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [(0, True), (U32_MAX, True), (U32_MAX + 1, False), (-1, False), (True, False), ("1", False)],
+)
+def test_hop_is_a_u32(value: Any, ok: bool) -> None:
+    assert valid_hop(value) is ok
+
+
+def test_parse_inner_refuses_what_is_too_deep_or_not_an_object() -> None:
+    assert parse_inner(json.dumps({"kind": "a2a.message"})) == {"kind": "a2a.message"}
+    assert parse_inner(b"[]") is None
+    assert parse_inner(b"{") is None
+    assert parse_inner(json.dumps({"body": deep(MAX_DEPTH)})) is None
+    depth = 200_000  # past what the JSON parser recurses to
+    assert parse_inner("[" * depth + "]" * depth) is None
+
+
+@pytest.mark.parametrize(
+    ("fields", "problem"),
+    [
+        ({}, None),
+        ({"hop": U32_MAX, "to": ["*"], "addressee": ["ac:v0:x"]}, None),
+        ({"hop": U32_MAX + 1}, "malformed"),
+        ({"hop": None}, "malformed"),
+        ({"to": ["x"] * MAX_RECIPIENTS}, None),
+        ({"to": ["x"] * (MAX_RECIPIENTS + 1)}, "malformed"),
+        ({"to": ["x" * MAX_RECIPIENT_LEN]}, None),
+        ({"to": ["x" * (MAX_RECIPIENT_LEN + 1)]}, "malformed"),
+        ({"to": [1]}, "malformed"),
+        ({"to": "*"}, "malformed"),
+        ({"addressee": ["x"] * MAX_RECIPIENTS}, None),
+        ({"addressee": ["x"] * (MAX_RECIPIENTS + 1)}, "malformed"),
+        ({"addressee": ["x" * (MAX_RECIPIENT_LEN + 1)]}, "malformed"),
+        # SPEC 9.3: another shape triggers nobody, and isn't malformed.
+        ({"addressee": "x"}, None),
+        ({"addressee": [1]}, None),
+        ({"body": {"parts": [{"data": deep(MAX_DEPTH)}]}}, "malformed"),
+    ],
+)
+def test_inner_bounds(fields: dict[str, Any], problem: str | None) -> None:
+    message = {"kind": "a2a.message", "body": {"parts": [{"text": "x"}]}} | fields
+    assert inner_problem(message) == problem
+    assert content_problem(message, 10) == problem
 
 
 def test_rates_per_sender_and_group(fake_clock: FakeClock) -> None:

@@ -347,8 +347,12 @@ context.
 
 The runtime's safety policy has already dropped what breaks the group's
 limits, and holds messages for your human when the group asks for approval,
-so your handler only sees what passed. [safety.md](safety.md) covers the
-policy and how to build an agent that stays safe when its peers don't.
+so your handler only sees what passed: in particular no message nested more
+than 64 levels deep, so walking `msg.data` can't exhaust the stack. A
+message that fails in the runtime's own handling never reaches your handler
+and never holds up the ones after it; the human hears of it
+(`message_failed`). [safety.md](safety.md) covers the policy and how to
+build an agent that stays safe when its peers don't.
 
 ## Delivery semantics
 

@@ -90,9 +90,18 @@ HOLD_OUTCOMES = frozenset({"approved", "rejected", "cancelled", "expired"})
 # Refusals that say a sender tried what it may not, rather than sent too
 # much: a human's or the owner's control, a control or card from an agent,
 # content smuggled into a control, card or cancel, a part the group doesn't
-# allow, a card that fails its pinned key.
+# allow, a card that fails its pinned key, and a message that failed in this
+# daemon's own handling (it fails alone, and may be an attack).
 SECURITY_DROPS = frozenset(
-    {"not_human", "not_owner", "not_for_agents", "malformed", "part_kind", "bad_signature"}
+    {
+        "not_human",
+        "not_owner",
+        "not_for_agents",
+        "malformed",
+        "part_kind",
+        "bad_signature",
+        "processing_failed",
+    }
 )
 
 

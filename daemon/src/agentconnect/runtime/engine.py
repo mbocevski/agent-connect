@@ -80,7 +80,11 @@ from agentconnect.limits import (
     KNOWN_KINDS,
     MAX_TASK_ID,
     TASK_UPDATE_KINDS,
+    U32_MAX,
     DrainBudget,
+    inner_problem,
+    parse_inner,
+    valid_hop,
 )
 from agentconnect.policy import (
     HUMAN_ONLY_KINDS,
@@ -183,6 +187,7 @@ HUMAN_EVENTS = (
             "message_held",
             "held_expired",
             "repeated_violations",
+            "message_failed",
             "invite_flooded",
             "join_ledger_full",
         }
@@ -349,6 +354,19 @@ def _refs(inner: dict[str, Any]) -> list[str]:
     return [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)] if isinstance(refs, list) else []
 
 
+def _transient(e: BaseException) -> bool:
+    """Whether a failure handling a frame may pass if the same frame is
+    tried again: an injected or flagged transient failure, a lost
+    connection, or a core or storage failure of the transient kind. Any
+    other failure would repeat on every try, so the message fails alone
+    (``Engine._fail_message``)."""
+    if isinstance(e, TransientError | FailpointError | OSError | TimeoutError):
+        return True
+    if isinstance(e, ac.AgentConnectError | ac.CoreError):
+        return _core_error(e) == "transient"
+    return False
+
+
 KNOCK_REQUEST_PREFIX = "kn-"  # knock request ids, 19 characters (agentconnect.runtime.knocks)
 ENVELOPE_KINDS = frozenset(
     {"commit", "proposal", "application", "welcome_wrapped", "join_request", "knock"}
@@ -481,21 +499,16 @@ def _same_relay(a: str, b: str) -> bool:
 
 def _ceremony_inner(event: dict[str, Any]) -> dict[str, Any] | None:
     """The inner message of a received SAS ceremony message (SPEC 11.2)."""
-    try:
-        inner = json.loads(event["plaintext"])
-    except (ValueError, KeyError, TypeError):
-        return None
-    return inner if isinstance(inner, dict) and inner.get("kind") in SAS_KINDS else None
+    plaintext = event.get("plaintext")
+    inner = parse_inner(plaintext) if isinstance(plaintext, bytes | str) else None
+    return inner if inner is not None and inner.get("kind") in SAS_KINDS else None
 
 
 def _floor_inner(event: dict[str, Any]) -> dict[str, Any] | None:
     """A received application event's inner message if it is a
     ``control.floor``."""
-    try:
-        inner = json.loads(event["plaintext"])
-    except ValueError:
-        return None
-    return inner if isinstance(inner, dict) and inner.get("kind") == "control.floor" else None
+    inner = parse_inner(event["plaintext"])
+    return inner if inner is not None and inner.get("kind") == "control.floor" else None
 
 
 def _max_turns(policy: dict[str, Any]) -> int:
@@ -1457,17 +1470,24 @@ class Engine:
             for attempt in range(1, MAX_TRANSIENT_RETRIES + 1):
                 try:
                     await self._handle_frame(frame)
-                except TransientFailure as e:
+                except Exception as e:
+                    if not _transient(e):
+                        # It would fail the same way every time: it fails
+                        # alone, and the frames after it go on (SPEC 7.2).
+                        await self._fail_frame(frame, e)
+                        backoff.reset()
+                        break
                     # Nothing was acked: retry the same frame, in order. If
                     # the core already processed it, the retry gets the
                     # journalled result back (ADR-004), and the inbox's
                     # (sender, msg_id) dedup means its effects are recorded
                     # once: a retry can't process or deliver a message twice.
-                    group_id, reason = (
-                        (e.group_id, e.reason)
-                        if isinstance(e, TransientError)
-                        else (None, "failpoint")
-                    )
+                    if isinstance(e, TransientError):
+                        group_id, reason = e.group_id, e.reason
+                    elif isinstance(e, FailpointError):
+                        group_id, reason = None, "failpoint"
+                    else:
+                        group_id, reason = None, type(e).__name__
                     LOG.warning("inbound_transient", reason=reason, attempt=attempt)
                     if attempt < MAX_TRANSIENT_RETRIES:
                         await self._sleep(backoff.next())
@@ -1478,8 +1498,6 @@ class Engine:
                     self._caught_up, self._gave_up = 0, self.link.connections
                     await self.emit(group_id, "processing_failed", reason=reason)
                     await self.link.kick()
-                except Exception:
-                    LOG.exception("inbound_failed", t=frame.get("t"))
                 backoff.reset()
                 break
             self._pulse()
@@ -1704,6 +1722,116 @@ class Engine:
             # commits are harmless and don't count.)
             await self.mark_out_of_sync(group_id, "commit_rejected", error=reason)
 
+    async def _fail_frame(self, frame: dict[str, Any], error: Exception) -> None:
+        """A frame whose handling failed for a reason that would repeat
+        (:func:`_transient` says no): its message fails alone
+        (:meth:`_fail_message`), its journal entry is consumed and the relay
+        is acked, so the frames after it go on and it is never retried. If
+        even that fails, the frame stays unacked, as before."""
+        env = frame.get("env") if frame.get("t") == "deliver" else None
+        if (
+            not isinstance(env, dict)
+            or not isinstance(env.get("sender"), str)
+            or not isinstance(env.get("msg_id"), str)
+        ):
+            LOG.error("inbound_failed", t=frame.get("t"), exc_info=error)
+            return
+        try:
+            key = journal_key(str(env["sender"]), str(env["msg_id"]))
+            event = next(
+                (e["event"] for e in self.client.journal_pending() if e["key"] == key), None
+            )
+            state = await self._fail_message(env, error, event)
+            self._settle_recorded(env)
+            await self._ack_recorded(
+                str(env["sender"]), str(env["msg_id"]), env.get("group_id"), state
+            )
+        except Exception:
+            LOG.exception("inbound_failed", t=frame.get("t"))
+
+    async def _fail_message(
+        self, env: dict[str, Any], error: Exception, event: dict[str, Any] | None = None
+    ) -> str:
+        """Record a message that failed in this daemon's own handling, for a
+        reason that would repeat on every try (SPEC 7.2, "fails alone"): the
+        inbox marks it failed, so a redelivery is only acked; the audit log
+        gets a ``drop`` row with reason ``processing_failed``; the human gets
+        ``message_failed``. A commit the core merged is in the cached view
+        (the caller refreshed it from the core), though the events it would
+        have raised are lost; a removal of this instance the daemon couldn't
+        finish leaves the group out of sync. The loop guard
+        still decides on the message's hop (SPEC 10.3). Returns the inbox
+        state. The caller consumes the journal entry and acks the relay.
+
+        ``event`` is the core's result for the message, when it has one: the
+        sender's identity and the inner kind come from it, else the sender
+        is its mailbox and the kind the envelope's."""
+        sender, msg_id = str(env["sender"]), str(env["msg_id"])
+        state = self.store.inbox_state(sender, msg_id)
+        if state is not None:
+            return state
+        group_id = env.get("group_id") if isinstance(env.get("group_id"), str) else None
+        group = None if group_id is None else self.store.group(group_id)
+        etype = event.get("type") if isinstance(event, dict) else None
+        identity, kind, size = f"mailbox:{sender}", str(env.get("kind")), len(str(env.get("ct")))
+        inner = None
+        if etype == "application" and isinstance(event, dict):
+            identity = str(event["sender"]["identity"])
+            size = len(event["plaintext"])
+            inner = parse_inner(event["plaintext"])
+            raw_kind = None if inner is None else inner.get("kind")
+            kind = raw_kind if raw_kind in KNOWN_KINDS else "unknown"
+        reason = type(error).__name__
+        LOG.error("message_failed", group=log.hid(group_id), kind=kind, exc_info=error)
+        cause = journal_key(sender, msg_id) + "/failed"
+
+        async def failed() -> str:
+            self.store.record_inbox(sender, msg_id, group_id, "failed", self.now())
+            self.safety.audit(
+                group_id or "",
+                "in",
+                sender=identity,
+                msg_id=msg_id,
+                kind=kind,
+                size=size,
+                decision=Verdict.DROP,
+                reason="processing_failed",
+            )
+            if group is not None and group.status == "active":
+                if etype == "removed" and not group.out_of_sync:
+                    # The core has let the group go; the daemon still has it.
+                    await self.mark_out_of_sync(group.group_id, "commit_failed")
+                if inner is not None and inner.get("origin") != "human":
+                    await self._guard_failed(group, msg_id, identity, inner)
+            await self.emit(
+                group_id,
+                "message_failed",
+                cause=cause,
+                sender=identity,
+                msg_id=msg_id,
+                message_kind=kind,
+                reason=reason,
+            )
+            return "failed"
+
+        with self._causing(cause):
+            return await self._apply("poison", failed)
+
+    async def _guard_failed(
+        self, group: GroupRow, msg_id: str, identity: str, inner: dict[str, Any]
+    ) -> None:
+        """SPEC 10.3 for a message that failed: the pause is decided on its
+        hop alone, as for any other. A failure here is logged, so it can't
+        keep the message from failing alone."""
+        try:
+            if inner_problem(inner) is not None:
+                return
+            hop = self._received_hop(group.group_id, inner)
+            if hop > _max_turns(group.policy):
+                await self._loop_guard(group, msg_id, identity, hop)
+        except Exception:
+            LOG.exception("loop_guard_failed", group=log.hid(group.group_id))
+
     async def _on_group_message(self, group: GroupRow, env: dict[str, Any]) -> None:
         group_id, sender, msg_id = group.group_id, str(env["sender"]), str(env["msg_id"])
         gid = unb64(group_id)
@@ -1787,13 +1915,15 @@ class Engine:
                         state = await self._apply(
                             path, lambda: self._effects(group, env, event, from_relay=from_relay)
                         )
-                except Exception:
-                    # The effects rolled back and the entry stays pending (it
-                    # is finished on the next replay), but the cached view
-                    # must follow the core now: local decisions use it.
+                except Exception as e:
+                    # The effects rolled back, but the cached view must
+                    # follow the core now: local decisions use it.
                     with contextlib.suppress(Exception):
                         self._refresh(group_id)
-                    raise
+                    if _transient(e):
+                        raise  # the entry stays pending: retried, or replayed
+                    # It would fail the same way on every retry and replay.
+                    state = await self._fail_message(env, e, event)
         with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
             self.client.journal_consume(journal_key(sender, msg_id), unb64(group_id))
         self.failpoints.hit(f"{path}.after_consume")
@@ -1928,17 +2058,36 @@ class Engine:
         for entry in self.client.journal_pending():
             try:
                 await self._replay_entry(entry)
-            except TransientFailure:
-                raise  # the inbound worker retries the replay after a backoff
             except Exception as err:
+                if _transient(err):
+                    raise  # the inbound worker retries the replay after a backoff
                 # One entry that fails for good must not stop the others, nor
-                # the renotify after them. It stays pending: the next replay,
-                # on the next start or reconnect, tries it once more.
-                LOG.warning(
-                    "journal_replay_failed",
-                    error=type(err).__name__,
-                    entry=log.hid(str(entry.get("key"))),
-                )
+                # the renotify after them, nor come back on every replay: it
+                # fails alone.
+                await self._fail_entry(entry, err)
+
+    async def _fail_entry(self, entry: dict[str, Any], error: Exception) -> None:
+        """A journal entry whose replay failed for a reason that would
+        repeat: its message fails alone (:meth:`_fail_message`) and the entry
+        is consumed. If even that fails, it stays pending, as before."""
+        try:
+            ctx = json.loads(entry["context"])
+            env = ctx.get("env") if isinstance(ctx, dict) else None
+            if (
+                isinstance(env, dict)
+                and isinstance(env.get("sender"), str)
+                and isinstance(env.get("msg_id"), str)
+            ):
+                await self._fail_message(env, error, None if entry["welcome"] else entry["event"])
+            self.client.journal_consume(
+                str(entry["key"]), None if entry["welcome"] else entry["group_id"]
+            )
+        except Exception as err:
+            LOG.warning(
+                "journal_replay_failed",
+                error=type(err).__name__,
+                entry=log.hid(str(entry.get("key"))),
+            )
 
     async def _replay_entry(self, entry: dict[str, Any]) -> None:
         """Finish one pending journal entry (:meth:`_replay_journal`)."""
@@ -1982,7 +2131,8 @@ class Engine:
     def _received_hop(self, group_id: str, inner: dict[str, Any]) -> int:
         """The SPEC 10.3 hop of a received message: what it claims, and at
         least one more than any message it replies to that we know (SPEC
-        7.2), whatever the sender claims."""
+        7.2), whatever the sender claims; never past a u32. ``hop`` is
+        checked first (:func:`inner_problem`)."""
         raw_hop = inner.get("hop")
         hop = raw_hop if isinstance(raw_hop, int) and not isinstance(raw_hop, bool) else 0
         hop = max(hop, 0)
@@ -1993,7 +2143,7 @@ class Engine:
             )
             if known:
                 hop = max(hop, max(known) + 1)
-        return hop
+        return min(hop, U32_MAX)
 
     def _granting(
         self, group_id: str, identity: str, instance: str, inner: dict[str, Any]
@@ -2082,14 +2232,22 @@ class Engine:
         """Apply the safety policy to a received application message. Returns
         the delivery to record (``None`` if dropped), the decision and the
         message kind."""
-        try:
-            inner = json.loads(event["plaintext"])
-        except ValueError:
-            return None, drop("malformed"), "", None
-        if not isinstance(inner, dict) or not isinstance(inner.get("kind"), str):
+        # SPEC 7.2: nesting, hop, to and addressee are bounded before anything
+        # else reads the message, so no step after can fail on its shape.
+        inner = parse_inner(event["plaintext"])
+        if inner is None or not isinstance(inner.get("kind"), str):
             return None, drop("malformed"), "", None
         # The kind is peer text: record only the ones the protocol defines.
         kind = str(inner["kind"]) if inner["kind"] in KNOWN_KINDS else "unknown"
+        if inner_problem(inner) is not None:
+            # SPEC 10.3 still decides on the hop alone, unless the hop itself
+            # is what is malformed.
+            guard = (
+                self._received_hop(group.group_id, inner)
+                if valid_hop(inner.get("hop", 0)) and inner.get("origin") != "human"
+                else None
+            )
+            return None, drop("malformed"), kind, guard
         sender = event["sender"]
         identity = sender["identity"]
         policy = group.policy
@@ -2197,7 +2355,8 @@ class Engine:
                 str(state),
                 terminal=state in TERMINAL_STATES,
             )
-        body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
+        raw_body = inner.get("body")
+        body: dict[str, Any] = raw_body if isinstance(raw_body, dict) else {}
         # Controls, cards and cancels reach adapters in their schema's shape
         # only: unknown fields stripped, card text capped (agentconnect.schemas).
         shaped = normalize(inner["kind"], body)
@@ -2236,7 +2395,7 @@ class Engine:
 
     def _reply_hop(self, group_id: str, reply_to: list[str] | None) -> tuple[int, list[str]]:
         """``hop`` for an agent message: one more than the largest ``hop`` of
-        the messages it replies to.
+        the messages it replies to, at most 2^32 - 1 (SPEC 7.2: a u32).
 
         "Replies to" is the received messages named in ``reply_to`` (their
         ``msg_id``s) when the agent says; otherwise the last message that
@@ -2248,12 +2407,12 @@ class Engine:
         refs: list[str] = [str(r) for r in (reply_to or [])][:MAX_REPLY_TO]
         hops = self.store.inbox_hops(group_id, refs)
         if hops:
-            return int(max(hops)) + 1, refs
+            return min(int(max(hops)) + 1, U32_MAX), refs
         last = self.store.kv_get(f"trigger_msg/{group_id}") or ""
         hop = int(self.store.kv_get(f"trigger_hop/{group_id}") or "0") + 1
         if not refs and last != "":
             refs = [last]
-        return hop, refs
+        return min(hop, U32_MAX), refs
 
     def _record_task_links(
         self, group: GroupRow, msg_id: str, kind: str, inner: dict[str, Any], refs: list[str]

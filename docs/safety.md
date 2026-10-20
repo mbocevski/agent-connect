@@ -33,7 +33,18 @@ that silence a rule for every implementation. A dropped send fails with an
 error your agent sees.
 
 The decision is recorded with the message, in one place in the daemon, and
-adapters only receive what was recorded as delivered. Adapters can only send
+adapters only receive what was recorded as delivered.
+
+A message the daemon fails to handle for a reason that would come back on
+every try (a bug, or input the checks below didn't foresee) fails alone,
+as SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext)
+requires: it is dropped and acked at the relay, the audit log gets a
+`drop` row with reason `processing_failed`, and your human gets a
+`message_failed` event (`sender`, `msg_id`, `message_kind` and `reason`,
+the error's type). The sender is the identity, or `mailbox:<id>` if the
+message failed before the daemon knew who sent it. The messages after it go on, and it is never tried
+again. A failure that may pass (storage, a lost connection) is retried
+instead, after a backoff. Adapters can only send
 through the daemon. Neither direction has a path around the policy.
 
 The policy is part of the AgentConnect runtime, so it is the same code
@@ -44,7 +55,14 @@ agent's data directory.
 
 What the policy checks, in order:
 
-1. **Content.** The kind must be one the protocol defines. The message must
+1. **Content.** First the shape every message must have, whatever its
+   kind (SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext)):
+   at most 64 levels of nested objects and arrays, a `hop` from 0 to
+   2^32 − 1, a `to` of at most 50 strings and an `addressee` of at most 50
+   entries, none longer than 128 characters. Anything else is `malformed`
+   and counts as a violation, so one message can't make the daemon, the
+   SDK or your agent recurse without end or walk a huge recipient list.
+   The kind must be one the protocol defines. The message must
    fit `max_message_bytes` (256 KiB by default). Each A2A part has exactly
    one content member (`text`, `data`, or a file as `file`, `raw` or
    `url`), an optional `kind` that names it, and otherwise only
@@ -356,7 +374,7 @@ When a message is held, the daemon records a `message_held` event with its
 metadata (who, which kind, its size, when the hold expires), never its
 content, in the same transaction as the hold, so a crash can't lose it.
 The policy's events (`message_held`, `held_expired`,
-`repeated_violations`) are for the human: they are not passed to the
+`repeated_violations`, `message_failed`) are for the human: they are not passed to the
 agent's adapter, and `GET /v0/events` leaves them out for the agent token
 (`agentconnect events` uses the human token). An agent that heard of a hold
 could tell the sender, which SPEC [§10.2](../SPEC.md#102-limits) forbids.
@@ -500,7 +518,7 @@ classes that never push each other out:
 
 | Class | Rows |
 |---|---|
-| security | in a group: what reached the agent or left it with content (delivered messages and task status and artifact updates, a changed Agent Card's text), holds and how they ended (the human's approvals, rejections and cancellations, and expiries), and refusals of what a sender may not do: `not_human`, `not_owner`, `not_for_agents`, `malformed` (content smuggled into a control, card or cancel), `part_kind` and `bad_signature`. For a knock, the human's approval or rejection |
+| security | in a group: what reached the agent or left it with content (delivered messages and task status and artifact updates, a changed Agent Card's text), holds and how they ended (the human's approvals, rejections and cancellations, and expiries), and refusals of what a sender may not do: `not_human`, `not_owner`, `not_for_agents`, `malformed` (content smuggled into a control, card or cancel, or a message past the bounds above), `part_kind`, `bad_signature` and `processing_failed`. For a knock, the human's approval or rejection |
 | decisions | delivered controls that change state (`control.close`, `control.pause`, `control.resume`, `control.floor`) and task cancels; a knock's hold and its expiry |
 | routine | the other deliveries, which carry no content and change nothing: an unchanged Agent Card, `control.leave`, `control.capabilities` |
 | drops | every other refusal: over a rate or a size, a full held queue, a task waiting for your decision, a join request or a knock refused, and so on |

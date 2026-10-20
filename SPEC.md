@@ -824,7 +824,7 @@ Inner = {
   "seq": <u64, per-instance monotonic>,
   "sender": "ac:v0:…",
   "instance_id": "...",
-  "to": ["*"] | ["ac:v0:…", ...],
+  "to": ["*"] | ["ac:v0:…", ...],  // at most 50
   "hop": <u32, see §10.3>,
   "reply_to": ["<msg_id>", ...],   // optional, at most 16, see §10.3
   "addressee": ["ac:v0:…", ...],   // optional, 1 to 50, see §9.3
@@ -836,6 +836,23 @@ Inner = {
 
 - `sender` and `instance_id` MUST match the MLS sender leaf's credential and
   instance certificate. Receivers MUST drop the message if they don't.
+- **Bounds.** `hop` is an integer from 0 to 2^32 − 1. The inner message
+  nests objects and arrays at most 64 levels deep, the inner object itself
+  being the first. `to` is a list of at most 50 strings, `addressee` lists
+  at most 50 entries (§9.3), and no entry of either is longer than 128
+  characters. A receiver MUST treat a message outside these bounds as
+  malformed and drop it, whatever its `kind`. They keep one message from
+  costing the receiver more than its size, and honest traffic stays far
+  inside them: a group has at most 50 members, an identity is 49
+  characters, and the inner message and A2A objects around a part's
+  `data` take at most six levels.
+- **A message fails alone.** A receiver that can't process a message for a
+  reason that would repeat on every try (anything but a transient failure
+  of its own, such as storage or a lost connection) MUST NOT let it hold up
+  the messages after it, and MUST NOT retry it without end: it drops the
+  message, acks it at the relay (§8.2), and SHOULD tell its human. The
+  reference daemon records it as failed, audits it with reason
+  `processing_failed` and raises `message_failed` for the human.
 - `body` for the `a2a.*` kinds is the corresponding **A2A v1.0** object:
   `Message`, `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`,
   `CancelTaskRequest` (`a2a.task_cancel`) or `AgentCard`. The A2A
@@ -1629,7 +1646,8 @@ is triggered (§12).
 identities. In `free` and `mention` mode, a message with `addressee`
 triggers exactly the members it lists, whatever `to` and `origin` say
 (§9.4 then applies to their instances). An `addressee` that isn't a list
-of identity strings triggers nobody. In `moderated` mode the table above
+of identity strings triggers nobody; one longer than 50 entries makes the
+message malformed (§7.2). In `moderated` mode the table above
 applies and `addressee` is ignored. Task replies (§7.2) use it: every
 member sees the task's progress, and only the requester is triggered.
 
@@ -1813,13 +1831,15 @@ reference daemon raises `send_failed`).
 ### 10.3 Loop guard
 
 - `hop` is 0 on human-originated messages.
-- An agent's reply carries `max(hop of the message it replies to) + 1`, and
+- An agent's reply carries `max(hop of the message it replies to) + 1`, at
+  most 2^32 − 1 (§7.2), and
   names those messages' `msg_id`s in `reply_to` (§7.2). When the agent
   doesn't say what it replies to, it replies to the last message that
   triggered its instance in the group (a fresh agent message has hop 1).
 - A receiver that knows any message named in `reply_to` (because it sent
   or received it) MUST treat the message's `hop` as at least one more than
-  the largest of their hops for the loop guard, whatever `hop` says.
+  the largest of their hops (at most 2^32 − 1) for the loop guard, whatever
+  `hop` says.
 - The guard sends at most one `control.pause{reason: "loop_guard"}` per
   episode, until a `control.resume`.
 - If a member receives `hop > loop_guard.max_agent_turns`, it MUST NOT trigger

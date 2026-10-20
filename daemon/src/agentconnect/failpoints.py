@@ -43,6 +43,8 @@ Action = Literal["raise", "crash"]
 #: inviter's record of a verified JoinRequest (replay ledger, approval, inbox).
 #: Leaves: ``leave_timeout.in_tx`` and ``leave_timeout.after_tx`` around a
 #: timed-out leave's deletion of the group and its ``left`` event.
+#: A message that fails alone: ``poison.in_tx`` and ``poison.after_tx``
+#: around recording it as failed (inbox, audit row, ``message_failed``).
 PATHS = ("receive", "confirm", "welcome", "knock_welcome")
 STEPS = ("before_core", "after_core", "in_tx", "after_tx", "after_consume")
 POINTS = frozenset(
@@ -55,6 +57,7 @@ POINTS = frozenset(
     | {"knock_approve.after_group", "knock_add.after_welcome"}
     | {"join_request.in_tx", "join_request.after_tx"}
     | {"leave_timeout.in_tx", "leave_timeout.after_tx"}
+    | {"poison.in_tx", "poison.after_tx"}
 )
 
 

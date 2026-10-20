@@ -41,6 +41,10 @@ GROUP_TASK_PER_MINUTE = 1200  # task updates from the whole group: 4 x TASK_PER_
 MAX_KEYS = 50_000  # rate windows tracked at most (least recently used go first)
 SWEEP_FLOOR = 256  # sweep emptied windows once more than this many are tracked
 MAX_TASK_ID = 256  # longer taskIds get no task budget
+U32_MAX = 2**32 - 1  # SPEC 7.2: `hop` is a u32
+MAX_DEPTH = 64  # SPEC 7.2: nesting of the inner message, itself the first level
+MAX_RECIPIENTS = 50  # SPEC 7.2: entries in `to` and `addressee` (the group size)
+MAX_RECIPIENT_LEN = 128  # characters in one entry (an identity has 49)
 DEFAULT_MAX_FILE_BYTES = 64 * 1024
 TASK_UPDATE_KINDS = frozenset({"a2a.task_status", "a2a.task_artifact"})
 WINDOW_SECS = 60.0
@@ -119,6 +123,73 @@ def _parts_of(kind: str, body: dict[str, Any]) -> list[Any]:
     return []
 
 
+def too_deep(value: Any, limit: int = MAX_DEPTH) -> bool:
+    """Whether ``value`` nests objects and arrays more than ``limit`` levels
+    (``value`` itself, if it is one, is the first). Iterative, so it can't
+    run out of stack on what it measures."""
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def parse_inner(plaintext: bytes | str) -> dict[str, Any] | None:
+    """A received inner message (SPEC 7.2): a JSON object nested at most
+    :data:`MAX_DEPTH` levels, else ``None``. JSON too deep for the parser
+    itself is ``None`` too, never an error."""
+    try:
+        inner = json.loads(plaintext)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(inner, dict) or too_deep(inner):
+        return None
+    return inner
+
+
+def valid_hop(value: Any) -> bool:
+    """Whether ``value`` is a SPEC 7.2 ``hop``: an integer from 0 to 2^32 - 1."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= U32_MAX
+
+
+def _recipients_ok(value: Any) -> bool:
+    return isinstance(value, list) and len(value) <= MAX_RECIPIENTS
+
+
+def inner_problem(inner: dict[str, Any]) -> str | None:
+    """``malformed`` if ``inner`` breaks the SPEC 7.2 bounds that keep one
+    message from costing the receiver more than its size: nesting past
+    :data:`MAX_DEPTH`, a ``hop`` outside a u32, a ``to`` that isn't a list of
+    at most :data:`MAX_RECIPIENTS` strings of at most
+    :data:`MAX_RECIPIENT_LEN` characters, or an ``addressee`` list longer than
+    that or with a longer string. (Any other ``addressee`` shape triggers
+    nobody, SPEC 9.3.)"""
+    if not valid_hop(inner.get("hop", 0)):
+        return "malformed"
+    to = inner.get("to", ["*"])
+    if not _recipients_ok(to) or not all(
+        isinstance(r, str) and len(r) <= MAX_RECIPIENT_LEN for r in to
+    ):
+        return "malformed"
+    addressee = inner.get("addressee")
+    if isinstance(addressee, list) and (
+        not _recipients_ok(addressee)
+        or any(isinstance(r, str) and len(r) > MAX_RECIPIENT_LEN for r in addressee)
+    ):
+        return "malformed"
+    if too_deep(inner):
+        return "malformed"
+    return None
+
+
 def _part_size(part: Any) -> int:
     return len(json.dumps(part, sort_keys=True, separators=(",", ":")).encode())
 
@@ -128,13 +199,16 @@ def content_problem(  # noqa: PLR0911
 ) -> str | None:
     """Why ``inner`` (``size`` bytes of canonical JSON) breaks §10.2/§7.2
     under ``limits``: ``unknown_kind``, ``too_large``, ``malformed`` (not
-    an object, or a control, card or cancel outside its strict schema,
-    :mod:`agentconnect.schemas`), ``part_kind`` or ``file_too_large``."""
+    an object, past the bounds of :func:`inner_problem`, or a control, card
+    or cancel outside its strict schema, :mod:`agentconnect.schemas`),
+    ``part_kind`` or ``file_too_large``."""
     kind = inner.get("kind")
     if kind not in KNOWN_KINDS:
         return "unknown_kind"
     if size > limits.max_message_bytes:
         return "too_large"
+    if inner_problem(inner) is not None:
+        return "malformed"
     body = inner.get("body")
     if not isinstance(body, dict) or not schema_ok(str(kind), body):
         return "malformed"

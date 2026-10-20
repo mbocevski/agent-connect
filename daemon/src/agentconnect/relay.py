@@ -187,7 +187,7 @@ class RelayLink:
     async def _dispatch(self, raw: str | bytes) -> None:
         try:
             frame = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):  # nested too deep for the parser
             LOG.warning("relay_frame_unparsable")
             return
         if not isinstance(frame, dict):

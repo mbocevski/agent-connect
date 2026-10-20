@@ -141,7 +141,7 @@ approved one of your agent's held sends and it goes out now (`data`:
 `msg_id`, `hold_id`); `send_failed` says a send won't go out (`msg_id`,
 `code`, and `hold_id` for a held one: `rejected`, `expired`, `cancelled`,
 `group_gone`). The safety policy's own events (`message_held`,
-`held_expired`, `repeated_violations`) are the human's and never reach the
+`held_expired`, `repeated_violations`, `message_failed`) are the human's and never reach the
 webhook or the stream ([safety.md](../safety.md#approvals)); so is
 `invite_flooded` and `join_ledger_full` ([safety.md](../safety.md#knocks)).
 `group` is `null` for an event about no group. `data` can contain text chosen

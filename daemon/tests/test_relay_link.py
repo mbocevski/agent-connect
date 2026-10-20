@@ -93,6 +93,21 @@ class Watch:
         await asyncio.wait_for(loop(), 5)
 
 
+async def test_a_frame_nested_too_deep_to_parse_is_dropped(rng: random.Random) -> None:
+    """JSON past the parser's own recursion limit is an unparsable frame,
+    not an error that ends the link (SR-11)."""
+    frames: list[dict[str, Any]] = []
+
+    async def on_frame(frame: dict[str, Any]) -> None:
+        frames.append(frame)
+
+    link = RelayLink("ws://127.0.0.1:1", "relay.test", instance(rng), FakeClock(), on_frame)
+    depth = 200_000
+    await link._dispatch("[" * depth + "]" * depth)
+    await link._dispatch(json.dumps({"t": "deliver", "env": {}}))
+    assert [f["t"] for f in frames] == ["deliver"]
+
+
 async def test_link_authenticates_routes_replies_and_reconnects(  # noqa: PLR0915
     fake_relay: FakeRelay, rng: random.Random, fake_clock: FakeClock
 ) -> None:

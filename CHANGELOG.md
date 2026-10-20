@@ -1372,6 +1372,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   follow-up after a restart continues the task. An agent's task update sent
   without `reply_to` names its task's request. The SDK's `reply_status`
   and `reply_artifact` answers to one message are about one task.
+- Daemon: one authenticated peer message could wedge a receiver's inbound
+  handling (SR-11 and SR-54, `docs/security-review-v0.md`). A `hop` of
+  2^63 or more overflowed, and a `data` part nested 2,000 levels deep
+  recursed past Python's limit; either left the message unacked at the
+  relay and its journal entry pending, kept the receiver from catching up,
+  blocked its leave timeouts and told nobody. Every inner message is now
+  bounded (SPEC §7.2): a `hop` from 0 to 2^32 − 1, at most 64 levels of
+  nesting, and a `to` and an `addressee` of at most 50 entries of at most
+  128 characters; anything else is `malformed`, dropped and counted against
+  the sender, and replies never carry a `hop` past 2^32 − 1. A message
+  that fails in the daemon's own handling for any other reason that would
+  repeat now fails alone: it is recorded as failed, its journal entry is
+  consumed, the relay is acked, the audit log gets a `drop` row with reason
+  `processing_failed` (a security row) and the human gets a
+  `message_failed` event (human token only). Storage errors and lost
+  connections are still retried. The relay link drops a frame nested too
+  deep to parse instead of failing on it. The core's JSON parsers already
+  stopped at 128 levels; a regression test now holds them to it.
 - Directory: at `RUST_LOG=trace`, `axum::serve` logged client addresses,
   since the log filter held back only the MCP library. Crates other than
   the directory's own are now held at `warn` (the MCP library at `error`)
