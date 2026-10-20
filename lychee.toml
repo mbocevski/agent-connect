@@ -15,4 +15,7 @@ exclude = [
     "^https?://(127\\.0\\.0\\.1|localhost)",
     "relay\\.example\\.org",
     "relay\\.agentconnect\\.dev",
+    # Times out from CI runners now and then (three tries, 20 s each); the
+    # link is a tool's home page, not something the docs depend on.
+    "^https://asciinema\\.org",
 ]
