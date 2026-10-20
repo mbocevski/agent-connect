@@ -174,6 +174,16 @@ async def test_task_replies(
     await group.reply_status(make_message(make_payload), TaskState.FAILED)
     assert daemon.last_body()["body"]["taskId"] != ""
 
+    # Answers to one message without a taskId are about one task: the
+    # requester grants one task per request (SPEC 9.3).
+    plain = make_message(make_payload, msg_id="m6")
+    await group.reply_status(plain, TaskState.WORKING)
+    status_task = daemon.last_body()["body"]["taskId"]
+    await group.reply_artifact(plain, "result")
+    assert daemon.last_body()["body"]["taskId"] == status_task
+    await group.reply_status(make_message(make_payload, msg_id="m7"), TaskState.WORKING)
+    assert daemon.last_body()["body"]["taskId"] != status_task
+
     await group.reply_artifact(msg, "the plan", name="plan", last_chunk=False, append=True)
     sent = daemon.last_body()
     assert sent["kind"] == "a2a.task_artifact"

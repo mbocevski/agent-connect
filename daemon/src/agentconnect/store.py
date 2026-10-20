@@ -283,14 +283,44 @@ CREATE TABLE IF NOT EXISTS hops (
     at INTEGER NOT NULL,
     PRIMARY KEY (group_id, msg_id)
 );
-CREATE TABLE IF NOT EXISTS own_requests (
+CREATE TABLE IF NOT EXISTS task_requests (
     group_id TEXT NOT NULL,
     msg_id TEXT NOT NULL,
     task_id TEXT,
-    asked TEXT,
+    asked TEXT NOT NULL,
+    instance TEXT,
     at INTEGER NOT NULL,
     PRIMARY KEY (group_id, msg_id)
 );
+CREATE INDEX IF NOT EXISTS task_requests_at ON task_requests (at);
+CREATE TABLE IF NOT EXISTS task_grants (
+    group_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    responder TEXT NOT NULL,
+    instance TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    ends_at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, msg_id, responder)
+);
+CREATE INDEX IF NOT EXISTS task_grants_ends ON task_grants (ends_at);
+CREATE INDEX IF NOT EXISTS task_grants_task ON task_grants (group_id, task_id);
+CREATE TABLE IF NOT EXISTS answered_tasks (
+    group_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS answered_tasks_at ON answered_tasks (at);
+CREATE TABLE IF NOT EXISTS a2a_tasks (
+    task_id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    requester TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS a2a_tasks_at ON a2a_tasks (at);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1195,7 +1225,10 @@ class Store:
                 "listed_peers",
                 "floor_state",
                 "floor_writes",
-                "own_requests",
+                "task_requests",
+                "task_grants",
+                "answered_tasks",
+                "a2a_tasks",
                 "sas_answered",
                 "sas_sent",
                 "sas_warnings",
@@ -2427,45 +2460,167 @@ class Store:
     def forget_hops(self, before: int) -> None:
         self._db.execute("DELETE FROM hops WHERE at < ?", (before,))
         self._db.execute("DELETE FROM sent_via WHERE at < ?", (before,))
-        self._db.execute("DELETE FROM own_requests WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM task_requests WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM answered_tasks WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM a2a_tasks WHERE at < ?", (before,))
 
-    def record_request(
+    def forget_grants(self, now: int) -> None:
+        """Grants past their request's lifetime (SPEC 10.2)."""
+        self._db.execute("DELETE FROM task_grants WHERE ends_at <= ?", (now,))
+
+    def record_request(  # noqa: PLR0913
         self,
         group_id: str,
         msg_id: str,
+        *,
         task_id: str | None,
-        asked: Sequence[str] | None,
+        asked: Sequence[str],
+        instance: str | None,
         now: int,
     ) -> None:
         """Remember a message this instance sent that a peer may answer with
-        a task (SPEC 9.3): the task it names, if any, and the identities it
-        asked (``None``: every member)."""
+        a task (SPEC 9.3): the task it names, if any, the identities it asked
+        and, with an instance hint, the one instance."""
         self._db.execute(
-            "INSERT OR IGNORE INTO own_requests (group_id, msg_id, task_id, asked, at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (group_id, msg_id, task_id, None if asked is None else json.dumps(list(asked)), now),
+            "INSERT OR IGNORE INTO task_requests "
+            "(group_id, msg_id, task_id, asked, instance, at) VALUES (?, ?, ?, ?, ?, ?)",
+            (group_id, msg_id, task_id, json.dumps(sorted(set(asked))), instance, now),
         )
 
-    def requested_task(
-        self, group_id: str, refs: Sequence[str], responder: str, task_id: str
-    ) -> bool:
-        """Whether a task update from ``responder`` about ``task_id`` answers
-        a message this instance sent (SPEC 9.3): one of ``refs`` is such a
-        message, it asked ``responder``, and it named ``task_id`` or no task."""
+    def request_asks(self, group_id: str, msg_id: str, identity: str, instance: str) -> bool:
+        """Whether the request ``msg_id`` asked that instance of ``identity``."""
+        row = self._one(
+            "SELECT asked, instance FROM task_requests WHERE group_id = ? AND msg_id = ?",
+            group_id,
+            msg_id,
+        )
+        return row is not None and identity in json.loads(row[0]) and row[1] in (None, instance)
+
+    def task_owner(self, group_id: str, task_id: str) -> tuple[str, str] | None:
+        """The member running ``task_id`` for this instance (identity and
+        instance), if exactly one is known (SPEC 9.3)."""
+        rows = self._all(
+            "SELECT DISTINCT responder, instance FROM task_grants "
+            "WHERE group_id = ? AND task_id = ? LIMIT 2",
+            group_id,
+            task_id,
+        )
+        return (str(rows[0][0]), str(rows[0][1])) if len(rows) == 1 else None
+
+    def grant_task(  # noqa: PLR0913
+        self,
+        group_id: str,
+        refs: Sequence[str],
+        *,
+        responder: str,
+        instance: str,
+        task_id: str,
+        now: int,
+        window: int,
+        lifetime: int,
+    ) -> str | None:
+        """The request among ``refs`` that grants a task update from
+        ``responder`` (``instance``) about ``task_id`` (SPEC 9.3, 10.2), or
+        ``None``. A request asked the responder; it grants one task per asked
+        member: the one it named, else the first the member answers it with,
+        within ``window`` seconds of the request. Each update of that task
+        renews it for ``window`` seconds, and nothing outlives ``lifetime``
+        seconds from the request."""
         for ref in refs:
             row = self._one(
-                "SELECT task_id, asked FROM own_requests WHERE group_id = ? AND msg_id = ?",
+                "SELECT task_id, asked, instance, at FROM task_requests "
+                "WHERE group_id = ? AND msg_id = ?",
                 group_id,
                 ref,
             )
             if row is None:
                 continue
-            named, asked = row
-            if asked is not None and responder not in json.loads(asked):
+            named, asked, hint, at = row
+            if responder not in json.loads(asked) or hint not in (None, instance):
                 continue
-            if named is None or named == task_id:
-                return True
-        return False
+            ends = int(at) + lifetime
+            grant = self._one(
+                "SELECT task_id, instance, expires_at FROM task_grants "
+                "WHERE group_id = ? AND msg_id = ? AND responder = ?",
+                group_id,
+                ref,
+                responder,
+            )
+            if grant is None:
+                if now > int(at) + window or now >= ends or named not in (None, task_id):
+                    continue
+                self._db.execute(
+                    "INSERT INTO task_grants (group_id, msg_id, responder, instance, task_id, "
+                    "expires_at, ends_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (group_id, ref, responder, instance, task_id, min(now + window, ends), ends),
+                )
+                return ref
+            if (grant[0], grant[1]) != (task_id, instance) or now >= int(grant[2]):
+                continue
+            self._db.execute(
+                "UPDATE task_grants SET expires_at = ? "
+                "WHERE group_id = ? AND msg_id = ? AND responder = ?",
+                (min(now + window, ends), group_id, ref, responder),
+            )
+            return ref
+        return None
+
+    def granting_request(
+        self, group_id: str, refs: Sequence[str], responder: str, task_id: str
+    ) -> str | None:
+        """The request among ``refs`` that granted ``task_id`` to ``responder``."""
+        for ref in refs:
+            row = self._one(
+                "SELECT 1 FROM task_grants WHERE group_id = ? AND msg_id = ? "
+                "AND responder = ? AND task_id = ?",
+                group_id,
+                ref,
+                responder,
+                task_id,
+            )
+            if row is not None:
+                return ref
+        return None
+
+    def record_answered(self, group_id: str, task_id: str, msg_id: str, now: int) -> None:
+        """This instance runs ``task_id`` for the request ``msg_id`` (the
+        first task update it sent names it)."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO answered_tasks (group_id, task_id, msg_id, at) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, task_id, msg_id, now),
+        )
+
+    def answered_request(self, group_id: str, task_id: str) -> str | None:
+        row = self._one(
+            "SELECT msg_id FROM answered_tasks WHERE group_id = ? AND task_id = ?",
+            group_id,
+            task_id,
+        )
+        return None if row is None else str(row[0])
+
+    def a2a_task_put(  # noqa: PLR0913
+        self, task_id: str, *, group_id: str, requester: str, msg_id: str, now: int, keep: int
+    ) -> None:
+        """The A2A adapter's map of its agent's tasks (who asked, where),
+        kept so follow-ups continue a task after a restart; the newest
+        ``keep`` stay."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO a2a_tasks (task_id, group_id, requester, msg_id, at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (task_id, group_id, requester, msg_id, now),
+        )
+        self._db.execute(
+            "DELETE FROM a2a_tasks WHERE task_id NOT IN "
+            "(SELECT task_id FROM a2a_tasks ORDER BY at DESC, rowid DESC LIMIT ?)",
+            (keep,),
+        )
+
+    def a2a_task(self, task_id: str) -> tuple[str, str, str] | None:
+        row = self._one(
+            "SELECT group_id, requester, msg_id FROM a2a_tasks WHERE task_id = ?", task_id
+        )
+        return None if row is None else (str(row[0]), str(row[1]), str(row[2]))
 
     def pending_deliveries(
         self,

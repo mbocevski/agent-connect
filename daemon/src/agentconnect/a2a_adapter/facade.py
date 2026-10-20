@@ -437,13 +437,16 @@ class Facade:
             future.set_result(outcome)
 
     def route_reply(self, d: Delivery) -> bool:
-        """Hand a reply to the facade request it answers; False if none."""
+        """Hand a reply to the facade request it answers; False if none. Only
+        a member the request asked (SPEC 9.3) answers it: every member reads
+        the request, and an answer from anyone else is context, so it can't
+        stand in for the member the client asked, nor bind its task."""
         refs = d.inner.get("reply_to")
         if not isinstance(refs, list):
             return False
         for ref in refs:
             queue = self.waiters.get(ref) if isinstance(ref, str) else None
-            if queue is not None:
+            if queue is not None and self.adapter.asked(d, ref):
                 queue.put_nowait(d)
                 return True
         return False

@@ -329,14 +329,21 @@ def _request_task(kind: str, body: dict[str, Any]) -> str | None:
     return task if isinstance(task, str) and 0 < len(task) <= MAX_TASK_ID else None
 
 
-def _asked(to: list[str] | None, addressee: list[str] | None) -> list[str] | None:
-    """The identities an own request asks (SPEC 9.3): its ``addressee``,
-    else the members ``to`` names; ``None`` for every member."""
-    if addressee is not None:
-        return list(addressee)
-    if to is None or len(to) == 0 or "*" in to:
-        return None
-    return list(to)
+def _named(inner: dict[str, Any]) -> list[str]:
+    """The identities a message names: its ``addressee``, else its ``to``
+    unless that is ``["*"]``."""
+    addressee, to = inner.get("addressee"), inner.get("to")
+    if isinstance(addressee, list):
+        return [str(a) for a in addressee]
+    if isinstance(to, list) and "*" not in to:
+        return [str(t) for t in to]
+    return []
+
+
+def _refs(inner: dict[str, Any]) -> list[str]:
+    """The ``reply_to`` entries the runtime reads (SPEC 7.2: at most 16)."""
+    refs = inner.get("reply_to")
+    return [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)] if isinstance(refs, list) else []
 
 
 KNOCK_REQUEST_PREFIX = "kn-"  # knock request ids, 19 characters (agentconnect.runtime.knocks)
@@ -997,9 +1004,15 @@ class Engine:
         answers (Capabilities.answers). The others get it as context, so
         two answering adapters don't both reply."""
         names = self.adapter_names(group_id)
-        reply_to = delivery.inner.get("reply_to")
-        for msg_id in reply_to if isinstance(reply_to, list) else []:
-            via = self.store.sent_via(group_id, str(msg_id))
+        refs = _refs(delivery.inner)
+        task = task_of(delivery.inner)
+        if task is not None:
+            # A task update is for the adapter whose request granted it
+            # (SPEC 9.3), not whichever sent another message it names.
+            granted = self.store.granting_request(group_id, refs, delivery.sender.identity, task)
+            refs = [] if granted is None else [granted]
+        for msg_id in refs:
+            via = self.store.sent_via(group_id, msg_id)
             if via in names:
                 return via
         answering = [n for n in names if self.adapters[n].capabilities().answers]
@@ -1510,6 +1523,7 @@ class Engine:
         # Hops are needed only while a reply can still arrive (relay TTL);
         # so are the journal's tombstones of consumed entries.
         self.store.forget_hops(now - HOP_MEMORY_SECS)
+        self.store.forget_grants(now)
         with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
             self.client.journal_purge(now - HOP_MEMORY_SECS)
         # After the invites above: an entry outlives its invite's expiry.
@@ -1976,16 +1990,57 @@ class Engine:
                 hop = max(hop, max(known) + 1)
         return hop
 
-    def _requested(self, group_id: str, identity: str, inner: dict[str, Any]) -> bool:
-        """SPEC 9.3: whether a received task update answers a message this
-        instance sent (``reply_to``), from a member it asked, about the task
-        it named, if it named one (:meth:`Store.requested_task`)."""
+    def _granting(
+        self, group_id: str, identity: str, instance: str, inner: dict[str, Any]
+    ) -> str | None:
+        """SPEC 9.3: the request of this instance that a received task update
+        answers (named in ``reply_to``, asked this member, grants it this
+        task and is still active, :meth:`Store.grant_task`), or ``None``."""
         task = task_of(inner)
-        refs = inner.get("reply_to")
-        if task is None or not isinstance(refs, list):
-            return False
-        mine = [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)]
-        return self.store.requested_task(group_id, mine, identity, task)
+        if task is None:
+            return None
+        settings = self.safety.settings(group_id)
+        return self.store.grant_task(
+            group_id,
+            _refs(inner),
+            responder=identity,
+            instance=instance,
+            task_id=task,
+            now=self.now(),
+            window=settings.task_request_window_secs,
+            lifetime=settings.task_request_max_secs,
+        )
+
+    def _request_asks(
+        self, group: GroupRow, kind: str, inner: dict[str, Any]
+    ) -> tuple[list[str], str | None]:
+        """Whom a request this instance sends asks (SPEC 9.3): the members it
+        triggers under the floor rules, and its instance hint. One that names
+        a task asks only the member running it, when this instance knows it,
+        else only the members it names."""
+        raw = inner.get("body")
+        body: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        metadata = body.get("metadata")
+        hint = metadata.get("instance") if isinstance(metadata, dict) else None
+        hint = hint if isinstance(hint, str) else None
+        moderator, holder = self.floor.triggers(group.group_id, group.policy)
+        floor = str(group.policy.get("floor", "free"))
+        asked = [
+            m.identity
+            for m in self.store.members(group.group_id)
+            if m.identity != self.me
+            and addressed_to_me(floor, inner, m.identity, hint or "", moderator, holder)
+        ]
+        task = _request_task(kind, body)
+        if task is None:
+            return asked, hint
+        owner = self.store.task_owner(group.group_id, task)
+        if owner is None:
+            named = _named(inner)
+            return [m for m in asked if m in named], hint
+        if owner[0] not in asked or hint not in (None, owner[1]):
+            return [], hint
+        return [owner[0]], owner[1]
 
     def _card_problem(self, inner: dict[str, Any]) -> str:
         """Why a received Agent Card can't be used, or ``""``. A card the A2A
@@ -2011,11 +2066,13 @@ class Engine:
         shaped = normalize("a2a.agent_card", inner["body"])
         return shaped is not None and self.store.cards(group_id).get(identity) != shaped
 
-    def _triggered(self, group_id: str, hop: int, msg_id: str) -> None:
+    def _triggered(self, group_id: str, hop: int, msg_id: str, sender: str) -> None:
         """The default "message replied to" for this instance's next agent
-        message in the group (see _reply_hop)."""
+        message in the group (see _reply_hop), and for a task update to
+        ``sender`` (see queue_message)."""
         self.store.kv_set(f"trigger_hop/{group_id}", str(hop))
         self.store.kv_set(f"trigger_msg/{group_id}", msg_id)
+        self.store.kv_set(f"trigger_from/{group_id}/{sender}", msg_id)
 
     def _make_delivery(
         self, group: GroupRow, msg_id: str, event: dict[str, Any], *, replayed: bool = False
@@ -2048,8 +2105,14 @@ class Engine:
         )
         # SPEC 9.3: a task update triggers only the instance that asked for
         # the task, and only then has the task budget (SPEC 10.2).
-        requested = self._requested(group.group_id, identity, inner)
-        if inner["kind"] in TASK_UPDATE_KINDS and not requested:
+        task_update = inner["kind"] in TASK_UPDATE_KINDS
+        granting = (
+            self._granting(group.group_id, identity, str(sender["instance_id_hex"]), inner)
+            if task_update
+            else None
+        )
+        requested = granting is not None
+        if task_update and not requested:
             addressed = False
         # One decision: SPEC 7.2 (unknown kinds are ignored), 7.3, 9.3, 10.2
         # (size, parts, rates; a replayed journal entry was counted when the
@@ -2070,6 +2133,9 @@ class Engine:
                 card_changed=self._card_changed(group.group_id, identity, inner),
                 card_problem=self._card_problem(inner),
                 requested=requested,
+                known_refs=task_update
+                and not requested
+                and bool(self.store.inbox_hops(group.group_id, _refs(inner))),
             )
         )
         if (
@@ -2094,7 +2160,7 @@ class Engine:
         if inner["kind"] in HUMAN_ONLY_KINDS:
             self._reset_loop_guard(group.group_id)
         if decision.verdict is Verdict.DELIVER:
-            self._triggered(group.group_id, hop, msg_id)
+            self._triggered(group.group_id, hop, msg_id, identity)
         # A held message triggers once approved if it would trigger now.
         triggers = decision.verdict is Verdict.DELIVER or (
             decision.verdict is Verdict.HOLD_FOR_APPROVAL
@@ -2158,6 +2224,48 @@ class Engine:
         if not refs and last != "":
             refs = [last]
         return hop, refs
+
+    def _record_task_links(
+        self, group: GroupRow, msg_id: str, kind: str, inner: dict[str, Any], refs: list[str]
+    ) -> None:
+        """Inside :meth:`queue_message`'s transaction. A request: what a
+        peer may answer with task updates that trigger this instance, and who
+        (SPEC 9.3). A task update: the request this instance's task answers,
+        for its updates sent without ``reply_to``."""
+        if kind in REQUEST_KINDS:
+            asked, hint = self._request_asks(group, kind, inner)
+            self.store.record_request(
+                group.group_id,
+                msg_id,
+                task_id=_request_task(kind, inner["body"]),
+                asked=asked,
+                instance=hint,
+                now=self.now(),
+            )
+        task = task_of(inner)
+        if task is not None and refs:
+            self.store.record_answered(group.group_id, task, refs[0], self.now())
+
+    def _task_request(
+        self, group_id: str, kind: str, body: dict[str, Any], addressee: list[str] | None
+    ) -> list[str] | None:
+        """``reply_to`` for an agent's task update sent without one: the
+        request whose task it is (the first update of the task named it),
+        else the last message from the ``addressee`` that triggered this
+        instance; ``None`` leaves it to :meth:`_reply_hop` (and any other
+        kind)."""
+        if kind not in TASK_UPDATE_KINDS:
+            return None
+        task = body.get("taskId")
+        if isinstance(task, str) and task:
+            known = self.store.answered_request(group_id, task)
+            if known is not None:
+                return [known]
+        if addressee is not None and len(addressee) > 0:
+            last = self.store.kv_get(f"trigger_from/{group_id}/{addressee[0]}")
+            if last is not None and last != "":
+                return [last]
+        return None
 
     def _reset_loop_guard(self, group_id: str) -> None:
         """A human ``control.resume`` (sent or received) resets the counter."""
@@ -2731,7 +2839,9 @@ class Engine:
                         del self._cursors[key]
                     self._cursor_gen[group_id] = self._cursor_gen.get(group_id, 0) + 1
                     if delivery.addressed_to_me:
-                        self._triggered(group_id, delivery.hop, delivery.msg_id)
+                        self._triggered(
+                            group_id, delivery.hop, delivery.msg_id, delivery.sender.identity
+                        )
                     self.safety.transcribe(
                         group_id, "in", item["sender"], item["msg_id"], delivery.inner
                     )
@@ -4166,7 +4276,10 @@ class Engine:
         elif origin == "human":
             hop, refs = 0, list(reply_to or [])[:MAX_REPLY_TO]
         else:
-            hop, refs = self._reply_hop(group.group_id, reply_to)
+            hop, refs = self._reply_hop(
+                group.group_id,
+                reply_to or self._task_request(group.group_id, kind, body, addressee),
+            )
         # A control or cancel goes out in its schema's shape only. A card goes
         # out exactly as built (a signature covers it): it must already fit.
         shaped = normalize(kind, body)
@@ -4206,16 +4319,7 @@ class Engine:
             payload["floor"] = True  # this instance's own: taken when sealed
         with self.store.tx():
             self.store.record_hop(group.group_id, msg_id, hop, self.now())
-            if kind in REQUEST_KINDS:
-                # SPEC 9.3: what a peer may answer with task updates that
-                # trigger this instance.
-                self.store.record_request(
-                    group.group_id,
-                    msg_id,
-                    _request_task(kind, body),
-                    _asked(to, addressee),
-                    self.now(),
-                )
+            self._record_task_links(group, msg_id, kind, inner, refs)
             self.safety.audit(
                 group.group_id,
                 "out",

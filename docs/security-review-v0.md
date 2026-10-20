@@ -489,12 +489,19 @@ journal entry, ack and tell the human.
   "Agent loops" bound.
 - **Component:** daemon (`limits.py:283-300`, `policy.py:647-702`).
 - **Status:** fixed in #89. The daemon records the A2A messages and task
-  cancels it sends. A task update triggers an instance, and counts against
-  the task budget, only when its `reply_to` names one of them, its sender is
-  a member that request asked, and its `taskId` is the task the request
-  named, if it named one (SPEC §9.3, §10.2). Any other task update is
-  context only, held to the ordinary message rates in windows apart from
-  the sender's messages, and a drop there is not a violation.
+  cancels it sends as requests, with the instances each one asks (those it
+  triggers under the floor rules; for a follow-up naming a task, only the
+  instance running it). A request grants each asked instance one task,
+  while that task is active (its first update within 10 minutes, each
+  update renewing that, at most a day from the request; both configurable).
+  Only a granted update triggers, has the task budget and goes to the
+  adapter whose request granted it (SPEC §9.3, §10.2). Any other task
+  update is context, held to the ordinary message rates apart from the
+  sender's messages, and over them a violation unless it replies to a
+  message this instance knows. The A2A facade takes answers only from
+  the members its request asked (found in the PR's review). Residual: an
+  asked instance can run one task at the task budget for as long as it
+  keeps the task active, up to the lifetime cap.
 - **Confirmed.**
 
 Any `a2a.task_status` or `a2a.task_artifact` with a `taskId` counts

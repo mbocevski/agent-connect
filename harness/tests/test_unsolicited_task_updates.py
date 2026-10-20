@@ -82,13 +82,16 @@ async def test_unsolicited_updates_get_the_message_rate_in_windows_of_their_own(
     group: GroupFixture,
 ) -> None:
     (a, b), gid = await group(2)
-    # More than the message rate, under the relay's per-second send rate.
-    ids = [update(a, gid, "t1", b) for _ in range(SENDER_PER_MINUTE + 5)]
+    seen = a.daemon.send_message(gid, {"text": "a message b saw"})
+    assert await handled(b, a, seen) == "done"
+    # More than the message rate, under the relay's per-second send rate,
+    # replying to a message b knows: it may be an honest task for another
+    # member, so the drops are no violation.
+    ids = [update(a, gid, "t1", b, [seen]) for _ in range(SENDER_PER_MINUTE + 5)]
     assert await handled(b, a, ids[-1]) == "dropped"
     states = [b.daemon.store.inbox_state(a.daemon.mailbox, m) for m in ids]
     assert states.count("done") == SENDER_PER_MINUTE
     assert reason(b, gid, ids[-1]) == "context_rate_limited"
-    # Not a violation: it may be an honest task for another member.
     assert b.daemon.safety.violations(gid, a.me) == 0
     # The ordinary messages have their own window, untouched.
     plain = a.daemon.send_message(gid, {"text": "still here"})
@@ -140,9 +143,18 @@ async def test_only_the_member_asked_answers(group: GroupFixture) -> None:
     assert not delivered(c, answer).addressed_to_me
 
 
-async def test_a_broadcast_request_may_be_answered_by_every_member(group: GroupFixture) -> None:
-    (a, b, c), gid = await group(3)
-    request = b.daemon.send_message(gid, {"text": "anyone?"})
+async def test_a_flood_naming_nothing_b_knows_is_a_violation(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    ids = [update(a, gid, "t1", b) for _ in range(SENDER_PER_MINUTE + 5)]
+    assert await handled(b, a, ids[-1]) == "dropped"
+    assert reason(b, gid, ids[-1]) == "rate_limited"
+    assert b.daemon.safety.violations(gid, a.me) == 5
+
+
+async def test_a_request_asks_whom_it_triggers(group: GroupFixture) -> None:
+    (a, b, c), gid = await group(3)  # three identities: mention mode
+    # The human's broadcast triggers every member: any of them may answer.
+    request = b.daemon.send_message(gid, {"text": "anyone?"}, origin="human")
     assert await handled(c, b, request) == "done"
     from_a = update(a, gid, "ta", b, [request])
     from_c = update(c, gid, "tc", b, [request])
@@ -150,3 +162,17 @@ async def test_a_broadcast_request_may_be_answered_by_every_member(group: GroupF
     assert await handled(b, c, from_c) == "done"
     assert delivered(b, from_a).addressed_to_me
     assert delivered(b, from_c).addressed_to_me
+    # An agent's broadcast triggers nobody in mention mode: nobody was asked.
+    quiet = b.daemon.send_message(gid, {"text": "thinking aloud"})
+    assert await handled(a, b, quiet) == "done"
+    answer = update(a, gid, "tq", b, [quiet])
+    assert await handled(b, a, answer) == "done"
+    assert not delivered(b, answer).addressed_to_me
+    # An instance hint asks that instance only.
+    hinted, _ = b.daemon.queue_message(
+        gid, {"text": "you, a"}, to=[a.me], instance=a.daemon.instance.instance_id_hex
+    )
+    assert await handled(a, b, hinted) == "done"
+    ok = update(a, gid, "th", b, [hinted])
+    assert await handled(b, a, ok) == "done"
+    assert delivered(b, ok).addressed_to_me

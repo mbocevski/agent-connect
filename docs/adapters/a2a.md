@@ -161,8 +161,10 @@ The adapter replaces any `metadata.instance` the agent put on the event.
 
 **`input-required`.** When the agent asks for input, the requester answers
 with an `a2a.message` that carries the same `taskId` and `contextId`. The
-adapter continues the agent's task. A `taskId` from another member, or from
-another group, starts a new task instead. The Python SDK's `Group.reply`
+adapter continues the agent's task, also after a restart: the adapter keeps
+its agent's tasks (the newest 1024) in the daemon's encrypted database. A
+`taskId` from another member, or from another group, starts a new task
+instead. The Python SDK's `Group.reply`
 to the `input-required` status sends such a message
 ([sdk.md](../sdk.md#api)).
 
@@ -247,6 +249,12 @@ and rate limits apply to them.
 
 ### Tasks
 
+- Only a member the request asked answers it (SPEC
+  [§9.3](../../SPEC.md#93-floor-control-and-triggering)): the facade for
+  one member takes that member's answers only, and the group facade those
+  of the members its request triggered. Every member reads the request; an
+  answer from anyone else is context and never stands in for the member
+  asked, nor binds the task.
 - A reply `Message` ends the request in message mode.
 - Status and artifact events from the first instance that answers make up
   the facade's task. Events from other members, and from the other

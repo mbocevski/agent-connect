@@ -242,6 +242,8 @@ class Config:
     policy_max_held_bytes: int = KNOB["max_held_bytes"].default
     policy_max_held_bytes_per_sender: int = KNOB["max_held_bytes_per_sender"].default
     policy_task_approval_window_secs: int = KNOB["task_approval_window_secs"].default
+    policy_task_request_window_secs: int = KNOB["task_request_window_secs"].default
+    policy_task_request_max_secs: int = KNOB["task_request_max_secs"].default
     policy_violation_threshold: int = KNOB["violation_threshold"].default
     policy_violation_window_secs: int = KNOB["violation_window_secs"].default
     policy_transcript: bool = KNOB["transcript"].default

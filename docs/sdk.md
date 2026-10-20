@@ -293,11 +293,20 @@ continue it: the peer's A2A adapter starts a new task for a `taskId` from
 another member.
 
 `on_task` gets every task update in the group, but only one that answers a
-message or task cancel your instance sent, from a member it asked and about
-the task it named, has `addressed_to_me` true (SPEC
+message or task cancel your instance sent, from the instance it asked and
+about the one task it granted that instance, while the task is active, has
+`addressed_to_me` true (SPEC
 [§9.3](../SPEC.md#93-floor-control-and-triggering)). The rest are other
 members' tasks, or updates nobody asked for: context, held to the ordinary
 message rates ([safety.md](safety.md)).
+
+When your agent runs the task, `reply_status` and `reply_artifact` set
+`reply_to` to the message answered, which is what makes them reach the
+requester as a trigger, and every answer to one message is about one task:
+its own `taskId`, else one derived from its `msg_id`. A task update sent
+through the local API without `reply_to` gets the request this task's
+first update named, else the last message from its `addressee` that
+triggered your instance ([api.md](api.md)).
 
 The `group` a handler gets has `id`, `name`, `purpose`, `epoch`, `floor`
 and `floor_holder`: in a `moderated` group, the member that holds the floor
