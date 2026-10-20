@@ -670,7 +670,7 @@ class GroupService:
         retry = False
         for invite in e.store.invites("revoking"):
             invite_id = str(invite["invite_id"])
-            e.keystore.delete(f"invite/{invite_id}")
+            e._forget_secret(f"invite/{invite_id}")
             e._forget_invite_requests(invite_id)
             if not e.link.connected:
                 continue

@@ -439,8 +439,10 @@ REST_TS_KEY = "relay/rest_ts"
 # An internal frame: finish every pending journal entry (ADR-004).
 REPLAY_JOURNAL = "_replay_journal"
 SUMMARY_REPORTS_LEAVES = "left_reported"
-# Set while a Welcome waits for a locked keystore (Engine.check_joins).
+# Since when a Welcome waits for a locked keystore (Engine._welcome_waiting).
 WELCOME_WAITING = "welcome_waiting"
+# Secrets a locked keystore kept from being deleted (Engine._forget_secret).
+KEPT_SECRETS = "secrets/kept"
 TransientFailure = (TransientError, FailpointError)
 
 
@@ -1059,7 +1061,7 @@ class Engine:
             with contextlib.suppress(RelayError, OSError):
                 await self.rest.revoke_invite(invite_id)
             self.store.set_invite_status(invite_id, "revoked")
-            self.keystore.delete(f"invite/{invite_id}")
+            self._forget_secret(f"invite/{invite_id}")
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         await self._frames.put(frame)
@@ -1616,6 +1618,11 @@ class Engine:
                 # process or deliver a message twice.
                 group_id, reason = _retry_reason(e)
                 LOG.warning("inbound_transient", reason=reason, attempt=attempt)
+                if _waits_unbounded(e):
+                    # Never counted, from the first try: a daemon restarted
+                    # before this handling gives up must not run the count up.
+                    stopped = self._stopped_at()
+                    self._uncount(key if stopped is None else str(stopped["key"]))
                 if attempt < MAX_TRANSIENT_RETRIES and _transient(e):
                     await self._sleep(backoff.next())
                     continue
@@ -1748,20 +1755,26 @@ class Engine:
         retention. Runs before each inbound frame (outside its failure
         handling, :meth:`_housekeeping`) and on (re)connect."""
         now = self.now()
+        self._forget_kept_secrets()
         ended = []
         for invite in self.store.invites("open"):
             if now >= int(invite["expires_at"]):
                 self.store.set_invite_status(invite["invite_id"], "expired")
-                self.keystore.delete(f"invite/{invite['invite_id']}")
+                self._forget_secret(f"invite/{invite['invite_id']}")
                 ended.append(str(invite["invite_id"]))
         self._forget_invite_requests(*ended)
-        for pending in self.store.pending_joins():
+        waiting = self._welcome_waiting()
+        pending_joins = self.store.pending_joins()
+        for pending in [] if waiting else pending_joins:
             expires = pending["meta"].get("expires_at")
             if isinstance(expires, int) and now >= expires + JOIN_CLOSED_GRACE_SECS:
                 invite_id = pending["invite_id"]
                 self.store.finish_join(invite_id, "expired")
-                self.keystore.delete(f"join/{invite_id}")
+                self._forget_secret(f"join/{invite_id}")
                 await self.emit(None, "join_failed", invite_id=invite_id, reason="expired")
+        if (self.store.kv_get(WELCOME_WAITING) or "") != "" and (not waiting or not pending_joins):
+            # Stale (the Welcome can't come again), or no join left to wait.
+            self.store.kv_set(WELCOME_WAITING, "")
         if self._parked and not self._may_join():
             self._parked.clear()
         # Hops are needed only while a reply can still arrive (relay TTL);
@@ -1914,13 +1927,51 @@ class Engine:
     def _forget_join_secrets(self) -> None:
         """Delete the secrets of joins that ended (SPEC §6.3)."""
         for invite_id in self.store.joined_invites():
-            self.keystore.delete(f"join/{invite_id}")
+            self._forget_secret(f"join/{invite_id}")
+
+    def _forget_secret(self, name: str) -> None:
+        """Delete a secret whose invite or join ended (SPEC §6.3). A locked
+        keystore keeps it for now: it is deleted on a later housekeeping
+        pass, once the keystore opens (:meth:`_forget_kept_secrets`)."""
+        try:
+            self.keystore.delete(name)
+        except Exception as e:
+            if not _waits_unbounded(e):
+                raise
+            kept = set(json.loads(self.store.kv_get(KEPT_SECRETS) or "[]")) | {name}
+            self.store.kv_set(KEPT_SECRETS, json.dumps(sorted(kept)))
+            LOG.warning("secret_kept", error=type(e).__name__)
+
+    def _forget_kept_secrets(self) -> None:
+        """Delete the secrets a locked keystore kept, as far as it lets us."""
+        kept = json.loads(self.store.kv_get(KEPT_SECRETS) or "[]")
+        if not kept:
+            return
+        left = []
+        for name in kept:
+            try:
+                self.keystore.delete(name)
+            except Exception as e:
+                if not _waits_unbounded(e):
+                    raise
+                left.append(name)
+        self.store.kv_set(KEPT_SECRETS, json.dumps(left))
+
+    def _welcome_waiting(self) -> bool:
+        """Whether a Welcome waits for a locked keystore, and may still come
+        (within the relay's lifetime for it): no pending join lapses then."""
+        since = self.store.kv_get(WELCOME_WAITING) or ""
+        return since != "" and self.now() - int(since) < HOP_MEMORY_SECS
+
+    def _welcome_done(self) -> None:
+        """The waiting Welcome stopped waiting (joined, dropped or failed alone)."""
+        if (self.store.kv_get(WELCOME_WAITING) or "") != "":
+            self.store.kv_set(WELCOME_WAITING, "")
 
     async def _on_welcome_env(self, env: dict[str, Any]) -> None:
         sender, msg_id = str(env["sender"]), str(env["msg_id"])
         joined = await self._on_welcome(env)
-        if self.store.kv_get(WELCOME_WAITING) == "1":
-            self.store.kv_set(WELCOME_WAITING, "")
+        self._welcome_done()
         if joined is None:
             self.store.record_inbox(sender, msg_id, env.get("group_id"), "done", self.now())
             await self._ack(msg_id)
@@ -2075,6 +2126,8 @@ class Engine:
                 decision=Verdict.DROP,
                 reason="processing_failed",
             )
+            if env.get("kind") == "welcome_wrapped":
+                self._welcome_done()  # it waits no more
             if joined is not None:
                 await self._joined_out_of_sync(*joined)
             elif group is not None and active:
@@ -2175,7 +2228,7 @@ class Engine:
             await self.mark_out_of_sync(group_id, "welcome_failed")
         if invite_id is not None:
             self.store.finish_join(invite_id, "joined", group_id)
-            self._defer(lambda: self.keystore.delete(f"join/{invite_id}"))
+            self._defer(lambda: self._forget_secret(f"join/{invite_id}"))
 
     async def _guard_failed(
         self, group: GroupRow, msg_id: str, identity: str, inner: dict[str, Any]
@@ -3229,7 +3282,7 @@ class Engine:
         on the way). Runs on every (re)connect. Not while a Welcome waits for
         a locked keystore (``WELCOME_WAITING``): it may be this join's.
         """
-        if self.store.kv_get(WELCOME_WAITING) == "1":
+        if self._welcome_waiting():
             return  # a Welcome came that the locked keyring kept us from opening
         for pending in self.store.pending_joins():
             invite_id = pending["invite_id"]
@@ -3249,7 +3302,7 @@ class Engine:
             if self.store.join_status(invite_id) != ("pending", None):
                 continue  # the Welcome arrived meanwhile
             self.store.finish_join(invite_id, "failed")
-            self.keystore.delete(f"join/{invite_id}")
+            self._forget_secret(f"join/{invite_id}")
             await self.emit(
                 None,
                 "join_failed",
@@ -3271,7 +3324,7 @@ class Engine:
             except KeystoreError:
                 # The keyring is locked: this Welcome waits (it is retried),
                 # and no pending join lapses as "invite used" meanwhile.
-                self.store.kv_set(WELCOME_WAITING, "1")
+                self.store.kv_set(WELCOME_WAITING, str(self.now()))
                 raise
             if url is None:
                 continue
@@ -3300,7 +3353,7 @@ class Engine:
                     return None
                 # The KeyPackage is used up; a retry needs a new JoinRequest.
                 self.store.finish_join(invite_id, "failed")
-                self.keystore.delete(f"join/{invite_id}")
+                self._forget_secret(f"join/{invite_id}")
                 await self.emit(None, "join_failed", invite_id=invite_id, reason=str(e)[:80])
                 return None
             self.failpoints.hit("welcome.after_core")
@@ -3341,7 +3394,7 @@ class Engine:
             self.store.finish_join(invite_id, "joined", group_id)
             self.store.record_inbox(sender, msg_id, group_id, "done", self.now())
             # SPEC §6.3: the invite secret goes once the join succeeded.
-            self._defer(lambda: self.keystore.delete(f"join/{invite_id}"))
+            self._defer(lambda: self._forget_secret(f"join/{invite_id}"))
             await self.emit(group_id, "joined", invite_id=invite_id)
             await self.send_capabilities(group_id)
             await self._send_card(group_id, ["*"])
@@ -4112,7 +4165,7 @@ class Engine:
             if frame.get("t") == "join":
                 invite_id = str(frame.get("invite_id"))
                 self.store.finish_join(invite_id, "failed")
-                self.keystore.delete(f"join/{invite_id}")
+                self._forget_secret(f"join/{invite_id}")
                 await self.emit(None, "join_failed", invite_id=invite_id, reason=e.code)
             return "failed"
         if frame.get("t") == "invite.consume":
@@ -4127,7 +4180,7 @@ class Engine:
                 )
                 if used >= invite["max_uses"]:
                     self.store.set_invite_status(invite["invite_id"], "exhausted")
-                    self.keystore.delete(f"invite/{invite['invite_id']}")
+                    self._forget_secret(f"invite/{invite['invite_id']}")
                     self._forget_invite_requests(str(invite["invite_id"]))
         return "done"
 
@@ -4707,7 +4760,7 @@ class Engine:
             # Never leave a secret for an invite we don't track. (A crash or
             # a cancellation leaves the row "registering" for the sweep.)
             self.store.delete_invite(invite_id)
-            self.keystore.delete(f"invite/{invite_id}")
+            self._forget_secret(f"invite/{invite_id}")
             if isinstance(e, RelayError):
                 raise DaemonError("relay", f"invite registration failed: {e.code}") from None
             raise
@@ -4724,7 +4777,7 @@ class Engine:
             raise DaemonError("not_found", "no such invite")
         await self.rest.revoke_invite(invite_id)
         self.store.set_invite_status(invite_id, "revoked")
-        self.keystore.delete(f"invite/{invite_id}")
+        self._forget_secret(f"invite/{invite_id}")
         self._forget_invite_requests(invite_id)
 
     def _link(self, url: str) -> ac.InviteLink:

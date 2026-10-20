@@ -70,10 +70,14 @@ of sync (`welcome_failed`).
 A locked or unavailable keystore (an OS keyring still locked after a
 login, say) is the one exception: it says nothing about the message, and waiting
 loses nothing, so a message that needs a secret from it is retried for as
-long as it takes and never fails alone for it. Your human sees
-`processing_failed` with reason `KeystoreError` until the keyring opens
-again. While a Welcome waits for it, no pending join lapses as
-"invite used".
+long as it takes and never fails alone for it, however often the daemon
+restarts meanwhile. Your human sees `processing_failed` with reason
+`KeystoreError` until the keyring opens again. While a Welcome waits for
+it, no pending join lapses, as "invite used" or at its invite's expiry
+(for up to the relay's 7 days a Welcome can come again). An invite's or a
+join's secret that the locked keyring keeps from being deleted is deleted
+once it opens. While the keyring stays locked the runtime never catches
+up, so leave timeouts don't fire until it opens.
 
 This is a trade-off. A local failure that lasts through 8 handlings
 (each gives up after about 2 minutes of retries, and the next waits for a

@@ -28,7 +28,7 @@ import pytest
 
 import agentconnect_core as ac
 from agentconnect.failpoints import SimulatedCrash
-from agentconnect.keystore import KeystoreError, KeystoreNameError
+from agentconnect.keystore import FileKeystore, KeystoreError, KeystoreNameError
 from agentconnect.limits import SENDER_PER_MINUTE
 from agentconnect.policy import SafetyPolicy
 from agentconnect.relay import RelayError
@@ -576,3 +576,154 @@ async def test_a_message_that_crashes_the_daemon_fails_alone_after_the_bound(
     assert (event["msg_id"], event["reason"]) == (bad, "RetriesExhausted")
     b.events_may_fail = False
     await unwedged(b, a, gid)
+
+
+# -- a locked keyring, across restarts, expiries and its own end ----------------------
+
+
+def lock_store(
+    monkeypatch: pytest.MonkeyPatch, prefix: str, *, deletes: bool = False
+) -> list[bool]:
+    """Every node's keystore refuses ``prefix...`` secrets while the returned
+    flag is set, as a locked OS keyring does; across restarts too. With
+    ``deletes``, deleting them fails as well."""
+    locked = [True]
+    get, delete = FileKeystore.get, FileKeystore.delete
+
+    def flaky_get(self: FileKeystore, name: str) -> bytes | None:
+        if locked[0] and name.startswith(prefix):
+            msg = "keyring read failed"
+            raise KeystoreError(msg)
+        return get(self, name)
+
+    def flaky_delete(self: FileKeystore, name: str) -> None:
+        if locked[0] and name.startswith(prefix):
+            raise keyring.errors.KeyringLocked("locked")
+        delete(self, name)
+
+    monkeypatch.setattr(FileKeystore, "get", flaky_get)
+    if deletes:
+        monkeypatch.setattr(FileKeystore, "delete", flaky_delete)
+    return locked
+
+
+async def test_restarts_while_the_keyring_is_locked_never_count(
+    cluster: Cluster, advance: Advance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keystore wait clears its count at once: restarted before its
+    retries give up, again and again, the Welcome still waits."""
+    locked = lock_store(monkeypatch, "join/")
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    b = await cluster.node()
+    b.events_may_fail = True
+    invite = await a.daemon.create_invite(gid)
+    await b.daemon.accept_invite(invite["url"])
+    for _ in range(engine_module.MAX_ENTRY_ATTEMPTS + 1):
+        await b.wait(lambda: b.clock.sleepers > 0)  # retried in place
+        await b.restart()
+        await b.connected()
+    await through_retries(b, advance, lambda: len(events(b, "processing_failed")) >= 1)
+    assert not events(b, "message_failed")
+    locked[0] = False
+    await through_retries(b, advance, lambda: b.daemon.store.group(gid) is not None)
+    assert not events(b, "message_failed")
+    assert b.daemon.store.kv_get(engine_module.WELCOME_WAITING) in (None, "")
+
+
+async def test_a_welcome_waiting_for_the_keyring_outlives_the_invite(
+    cluster: Cluster, advance: Advance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine_module, "MAX_TRANSIENT_RETRIES", 2)
+    locked = lock_store(monkeypatch, "join/")
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    b = await cluster.node()
+    b.events_may_fail = True
+    invite = await a.daemon.create_invite(gid, ttl_secs=3600)
+    await b.daemon.accept_invite(invite["url"])
+    expires = int(invite["expires_at"])
+    lapse = expires + engine_module.JOIN_CLOSED_GRACE_SECS
+    await through_retries(b, advance, lambda: b.daemon.now() > lapse + 600)
+    # Past the invite's expiry, the join still waits for its Welcome.
+    assert not events(b, "join_failed")
+    locked[0] = False
+    await through_retries(b, advance, lambda: b.daemon.store.group(gid) is not None)
+    assert not events(b, "join_failed")
+    assert b.daemon.store.kv_get(engine_module.WELCOME_WAITING) in (None, "")
+
+
+async def test_secrets_a_locked_keyring_kept_go_once_it_opens(
+    cluster: Cluster, advance: Advance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SPEC 6.3: an expired invite's secret goes, also when the keyring was
+    locked at its expiry."""
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    invite = await a.daemon.create_invite(gid, ttl_secs=60)
+    name = f"invite/{invite['invite_id']}"
+    assert a.daemon.keystore.get(name) is not None
+    locked = lock_store(monkeypatch, "invite/", deletes=True)
+    await advance(120)
+    await a.daemon.expire()
+    assert a.daemon.store.invite(invite["invite_id"])["status"] == "expired"  # ty: ignore[not-subscriptable]
+    await a.daemon.expire()  # still locked: kept for the next pass
+    locked[0] = False
+    assert a.daemon.keystore.get(name) is not None  # kept while locked
+    await a.daemon.expire()
+    assert a.daemon.keystore.get(name) is None
+    # Any other failure to delete is no lock: it isn't kept for later.
+    a.daemon.store.kv_set(engine_module.KEPT_SECRETS, json.dumps([name]))
+
+    def broken(_name: str) -> None:
+        msg = "read-only file system"
+        raise OSError(msg)
+
+    monkeypatch.setattr(a.daemon.keystore, "delete", broken)
+    with pytest.raises(OSError, match="read-only"):
+        a.daemon._forget_secret(name)
+    with pytest.raises(OSError, match="read-only"):
+        a.daemon._forget_kept_secrets()
+
+
+async def test_the_welcome_flag_ends_with_the_welcome(
+    cluster: Cluster, advance: Advance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Welcome waiting for the keyring that then fails alone takes its
+    flag with it, so check_joins (SPEC 4.3) runs again."""
+    lock_store(monkeypatch, "join/")
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    b = await cluster.node()
+    b.events_may_fail = True
+    invite = await a.daemon.create_invite(gid)
+    await b.daemon.accept_invite(invite["url"])
+    await through_retries(b, advance, b.daemon._welcome_waiting)
+    on_welcome = Engine._on_welcome
+
+    async def failing(self: Engine, env: dict[str, Any]) -> str | None:
+        if self is b.daemon:
+            msg = "a bug this Welcome reaches"
+            raise ValueError(msg)
+        return await on_welcome(self, env)
+
+    monkeypatch.setattr(Engine, "_on_welcome", failing)
+    await through_retries(b, advance, lambda: bool(events(b, "message_failed")))
+    assert b.daemon.store.kv_get(engine_module.WELCOME_WAITING) in (None, "")
+
+
+async def test_the_welcome_flag_doesnt_outlive_the_relay(group: GroupFixture) -> None:
+    """Set but stale (the Welcome can no longer be redelivered), or with no
+    join left to wait: it holds nothing back, and housekeeping clears it."""
+    (a, _b), _gid = await group(2)
+    e = a.daemon
+    e.store.kv_set(engine_module.WELCOME_WAITING, str(e.now() - engine_module.HOP_MEMORY_SECS))
+    assert not e._welcome_waiting()
+    e.store.kv_set(engine_module.WELCOME_WAITING, str(e.now()))
+    assert e._welcome_waiting()
+    await e.expire()  # no join pending: nothing to wait for
+    assert e.store.kv_get(engine_module.WELCOME_WAITING) in (None, "")
