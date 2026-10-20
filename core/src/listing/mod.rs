@@ -344,9 +344,15 @@ mod tests {
             "xn--bcher-kva.example",
             "1x.io",
             "a-b.co",
+            &format!("{0}.{0}.{0}.{1}", "a".repeat(63), "b".repeat(61)),
         ] {
+            assert!(ok.len() <= 253);
             assert!(is_owner_domain(ok), "{ok}");
         }
+        // 254 characters, every label valid.
+        let long = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "b".repeat(62));
+        assert_eq!(long.len(), 254);
+        assert!(!is_owner_domain(&long));
         for bad in [
             "example",
             "Example.com",

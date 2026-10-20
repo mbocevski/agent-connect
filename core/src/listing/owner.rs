@@ -449,6 +449,8 @@ mod tests {
             "identities": [
                 {"identity": a.id(), "fingerprint": b.fingerprint()},
                 {"identity": b.id(), "listings": ["not a listing"]},
+                {"identity": b.id(), "listings": ["Agents.example/a/release-planner"]},
+                {"identity": b.id(), "listings": ["agents.example/a/Release-planner"]},
                 {"identity": "ac:v0:nope"},
                 {"fingerprint": a.fingerprint()},
                 {"identity": b.id(), "listings": "agents.example/a/x"},
@@ -532,6 +534,17 @@ mod tests {
             "x".repeat(MAX_OWNER_FILE_BYTES)
         );
         assert_eq!(OwnerFile::parse(big.as_bytes()), Err(bad("too large")));
+        // SPEC 13.2.4: a file of 64 KiB is read.
+        let head = "{\"v\":0,\"pad\":\"";
+        let largest = format!("{head}{}\"}}", "x".repeat(64 * 1024 - head.len() - 2));
+        assert_eq!(largest.len(), 64 * 1024);
+        assert_eq!(
+            OwnerFile::parse(largest.as_bytes())
+                .unwrap()
+                .identities()
+                .len(),
+            0
+        );
         let ok = format!("{{\"v\":0,\"identities\":[{entry}],\"n\":1.5}}");
         assert_eq!(
             OwnerFile::vouch_bytes(ok.as_bytes(), &a.id(), DIR, "release-planner"),

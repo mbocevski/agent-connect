@@ -280,6 +280,16 @@ mod tests {
             unwrap_identity_export(&[b' '; MAX_EXPORT_LEN + 1], &out.code).unwrap_err(),
             Error::Malformed(WHAT)
         );
+        // MAX_EXPORT_LEN bytes is the longest file read, trailing newlines
+        // included.
+        let mut longest = out.file.clone();
+        longest.resize(MAX_EXPORT_LEN, b'\n');
+        assert!(unwrap_identity_export(&longest, &out.code).is_ok());
+        longest.push(b'\n');
+        assert_eq!(
+            unwrap_identity_export(&longest, &out.code).unwrap_err(),
+            Error::Malformed(WHAT)
+        );
     }
 
     #[test]

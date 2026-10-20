@@ -1700,6 +1700,8 @@ mod tests {
         ];
         assert_eq!(big.sign(&f.ik), Err(bad("too large")));
         assert_eq!(err(&vec![b' '; MAX_LISTING_BYTES + 1]), bad("too large"));
+        // MAX_LISTING_BYTES is still read (and blank input isn't JSON).
+        assert_eq!(err(&vec![b' '; MAX_LISTING_BYTES]), bad("json"));
     }
 
     #[test]
@@ -1776,6 +1778,27 @@ mod tests {
         card_for(&f.ik, open, None).sign(&f.ik).unwrap();
     }
 
+    #[test]
+    fn listing_times_go_up_to_the_largest_safe_integer() {
+        let f = fixture("card-max-times");
+        let mut c = f.card.clone();
+        // A door's expiry is checked against issued_at; without one, only
+        // the bounds apply.
+        c.params.door = None;
+        c.params.issued_at = MAX_SAFE_INTEGER;
+        c.params.seq = MAX_SAFE_INTEGER;
+        c.sign(&f.ik).unwrap();
+        for (issued_at, seq) in [(MAX_SAFE_INTEGER + 1, 1), (T0, MAX_SAFE_INTEGER + 1)] {
+            c.params.issued_at = issued_at;
+            c.params.seq = seq;
+            assert_eq!(
+                c.sign(&f.ik).err(),
+                Some(bad("seq or issued_at")),
+                "{issued_at} {seq}"
+            );
+        }
+    }
+
     /// Review M3: `seq` and tombstones belong to (directory, name,
     /// identity), and between identities the newer operator grant wins.
     #[test]
@@ -1823,6 +1846,7 @@ mod tests {
         // Listings of other names are not comparable.
         let mut other = card_for(old, stored.token().clone(), None);
         other.params.name = "other-name".into();
+        other.params.seq = 8;
         other.params.token =
             f.dk.issue_token(
                 &rng,
@@ -1905,6 +1929,18 @@ mod tests {
         assert_eq!(
             ListingCard::from_unsigned_json(&vec![b' '; 2 * MAX_LISTING_BYTES + 1]),
             Err(bad("too large"))
+        );
+        assert_eq!(
+            ListingCard::from_unsigned_json(&vec![b' '; 2 * MAX_LISTING_BYTES]),
+            Err(bad("json"))
+        );
+        // The proto3 default rule doesn't apply inside `params`: a `false`
+        // there fails only the schema.
+        let mut v4: Value = serde_json::from_slice(&f.card.to_unsigned_json().unwrap()).unwrap();
+        v4["capabilities"]["extensions"][0]["params"]["x"] = json!(false);
+        assert_eq!(
+            ListingCard::from_unsigned_json(&jcs(&v4).unwrap()),
+            Err(bad("schema"))
         );
     }
 
@@ -2068,6 +2104,11 @@ mod tests {
                 "too large",
                 vec![b' '; 2 * MAX_LISTING_BYTES + 1],
                 bad("too large"),
+            ),
+            (
+                "the largest size read",
+                vec![b' '; 2 * MAX_LISTING_BYTES],
+                bad("json"),
             ),
         ];
         for (name, bytes, e) in cases {

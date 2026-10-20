@@ -584,6 +584,16 @@ pub(crate) mod tests {
         assert_eq!(dk.issue_token(&rng, &g), Err(bad("lifetime")));
         g.expires_at = g.issued_at;
         assert_eq!(dk.issue_token(&rng, &g), Err(bad("lifetime")));
+        // Times up to 2^53 - 1 are in range: a token may end there, and one
+        // issued there fails only its lifetime.
+        let mut last = grant(&ik.id());
+        last.expires_at = MAX_SAFE_INTEGER;
+        last.issued_at = MAX_SAFE_INTEGER - 3600;
+        dk.issue_token(&rng, &last).unwrap();
+        last.issued_at = MAX_SAFE_INTEGER;
+        assert_eq!(dk.issue_token(&rng, &last), Err(bad("lifetime")));
+        last.expires_at = MAX_SAFE_INTEGER + 1;
+        assert_eq!(dk.issue_token(&rng, &last), Err(bad("time out of range")));
         // An overlong token signed by hand is still refused on parse.
         let mut long = token.json(true);
         long.expires_at = T0 + MAX_TOKEN_LIFETIME_SECS + 1;
@@ -710,6 +720,19 @@ pub(crate) mod tests {
         assert_eq!(
             ListingToken::from_json(&jcs(&raw).unwrap()),
             Err(bad("directory"))
+        );
+    }
+
+    #[test]
+    fn revocation_times_go_up_to_the_largest_safe_integer() {
+        let (dk, _, _, token) = setup();
+        let rev = dk
+            .revoke_token(&token.token_id, MAX_SAFE_INTEGER, "spam")
+            .unwrap();
+        assert_eq!(rev.revoked_at, MAX_SAFE_INTEGER);
+        assert_eq!(
+            dk.revoke_token(&token.token_id, MAX_SAFE_INTEGER + 1, "spam"),
+            Err(bad("time out of range"))
         );
     }
 

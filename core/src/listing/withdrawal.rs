@@ -247,6 +247,16 @@ mod tests {
             Withdrawal::sign(&ik, DIR, "release-planner", 0, T0),
             Err(bad("integer out of range"))
         );
+        // seq and ts go up to 2^53 - 1, each on its own.
+        Withdrawal::sign(&ik, DIR, "release-planner", MAX_SAFE_INTEGER, T0).unwrap();
+        Withdrawal::sign(&ik, DIR, "release-planner", 1, MAX_SAFE_INTEGER).unwrap();
+        for (seq, ts) in [(MAX_SAFE_INTEGER + 1, T0), (1, MAX_SAFE_INTEGER + 1)] {
+            assert_eq!(
+                Withdrawal::sign(&ik, DIR, "release-planner", seq, ts),
+                Err(bad("integer out of range")),
+                "seq {seq}, ts {ts}"
+            );
+        }
         assert_eq!(
             Withdrawal::sign(&ik, "a b", "release-planner", 1, T0),
             Err(bad("directory"))

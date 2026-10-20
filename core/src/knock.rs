@@ -1039,6 +1039,63 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_owner_checks_stop_at_their_bounds() {
+        let s = setup("knock-bounds");
+        let (sealed, _) = knock(&s);
+        // The door's last second of grace still opens it: the knock's own
+        // ts check is what refuses this one.
+        let last = s.door.expires_at() + DOOR_GRACE_SECS;
+        assert_eq!(
+            s.door.open_knock(s.door.id(), &sealed, last).err(),
+            Some(bad("ts out of range"))
+        );
+        // MAX_SEALED_KNOCK bytes is still opened (and this junk fails to).
+        assert_eq!(
+            s.door
+                .open_knock(s.door.id(), &vec![0u8; MAX_SEALED_KNOCK], now(&s.clock))
+                .err(),
+            Some(bad("seal does not open"))
+        );
+    }
+
+    #[test]
+    fn a_knock_ts_may_be_the_largest_safe_integer() {
+        let s = setup("knock-max-ts");
+        let (_, k) = s
+            .knocker
+            .create_knock_at(
+                s.door.id(),
+                s.door.public_key(),
+                "bob",
+                None,
+                MAX_SAFE_INTEGER,
+            )
+            .unwrap();
+        assert_eq!(k.ts, MAX_SAFE_INTEGER);
+        assert_eq!(Knock::from_json(&k.to_json()).unwrap().ts, MAX_SAFE_INTEGER);
+    }
+
+    #[test]
+    fn doors_knocks_and_secrets_print_their_ids_only() {
+        let s = setup("knock-debug");
+        let (_, k) = knock(&s);
+        let door = format!("{:?}", s.door);
+        assert!(door.starts_with("Door {"));
+        assert!(door.contains(&b64(s.door.id())));
+        assert!(door.contains(&s.door.expires_at().to_string()));
+        assert!(!door.contains(&b64(&s.door.private)));
+        let knock = format!("{k:?}");
+        assert!(knock.starts_with("Knock {"));
+        assert!(knock.contains(&b64(&k.knock_id)) && knock.contains(&k.ts.to_string()));
+        let secret = format!("{:?}", k.secret());
+        assert!(secret.starts_with("KnockSecret {"));
+        assert!(secret.contains(&b64(&k.knock_id)));
+        for dbg in [knock, secret] {
+            assert!(!dbg.contains(&b64(k.secret().secret.as_slice())));
+        }
+    }
+
+    #[test]
     fn owner_checks_1_to_3() {
         let s = setup("knock-checks");
         let (sealed, k) = knock(&s);
