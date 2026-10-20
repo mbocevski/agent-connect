@@ -1633,26 +1633,37 @@ of identity strings triggers nobody. In `moderated` mode the table above
 applies and `addressee` is ignored. Task replies (§7.2) use it: every
 member sees the task's progress, and only the requester is triggered.
 
-**Task updates trigger only the instance that asked.** An
-`a2a.message` or `a2a.task_cancel` an instance sends is a **request**. It
-**asks** the members it triggers under this section's rules (its
-`addressee`, `to` and the floor mode), and with an instance hint only that
-instance (§9.4); a broadcast that triggers nobody asks nobody. A request
-that names a task (a follow-up's `taskId`, a cancel's `id`) asks only the
-member running that task, when the requester knows it (it granted it, see
-below), and otherwise only the members the request names. A request grants
-each instance it asked at most **one task**: the one it named, else the
-first task that instance answers it with. An `a2a.task_status` or
-`a2a.task_artifact` triggers an instance only if its `reply_to` names a
-request of that instance that granted the update's sender instance the
-update's `body.taskId`, and that grant is still active (§10.2). Whatever
-the mode, `to` and `addressee` say, any other task update is context only:
-a member can't trigger another member's agent at the task budget (§10.2)
-with task updates nobody asked for. Every member sees the progress of other
-members' tasks as context, and so do the requester's other instances. A
-member running a task names the request it answers in `reply_to` on every
-update of the task (§7.2); the reference daemon fills it in when its agent
-leaves it out.
+**Task updates trigger only the instance that asked, and only when it has
+something to do.** An `a2a.message` or `a2a.task_cancel` an instance sends
+is a **request**. It **asks** the members it triggers under this section's
+rules (its `addressee`, `to` and the floor mode), and with an instance hint
+only that instance (§9.4); a broadcast that triggers nobody asks nobody. A
+request that names a task (a follow-up's `taskId`, a cancel's `id`) asks
+only the member running that task, when the requester knows it, and
+otherwise only the members the request names. A request grants each
+instance it asked at most **one task**: the one it named, else the first
+task that instance answers it with. An `a2a.task_status` or
+`a2a.task_artifact` whose `reply_to` names such a request, from that
+instance and about its granted task, belongs to the requester's task. It
+triggers the requester only when it moves the task into a state the
+requester acts on or learns the outcome from: `TASK_STATE_INPUT_REQUIRED`,
+`TASK_STATE_AUTH_REQUIRED`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`,
+`TASK_STATE_CANCELED` or `TASK_STATE_REJECTED` (the A2A 0.x names, such as
+`completed`, are the same states). Each request and granted task triggers
+at most once per such state, and not after it ended (a terminal state).
+Its other updates (`TASK_STATE_SUBMITTED`, `TASK_STATE_WORKING`, every
+artifact chunk, a repeated state) reach the requester as context, in order,
+before the one that triggers. A task that asks for input again does so in
+answer to the requester's follow-up, which is a request of its own, so each
+round triggers once. A request therefore triggers its sender a small, fixed
+number of times, however many updates follow and however late or long the
+task, and a member can trigger another member's agent with task updates
+only as often as that member sends it requests. Whatever the mode, `to` and
+`addressee` say, any other task update is context only. Every member sees
+the progress of other members' tasks as context, and so do the requester's
+other instances. A member running a task names the request it answers in
+`reply_to` on every update of the task (§7.2); the reference daemon fills
+it in when its agent leaves it out.
 
 Messages that don't trigger a member are still delivered to its adapter as
 context (`addressed_to_me: false`), or batched by the adapter (§10.6).
@@ -1754,27 +1765,27 @@ Task updates have their own budget. An `a2a.task_status` or
 `a2a.task_artifact` whose `body.taskId` is a string of 1 to 256 characters,
 and which a request of the receiving instance granted (§9.3), counts
 against a budget of 300 per minute for that sender instance and task,
-instead of the per-sender and per-group rates. A grant is active only while
-its task is: the task's first update must come within a window of the
-request (the reference daemon's `task_request_window_secs`, 600 seconds by
-default), each update of the task renews it for that window, and no grant
-outlives a lifetime counted from the request (`task_request_max_secs`, 24
-hours by default). A task that runs longer, or pauses longer than the
-window, needs a new request: a follow-up naming the task. Task updates have caps of their
-own too: all task updates of one identity's instances together 3 times that
-(900), and those of the whole group 1200 per minute, so replicas and many
-open tasks can't multiply the budget. The first update of a task in the
-window also counts as one ordinary message, so opening tasks is held to the
-message rates. The size, kind and part limits apply to task updates
-unchanged. A task update that answers no request of the receiving
-instance is held to the ordinary rates instead (30 per sender instance, 90
-per identity and 120 for the group, per minute), counted apart from the
-sender's other messages: it may be an honest task for another member, so
-it mustn't use up the sender's messages. A receiver SHOULD NOT hold one
-over that rate against its sender when its `reply_to` names a message the
-receiver sent or received in the group, and treats one that names none like
-any message over the rate. Every other message,
-`a2a.task_cancel` included, counts against the ordinary rates.
+instead of the per-sender and per-group rates. The budget bounds the volume
+of a task's progress, which the requester takes as context; how often the
+task triggers it is bounded by the task's states (§9.3), not by a rate. A
+receiver keeps its requests for as long as a message can wait at the relay
+(7 days, §8.3), so a late or long task still triggers on its states. Task
+updates have caps of their own too: all task updates of one identity's
+instances together 3 times that (900), and those of the whole group 1200
+per minute, so replicas and many open tasks can't multiply the budget. The
+first update of a task in the window also counts as one ordinary message,
+so opening tasks is held to the message rates. The size, kind and part
+limits apply to task updates unchanged. A task update that answers no
+request of the receiving instance is held to the ordinary rates instead (30
+per sender instance, 90 per identity and 120 for the group, per minute),
+counted apart from the sender's other messages: it may be an honest task
+for another member, so it mustn't use up the sender's messages, and a
+receiver SHOULD NOT hold one over that rate against its sender, since a
+member that joined after the request can't tell an honest stream from a
+flood. Such updates never trigger anyone, so a flood costs the receiver
+only the bounded share of its audit log and storage that any sender's
+dropped messages take. Every other message, `a2a.task_cancel` included,
+counts against the ordinary rates.
 
 A receiver MUST NOT tell the sender that a message it received was dropped,
 held for approval (§10.6), rejected or expired: no control message, receipt

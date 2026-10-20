@@ -491,17 +491,16 @@ journal entry, ack and tell the human.
 - **Status:** fixed in #89. The daemon records the A2A messages and task
   cancels it sends as requests, with the instances each one asks (those it
   triggers under the floor rules; for a follow-up naming a task, only the
-  instance running it). A request grants each asked instance one task,
-  while that task is active (its first update within 10 minutes, each
-  update renewing that, at most a day from the request; both configurable).
-  Only a granted update triggers, has the task budget and goes to the
-  adapter whose request granted it (SPEC §9.3, §10.2). Any other task
-  update is context, held to the ordinary message rates apart from the
-  sender's messages, and over them a violation unless it replies to a
-  message this instance knows. The A2A facade takes answers only from
-  the members its request asked (found in the PR's review). Residual: an
-  asked instance can run one task at the task budget for as long as it
-  keeps the task active, up to the lifetime cap.
+  instance running it). A request grants each asked instance one task, and
+  that task triggers the requester only on entering input required, auth
+  required or an end state: once per state for each request, and not
+  after it ended, on the adapter whose request it is. Its progress is
+  context (SPEC §9.3, §10.2). A request therefore triggers its sender a
+  small, fixed number of times, and a member triggers another's agent with
+  task updates only as often as that agent sends it requests, which its own
+  send rate bounds. Any other task update is context at the ordinary rates,
+  never a violation. The A2A facade takes answers only from the members its
+  request asked (found in the PR's review).
 - **Confirmed.**
 
 Any `a2a.task_status` or `a2a.task_artifact` with a `taskId` counts

@@ -1,6 +1,8 @@
-"""What a request grants (SPEC 9.3, 10.2), from the adversarial review of
-the SR-12 fix: one task per member it asked, while that task is active and
-for at most a capped lifetime; the trigger goes to the adapter that asked;
+"""What a request grants (SPEC 9.3), from the adversarial reviews of the
+SR-12 fix: one task per instance it asked, which triggers only when it
+enters a state the requester acts on (input or auth required, or an end),
+once per state, however late or long the task; the trigger goes to the
+adapter that asked;
 the A2A facade takes answers only from the members it asked; a follow-up
 on a task asks only the member running it; an agent's task update without
 ``reply_to`` answers the request whose task it is; and a follow-up after
@@ -21,6 +23,7 @@ from a2a.types import Message, Part, Role, SendMessageRequest
 
 from agentconnect.a2a_adapter import convert
 from agentconnect.adapter import Delivery, RecordingAdapter
+from agentconnect.limits import SENDER_PER_MINUTE
 from agentconnect.runtime.engine import new_msg_id
 from agentconnect_harness.a2a_agents import AgentServer, ScriptedExecutor, a2a_node, a2a_of
 from agentconnect_harness.cluster import WAIT, Cluster, Node
@@ -37,9 +40,29 @@ def raw_send(node: Node, gid: str, kind: str, body: dict[str, Any], **fields: An
     return msg_id
 
 
-def update(node: Node, gid: str, task: str, to: Node, refs: list[str]) -> str:
-    body = {"taskId": task, "contextId": gid, "status": {"state": "TASK_STATE_WORKING"}}
+IR = "TASK_STATE_INPUT_REQUIRED"
+
+
+def update(  # noqa: PLR0913, PLR0917
+    node: Node, gid: str, task: str, to: Node, refs: list[str], state: str = IR
+) -> str:
+    """A task status update; by default one that asks the requester for
+    input, which triggers it when the task is granted."""
+    body = {"taskId": task, "contextId": gid, "status": {"state": state}}
     return raw_send(node, gid, "a2a.task_status", body, addressee=[to.me], reply_to=refs)
+
+
+def artifact(  # noqa: PLR0913
+    node: Node, gid: str, task: str, to: Node, refs: list[str], *, last: bool
+) -> str:
+    body = {
+        "taskId": task,
+        "contextId": gid,
+        "artifact": {"artifactId": "a1", "parts": [{"text": "chunk"}]},
+        "append": True,
+        "lastChunk": last,
+    }
+    return raw_send(node, gid, "a2a.task_artifact", body, addressee=[to.me], reply_to=refs)
 
 
 async def handled(receiver: Node, sender: Node, msg_id: str) -> str | None:
@@ -60,58 +83,138 @@ async def triggers(receiver: Node, sender: Node, msg_id: str) -> bool:
     return delivered(receiver.adapter, msg_id).addressed_to_me
 
 
-# -- F1: a request grants one task per member, while it is active ----------------------
+# -- F1 and V1-V3: what a granted task triggers ---------------------------------------
+
+
+async def answers(a: Node, b: Node, gid: str, n: int) -> list[str]:
+    """b's agent answers ``n`` messages of a as SDK `reply` does: each
+    answer asks a, so each grants a one task."""
+    out = []
+    for i in range(n):
+        hello = a.daemon.send_message(gid, {"text": f"hi {i}"})
+        assert await handled(b, a, hello) == "done"
+        answer = b.daemon.send_message(
+            gid, {"parts": [{"text": "hello"}]}, reply_to=[hello], addressee=[a.me]
+        )
+        assert await handled(a, b, answer) == "done"
+        out.append(answer)
+    return out
 
 
 async def test_an_answer_grants_one_task_to_the_member_it_answers(group: GroupFixture) -> None:
     (a, b), gid = await group(2)
-    hello = a.daemon.send_message(gid, {"text": "hi"})
-    assert await handled(b, a, hello) == "done"
-    # b's agent answers as SDK `reply` does: that asks a.
-    answer = b.daemon.send_message(
-        gid, {"parts": [{"text": "hello"}]}, reply_to=[hello], addressee=[a.me]
-    )
-    assert await handled(a, b, answer) == "done"
+    (answer,) = await answers(a, b, gid, 1)
     assert await triggers(b, a, update(a, gid, "t0", b, [answer]))
     # Another task against the same request is context: one task per member.
     for task in ("t1", "t2"):
         assert not await triggers(b, a, update(a, gid, task, b, [answer]))
-    assert await triggers(b, a, update(a, gid, "t0", b, [answer]))
 
 
-async def test_a_request_unanswered_for_its_window_grants_nothing(
+async def test_replies_give_at_most_a_few_triggers_each(group: GroupFixture) -> None:
+    """V1: however many updates a member sends on the tasks its answers
+    granted, each request triggers at most once per state the requester acts
+    on, and never after the task ended: no task budget of triggers."""
+    (a, b), gid = await group(2)
+    cycle = [
+        "TASK_STATE_WORKING",
+        IR,
+        "TASK_STATE_WORKING",
+        IR,
+        "TASK_STATE_AUTH_REQUIRED",
+        "TASK_STATE_COMPLETED",
+        "TASK_STATE_COMPLETED",
+        "TASK_STATE_FAILED",
+        IR,
+    ]
+    sent: list[str] = []
+    for k, answer in enumerate(await answers(a, b, gid, 3)):
+        sent += [update(a, gid, f"t{k}", b, [answer], state) for state in cycle]
+        sent.append(artifact(a, gid, f"t{k}", b, [answer], last=True))
+    assert await handled(b, a, sent[-1]) == "done"
+    fired = [m for m in sent if delivered(b.adapter, m).addressed_to_me]
+    # Per request: input required, auth required, the end; three requests.
+    assert len(fired) == 9
+    states = [delivered(b.adapter, m).body["status"]["state"] for m in fired]
+    assert states == [IR, "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED"] * 3
+    reasons = {
+        r["reason"]
+        for r in b.daemon.store.audit(gid)
+        if r["msg_id"] in sent and r["msg_id"] not in fired
+    }
+    assert reasons == {"task_progress"}
+
+
+async def test_a_long_task_with_gaps_triggers_once_at_its_end(
     group: GroupFixture, advance: Advance
 ) -> None:
+    """V2: progress and artifacts are context, however long the gaps;
+    the end triggers, with the artifacts already delivered before it."""
     (a, b), gid = await group(2)
-    request = b.daemon.send_message(gid, {"text": "please"}, to=[a.me])
-    assert await handled(a, b, request) == "done"
-    await advance(601)  # task_request_window_secs: 600 by default
-    assert not await triggers(b, a, update(a, gid, "t1", b, [request]))
+    request = a.daemon.send_message(gid, {"parts": [{"text": "long job"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    progress = [update(b, gid, "job", a, [request], "TASK_STATE_WORKING")]
+    for last in (False, True):
+        await advance(3 * 3600)  # hours without a word
+        progress.append(artifact(b, gid, "job", a, [request], last=last))
+    await advance(3 * 3600)
+    done = update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED")
+    assert await triggers(a, b, done)
+    assert not any(delivered(a.adapter, m).addressed_to_me for m in progress)
+    order = [d.msg_id for d in a.adapter.deliveries]
+    assert all(order.index(m) < order.index(done) for m in progress)
+    # Anything after the end is context.
+    late = update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED")
+    assert not await triggers(a, b, late)
 
 
-async def test_each_update_renews_the_task_until_the_cap(
-    group: GroupFixture, advance: Advance
-) -> None:
+async def test_a_late_first_answer_triggers(group: GroupFixture, advance: Advance) -> None:
+    """V3: the relay held the request while the peer was away."""
     (a, b), gid = await group(2)
-    b.daemon.update_safety(gid, {"task_request_max_secs": 3600})
-    request = b.daemon.send_message(gid, {"text": "please"}, to=[a.me])
-    assert await handled(a, b, request) == "done"
-    assert await triggers(b, a, update(a, gid, "t1", b, [request]))
-    # Every update renews the window (600 s), so a quiet gap shorter than it
-    # never ends the task...
-    for _ in range(6):
-        await advance(500)
-        assert await triggers(b, a, update(a, gid, "t1", b, [request]))
-    # ...but a request lives at most task_request_max_secs (here an hour):
-    # a longer task needs a new request.
-    await advance(700)
-    assert not await triggers(b, a, update(a, gid, "t1", b, [request]))
-    # And a gap longer than the window ends it too.
-    again = b.daemon.send_message(gid, {"text": "again"}, to=[a.me])
-    assert await handled(a, b, again) == "done"
-    assert await triggers(b, a, update(a, gid, "t2", b, [again]))
-    await advance(601)
-    assert not await triggers(b, a, update(a, gid, "t2", b, [again]))
+    request = a.daemon.send_message(gid, {"parts": [{"text": "when you can"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    await advance(2 * 86_400)
+    assert await triggers(a, b, update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED"))
+
+
+async def test_an_input_required_loop_triggers_once_per_entry(group: GroupFixture) -> None:
+    """Each follow-up is a request of its own: the task asking again in
+    answer to it triggers again, a repeat without one doesn't."""
+    (a, b), gid = await group(2)
+    request = a.daemon.send_message(gid, {"parts": [{"text": "plan it"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    assert await triggers(a, b, update(b, gid, "job", a, [request]))
+    assert not await triggers(a, b, update(b, gid, "job", a, [request]))
+    for round_ in range(3):
+        follow_up = a.daemon.send_message(
+            gid, {"parts": [{"text": f"answer {round_}"}], "taskId": "job"}, to=[b.me]
+        )
+        assert await handled(b, a, follow_up) == "done"
+        working = update(b, gid, "job", a, [follow_up], "TASK_STATE_WORKING")
+        assert not await triggers(a, b, working)
+        assert await triggers(a, b, update(b, gid, "job", a, [follow_up]))
+    assert await triggers(a, b, update(b, gid, "job", a, [follow_up], "TASK_STATE_COMPLETED"))
+
+
+async def test_a_late_joiner_counts_no_violations(group: GroupFixture, cluster: Cluster) -> None:
+    """V4: c joins while b streams a task for a; c can't read a's request,
+    and b's honest stream is never held against b."""
+    (a, b), gid = await group(2)
+    request = a.daemon.send_message(gid, {"parts": [{"text": "stream"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    c = await cluster.node("late")
+    await cluster.invite(a, c, gid)
+    ids = [
+        update(b, gid, "job", a, [request], "TASK_STATE_WORKING")
+        for _ in range(SENDER_PER_MINUTE + 15)
+    ]
+    assert await handled(c, b, ids[-1]) == "dropped"
+    reasons = {r["reason"] for r in c.daemon.store.audit(gid) if r["msg_id"] in ids}
+    assert reasons == {"not_requested", "context_rate_limited"}
+    assert c.daemon.safety.violations(gid, b.me) == 0
+    assert "repeated_violations" not in [e["type"] for e in c.daemon.store.events(limit=10_000)]
+    # The requester takes the whole stream, as context, on the task budget.
+    assert await handled(a, b, ids[-1]) == "done"
+    assert all(a.daemon.store.inbox_state(b.daemon.mailbox, m) == "done" for m in ids)
 
 
 async def test_the_task_is_bound_to_the_instance_that_opened_it(cluster: Cluster) -> None:
@@ -131,11 +234,11 @@ async def test_the_task_is_bound_to_the_instance_that_opened_it(cluster: Cluster
     assert not await triggers(a, x2, update(x2, gid, "t2", a, [request]))
 
 
-async def test_a_held_request_counts_from_when_it_is_sent(
+async def test_a_held_request_still_grants_once_approved(
     group: GroupFixture, advance: Advance
 ) -> None:
-    """A request held for the human's approval starts its window when the
-    human lets it go, not when the agent queued it."""
+    """A request held for the human's approval grants its task when the
+    peer answers it, however long the hold took."""
     (a, b), gid = await group(2)
     b.daemon.update_safety(gid, {"require_approval": "outbound"})
     request = b.daemon.send_message(gid, {"text": "please"}, to=[a.me])
@@ -350,10 +453,13 @@ async def test_a_task_update_without_reply_to_answers_its_request(group: GroupFi
     assert await handled(b, a, from_a) == "done"
     from_c = c.daemon.send_message(gid, {"parts": [{"text": "another"}]}, to=[b.me])
     assert await handled(b, c, from_c) == "done"
-    # b's agent reports progress on a's task with the requester as addressee
+    # b's agent asks a for input on a's task with the requester as addressee
     # and no reply_to: the runtime names a's request, not c's.
-    status = {"taskId": "ta", "contextId": gid, "status": {"state": "TASK_STATE_WORKING"}}
-    sent = b.daemon.send_message(gid, status, kind="a2a.task_status", addressee=[a.me])
+
+    def status(state: str) -> dict[str, Any]:
+        return {"taskId": "ta", "contextId": gid, "status": {"state": state}}
+
+    sent = b.daemon.send_message(gid, status(IR), kind="a2a.task_status", addressee=[a.me])
     assert await handled(a, b, sent) == "done"
     d = delivered(a.adapter, sent)
     assert d.inner["reply_to"] == [from_a]
@@ -362,7 +468,9 @@ async def test_a_task_update_without_reply_to_answers_its_request(group: GroupFi
     # request whose task it is, not a's latest message.
     later = a.daemon.send_message(gid, {"parts": [{"text": "unrelated"}]}, to=[b.me])
     assert await handled(b, a, later) == "done"
-    more = b.daemon.send_message(gid, status, kind="a2a.task_status", addressee=[a.me])
+    more = b.daemon.send_message(
+        gid, status("TASK_STATE_COMPLETED"), kind="a2a.task_status", addressee=[a.me]
+    )
     assert await handled(a, b, more) == "done"
     assert delivered(a.adapter, more).inner["reply_to"] == [from_a]
     assert delivered(a.adapter, more).addressed_to_me

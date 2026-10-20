@@ -1342,21 +1342,23 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `to`, mention and moderated mode, the instance hint), and for a follow-up
   naming a task only the instance running it. A request grants each asked
   instance one task, the one it named or the first that instance answers it
-  with, while the task is active: its first update within
-  `policy.task_request_window_secs` (600 s), each update renewing that,
-  and never past `policy.task_request_max_secs` (a day) from the request.
-  Only a task update that a request of this instance granted triggers it,
-  counts against the task budget, and goes to the adapter whose request
-  granted it (SPEC §9.3, §10.2). Any other task update is context
-  (`not_requested`), held to the ordinary message rates apart from the
-  sender's messages; one over them is `context_rate_limited`, no violation,
-  when it replies to a message this instance knows, and `rate_limited`, a
-  violation, when it doesn't. The A2A facade takes answers only from the
-  members its request asked. The A2A adapter keeps its agent's task map in
-  the daemon's database, so a follow-up after a restart continues the task.
-  An agent's task update sent without `reply_to` names its task's request.
-  The SDK's `reply_status` and `reply_artifact` answers to one message are
-  about one task.
+  with, and that task triggers the requester only when it enters a state
+  the requester acts on (`TASK_STATE_INPUT_REQUIRED`, `_AUTH_REQUIRED`,
+  `_COMPLETED`, `_FAILED`, `_CANCELED`, `_REJECTED`): once per state for
+  each request, nothing after it ended, and on the adapter whose request it
+  is. Its progress (`working`, artifact chunks, a repeated state) is
+  delivered as context (`task_progress`), in order, on the task budget, so a
+  request triggers its sender a small, fixed number of times however late
+  or long the task (SPEC §9.3, §10.2). Requests are kept for the relay's 7
+  days. Any other task update is context (`not_requested`), held to the
+  ordinary message rates apart from the sender's messages; one over them is
+  `context_rate_limited`, never a violation. The A2A facade takes answers
+  only from the members its request asked, and still streams every event of
+  the task to its client. The A2A adapter keeps its agent's task map in the
+  daemon's database, the newest 64 tasks per requesting instance, so a
+  follow-up after a restart continues the task. An agent's task update sent
+  without `reply_to` names its task's request. The SDK's `reply_status`
+  and `reply_artifact` answers to one message are about one task.
 - Directory: at `RUST_LOG=trace`, `axum::serve` logged client addresses,
   since the log filter held back only the MCP library. Crates other than
   the directory's own are now held at `warn` (the MCP library at `error`)

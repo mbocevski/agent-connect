@@ -84,14 +84,17 @@ from agentconnect.limits import (
 )
 from agentconnect.policy import (
     HUMAN_ONLY_KINDS,
+    TERMINAL_STATES,
     Decision,
     Inbound,
     Outbound,
     PolicyError,
     SafetyPolicy,
     Verdict,
+    acts_on,
     drop,
     task_of,
+    task_state,
     verification_holds,
 )
 from agentconnect.relay import (
@@ -767,6 +770,9 @@ class Engine:
             bind = getattr(adapter, "bind_store", None)
             if bind is not None:
                 bind(self.store)  # optional hook: adapters that keep a durable feed
+            bind_clock = getattr(adapter, "bind_clock", None)
+            if bind_clock is not None:
+                bind_clock(self.clock)  # optional hook: adapters that stamp what they keep
             await adapter.on_outbound(self._outbound_for(adapter.name))
         self.running = True
         if bool(self.store.kv_get(SAS_RESET_NOTICE)):
@@ -1523,7 +1529,6 @@ class Engine:
         # Hops are needed only while a reply can still arrive (relay TTL);
         # so are the journal's tombstones of consumed entries.
         self.store.forget_hops(now - HOP_MEMORY_SECS)
-        self.store.forget_grants(now)
         with contextlib.suppress(ac.AgentConnectError, ac.CoreError):
             self.client.journal_purge(now - HOP_MEMORY_SECS)
         # After the invites above: an entry outlives its invite's expiry.
@@ -1994,12 +1999,11 @@ class Engine:
         self, group_id: str, identity: str, instance: str, inner: dict[str, Any]
     ) -> str | None:
         """SPEC 9.3: the request of this instance that a received task update
-        answers (named in ``reply_to``, asked this member, grants it this
-        task and is still active, :meth:`Store.grant_task`), or ``None``."""
+        answers (named in ``reply_to``, asked this member and grants it this
+        task, :meth:`Store.grant_task`), or ``None``."""
         task = task_of(inner)
         if task is None:
             return None
-        settings = self.safety.settings(group_id)
         return self.store.grant_task(
             group_id,
             _refs(inner),
@@ -2007,8 +2011,6 @@ class Engine:
             instance=instance,
             task_id=task,
             now=self.now(),
-            window=settings.task_request_window_secs,
-            lifetime=settings.task_request_max_secs,
         )
 
     def _request_asks(
@@ -2112,7 +2114,16 @@ class Engine:
             else None
         )
         requested = granting is not None
-        if task_update and not requested:
+        # SPEC 9.3: a granted task triggers only on entering a state the
+        # requester acts on, once per state, and not after it ended; its
+        # other updates are progress, delivered as context.
+        state = task_state(inner) if requested else None
+        trigger = (
+            granting is not None
+            and acts_on(state)
+            and self.store.task_triggers(group.group_id, granting, identity, str(state))
+        )
+        if task_update and not trigger:
             addressed = False
         # One decision: SPEC 7.2 (unknown kinds are ignored), 7.3, 9.3, 10.2
         # (size, parts, rates; a replayed journal entry was counted when the
@@ -2133,11 +2144,17 @@ class Engine:
                 card_changed=self._card_changed(group.group_id, identity, inner),
                 card_problem=self._card_problem(inner),
                 requested=requested,
-                known_refs=task_update
-                and not requested
-                and bool(self.store.inbox_hops(group.group_id, _refs(inner))),
+                progress=requested and not trigger,
             )
         )
+        if granting is not None and state is not None and decision.verdict is not Verdict.DROP:
+            self.store.task_entered(
+                group.group_id,
+                granting,
+                identity,
+                state,
+                terminal=state in TERMINAL_STATES,
+            )
         if (
             decision.verdict is not Verdict.DROP
             and inner["kind"] == "control.floor"
@@ -2848,8 +2865,6 @@ class Engine:
             else:
                 payload = item["payload"] or {}
                 self._enqueue("app", group_id, payload)
-                # A request's window starts when it goes out (SPEC 10.2).
-                self.store.request_sent(group_id, str(item["msg_id"]), self.now())
                 self.safety.transcribe(group_id, "out", self.me, item["msg_id"], payload["inner"])
                 # The agent's own message goes out: tell its adapter (the
                 # A2A facade waits for it), in the same transaction.

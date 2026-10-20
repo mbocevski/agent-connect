@@ -39,7 +39,6 @@ import hashlib
 import json
 import logging
 import secrets
-import time
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Coroutine, Mapping
 from dataclasses import dataclass, field
@@ -73,6 +72,7 @@ from agentconnect.adapter import (
     OutboundSend,
     Sender,
 )
+from agentconnect.clock import Clock, unix_seconds
 from agentconnect.tasks import cancel_and_wait
 
 if TYPE_CHECKING:
@@ -83,7 +83,8 @@ LOG = log.get("a2a")
 FACADE_TOKEN_FILE = "a2a-facade-token"  # noqa: S105 - a file name
 SEEN_FILE = "a2a-seen.db"
 MAX_CONTEXT_ENTRY = 64 * 1024  # bytes of JSON; bigger context entries are summarised
-MAX_TASKS = 1024  # local agent tasks remembered for follow-ups and cancels
+MAX_TASKS = 1024  # local agent tasks kept in memory (a cache of the database's)
+TASKS_PER_PEER = 64  # tasks kept per requesting instance in the database
 CARD_TIMEOUT = 5.0
 
 
@@ -124,6 +125,7 @@ class TaskRef:
 
     group_id: str
     requester: str
+    instance: str
     trigger: str
 
 
@@ -159,8 +161,10 @@ class A2AAdapter:
         self._peers: dict[str, set[str]] = {}
         self._context: dict[str, deque[dict[str, Any]]] = {}
         self._tasks: OrderedDict[str, TaskRef] = OrderedDict()
-        # The daemon's encrypted store, where the task map outlives a restart.
+        # The daemon's encrypted store, where the task map outlives a restart,
+        # and the runtime's clock for its entries.
         self._store: Store | None = None
+        self._clock: Clock | None = None
         self._running: set[asyncio.Task[None]] = set()
         self.facade: Facade | None = None
         self.facade_token: str | None = None
@@ -169,6 +173,10 @@ class A2AAdapter:
         """The daemon's database: the local agent's tasks are kept there,
         so a follow-up or a cancel after a restart still finds its task."""
         self._store = store
+
+    def bind_clock(self, clock: Clock) -> None:
+        """The runtime's clock, which stamps the task map's entries."""
+        self._clock = clock
 
     def _task(self, task_id: str) -> TaskRef | None:
         """One of the local agent's tasks, in memory or, after a restart,
@@ -192,14 +200,15 @@ class A2AAdapter:
         self._tasks.move_to_end(task_id)
         while len(self._tasks) > MAX_TASKS:
             self._tasks.popitem(last=False)
-        if self._store is not None:
+        if self._store is not None and self._clock is not None:
             self._store.a2a_task_put(
                 task_id,
                 group_id=ref.group_id,
                 requester=ref.requester,
+                instance=ref.instance,
                 msg_id=ref.trigger,
-                now=int(time.time()),
-                keep=MAX_TASKS,
+                now=unix_seconds(self._clock),
+                keep=TASKS_PER_PEER,
             )
 
     @property
@@ -482,7 +491,9 @@ class A2AAdapter:
     async def _emit(self, d: Delivery, addressee: list[str], resp: StreamResponse) -> None:
         task_id = convert.task_id_of(resp)
         if task_id and task_id not in self._tasks:
-            self._keep_task(task_id, TaskRef(d.group_id, d.sender.identity, d.msg_id))
+            self._keep_task(
+                task_id, TaskRef(d.group_id, d.sender.identity, d.sender.instance_id, d.msg_id)
+            )
         if self._send is None:
             return
         for kind, body in convert.stream_to_inner(resp, d.group_id):

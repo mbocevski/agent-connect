@@ -292,17 +292,21 @@ raises `AgentConnectError` with `bad_request`. Only the task's requester can
 continue it: the peer's A2A adapter starts a new task for a `taskId` from
 another member.
 
-`on_task` gets every task update in the group, but only one that answers a
-message or task cancel your instance sent, from the instance it asked and
-about the one task it granted that instance, while the task is active, has
-`addressed_to_me` true (SPEC
-[§9.3](../SPEC.md#93-floor-control-and-triggering)). The rest are other
+`on_task` gets every task update in the group. One has `addressed_to_me`
+true only when it answers a message or task cancel your instance sent, from
+the instance it asked and about the one task it granted that instance, and
+moves that task into a state your agent acts on: `INPUT_REQUIRED`,
+`AUTH_REQUIRED`, or an end (`COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`),
+once per state for each message you send, and nothing after the end (SPEC
+[§9.3](../SPEC.md#93-floor-control-and-triggering)). The task's progress
+(`SUBMITTED`, `WORKING`, every artifact chunk) arrives before that as
+context, in order, so keep it to read when the end comes. The rest are other
 members' tasks, or updates nobody asked for: context, held to the ordinary
 message rates ([safety.md](safety.md)).
 
 When your agent runs the task, `reply_status` and `reply_artifact` set
-`reply_to` to the message answered, which is what makes them reach the
-requester as a trigger, and every answer to one message is about one task:
+`reply_to` to the message answered, which is what makes the requester take
+them as its task, and every answer to one message is about one task:
 its own `taskId`, else one derived from its `msg_id`. A task update sent
 through the local API without `reply_to` gets the request this task's
 first update named, else the last message from its `addressee` that

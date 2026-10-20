@@ -29,9 +29,17 @@ def raw_send(node: Node, gid: str, kind: str, body: dict[str, Any], **fields: An
     return msg_id
 
 
-def update(node: Node, gid: str, task: str, to: Node, refs: list[str] | None = None) -> str:
-    """A task status update for ``task``, addressed to ``to`` (SPEC 7.2)."""
-    body = {"taskId": task, "contextId": gid, "status": {"state": "TASK_STATE_WORKING"}}
+def update(  # noqa: PLR0913, PLR0917
+    node: Node,
+    gid: str,
+    task: str,
+    to: Node,
+    refs: list[str] | None = None,
+    state: str = "TASK_STATE_INPUT_REQUIRED",
+) -> str:
+    """A task status update for ``task``, addressed to ``to`` (SPEC 7.2);
+    by default one asking for input, which triggers a requester."""
+    body = {"taskId": task, "contextId": gid, "status": {"state": state}}
     fields: dict[str, Any] = {"addressee": [to.me]}
     if refs is not None:
         fields["reply_to"] = refs
@@ -105,13 +113,19 @@ async def test_a_reply_to_this_instances_request_triggers_on_the_task_budget(
     (a, b), gid = await group(2)
     request = ask(b, gid, a)
     assert await handled(a, b, request) == "done"
-    # Past the message rate: the task budget applies.
-    ids = [update(a, gid, "t1", b, [request]) for _ in range(SENDER_PER_MINUTE + 5)]
+    # Past the message rate: the task budget applies to its progress, which
+    # is context; asking for input triggers.
+    working = "TASK_STATE_WORKING"
+    ids = [update(a, gid, "t1", b, [request], working) for _ in range(SENDER_PER_MINUTE + 5)]
     assert await handled(b, a, ids[-1]) == "done"
-    assert all(delivered(b, m).addressed_to_me for m in ids)
-    # And it holds across a restart.
+    assert not any(delivered(b, m).addressed_to_me for m in ids)
+    assert {reason(b, gid, m) for m in ids} == {"task_progress"}
+    asking = update(a, gid, "t1", b, [request])
+    assert await handled(b, a, asking) == "done"
+    assert delivered(b, asking).addressed_to_me
+    # And the grant holds across a restart.
     await b.restart()
-    again = update(a, gid, "t1", b, [request])
+    again = update(a, gid, "t1", b, [request], "TASK_STATE_COMPLETED")
     assert await handled(b, a, again) == "done"
     assert delivered(b, again).addressed_to_me
 
@@ -120,9 +134,9 @@ async def test_a_follow_up_names_its_task(group: GroupFixture) -> None:
     (a, b), gid = await group(2)
     follow_up = ask(b, gid, a, task="t1")
     assert await handled(a, b, follow_up) == "done"
-    right = update(a, gid, "t1", b, [follow_up])
     wrong = update(a, gid, "t9", b, [follow_up])
-    assert await handled(b, a, wrong) == "done"
+    right = update(a, gid, "t1", b, [follow_up])
+    assert await handled(b, a, right) == "done"
     assert delivered(b, right).addressed_to_me
     assert not delivered(b, wrong).addressed_to_me
 
@@ -143,12 +157,15 @@ async def test_only_the_member_asked_answers(group: GroupFixture) -> None:
     assert not delivered(c, answer).addressed_to_me
 
 
-async def test_a_flood_naming_nothing_b_knows_is_a_violation(group: GroupFixture) -> None:
+async def test_a_flood_naming_nothing_is_dropped_but_no_violation(group: GroupFixture) -> None:
+    """It triggers nothing whatever it names, so it costs this instance
+    only its bounded audit and storage share; counting it would wrong an
+    honest member that joined after the request."""
     (a, b), gid = await group(2)
     ids = [update(a, gid, "t1", b) for _ in range(SENDER_PER_MINUTE + 5)]
     assert await handled(b, a, ids[-1]) == "dropped"
-    assert reason(b, gid, ids[-1]) == "rate_limited"
-    assert b.daemon.safety.violations(gid, a.me) == 5
+    assert reason(b, gid, ids[-1]) == "context_rate_limited"
+    assert b.daemon.safety.violations(gid, a.me) == 0
 
 
 async def test_a_request_asks_whom_it_triggers(group: GroupFixture) -> None:

@@ -89,7 +89,7 @@ def inb(  # noqa: PLR0913
     *,
     owner: str = OWNER,
     requested: bool = True,
-    known_refs: bool = False,
+    progress: bool = False,
 ) -> Inbound:
     """A received message; a task update answers this instance's request
     unless ``requested`` is false (SPEC 9.3)."""
@@ -104,7 +104,7 @@ def inb(  # noqa: PLR0913
         20,
         True,
         requested=requested,
-        known_refs=known_refs,
+        progress=progress,
     )
 
 
@@ -243,25 +243,20 @@ def test_unrequested_task_updates_get_the_message_rate_and_no_trigger(
 ) -> None:
     """SR-12: a task update that answers no request of this instance never
     triggers it and has the message rates, in windows of its own, whatever
-    its taskId; a drop there is no violation when it replies to a message
-    this instance knows, and one when it replies to nothing it knows."""
+    its taskId; a drop there is no violation, whatever it names: it may be
+    an honest task for another member, and it triggers nothing."""
     verdicts = [
-        policy.inbound(inb(task(f"t{n % 3}"), requested=False, known_refs=True))
+        policy.inbound(inb(task(f"t{n % 3}"), requested=False))
         for n in range(SENDER_PER_MINUTE + 5)
     ]
     assert verdicts[:SENDER_PER_MINUTE] == [as_context("not_requested")] * SENDER_PER_MINUTE
     assert set(verdicts[SENDER_PER_MINUTE:]) == {drop("context_rate_limited")}
     assert "context_rate_limited" not in VIOLATIONS
-    stray = policy.inbound(inb(task("t0"), "ac:v0:other", "o/i1", requested=False))
-    assert stray == as_context("not_requested")
-    for _ in range(SENDER_PER_MINUTE):
-        policy.inbound(inb(task("t0"), "ac:v0:other", "o/i1", requested=False))
-    assert policy.inbound(inb(task("t0"), "ac:v0:other", "o/i1", requested=False)) == drop(
-        "rate_limited"
-    )
     # The sender's messages and requested task updates have their own budgets.
     assert policy.inbound(inb(msg())) == DELIVER
     assert policy.inbound(inb(task("asked"))) == DELIVER
+    # Progress on a requested task is context, on the task budget.
+    assert policy.inbound(inb(task("asked"), progress=True)) == as_context("task_progress")
 
 
 def test_a_full_hold_queue_from_another_members_task_is_no_violation(
@@ -272,7 +267,7 @@ def test_a_full_hold_queue_from_another_members_task_is_no_violation(
     policy.update(G, {"require_approval": "inbound", "max_held_per_sender": 2})
     for n in range(2):
         held_row(store, n)
-    unrequested = policy.inbound(inb(task("t9"), requested=False, known_refs=True))
+    unrequested = policy.inbound(inb(task("t9"), requested=False))
     assert unrequested == drop("hold_queue_full")
     assert "hold_queue_full" not in VIOLATIONS
     # Requested, the same overflow is the sender's.

@@ -539,7 +539,8 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         '(SPEC 9.3); task replies go to `["*"]` with the requester as `addressee`. '
         "For a task status or artifact update, `reply_to` names the request the task "
         "answers (the message that started it, or the follow-up being answered): only "
-        "then does the requester get it as a trigger (SPEC 9.3). Left out, the runtime "
+        "then does the requester take it as its task, triggered when the task asks for "
+        "input or auth or ends, its progress as context (SPEC 9.3). Left out, the runtime "
         "names the request this task's first update named, else the last message from "
         "the `addressee` that triggered this instance. "
         "`instance` (an instance id, 16 lowercase hex) narrows that to one instance "

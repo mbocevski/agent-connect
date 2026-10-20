@@ -100,9 +100,6 @@ DEFAULT_MAX_HELD_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_HELD_SENDER_BYTES = 1024 * 1024
 DEFAULT_TASK_WINDOW_SECS = 600
 MAX_TASK_WINDOW_SECS = 3600
-DEFAULT_TASK_REQUEST_WINDOW_SECS = 600  # a request's task must start, and stay active, within it
-DEFAULT_TASK_REQUEST_MAX_SECS = 86_400  # and lives at most this long
-MAX_TASK_REQUEST_SECS = 7 * 86_400  # requests are kept this long (the hop records' time)
 TASK_DECISION_DAYS = 7  # decided tasks are forgotten after a week untouched
 MAX_TRACKED = 10_000  # (group, sender) violation counters kept at most
 DEFAULT_VIOLATION_THRESHOLD = 10
@@ -324,25 +321,6 @@ KNOBS: tuple[Knob, ...] = (
         MAX_TASK_WINDOW_SECS,
     ),
     Knob(
-        "task_request_window_secs",
-        int,
-        DEFAULT_TASK_REQUEST_WINDOW_SECS,
-        "How long a message or task cancel your agent sends grants a task to the members it "
-        "asked: their first task update must come within it, and each update of that task "
-        "renews it (60 to 86400; SPEC 9.3, 10.2).",
-        60,
-        86_400,
-    ),
-    Knob(
-        "task_request_max_secs",
-        int,
-        DEFAULT_TASK_REQUEST_MAX_SECS,
-        "The longest a task granted by one request triggers your agent, from when the "
-        "request was sent; a longer task needs a new request (600 to 604800).",
-        600,
-        MAX_TASK_REQUEST_SECS,
-    ),
-    Knob(
         "violation_threshold",
         int,
         DEFAULT_VIOLATION_THRESHOLD,
@@ -425,8 +403,6 @@ class Settings:
     max_held_bytes: int = DEFAULT_MAX_HELD_BYTES
     max_held_bytes_per_sender: int = DEFAULT_MAX_HELD_SENDER_BYTES
     task_approval_window_secs: int = DEFAULT_TASK_WINDOW_SECS
-    task_request_window_secs: int = DEFAULT_TASK_REQUEST_WINDOW_SECS
-    task_request_max_secs: int = DEFAULT_TASK_REQUEST_MAX_SECS
     violation_threshold: int = DEFAULT_VIOLATION_THRESHOLD
     violation_window_secs: int = DEFAULT_VIOLATION_WINDOW_SECS
     transcript: bool = False
@@ -536,6 +512,31 @@ TERMINAL_STATES = frozenset(
 )
 
 
+INTERRUPTED_STATES = frozenset(
+    {"TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "input-required", "auth-required"}
+)
+
+
+def task_state(inner: dict[str, Any]) -> str | None:
+    """The state a task status update reports, in its A2A v1.0 name
+    (``TASK_STATE_COMPLETED``; an A2A 0.x name such as ``completed`` is
+    mapped to it), else ``None``."""
+    body = inner.get("body")
+    status = body.get("status") if isinstance(body, dict) else None
+    state = status.get("state") if isinstance(status, dict) else None
+    if inner.get("kind") != "a2a.task_status" or not isinstance(state, str) or not state:
+        return None
+    if state.startswith("TASK_STATE_"):
+        return state
+    return "TASK_STATE_" + str(state).upper().replace("-", "_")
+
+
+def acts_on(state: str | None) -> bool:
+    """Whether a requester acts on, or learns the outcome from, a task
+    entering ``state`` (SPEC 9.3): input or auth required, or an end."""
+    return state is not None and (state in INTERRUPTED_STATES or state in TERMINAL_STATES)
+
+
 def task_ended(inner: dict[str, Any]) -> bool:
     """Whether a task status update reports a terminal state."""
     body = inner.get("body")
@@ -570,10 +571,9 @@ class Inbound:
     # A task update answering a message this instance sent (SPEC 9.3): only
     # such an update triggers the agent and has the task budget.
     requested: bool = False
-    # Its reply_to names a message this instance sent or received in the
-    # group: an unrequested task update may then be another member's honest
-    # task, and one over the rate is no violation.
-    known_refs: bool = False
+    # A requested task update that doesn't move its task to a state the
+    # requester acts on (SPEC 9.3): progress, delivered as context.
+    progress: bool = False
 
     @property
     def kind(self) -> str:
@@ -700,10 +700,9 @@ class SafetyPolicy:
             )
         ):
             # Another member's task may be honest at any rate its daemon
-            # allows: dropping its progress here is no violation, unless it
-            # answers nothing this instance has seen.
-            honest = unrequested and m.known_refs
-            return drop("context_rate_limited" if honest else "rate_limited")
+            # allows: dropping its progress here is no violation. It never
+            # triggers, so a flood costs only a bounded audit share.
+            return drop("context_rate_limited" if unrequested else "rate_limited")
         if m.kind in HUMAN_ONLY_KINDS and m.origin != "human":
             return drop("not_human")  # SPEC 7.3: an agent can't resume
         if m.kind == "control.close" and m.sender != m.owner:
@@ -739,12 +738,7 @@ class SafetyPolicy:
                 size=m.size,
                 settings=settings,
             )
-            if (
-                unrequested
-                and m.known_refs
-                and decision is not None
-                and decision.reason == "hold_overflow"
-            ):
+            if unrequested and decision is not None and decision.reason == "hold_overflow":
                 # Another member's task, held for the human: a full queue
                 # is not that sender's violation.
                 decision = drop("hold_queue_full")
@@ -754,6 +748,8 @@ class SafetyPolicy:
             return as_context("loop_guard")  # SPEC 10.3: don't trigger the agent
         if unrequested:
             return as_context("not_requested")  # SPEC 9.3: no task we asked for
+        if m.progress:
+            return as_context("task_progress")  # SPEC 9.3: nothing to act on yet
         if not m.addressed:
             return as_context("not_addressed")  # SPEC 9.3
         return DELIVER

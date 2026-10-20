@@ -85,10 +85,10 @@ async def test_a_reply_to_input_required_continues_the_a2a_task(
 
 @pytest.mark.parametrize("mode", MODES)
 async def test_which_replies_name_a_task(cluster: Cluster, sockdir: Path, mode: str) -> None:
-    """A reply to an artifact update names its task; a reply to a plain
-    message names none; ``send(task_id=)`` names the one given. Only an
-    update answering the agent's own request triggers it (SPEC 9.3): a
-    stray one is context, and the agent doesn't answer it."""
+    """A reply to a task update names its task; a reply to a plain message
+    names none; ``send(task_id=)`` names the one given. Only an update
+    answering the agent's own request, and asking it for input, triggers it
+    (SPEC 9.3): a stray one is context, and the agent doesn't answer it."""
     peer = await cluster.node("peer")
     gid = peer.daemon.create_group("Pair", "Answer a task")
     await peer.idle()
@@ -120,9 +120,12 @@ async def test_which_replies_name_a_task(cluster: Cluster, sockdir: Path, mode: 
         stray = peer.daemon.send_message(
             gid, artifact("task-0"), kind="a2a.task_artifact", origin="human"
         )
-        peer.daemon.send_message(
-            gid, artifact("task-1"), kind="a2a.task_artifact", reply_to=[request]
-        )
+        asking = {
+            "taskId": "task-1",
+            "contextId": gid,
+            "status": {"state": "TASK_STATE_INPUT_REQUIRED"},
+        }
+        peer.daemon.send_message(gid, asking, kind="a2a.task_status", reply_to=[request])
         await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 3, WAIT)
         await node.wait(lambda: node.daemon.store.inbox_state(peer.daemon.mailbox, stray) == "done")
         bodies = {
