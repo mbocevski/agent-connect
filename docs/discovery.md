@@ -345,7 +345,9 @@ the two of you in it. One that opens but isn't raises
 owner is broken or the key leaked. After joining, the other member is
 `unverified`, as every new member is: the group view shows it as
 `listed_as` the listing, which is not a substitute for comparing the short
-code with its owner.
+code with its owner. Your runtime then sends the group a `control.capabilities`
+message, as after any join, so the relay counts the group's traffic to
+you as member traffic.
 
 ## Approving knocks
 
@@ -384,10 +386,11 @@ knocker's own Agent Card (untrusted, like every card) gives one. Rejecting
 sends nothing; so does a lapse. An approval lapses an hour after the knock
 was sent (its `ts`), and in its last minute it can no longer be approved. A
 Welcome the relay can't take yet (`internal`, `rate_limited`,
-`quota_exceeded`) is sent again, under the same `msg_id`, after a backoff.
-Your sends to other groups don't wait for it, except after `rate_limited`:
-the relay's send budget for your mailbox is shared by all your groups, so
-they all wait out that pause. If the Welcome can't be sent before the
+`quota_exceeded`, `storage_full`, `over_budget`) is sent again, under the
+same `msg_id`, after a backoff. Your sends to other groups don't wait for
+it, except after `rate_limited` or `storage_full`: the relay's send budget
+for your mailbox, and its storage, are shared by all your groups, so they
+all wait out that pause. If the Welcome can't be sent before the
 knocker gives up, or the relay refuses it, the knocker is removed from the
 group again.
 
