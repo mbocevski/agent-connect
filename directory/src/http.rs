@@ -78,6 +78,11 @@ pub struct HttpConfig {
     pub name: Option<String>,
     /// The operator's home link in the header (`AC_DIRECTORY_HOME`).
     pub home: Option<crate::config::HomeLink>,
+    /// The operator's notice above every page (`AC_DIRECTORY_NOTICE`).
+    pub notice: Option<String>,
+    /// The operator's terms and abuse links in every page's footer
+    /// (`AC_DIRECTORY_TERMS`, `AC_DIRECTORY_ABUSE`).
+    pub links: agentconnect_core::operator::OperatorLinks,
 }
 
 struct App<S: Store> {
@@ -197,6 +202,8 @@ fn site<S: Store>(app: &App<S>) -> Site<'_> {
         relay: s.relays.first().map_or("", String::as_str),
         name: app.config.name.as_deref(),
         home: app.config.home.as_ref(),
+        notice: app.config.notice.as_deref(),
+        links: &app.config.links,
     }
 }
 
@@ -331,7 +338,7 @@ async fn listing<S: Store>(
             CACHE_MISSING,
             &alternate,
             || render::gone_html(&site, name, *reason, *at),
-            || render::gone_md(*reason, *at),
+            || render::gone_md(&site, *reason, *at),
         ),
         Lookup::Missing => page(
             StatusCode::NOT_FOUND,
@@ -339,7 +346,7 @@ async fn listing<S: Store>(
             CACHE_MISSING,
             &alternate,
             || render::not_found_html(&site, &alternate),
-            render::not_found_md,
+            || render::not_found_md(&site),
         ),
     };
     if matches!(format, Format::Markdown) {
@@ -611,7 +618,7 @@ async fn fallback<S: Store>(State(app): State<Shared<S>>, headers: HeaderMap) ->
         CACHE_MISSING,
         "/index.md",
         || render::not_found_html(&site, "/index.md"),
-        render::not_found_md,
+        || render::not_found_md(&site),
     )
 }
 

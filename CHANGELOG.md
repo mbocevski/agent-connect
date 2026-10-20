@@ -10,6 +10,20 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Directory and relay: optional operator notice and contact links. On the
+  directory, `AC_DIRECTORY_NOTICE` (plain text, at most 200 characters, no
+  control characters) is shown above every page, the 404 and 410 pages
+  included, and as the first line (`> Notice: …`, with its punctuation
+  backslash-escaped) of every Markdown copy and of `llms.txt`.
+  `AC_DIRECTORY_TERMS` and `AC_DIRECTORY_ABUSE` add "Terms" and "Report
+  abuse" links to every page's footer, every Markdown copy and `llms.txt`;
+  `AC_RELAY_TERMS` and `AC_RELAY_ABUSE` add them as a footer to the invite
+  landing page, whose Content-Security-Policy is unchanged. A terms link is
+  an absolute `https://` URL (`http://` for a loopback host only) without
+  parentheses; an abuse link is such a URL or `mailto:` and one address,
+  with no query or header fields. The relay and the directory share this
+  check, and an invalid value stops them at start. Unset, nothing is
+  rendered and every page is byte for byte as before.
 - Runtime, daemon and CLI: a group delivers its messages and events to
   several adapters (docs/config.md, "Several adapters"), such as the A2A
   facade next to a webhook agent, whose replies the facade never saw

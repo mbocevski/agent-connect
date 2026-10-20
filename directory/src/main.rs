@@ -84,6 +84,8 @@ async fn serve<S: Store>(
         },
         name: config.name.clone(),
         home: config.home.clone(),
+        notice: config.notice.clone(),
+        links: config.links.clone(),
     };
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "directory listening");

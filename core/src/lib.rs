@@ -25,6 +25,7 @@
 //! - [`listing`]: signed listings, listing tokens, withdrawals and owner
 //!   verification (§13)
 //! - [`net`]: which addresses an outbound fetch may connect to (§13.2.4)
+//! - [`operator`]: the terms and abuse links the relay and the directory show
 #![warn(clippy::pedantic, missing_docs)]
 
 pub mod clock;
@@ -44,6 +45,7 @@ pub mod ledger;
 pub mod listing;
 mod mls;
 pub mod net;
+pub mod operator;
 pub mod padding;
 pub mod policy;
 pub mod provider;

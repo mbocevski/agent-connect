@@ -20,6 +20,16 @@ set `AC_DIRECTORY_FONT_DIR` to it and reference them from the stylesheet as
 `AC_DIRECTORY_HOME` adds a link to your home page to the header; with neither
 set, the pages say "AgentConnect directory" only.
 
+`AC_DIRECTORY_NOTICE` puts a one-line notice above every page, as
+`<p class="notice" role="note">` before `<header class="site">` (the 404
+and 410 pages too), and as the first line, `> Notice: …`, of every Markdown
+copy and of `llms.txt`. In Markdown every ASCII punctuation character of the
+notice is backslash-escaped, so it stays plain text. `AC_DIRECTORY_TERMS` and
+`AC_DIRECTORY_ABUSE` add "Terms" and "Report abuse" links to the footer
+(`p.operator`), to the end of every Markdown copy and to an "Operator"
+section at the end of `llms.txt`. Unset, none of it is rendered. The
+well-known file doesn't carry them.
+
 In a listing's card, the card text (`div.card-text`) and the facts the
 directory checked (`dl.facts`) are separate lists, so a stylesheet can tell
 them apart. The door's `dd` has `class="door"` and `data-state="open"` or
@@ -60,6 +70,9 @@ docker build -f directory/Dockerfile -t agentconnect-directory .   # from the re
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `AC_DIRECTORY_FONT_DIR` | none | A directory of font files (`.woff2`, `.woff`, `.ttf`, `.otf`) served at `/static/fonts/<file>`, for a replacement stylesheet to load with `@font-face`. Setting it adds `font-src 'self'` to the Content-Security-Policy; without it the policy has no `font-src`. Only regular files directly in the directory are served: no symlinks or subdirectories. |
 | `AC_DIRECTORY_NAME` | none | The operator's name for the site, e.g. `Example directory`: the home page's heading and the header's site name, with "AgentConnect directory" above the heading and after the name in page titles (`Example directory · AgentConnect directory`). It is trimmed, and may not be empty, hold control characters or be longer than 80 characters. |
+| `AC_DIRECTORY_NOTICE` | none | A notice shown above every page and as the first line of every Markdown copy and `llms.txt`, e.g. `Read-only until Monday`. Plain text: it is trimmed, and may not be empty, hold control characters or be longer than 200 characters. |
+| `AC_DIRECTORY_TERMS` | none | A "Terms" link to the operator's terms page, e.g. `https://example.org/terms`: an absolute `https://` URL (`http://` only for a loopback host) of URL characters, without parentheses. |
+| `AC_DIRECTORY_ABUSE` | none | A "Report abuse" link: `mailto:` and one address, e.g. `mailto:abuse@example.org`, with no query or header fields (`?`, `&`), no second address and no percent-encoding; or a URL as for `AC_DIRECTORY_TERMS`. An invalid value, for this or the two above, stops the directory at start. |
 | `AC_DIRECTORY_HOME` | none | A link to the operator's home page at the end of the header's navigation: a URL, whitespace, then the label, e.g. `https://example.org Example home`. The URL must be an absolute `https://` URL (`http://` only for a loopback host) of URL characters, without parentheses; the label follows the rules of `AC_DIRECTORY_NAME`. The link has `rel="noreferrer"`. A missing label or an invalid URL stops the directory at start. |
 | `RUST_LOG` | `info` | `tracing` filter for the directory's own logs (below). |
 

@@ -19,6 +19,8 @@ docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
 | `AC_RELAY_ADDR` | `127.0.0.1:8080` | Listen address. |
 | `AC_RELAY_DB` | `agentconnect-relay.db` | SQLite file path, or a `sqlite:` URL (`sqlite::memory:` for throwaway runs). |
 | `AC_RELAY_HOST` | the listen address | The host string clients sign into their authentication (WebSocket `auth`, signed REST requests). Set it to the public host name, with `:port` when not 443. A client that signs another host is refused. |
+| `AC_RELAY_TERMS` | none | A "Terms" link in the invite landing page's footer, e.g. `https://relay.example.org/terms`: an absolute `https://` URL (`http://` only for a loopback host) of URL characters, without parentheses. |
+| `AC_RELAY_ABUSE` | none | A "Report abuse" link in the same footer: `mailto:` and one address, e.g. `mailto:abuse@example.org`, with no query or header fields (`?`, `&`), no second address and no percent-encoding; or a URL as for `AC_RELAY_TERMS`. With neither set the page has no footer. An invalid value stops the relay at start. |
 | `RUST_LOG` | `info` | `tracing` filter. |
 
 Logs never contain `ct`, URL fragments or secrets, and identifiers (mailbox,
@@ -35,7 +37,7 @@ closing and knocks log no identifier at all, not even a tag.
 | `DELETE /v0/invites/{id}` | Revoke (signed request, inviter only). |
 | `POST /v0/doors` | Register a door (signed request, below). |
 | `DELETE /v0/doors/{id}` | Close a door now (signed request, owner only). |
-| `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. |
+| `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. With `AC_RELAY_TERMS` or `AC_RELAY_ABUSE` set, a `footer.operator` holds the links. |
 | `GET /healthz`, `GET /metrics` | Operations. Metrics are Prometheus counters with no identifiers, plus one gauge, `agentconnect_relay_ws_connections_open`: the WebSocket connections open now, authenticated or not. It has no labels. |
 
 ### Signed REST requests (SPEC 8.1.1)

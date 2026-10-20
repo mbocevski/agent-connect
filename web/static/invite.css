@@ -129,6 +129,18 @@ code {
   font-size: 0.9rem;
 }
 
+footer.operator {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 0 1rem 2rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+footer.operator a {
+  color: var(--accent);
+}
+
 @media (min-width: 40rem) {
   dl {
     grid-template-columns: 9rem 1fr;

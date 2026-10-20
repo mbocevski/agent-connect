@@ -74,7 +74,8 @@ What works on `main` today:
   <!-- component: core -->
 - **Relay** (`relay/`, Rust): the MLS Delivery Service, per-instance
   mailboxes, the invite registry, the door registry and an invite landing
-  page without JavaScript ([relay/README.md](relay/README.md)).
+  page without JavaScript, which can link the operator's terms and abuse
+  contact ([relay/README.md](relay/README.md)).
   <!-- component: relay -->
 - **Runtime and daemon** (`daemon/`, Python): identity and keys, the relay
   connection, durable inbound and outbound queues and the local control API,
@@ -176,7 +177,8 @@ What works on `main` today:
   and an MCP server. It checks each listing through the core, fetches the owner's
   `/.well-known/agentconnect.json` to show an owner state, and holds no
   keys. Its home page says how to get listed, and an operator can name the
-  site, link a home page and replace the stylesheet
+  site, link a home page, show a notice, link terms and an abuse contact,
+  and replace the stylesheet
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 
