@@ -1,20 +1,38 @@
 //! `agentconnect-relay` binary.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agentconnect_core::clock::SystemClock;
 use agentconnect_relay::config::Config;
-use agentconnect_relay::{Limits, Relay, SqliteStore, app_with_links, restart};
-use axum::serve::ListenerExt;
-use tracing_subscriber::EnvFilter;
+use agentconnect_relay::{Limits, Relay, Server, SqliteStore, logging, restart};
+use tokio::sync::watch;
+use tracing_subscriber::util::SubscriberInitExt as _;
+
+/// SIGINT (Ctrl-C) or SIGTERM (what docker, systemd and Kubernetes send).
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let Ok(mut term) = signal(SignalKind::terminate()) else {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
+    let rust_log = std::env::var("RUST_LOG").ok();
+    logging::subscriber(rust_log.as_deref(), std::io::stdout).init();
 
     let config =
         Config::from_env().map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
@@ -31,7 +49,8 @@ async fn main() -> std::io::Result<()> {
         config.host.clone(),
         Limits::default(),
     )
-    .with_quotas(config.quotas.clone());
+    .with_quotas(config.quotas.clone())
+    .with_ws_limits(config.ws.clone());
     relay = match floor {
         Some(ts) => relay.with_replay_floor(ts),
         None => relay.with_restart_guard(),
@@ -53,40 +72,43 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    let listener = tokio::net::TcpListener::bind(config.addr)
-        .await?
-        .tap_io(|tcp| {
-            // Small request/reply frames must not wait on Nagle.
-            let _ = tcp.set_nodelay(true);
-        });
-    tracing::info!(addr = %config.addr, "relay listening");
-    // The peer address feeds the per-address limits (SPEC 8.1.1); it is
-    // never logged.
-    axum::serve(
-        listener,
-        app_with_links(Arc::clone(&relay), config.links.clone())
-            .into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown())
-    .await?;
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stopped = |mut rx: watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
+    };
+
+    let metrics_listener = tokio::net::TcpListener::bind(config.metrics_addr).await?;
+    tracing::info!(addr = %metrics_listener.local_addr()?, "metrics listening");
+    let metrics = Server::metrics(Arc::clone(&relay), config.server.clone())
+        .serve(metrics_listener, stopped(stop_rx.clone()));
+    let metrics = tokio::spawn(metrics);
+
+    let listener = tokio::net::TcpListener::bind(config.addr).await?;
+    tracing::info!(addr = %listener.local_addr()?, "relay listening");
+    // The peer address (or the client address a trusted proxy reports)
+    // feeds the per-source and per-address limits; it is never logged.
+    let public = Server::with_links(
+        Arc::clone(&relay),
+        config.links.clone(),
+        config.server.clone(),
+    );
+    let signal_relay = Arc::clone(&relay);
+    tokio::spawn(async move {
+        stop_signal().await;
+        tracing::info!("stopping");
+        // WebSocket sessions close with 1001, the knock worker writes what
+        // it holds, and the listeners stop accepting.
+        signal_relay.stop();
+        let _ = stop_tx.send(true);
+    });
+    let served = public.serve(listener, stopped(stop_rx)).await;
+    let _ = metrics.await;
+    // Knocks answered `accepted` and not written yet, with a deadline.
+    let _ = tokio::time::timeout(config.server.shutdown_grace, relay.flush_knocks()).await;
     // No request is taken any more: tell the next process what this one
     // accepted.
     if let Err(e) = restart::write_marker(&config.db, relay.highest_accepted_ts()) {
         tracing::warn!(error = %e, "clean-shutdown marker not written");
     }
-    Ok(())
-}
-
-/// Ctrl-C, or SIGTERM (what a service manager or container runtime sends).
-async fn shutdown() {
-    #[cfg(unix)]
-    if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-        return;
-    }
-    let _ = tokio::signal::ctrl_c().await;
+    served
 }

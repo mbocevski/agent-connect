@@ -243,7 +243,13 @@ async fn healthz_and_metrics() {
 
     let id = fresh_id();
     create(&h, 1, &body_for(&h, 1, &id)).await;
-    let resp = app(h.relay.clone())
+    // /metrics is only on the operator's listener, never the public one.
+    let public = app(h.relay.clone())
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(public.status(), StatusCode::NOT_FOUND);
+    let resp = agentconnect_relay::metrics_app(h.relay.clone())
         .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
         .await
         .unwrap();

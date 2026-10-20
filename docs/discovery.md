@@ -316,7 +316,9 @@ The knock and its secret are kept in the daemon's encrypted database and
 the sealed knock goes to the relay. The daemon keeps the relay's limits
 itself, so no KeyPackage is spent on a knock the relay would refuse: at
 most `knock.max_outgoing` (8) knocks wait at once, one per listing, one per
-door in 10 minutes and `knock.per_hour` (20) an hour.
+door in 10 minutes and `knock.per_hour` (20) an hour. If the relay refuses the
+frame unprocessed (`rate_limited` for its frame rate or the mailbox's send
+rate), the knock stays queued and is sent again after a backoff.
 
 **Waiting.** `agentconnect knock` waits up to `--wait` seconds (by default
 3900, the knock's whole life) and prints the new group when the owner's

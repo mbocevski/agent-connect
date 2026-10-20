@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 async fn queued(h: &Harness, mailbox: &str) -> Vec<Value> {
     h.relay
         .store()
-        .pending(mailbox, 0, 10_000, h.relay.now_ms())
+        .pending(mailbox, 0, 10_000, u64::MAX, h.relay.now_ms())
         .await
         .unwrap()
         .into_iter()

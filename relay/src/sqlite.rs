@@ -641,16 +641,26 @@ impl Store for SqliteStore {
         mailbox: &str,
         after_seq: i64,
         limit: u32,
+        max_bytes: u64,
         now_ms: u64,
     ) -> StoreResult<Vec<StoredMessage>> {
+        // The running total runs over sizes only, so envelopes past the byte
+        // cap are never read into memory.
         let rows = sqlx::query(
-            "SELECT seq, msg_id, env, marker FROM messages \
-             WHERE mailbox = ? AND seq > ? AND expires_at > ? ORDER BY seq LIMIT ?",
+            "SELECT m.seq, m.msg_id, m.env, m.marker FROM messages m JOIN ( \
+                 SELECT seq, SUM(size) OVER (ORDER BY seq) AS run, \
+                        ROW_NUMBER() OVER (ORDER BY seq) AS n \
+                 FROM (SELECT seq, size FROM messages \
+                       WHERE mailbox = ?1 AND seq > ?2 AND expires_at > ?3 \
+                       ORDER BY seq LIMIT ?4) \
+             ) w ON m.seq = w.seq \
+             WHERE w.n = 1 OR w.run <= ?5 ORDER BY m.seq",
         )
         .bind(mailbox)
         .bind(after_seq)
         .bind(i64_of(now_ms))
         .bind(i64::from(limit))
+        .bind(i64_of(max_bytes))
         .fetch_all(&self.pool)
         .await?;
         rows.iter()

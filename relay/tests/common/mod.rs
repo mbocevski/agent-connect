@@ -15,10 +15,12 @@ use agentconnect_relay::auth::{rest_auth_message, ws_auth_message};
 use agentconnect_relay::proto::{b64_decode, b64_encode, mailbox_id_from_key, parse_client_frame};
 use agentconnect_relay::store::Store;
 use agentconnect_relay::store::Window;
-use agentconnect_relay::{DEFAULT_FRAME_MAX, Limits, Quotas, Relay, SqliteStore, app};
+use agentconnect_relay::timer::{ManualTimer, Timer};
+use agentconnect_relay::{
+    DEFAULT_FRAME_MAX, Limits, Quotas, Relay, Server, ServerLimits, SqliteStore, WsLimits, app,
+};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::serve::ListenerExt;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
@@ -34,6 +36,17 @@ pub struct Harness {
     pub addr: SocketAddr,
     pub relay: Arc<Relay<SqliteStore>>,
     pub clock: Arc<FakeClock>,
+    pub timer: Arc<ManualTimer>,
+}
+
+/// The default WebSocket limits, without the frame rate: tests that care
+/// about it set it explicitly.
+pub fn test_ws_limits() -> WsLimits {
+    WsLimits {
+        frames_per_sec: 1_000_000,
+        frame_burst: 1_000_000,
+        ..WsLimits::default()
+    }
 }
 
 impl Harness {
@@ -47,7 +60,7 @@ impl Harness {
     }
 
     pub async fn with_limits(limits: Limits) -> Self {
-        Self::build(limits, roomy_quotas()).await
+        Self::build(limits, roomy_quotas(), test_ws_limits()).await
     }
 
     pub async fn with_quotas(quotas: Quotas) -> Self {
@@ -57,25 +70,76 @@ impl Harness {
                 ..Limits::default()
             },
             quotas,
+            test_ws_limits(),
         )
         .await
     }
 
-    async fn build(limits: Limits, quotas: Quotas) -> Self {
+    /// A relay with these WebSocket limits (and a high send rate).
+    pub async fn with_ws_limits(ws: WsLimits) -> Self {
+        Self::build(
+            Limits {
+                sends_per_sec: 100_000,
+                ..Limits::default()
+            },
+            roomy_quotas(),
+            ws,
+        )
+        .await
+    }
+
+    /// A relay with these quotas and WebSocket limits (and a high send rate).
+    pub async fn with_quotas_and_ws(quotas: Quotas, ws: WsLimits) -> Self {
+        Self::build(
+            Limits {
+                sends_per_sec: 100_000,
+                ..Limits::default()
+            },
+            quotas,
+            ws,
+        )
+        .await
+    }
+
+    async fn build(limits: Limits, quotas: Quotas, ws: WsLimits) -> Self {
         let clock = Arc::new(FakeClock::default());
+        // Connection deadlines move only when a test advances this timer.
+        let timer = ManualTimer::new();
         let store = SqliteStore::in_memory().await.unwrap();
-        let relay = Relay::new(store, clock.clone(), HOST, limits).with_quotas(quotas);
+        let relay = Relay::new(store, clock.clone(), HOST, limits)
+            .with_quotas(quotas)
+            .with_ws_limits(ws)
+            .with_timer(Timer::Manual(timer.clone()));
         let relay = Arc::new(relay);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let router = app(relay.clone());
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        Self { addr, relay, clock }
+        let server = Server::new(relay.clone(), ServerLimits::default());
+        tokio::spawn(server.serve(listener, std::future::pending()));
+        Self {
+            addr,
+            relay,
+            clock,
+            timer,
+        }
+    }
+
+    /// Serve one in-memory connection, as the TCP server would; returns
+    /// the client's end. `buffer` bounds the bytes in flight each way.
+    pub fn duplex(&self, buffer: usize) -> tokio::io::DuplexStream {
+        self.duplex_from(buffer, agentconnect_relay::conn::SourceKey::unknown())
+    }
+
+    /// [`Harness::duplex`] for a connection from `source`.
+    pub fn duplex_from(
+        &self,
+        buffer: usize,
+        source: agentconnect_relay::conn::SourceKey,
+    ) -> tokio::io::DuplexStream {
+        let (client, server) = tokio::io::duplex(buffer);
+        let conn = Server::new(self.relay.clone(), ServerLimits::default())
+            .connection_from(server, source);
+        tokio::spawn(conn);
+        client
     }
 
     pub async fn client(&self, n: u8) -> Client {
@@ -464,10 +528,34 @@ pub async fn knock_frame_as(h: &Harness, mailbox: &str, frame: &Value) -> Value 
 pub async fn queued(h: &Harness, owner: u8) -> Vec<Value> {
     h.relay
         .store()
-        .pending(&mailbox_of(&signing_key(owner)), 0, 1000, h.relay.now_ms())
+        .pending(
+            &mailbox_of(&signing_key(owner)),
+            0,
+            1000,
+            u64::MAX,
+            h.relay.now_ms(),
+        )
         .await
         .unwrap()
         .into_iter()
         .map(|m| serde_json::from_str(&m.json).unwrap())
         .collect()
+}
+
+/// Yield until `want` WebSocket connections are open (sessions end on their
+/// own tasks). No timer: a hang fails on the guard timeout instead.
+pub async fn settle_open(h: &Harness, want: u64) {
+    let open = || {
+        let text = h.relay.metrics().render();
+        text.lines()
+            .find_map(|l| l.strip_prefix("agentconnect_relay_ws_connections_open "))
+            .and_then(|v| v.parse::<u64>().ok())
+    };
+    tokio::time::timeout(GUARD, async {
+        while open() != Some(want) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("open connections stuck at {:?}, wanted {want}", open()));
 }

@@ -24,7 +24,13 @@ from agentconnect.keystore import FileKeystore
 from agentconnect.ownerfile import OwnerFetch
 from agentconnect.relay import NotConnectedError, RelayError, b64, unb64
 from agentconnect.runtime import ApiError, Options, Runtime
-from agentconnect.runtime.engine import DaemonError, Engine, TransientError, _envelope_problem
+from agentconnect.runtime.engine import (
+    DaemonError,
+    Engine,
+    RateLimitedError,
+    TransientError,
+    _envelope_problem,
+)
 from agentconnect.runtime.knocks import (
     GIVE_UP_SECS,
     LAPSE_SECS,
@@ -980,6 +986,23 @@ async def test_a_resend_answered_rate_limited_counts_as_sent(world: World) -> No
     assert await run_frame(k, RelayError("rate_limited")) == "done"
     assert k.knocks.knocks()[0]["status"] == "sent"
     assert k.engine.store.knock_secret(sent["knock_id"]) is not None
+
+
+@pytest.mark.parametrize("detail", ["frame rate exceeded", "send rate exceeded"])
+async def test_a_knock_refused_unprocessed_is_sent_again(world: World, detail: str) -> None:
+    """The relay's frame rate (or the mailbox's send rate) refused the knock
+    before looking at it: the knock isn't failed, the outbox pauses and
+    sends it again, and the answer to that is what counts."""
+    k, _, _, ref = await ready(world)
+    sent = await k.knocks.knock(ref)
+    with pytest.raises(RateLimitedError):
+        await run_frame(k, RelayError("rate_limited", detail))
+    (row,) = k.knocks.knocks()
+    assert row["status"] == "queued"
+    assert k.engine.store.knock_secret(sent["knock_id"]) is not None
+    assert k.events("knock_failed") == []
+    assert await run_frame(k, None) == "done"
+    assert k.knocks.knocks()[0]["status"] == "sent"
 
 
 async def test_a_knock_queued_too_long_isnt_sent(world: World) -> None:

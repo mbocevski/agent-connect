@@ -67,8 +67,8 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; the rest open, follow-up task |
-| Low | 28 | SR-14 fixed in #74 and #77; SR-19 fixed in #71; the rest open, follow-up task |
+| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; the rest open, follow-up task |
+| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 partly fixed in #74; SR-19 fixed in #71; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
@@ -109,7 +109,8 @@ relay is offered to the public:
 3. SR-03, SR-04 and SR-07 (disk exhaustion and forced re-syncs by a
    stranger; SR-07 fixed in #71).
 4. SR-05, SR-06 and SR-13 (one connection stalls the relay; memory
-   exhaustion; no connection caps or timeouts).
+   exhaustion; no connection caps or timeouts). SR-06, SR-13 and SR-05's
+   frame rate limit fixed in #74.
 5. SR-14 (trace logs carry `ct` and client addresses, against
    `relay/README.md`). Fixed: the relay in #74, the directory in #77.
 
@@ -283,7 +284,8 @@ Fix: a separate sub-quota for traffic from non-members (`welcome_wrapped`,
   by two to three orders of magnitude.
 - **Component:** relay (`sqlite.rs:65-71`, `sqlite.rs:113-126`,
   `sqlite.rs:607-614`, `relay.rs:555-560`, `ws.rs:374-381`).
-- **Status:** open (T-05).
+- **Status:** open (T-05). The per-connection frame rate limit is fixed in
+  #74; the byte counter and the `(mailbox, msg_id)` index are open.
 - **Confirmed.**
 
 Every recipient of every send runs `SUM(size) … WHERE mailbox = ? AND
@@ -304,7 +306,14 @@ covering index `(mailbox, expires_at, size)`); an index on
 - **Severity:** Medium. One client drives the relay's memory up by
   gigabytes with its own mailbox and traffic.
 - **Component:** relay (`ws.rs:241`, `ws.rs:305-338`, `relay.rs:492-505`).
-- **Status:** open (T-06).
+- **Status:** fixed in #74. Batches are capped by bytes, connections per
+  mailbox, per source and in total, and a send that doesn't complete in
+  time drops the connection; the probe's 20 stalled connections now grow
+  the relay by well under 128 MiB (`relay/tests/limits_int.rs`). The
+  review of #74 found the read side outside the bound (unfinished messages
+  up to 4 MiB each, kept alive with pongs); messages are now capped at the
+  frame limit plus 64 KiB, must keep arriving at a minimum rate, and count
+  against a relay-wide read budget.
 - **Confirmed.**
 
 The drain loads up to 256 messages at once, which can be a whole 64 MiB
@@ -505,10 +514,10 @@ store written the old way.
 
 | ID | Component | Finding | Evidence | Status |
 |---|---|---|---|---|
-| SR-13 | relay | No connection caps, no header-read timeout (axum sets no hyper timer), no WebSocket ping or idle timeout after authentication. Unauthenticated sockets are closed after 10 s, as they should be. | `main.rs:39-52`, `ws.rs:365-396`. Probe: unfinished headers held for 40 s; an idle authenticated socket held for 45 s. Confirmed. | Open (T-13) |
+| SR-13 | relay | No connection caps, no header-read timeout (axum sets no hyper timer), no WebSocket ping or idle timeout after authentication. Unauthenticated sockets are closed after 10 s, as they should be. | `main.rs:39-52`, `ws.rs:365-396`. Probe: unfinished headers held for 40 s; an idle authenticated socket held for 45 s. Confirmed. | Fixed in #74 |
 | SR-14 | relay, directory | At `RUST_LOG=trace`, `tungstenite` logs whole frames (`ct`, every id) and `axum::serve` logs client addresses; `relay/README.md` says logs never contain `ct`. The directory's filter clamps only `rmcp`, so it logs client addresses at trace too. Debug and info are clean. | `relay/src/main.rs:15-17`, `directory/src/lib.rs:37-40`. Probe: `TRACE tungstenite::protocol: Received message {"t": "send", "env": {... "ct": ...}}`. Confirmed. | Fixed in #74 (relay) and #77 (directory) |
-| SR-15 | relay | `connected` and `disconnected` lines log the mailbox tag next to the knock lines, and tags are an unkeyed 32-bit hash prefix, so anyone holding an id can find it. SPEC §8.3: knock paths log no identifier, hashed or not. `door_log_privacy.rs` doesn't go through `ws.rs`. | `ws.rs:125`, `ws.rs:174`, `proto.rs:43-50`. Confirmed in probe logs. | Open (T-15) |
-| SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Open (T-16) |
+| SR-15 | relay | `connected` and `disconnected` lines log the mailbox tag next to the knock lines, and tags are an unkeyed 32-bit hash prefix, so anyone holding an id can find it. SPEC §8.3: knock paths log no identifier, hashed or not. `door_log_privacy.rs` doesn't go through `ws.rs`. | `ws.rs:125`, `ws.rs:174`, `proto.rs:43-50`. Confirmed in probe logs. | Fixed in #74 |
+| SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Partly fixed in #74 (residual, T-16) |
 | SR-17 | relay | Join requests have only the 2 MiB frame cap, and the per-invite budget of 10 a minute is shared by anyone who knows the public `invite_id`: junk joins fill the inviter's queue in about 3.5 minutes and use up the real joiner's budget. | `relay.rs:756-827`, `proto.rs:249`. Confirmed. | Open (T-17) |
 | SR-18 | relay | Deleted rows stay in the database file: `secure_delete` is off, so acked ciphertext and expired door mappings remain readable on disk. | `sqlite.rs:59-64`. Probe found acked ciphertext in the file after a checkpoint. Confirmed. | Open (T-18) |
 | SR-19 | relay, web | Invite registration rejects only Cc characters, so bidi controls and zero-width characters in `group_name`, `inviter_name` and `purpose` reach the landing page unaltered (escaped, but reordering what the human reads). The CLI already replaces them. | `relay.rs:374-380`, `landing.rs:29-41`. Probe: U+202E accepted and rendered raw. Confirmed. | Fixed in #71: the three fields must be one-line text (SPEC §4.2, §13.1.2). |
@@ -624,12 +633,12 @@ there is a negative test (the attack fails).
 | | Rollback bounded by door expiry and closing | `card.rs`, relay `close_door` | `relay/tests/doors.rs::only_the_owner_can_close_a_door_and_it_closes_at_once`; `harness/tests/test_knocks.py::test_after_a_withdrawal_a_knock_gets_door_not_open` | Covered |
 | | Rollback bounded by token revocation | not on the knocker | none | Not implemented (SR-25) |
 | Relay and directory colluding | Sealed knocks | `core/src/knock.rs` | `core/src/knock.rs::owner_checks_1_to_3`; `harness/tests/test_knocks.py::test_a_malicious_relay_cant_get_a_knock_through` | Covered (test gap 7) |
-| | No identifiers in logs | `directory/src/http.rs`, `metrics.rs`; relay | `directory/tests/log_privacy.rs::logs_carry_route_templates_and_no_identifiers`; `relay/tests/door_log_privacy.rs::door_and_knock_logs_carry_no_identifiers`; `directory/tests/trace_logs.rs` | Covered; SR-15, SR-21; SR-14 fixed in #74 and #77 |
+| | No identifiers in logs | `directory/src/http.rs`, `metrics.rs`; relay | `directory/tests/log_privacy.rs::logs_carry_route_templates_and_no_identifiers`; `relay/tests/door_log_privacy.rs::door_and_knock_logs_carry_no_identifiers`; `relay/tests/ws_log_privacy.rs`, `relay/tests/trace_logs.rs`; `directory/tests/trace_logs.rs` | Covered; SR-21; SR-14 fixed in #74 and #77, SR-15 in #74 |
 | Stale door | Door expiry checked by the knocker | `card.rs`, `knocks.py` | `core/src/listing/card.rs::publish_time_checks` | Covered |
 | | Relay answers `door_not_open` | `relay.rs` (`knock`) | `relay/tests/doors.rs::unknown_expired_and_closed_doors_are_not_open` | Covered |
 | | Owner drops knocks on doors expired over 1 h | `knock.rs` (`Door::open_knock`) | `core/src/knock.rs::owner_checks_1_to_3` | Covered |
 | | `seq`, tombstones, high-water mark | `core/src/listing/name.rs` | `core/src/listing/name.rs::a_superseded_key_cannot_take_the_name_back`; `directory/tests/vectors.rs::tombstones_block_only_their_own_identity` | Covered |
-| Knock flooder | Relay limits | `relay.rs` (`knock`) | `relay/tests/doors.rs::one_knock_per_door_and_sender_per_ten_minutes`, `::twenty_knocks_per_sender_per_hour_across_doors`, `::per_door_overflow_is_accepted_and_dropped_silently` | Covered; SR-16 |
+| Knock flooder | Relay limits | `relay.rs` (`knock`) | `relay/tests/doors.rs::one_knock_per_door_and_sender_per_ten_minutes`, `::twenty_knocks_per_sender_per_hour_across_doors`, `::per_door_overflow_is_accepted_and_dropped_silently`, `::forwarded_and_dropped_knocks_take_the_same_path_until_the_worker_writes` | Covered; SR-16 partly fixed in #74 |
 | | Owner caps, 1 h lapse, local drops | `policy.py` (`SafetyPolicy.knock`), `knocks.py` | `daemon/tests/test_knocks.py::test_one_pending_knock_per_identity_and_a_full_door`, `::test_an_approval_lapses_at_ts_plus_an_hour` | Covered |
 | Prompt injection through card text | Card text shown as data, never linked | `directory/src/mcp.rs`, `render.rs`, `knocks.py` (`_view`) | `directory/tests/render_props.rs::fenced_text_cannot_close_its_block`; `directory/tests/pages.rs::card_text_is_escaped_never_linked_and_fenced_in_markdown`; `directory/tests/mcp.rs::search_agents_returns_untrusted_results` | Covered (test gap 8); SR-20 |
 | | One-line fields with caps | `core/src/listing/mod.rs` (`is_one_line_text`) | `core/src/listing/card.rs::line_breaking_and_disguising_characters_are_rejected` | Covered |
@@ -757,8 +766,10 @@ another leaf's `instance_id`.
   and a 5 s timeout (`directory/src/owner.rs:96-331`).
 - **Doors and knocks.** Relay limits match SPEC §8.3, forwarded and
   dropped knocks look the same in the metrics, and the owner's checks run
-  in the SPEC order. SR-15 and SR-16 leak a little to the relay's logs and
-  to the knocker's timing.
+  in the SPEC order. SR-15 and SR-16 leaked a little to the relay's logs and
+  to the knocker's timing. #74 fixed the logs and moved the knock's write
+  off its answer's path; a knocker that keeps timing the relay across the
+  next write can still tell (SR-16 residual).
 - **Replay ledger.** 65,536 entries; through an honest relay a flooder
   can deliver at most about 2,600 knocks per mailbox in 65 minutes, so it
   can't fill it. A malicious relay can, which is relay denial of service.
@@ -793,7 +804,8 @@ What it stores, and for how long:
   tag on a join. At warn: the group tag and overflow count. All tags are
   unkeyed 32-bit SHA-256 prefixes. The door and knock lines carry no
   identifiers. There is no access log. Third-party trace logs: SR-14
-  (fixed in #74 and #77).
+  (fixed in #74 and #77). Since #74: tags are keyed per process, connection lines carry none, and
+  third-party crates log at `warn` and above only.
 - **Metrics.** Counters `agentconnect_relay_{connections, auth_failures,
   frames, accepted, duplicates, deliveries, queue_overflows, commits,
   joins_forwarded, invites_created, invites_consumed, doors_registered,
@@ -998,9 +1010,10 @@ One line per open item, ready to file.
 - **T-04 (Medium, SR-04):** Relay: give non-member traffic (Welcome, join,
   knock) its own per-mailbox sub-quota.
 - **T-05 (Medium, SR-05):** Relay: per-mailbox byte counter (or covering
-  index), index on `(mailbox, msg_id)`, per-connection frame rate limit.
+  index), index on `(mailbox, msg_id)`, per-connection frame rate limit
+  (the frame rate limit is done in #74).
 - **T-06 (Medium, SR-06):** Relay: cap drain batches by bytes, cap
-  connections per mailbox and in total, time out stalled sends.
+  connections per mailbox and in total, time out stalled sends. Done in #74.
 - **T-07 (Medium, SR-07, SR-43):** (done in #71) Relay: quotas for open invites and new
   groups per mailbox, REST limits per mailbox and address, and a SPEC rule
   for deleting idle groups and stale memberships.
@@ -1018,14 +1031,21 @@ One line per open item, ready to file.
   updates that reply to this instance's own message; update SPEC §9.3 and
   §10.2.
 - **T-13 (Low, SR-13):** Relay: header-read timeout, accept concurrency
-  limit, WebSocket ping and idle timeout.
+  limit, WebSocket ping and idle timeout. Done in #74.
 - **T-14 (Low, SR-14):** Relay and directory: clamp `tungstenite`,
   `axum::serve`, `hyper` and `hyper_util` logs whatever `RUST_LOG` says;
   correct `relay/README.md`. Done: the relay in #74, the directory in #77.
 - **T-15 (Low, SR-15):** Relay: keyed log tags (per-process HMAC key), no
   mailbox tag on connect lines, and a log-privacy test through `ws.rs`.
+  Done in #74.
 - **T-16 (Low, SR-16):** Relay: answer `accepted` for a knock before the
-  enqueue.
+  enqueue. Partly done in #74: the answer goes first and knocks are written
+  by a worker on a 250 ms tick, forwarded and dropped alike, so the next
+  frames' timing is at chance (52% on the review's probes, with a small and
+  a 60,000-message owner queue). Open: a knocker probing continuously across
+  the next tick still sees the write (46 ms against 7 ms with the large
+  queue); closing it needs the dropped path to cost the same in the store,
+  which the SR-05 quota counter would make cheap.
 - **T-17 (Low, SR-17):** Relay: cap `join_request` `ct` and count joins in
   the non-member sub-quota.
 - **T-18 (Low, SR-18):** Relay: `secure_delete` and periodic WAL

@@ -98,6 +98,13 @@ def run_relay(tmp: Path) -> Generator[RelayProcess]:
             "AC_RELAY_REST_JUNK_PER_ADDRESS_PER_MIN": "100000",
             "AC_RELAY_INVITES_PER_ADDRESS": "100000",
             "AC_RELAY_GROUPS_PER_ADDRESS": "100000",
+            # Its own free port, so parallel relays don't collide on the
+            # default operator listener.
+            "AC_RELAY_METRICS_ADDR": "127.0.0.1:0",
+            # Every node connects from loopback: one source for the relay.
+            "AC_RELAY_MAX_CONNECTIONS_PER_SOURCE": "4096",
+            "AC_RELAY_MAX_HTTP_CONNECTIONS_PER_SOURCE": "4096",
+            "AC_RELAY_MAX_UNAUTHENTICATED": "4096",
             "RUST_LOG": "info",
             "NO_COLOR": "1",
         }

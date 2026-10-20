@@ -75,7 +75,8 @@ What works on `main` today:
 - **Relay** (`relay/`, Rust): the MLS Delivery Service, per-instance
   mailboxes, the invite registry, the door registry and an invite landing
   page without JavaScript, which can link the operator's terms and abuse
-  contact ([relay/README.md](relay/README.md)).
+  contact, with connection caps, timeouts and a frame rate limit for a
+  public deployment ([relay/README.md](relay/README.md)).
   <!-- component: relay -->
 - **Runtime and daemon** (`daemon/`, Python): identity and keys, the relay
   connection, durable inbound and outbound queues and the local control API,

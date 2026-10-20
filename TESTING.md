@@ -8,7 +8,7 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 | Command | Contents | Budget | Network / docker | Runs |
 |---|---|---|---|---|
 | `just test` | Rust and Python unit, property and contract tests (`just contract`), multi-node harness scenarios | < 60 s | loopback only | pre-push, CI |
-| `just test-int` | docker compose integration: Postgres for the directory store (`compose.test.yaml`), and the demos and the malicious relay double (`demo/compose.yaml`, `integration/tests`) | < 10 min once the image is built | docker | CI (`integration` job, not part of `ci-ok`) |
+| `just test-int` | docker compose integration: Postgres for the directory store (`compose.test.yaml`), and the demos and the malicious relay double (`demo/compose.yaml`, `integration/tests`); the relay binary's connection limits on real time and its memory under stalled connections (`relay/tests/limits_int.rs`, `#[ignore]`d in the fast tier) | < 10 min once the image is built | docker | CI (`integration` job, not part of `ci-ok`) |
 | `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests; fuzzing and criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
 | `just ci` | exactly the PR pipeline: `lint`, `test`, `cov` (gates and ratchet), `changelog-check`, `docs-check` | minutes | none | PR CI (`ci-ok`) |
 
@@ -53,7 +53,13 @@ entry in `.cargo/mutants.toml` with the reason.
 - **Clock.** Rust: `agentconnect_core::clock::{Clock, SystemClock, FakeClock}`.
   Python: `agentconnect.clock.{Clock, SystemClock, FakeClock}` and the
   `fake_clock` fixture. Both fake clocks start at 2025-01-01T00:00:00Z, move
-  only through `advance`/`set`, and are thread-safe.
+  only through `advance`/`set`, and are thread-safe. The relay's
+  connection deadlines (header read, auth, ping, idle, stalled send, frame
+  pacing) run on `agentconnect_relay::timer::Timer`; the relay test harness
+  gives it a `ManualTimer`, which moves only through `advance`, and
+  `until_sleepers(n)` waits until the code under test is blocked on its
+  deadline. Slow readers use in-memory connections with a small buffer
+  (`Harness::duplex`) rather than waiting for kernel buffers to fill.
 - **Seeded randomness.** One seed per run, taken from `AC_TEST_SEED` (an
   integer) or chosen at random. pytest prints it in the report header and
   repeats it after any failure; reproduce with `AC_TEST_SEED=<n> just test-py`.

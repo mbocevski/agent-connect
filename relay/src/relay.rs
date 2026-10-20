@@ -6,13 +6,15 @@ use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use agentconnect_core::clock::Clock;
 use axum::http::HeaderMap;
 use serde::Deserialize;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc, watch};
 
 use crate::auth::{REST_MAX_SKEW_SECS, RestCredentials};
+use crate::conn::{Fair, ReadBudget, SourceCounts, SourceKey};
 use crate::proto::{
     ClientFrame, Envelope, ErrorCode, Kind, ServerFrame, is_id16, is_mailbox_id, log_tag,
 };
@@ -26,6 +28,8 @@ use crate::store::{
     DirectOutcome, DoorRecord, GroupOutcome, GroupSend, InviteRecord, InviteStatus, Limits,
     NewMessage, PurgeStats, RevokeOutcome, Store, StoredMessage, Window,
 };
+use crate::timer::Timer;
+use crate::ws::WsLimits;
 
 /// Maximum length of `group_name` and `inviter_name`, in characters.
 pub const MAX_NAME_CHARS: usize = 80;
@@ -64,11 +68,119 @@ pub struct Metrics {
     groups_max: AtomicU64,
     /// Gauge: WebSocket connections open now. Only a [`WsOpenGuard`] moves it.
     ws_open: Arc<AtomicU64>,
+    /// Gauge: WebSocket connections that haven't authenticated yet.
+    ws_unauth: Arc<AtomicU64>,
+    /// Gauge: TCP connections still speaking HTTP (not yet upgraded).
+    http_open: Arc<AtomicU64>,
+    evicted: [AtomicU64; Eviction::ALL.len()],
+    refused: [AtomicU64; ConnRefusal::ALL.len()],
+    replaced: AtomicU64,
+    shed: AtomicU64,
+    timeouts: [AtomicU64; Timeout::ALL.len()],
+    frames_rate_limited: AtomicU64,
+    drain_bytes: AtomicU64,
+    /// Gauge: bytes of queued envelopes loaded into memory for sending.
+    drain_loaded: AtomicU64,
+    /// Gauge: bytes read and not yet handed on as messages (the read
+    /// budget's total, shared with [`crate::conn::ReadBudget`]).
+    pub(crate) read_held: Arc<AtomicU64>,
     errors: [AtomicU64; ErrorCode::ALL.len()],
 }
 
-/// Counts one open WebSocket connection: up when created, down exactly once
-/// when dropped, whichever way the connection ends.
+/// Why a connection was refused (the `reason` label).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnRefusal {
+    /// The relay-wide cap on authenticated WebSocket connections.
+    Total,
+    /// The cap on WebSocket connections that haven't authenticated yet.
+    Unauthenticated,
+    /// A source's WebSocket connection cap.
+    Source,
+    /// A source's cap on connections in the HTTP phase.
+    HttpSource,
+}
+
+impl ConnRefusal {
+    const ALL: [ConnRefusal; 4] = [
+        ConnRefusal::Total,
+        ConnRefusal::Unauthenticated,
+        ConnRefusal::Source,
+        ConnRefusal::HttpSource,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            ConnRefusal::Total => "total",
+            ConnRefusal::Unauthenticated => "unauthenticated",
+            ConnRefusal::Source => "source",
+            ConnRefusal::HttpSource => "http_source",
+        }
+    }
+}
+
+/// Which total cap closed a connection to admit another (the `cap` label).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Eviction {
+    /// Connections in the HTTP phase.
+    Http,
+    /// Authenticated WebSocket connections.
+    Ws,
+}
+
+impl Eviction {
+    const ALL: [Eviction; 2] = [Eviction::Http, Eviction::Ws];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Eviction::Http => "http",
+            Eviction::Ws => "ws",
+        }
+    }
+}
+
+/// Which deadline closed a connection (the `kind` label).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Timeout {
+    /// The request headers didn't arrive in time.
+    Header,
+    /// A request (its body, its handling) didn't finish in time.
+    Request,
+    /// The client didn't answer the WebSocket challenge in time.
+    Auth,
+    /// The client sent no message and answered no ping for the idle
+    /// timeout.
+    Idle,
+    /// A message being received arrived slower than the minimum rate, or
+    /// took longer than the assembly deadline.
+    Upload,
+    /// A send to the client didn't complete in time (a stalled reader).
+    Send,
+}
+
+impl Timeout {
+    const ALL: [Timeout; 6] = [
+        Timeout::Header,
+        Timeout::Request,
+        Timeout::Auth,
+        Timeout::Idle,
+        Timeout::Upload,
+        Timeout::Send,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Timeout::Header => "header",
+            Timeout::Request => "request",
+            Timeout::Auth => "auth",
+            Timeout::Idle => "idle",
+            Timeout::Upload => "upload",
+            Timeout::Send => "send",
+        }
+    }
+}
+
+/// Counts one open connection on a gauge: up when created, down exactly
+/// once when dropped, whichever way the connection ends.
 #[derive(Debug)]
 pub(crate) struct WsOpenGuard(Arc<AtomicU64>);
 
@@ -78,10 +190,98 @@ impl Drop for WsOpenGuard {
     }
 }
 
+/// Bytes of one batch held in memory; the gauge drops as they are sent and
+/// for the rest when the batch is dropped.
+#[derive(Debug)]
+pub(crate) struct DrainLoaded<'a> {
+    metrics: &'a Metrics,
+    left: u64,
+}
+
+impl DrainLoaded<'_> {
+    /// `bytes` of the batch went out.
+    pub(crate) fn sent(&mut self, bytes: u64) {
+        let bytes = bytes.min(self.left);
+        self.left -= bytes;
+        self.metrics
+            .drain_loaded
+            .fetch_sub(bytes, Ordering::Relaxed);
+        self.metrics.drain_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
+impl Drop for DrainLoaded<'_> {
+    fn drop(&mut self) {
+        self.metrics
+            .drain_loaded
+            .fetch_sub(self.left, Ordering::Relaxed);
+    }
+}
+
+fn try_gauge(gauge: &Arc<AtomicU64>, max: usize) -> Option<WsOpenGuard> {
+    let max = u64::try_from(max).unwrap_or(u64::MAX);
+    gauge
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < max).then_some(n + 1)
+        })
+        .ok()?;
+    Some(WsOpenGuard(Arc::clone(gauge)))
+}
+
 impl Metrics {
-    pub(crate) fn ws_open(&self) -> WsOpenGuard {
-        self.ws_open.fetch_add(1, Ordering::Relaxed);
-        WsOpenGuard(Arc::clone(&self.ws_open))
+    /// Count a WebSocket connection as open, unless `max` are open already.
+    pub(crate) fn try_ws_open(&self, max: usize) -> Option<WsOpenGuard> {
+        try_gauge(&self.ws_open, max)
+    }
+
+    /// Count a WebSocket connection as waiting to authenticate, unless
+    /// `max` are waiting already.
+    pub(crate) fn try_ws_unauth(&self, max: usize) -> Option<WsOpenGuard> {
+        try_gauge(&self.ws_unauth, max)
+    }
+
+    pub(crate) fn replaced(&self) {
+        Self::inc(&self.replaced);
+    }
+
+    pub(crate) fn shed(&self) {
+        Self::inc(&self.shed);
+    }
+
+    /// Count a TCP connection as speaking HTTP until the guard drops.
+    pub(crate) fn http_open(&self) -> WsOpenGuard {
+        self.http_open.fetch_add(1, Ordering::Relaxed);
+        WsOpenGuard(Arc::clone(&self.http_open))
+    }
+
+    pub(crate) fn evicted(&self, cap: Eviction) {
+        if let Some(i) = Eviction::ALL.iter().position(|c| *c == cap) {
+            Self::inc(&self.evicted[i]);
+        }
+    }
+
+    pub(crate) fn refused(&self, why: ConnRefusal) {
+        if let Some(i) = ConnRefusal::ALL.iter().position(|r| *r == why) {
+            Self::inc(&self.refused[i]);
+        }
+    }
+
+    pub(crate) fn timeout(&self, kind: Timeout) {
+        if let Some(i) = Timeout::ALL.iter().position(|t| *t == kind) {
+            Self::inc(&self.timeouts[i]);
+        }
+    }
+
+    pub(crate) fn frame_rate_limited(&self) {
+        Self::inc(&self.frames_rate_limited);
+    }
+
+    pub(crate) fn drain_loaded(&self, bytes: u64) -> DrainLoaded<'_> {
+        self.drain_loaded.fetch_add(bytes, Ordering::Relaxed);
+        DrainLoaded {
+            metrics: self,
+            left: bytes,
+        }
     }
 
     fn inc(c: &AtomicU64) {
@@ -232,13 +432,7 @@ impl Metrics {
             "The cap on groups held.",
             &self.groups_max,
         );
-        let _ = writeln!(
-            out,
-            "# HELP agentconnect_relay_ws_connections_open WebSocket connections open now.\n\
-             # TYPE agentconnect_relay_ws_connections_open gauge\n\
-             agentconnect_relay_ws_connections_open {}",
-            self.ws_open.load(Ordering::Relaxed)
-        );
+        self.render_connections(&mut out);
         let _ = writeln!(
             out,
             "# HELP agentconnect_relay_errors_total Errors returned, by code.\n\
@@ -254,6 +448,109 @@ impl Metrics {
         }
         out
     }
+
+    /// The connection limits' metrics (SR-06, SR-13): caps, deadlines,
+    /// frame rate and drain bytes.
+    fn render_connections(&self, out: &mut String) {
+        let mut counter = |name: &str, help: &str, v: &AtomicU64| {
+            let _ = writeln!(
+                out,
+                "# HELP {name} {help}\n# TYPE {name} counter\n{name} {}",
+                v.load(Ordering::Relaxed)
+            );
+        };
+        counter(
+            "agentconnect_relay_frames_rate_limited_total",
+            "Client frames over the per-connection frame rate (refused, or delayed for acks).",
+            &self.frames_rate_limited,
+        );
+        counter(
+            "agentconnect_relay_drain_bytes_total",
+            "Bytes of queued messages other than knocks sent to connections.",
+            &self.drain_bytes,
+        );
+        counter(
+            "agentconnect_relay_connections_replaced_total",
+            "Connections closed because a newer one for the same mailbox passed the per-mailbox cap.",
+            &self.replaced,
+        );
+        counter(
+            "agentconnect_relay_connections_shed_total",
+            "Connections closed because the relay-wide read budget was exceeded.",
+            &self.shed,
+        );
+        let mut gauge = |name: &str, help: &str, v: &AtomicU64| {
+            let _ = writeln!(
+                out,
+                "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {}",
+                v.load(Ordering::Relaxed)
+            );
+        };
+        gauge(
+            "agentconnect_relay_ws_connections_open",
+            "WebSocket connections open now.",
+            &self.ws_open,
+        );
+        gauge(
+            "agentconnect_relay_ws_connections_unauthenticated",
+            "WebSocket connections open now that haven't authenticated.",
+            &self.ws_unauth,
+        );
+        gauge(
+            "agentconnect_relay_read_bytes_held",
+            "Bytes read from WebSocket clients and not yet handed on as messages.",
+            &self.read_held,
+        );
+        gauge(
+            "agentconnect_relay_http_connections_open",
+            "TCP connections open now that have not become WebSockets.",
+            &self.http_open,
+        );
+        gauge(
+            "agentconnect_relay_drain_bytes_loaded",
+            "Bytes of queued messages other than knocks loaded into memory for sending now.",
+            &self.drain_loaded,
+        );
+        let _ = writeln!(
+            out,
+            "# HELP agentconnect_relay_connections_refused_total Connections refused at a connection cap, by cap.\n\
+             # TYPE agentconnect_relay_connections_refused_total counter"
+        );
+        for (why, n) in ConnRefusal::ALL.iter().zip(&self.refused) {
+            let _ = writeln!(
+                out,
+                "agentconnect_relay_connections_refused_total{{reason=\"{}\"}} {}",
+                why.as_str(),
+                n.load(Ordering::Relaxed)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP agentconnect_relay_connections_evicted_total Connections closed at a total cap to admit one from another source, by cap.\n\
+             # TYPE agentconnect_relay_connections_evicted_total counter"
+        );
+        for (cap, n) in Eviction::ALL.iter().zip(&self.evicted) {
+            let _ = writeln!(
+                out,
+                "agentconnect_relay_connections_evicted_total{{cap=\"{}\"}} {}",
+                cap.as_str(),
+                n.load(Ordering::Relaxed)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP agentconnect_relay_connection_timeouts_total Connections closed by a deadline, by deadline.\n\
+             # TYPE agentconnect_relay_connection_timeouts_total counter"
+        );
+        for (kind, n) in Timeout::ALL.iter().zip(&self.timeouts) {
+            let _ = writeln!(
+                out,
+                "agentconnect_relay_connection_timeouts_total{{kind=\"{}\"}} {}",
+                kind.as_str(),
+                n.load(Ordering::Relaxed)
+            );
+        }
+    }
 }
 
 /// Wakes connections when their mailbox has new messages.
@@ -263,7 +560,15 @@ struct Hub {
     waiters: Mutex<Waiters>,
 }
 
-type Waiters = HashMap<String, Vec<(u64, Arc<Notify>)>>;
+/// A registered connection: its wake-up, and its replacement signal.
+#[derive(Debug)]
+struct Waiter {
+    id: u64,
+    notify: Arc<Notify>,
+    replaced: Arc<Notify>,
+}
+
+type Waiters = HashMap<String, Vec<Waiter>>;
 
 /// A connection's registration for wake-ups; unregisters on drop.
 #[derive(Debug)]
@@ -273,13 +578,15 @@ pub struct Registration {
     id: u64,
     /// Fires when new messages are queued for the mailbox.
     pub notify: Arc<Notify>,
+    /// Fires when a newer connection for the mailbox took this one's place.
+    pub replaced: Arc<Notify>,
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
         let mut waiters = lock(&self.hub.waiters);
         if let Some(list) = waiters.get_mut(&self.mailbox) {
-            list.retain(|(id, _)| *id != self.id);
+            list.retain(|w| w.id != self.id);
             if list.is_empty() {
                 waiters.remove(&self.mailbox);
             }
@@ -462,6 +769,88 @@ pub struct Relay<S: Store> {
     /// start time, so members have an hour to reconnect after a restart.
     idle_swept_at: AtomicU64,
     metrics: Metrics,
+    ws_limits: WsLimits,
+    timer: Timer,
+    read_budget: Arc<ReadBudget>,
+    ws_sources: Arc<SourceCounts>,
+    ws_auth: Arc<Fair>,
+    knocks_tx: mpsc::Sender<(KnockForward, SourceKey)>,
+    knocks_rx: tokio::sync::Mutex<mpsc::Receiver<(KnockForward, SourceKey)>>,
+    knock_shares: Mutex<KnockShares>,
+    knock_worker: AtomicBool,
+    stopping: watch::Sender<bool>,
+}
+
+/// Accepted knocks waiting for the knock worker, at most. Past it a knock is
+/// dropped behind its `accepted`, like one to a busy door.
+pub const KNOCK_QUEUE: usize = 1024;
+
+/// Of [`KNOCK_QUEUE`], the most one source may hold: 16 sources can't fill
+/// it. A source's knocks past it are dropped silently.
+pub const KNOCK_QUEUE_PER_SOURCE: usize = KNOCK_QUEUE / 16;
+
+/// Of [`KNOCK_QUEUE`], the most one door may hold between two rounds of the
+/// worker. A door forwards at most 10 knocks a minute anyway (SPEC §8.3).
+pub const KNOCK_QUEUE_PER_DOOR: usize = 16;
+
+/// Queued knocks per source and per door.
+#[derive(Debug, Default)]
+struct KnockShares {
+    by_source: HashMap<SourceKey, usize>,
+    by_door: HashMap<String, usize>,
+}
+
+impl KnockShares {
+    fn release(&mut self, source: SourceKey, door: &str) {
+        if let Some(n) = self.by_source.get_mut(&source) {
+            *n -= 1;
+            if *n == 0 {
+                self.by_source.remove(&source);
+            }
+        }
+        if let Some(n) = self.by_door.get_mut(door) {
+            *n -= 1;
+            if *n == 0 {
+                self.by_door.remove(door);
+            }
+        }
+    }
+}
+
+/// How often the knock worker writes the knocks accepted since its last
+/// round. Knocks are written on this clock, not when they arrive, so the
+/// store's load right after a knock doesn't depend on whether it was
+/// forwarded or dropped.
+pub const KNOCK_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// A knock answered `accepted`: queued with [`Relay::queue_knock`] whether
+/// it is forwarded or dropped, so both take the same path; only the knock
+/// worker tells them apart, when it writes.
+#[derive(Debug)]
+pub struct KnockForward {
+    door: String,
+    write: Option<(String, NewMessage)>,
+}
+
+impl KnockForward {
+    /// True if the knock will be queued for the door's owner; false if it
+    /// was dropped (a busy door).
+    #[must_use]
+    pub fn forwards(&self) -> bool {
+        self.write.is_some()
+    }
+}
+
+/// Resolves once `stop` turns true; never if its sender is gone.
+pub(crate) async fn until_true(stop: &mut watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow_and_update() {
+            return;
+        }
+        if stop.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 impl<S: Store> Relay<S> {
@@ -469,6 +858,12 @@ impl<S: Store> Relay<S> {
     /// (the relay's public host name).
     pub fn new(store: S, clock: Arc<dyn Clock>, host: impl Into<String>, limits: Limits) -> Self {
         let started = clock.unix_millis();
+        let metrics = Metrics::default();
+        let read_budget = ReadBudget::new(
+            WsLimits::default().read_buffer_bytes,
+            Arc::clone(&metrics.read_held),
+        );
+        let (knocks_tx, knocks_rx) = mpsc::channel(KNOCK_QUEUE);
         Self {
             store,
             clock,
@@ -483,7 +878,17 @@ impl<S: Store> Relay<S> {
             replay_floor_secs: 0,
             warned: [AtomicBool::new(false), AtomicBool::new(false)],
             idle_swept_at: AtomicU64::new(started),
-            metrics: Metrics::default(),
+            metrics,
+            ws_limits: WsLimits::default(),
+            timer: Timer::default(),
+            read_budget,
+            ws_sources: Arc::default(),
+            ws_auth: Fair::new(),
+            knocks_tx,
+            knocks_rx: tokio::sync::Mutex::new(knocks_rx),
+            knock_shares: Mutex::default(),
+            knock_worker: AtomicBool::new(false),
+            stopping: watch::Sender::new(false),
         }
         .with_quotas(Quotas::default())
     }
@@ -500,6 +905,122 @@ impl<S: Store> Relay<S> {
             .store(n(quotas.max_groups), Ordering::Relaxed);
         self.quotas = quotas;
         self
+    }
+
+    /// Set the WebSocket connection limits.
+    #[must_use]
+    pub fn with_ws_limits(mut self, limits: WsLimits) -> Self {
+        self.read_budget = ReadBudget::new(
+            limits.read_buffer_bytes,
+            Arc::clone(&self.metrics.read_held),
+        );
+        self.ws_limits = limits;
+        self
+    }
+
+    /// Set the timer for connection deadlines (tests use a manual one).
+    #[must_use]
+    pub fn with_timer(mut self, timer: Timer) -> Self {
+        self.timer = timer;
+        self
+    }
+
+    /// The WebSocket connection limits.
+    #[must_use]
+    pub fn ws_limits(&self) -> &WsLimits {
+        &self.ws_limits
+    }
+
+    /// The timer for connection deadlines.
+    #[must_use]
+    pub fn timer(&self) -> &Timer {
+        &self.timer
+    }
+
+    /// The relay-wide budget for bytes read and not yet handed on.
+    #[must_use]
+    pub fn read_budget(&self) -> &Arc<ReadBudget> {
+        &self.read_budget
+    }
+
+    /// WebSocket connections per source.
+    #[must_use]
+    pub fn ws_sources(&self) -> &Arc<SourceCounts> {
+        &self.ws_sources
+    }
+
+    /// Authenticated WebSocket connections, under the total cap.
+    #[must_use]
+    pub fn ws_auth(&self) -> &Arc<Fair> {
+        &self.ws_auth
+    }
+
+    /// Tell connections and the knock worker that the relay is stopping.
+    pub fn stop(&self) {
+        self.stopping.send_replace(true);
+    }
+
+    /// Turns true when the relay is stopping.
+    #[must_use]
+    pub fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
+    }
+
+    /// Hand an accepted knock from `source` to the knock worker. Past the
+    /// source's or the door's share of the queue, or with the queue full,
+    /// it is dropped silently, as a busy door does.
+    pub fn queue_knock(&self, knock: KnockForward, source: SourceKey) {
+        let mut shares = lock(&self.knock_shares);
+        let held_source = shares.by_source.get(&source).copied().unwrap_or(0);
+        let held_door = shares.by_door.get(&knock.door).copied().unwrap_or(0);
+        if held_source >= KNOCK_QUEUE_PER_SOURCE || held_door >= KNOCK_QUEUE_PER_DOOR {
+            tracing::debug!(reason = "knock_queue_share", "knock dropped");
+            return;
+        }
+        let door = knock.door.clone();
+        if self.knocks_tx.try_send((knock, source)).is_err() {
+            tracing::debug!(reason = "knock_queue_full", "knock dropped");
+            return;
+        }
+        *shares.by_source.entry(source).or_default() += 1;
+        *shares.by_door.entry(door).or_default() += 1;
+    }
+
+    /// Write every queued knock now: forwarded ones to their owners,
+    /// dropped ones nowhere.
+    pub async fn flush_knocks(&self) {
+        let mut rx = self.knocks_rx.lock().await;
+        while let Ok((knock, source)) = rx.try_recv() {
+            lock(&self.knock_shares).release(source, &knock.door);
+            self.forward_knock(knock).await;
+        }
+    }
+
+    /// Start the knock worker, once: every [`KNOCK_FLUSH_INTERVAL`] it
+    /// writes the queued knocks, and it writes what is left when the relay
+    /// stops.
+    pub fn start_knock_worker(self: &Arc<Self>) {
+        if self.knock_worker.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let relay = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut stop = relay.stopping();
+            let mut next = relay.timer.now() + KNOCK_FLUSH_INTERVAL;
+            loop {
+                tokio::select! {
+                    () = relay.timer.sleep_until(next) => {}
+                    () = until_true(&mut stop) => {
+                        relay.flush_knocks().await;
+                        return;
+                    }
+                }
+                // Ticks missed while the store was busy are skipped, not run
+                // back to back.
+                next = (next + KNOCK_FLUSH_INTERVAL).max(relay.timer.now());
+                relay.flush_knocks().await;
+            }
+        });
     }
 
     /// Refuse every signed request whose `ts` is from before this start
@@ -782,33 +1303,50 @@ impl<S: Store> Relay<S> {
         self.now_ms() / 1000
     }
 
-    /// Register a connection for wake-ups on `mailbox`.
-    #[must_use]
-    pub fn register(&self, mailbox: &str) -> Registration {
+    /// Register a connection for wake-ups on `mailbox`. If `max` are
+    /// registered already, the oldest is unregistered and told through its
+    /// [`Registration::replaced`]: the newest connection is the one known to
+    /// be alive, while an old one may be half-open. Returns whether one was
+    /// replaced.
+    pub fn register(&self, mailbox: &str, max: usize) -> (Registration, bool) {
         let id = self.hub.next.fetch_add(1, Ordering::Relaxed);
         let notify = Arc::new(Notify::new());
-        lock(&self.hub.waiters)
-            .entry(mailbox.to_owned())
-            .or_default()
-            .push((id, Arc::clone(&notify)));
-        Registration {
+        let replaced = Arc::new(Notify::new());
+        let mut waiters = lock(&self.hub.waiters);
+        let list = waiters.entry(mailbox.to_owned()).or_default();
+        let mut evicted = false;
+        while !list.is_empty() && list.len() >= max.max(1) {
+            let oldest = list.remove(0);
+            oldest.replaced.notify_one();
+            evicted = true;
+        }
+        list.push(Waiter {
+            id,
+            notify: Arc::clone(&notify),
+            replaced: Arc::clone(&replaced),
+        });
+        drop(waiters);
+        let registration = Registration {
             hub: Arc::clone(&self.hub),
             mailbox: mailbox.to_owned(),
             id,
             notify,
-        }
+            replaced,
+        };
+        (registration, evicted)
     }
 
     fn wake<'a>(&self, mailboxes: impl IntoIterator<Item = &'a String>) {
         let waiters = lock(&self.hub.waiters);
         for m in mailboxes {
-            for (_, n) in waiters.get(m).into_iter().flatten() {
-                n.notify_one();
+            for w in waiters.get(m).into_iter().flatten() {
+                w.notify.notify_one();
             }
         }
     }
 
-    /// Unexpired queued messages after `after_seq`, oldest first.
+    /// Unexpired queued messages after `after_seq`, oldest first, capped at
+    /// `limit` messages and `max_bytes` (at least one message).
     ///
     /// # Errors
     ///
@@ -818,9 +1356,10 @@ impl<S: Store> Relay<S> {
         mailbox: &str,
         after_seq: i64,
         limit: u32,
+        max_bytes: u64,
     ) -> Result<Vec<StoredMessage>, RelayError> {
         self.store
-            .pending(mailbox, after_seq, limit, self.now_ms())
+            .pending(mailbox, after_seq, limit, max_bytes, self.now_ms())
             .await
             .map_err(|e| internal(&e))
     }
@@ -914,9 +1453,15 @@ impl<S: Store> Relay<S> {
         }
     }
 
-    /// Handle one authenticated client frame. Returns the reply frame, if any.
+    /// Handle one authenticated client frame. Returns the reply frame, if
+    /// any. An accepted knock is written at once (the WebSocket path queues
+    /// it for the knock worker instead).
     pub async fn handle(&self, mailbox: &str, frame: ClientFrame) -> Option<ServerFrame> {
-        self.handle_from(mailbox, None, frame).await
+        let (reply, knock) = self.handle_deferred(mailbox, None, frame).await;
+        if let Some(k) = knock {
+            self.forward_knock(k).await;
+        }
+        reply
     }
 
     /// [`Relay::handle`] for a connection from `ip` (`None`: unknown), which
@@ -927,13 +1472,33 @@ impl<S: Store> Relay<S> {
         ip: Option<IpAddr>,
         frame: ClientFrame,
     ) -> Option<ServerFrame> {
-        self.metrics.frame_in();
+        let (reply, knock) = self.handle_deferred(mailbox, ip, frame).await;
+        if let Some(k) = knock {
+            self.forward_knock(k).await;
+        }
+        reply
+    }
+
+    /// [`Relay::handle_from`], except that an accepted knock, forwarded or
+    /// dropped, comes back to be queued with [`Relay::queue_knock`]. Both
+    /// take the same path up to the knock worker's write, so neither the
+    /// reply's timing nor the store's load right after it says which it was
+    /// (SPEC §8.3).
+    pub async fn handle_deferred(
+        &self,
+        mailbox: &str,
+        ip: Option<IpAddr>,
+        frame: ClientFrame,
+    ) -> (Option<ServerFrame>, Option<KnockForward>) {
+        let mut knock = None;
         let (corr, result) = match frame {
             ClientFrame::Ack { msg_id } => {
+                // Not counted in frames_total: an owner's ack of a delivered
+                // knock would tell a forwarded knock from a dropped one.
                 if let Err(e) = self.store.ack(mailbox, &msg_id).await {
                     tracing::error!(error = %e, "ack failed");
                 }
-                return None;
+                return (None, None);
             }
             ClientFrame::Auth { .. } => (
                 None,
@@ -952,7 +1517,14 @@ impl<S: Store> Relay<S> {
             }
             ClientFrame::Knock { door_id, env } => {
                 let id = env.msg_id.clone();
-                (Some(id), self.knock(mailbox, &door_id, env).await)
+                let r = self.knock(mailbox, &door_id, env).await;
+                (
+                    Some(id),
+                    r.map(|forward| {
+                        knock = Some(forward);
+                        String::new()
+                    }),
+                )
             }
             ClientFrame::GroupCreate {
                 group_id,
@@ -969,12 +1541,41 @@ impl<S: Store> Relay<S> {
                 (Some(corr), r.map(|()| String::new()))
             }
         };
-        Some(match result {
+        self.metrics.frame_in();
+        let reply = match result {
             Ok(_) => ServerFrame::Accepted {
                 msg_id: corr.unwrap_or_default(),
             },
             Err(e) => self.error_frame(corr, e),
-        })
+        };
+        (Some(reply), knock)
+    }
+
+    /// Write a knock answered by [`Relay::handle_deferred`]: queue it for its
+    /// door's owner, or nothing for a dropped one. A full owner queue or a
+    /// repeated `msg_id` drops it silently.
+    pub async fn forward_knock(&self, knock: KnockForward) {
+        let Some((owner, msg)) = knock.write else {
+            return;
+        };
+        match self
+            .store
+            .deliver_direct(&owner, &msg, &self.limits, self.now_ms())
+            .await
+        {
+            Ok(DirectOutcome::Delivered) => {
+                tracing::debug!("knock forwarded");
+                self.wake([&owner]);
+            }
+            Ok(DirectOutcome::Duplicate) => tracing::debug!("knock repeated"),
+            // Unlike `join`: the knocker was told `accepted` either way.
+            Ok(DirectOutcome::QuotaExceeded) => {
+                tracing::debug!(reason = "queue_full", "knock dropped");
+            }
+            Err(e) => {
+                let _ = internal(&e);
+            }
+        }
     }
 
     pub(crate) fn error_frame(&self, msg_id: Option<String>, e: RelayError) -> ServerFrame {
@@ -1246,13 +1847,14 @@ impl<S: Store> Relay<S> {
     /// `knock`"). The knocker hears `accepted`, `door_not_open` or
     /// `rate_limited` and nothing else: a busy door or a full owner queue
     /// drops the knock behind an `accepted`. Nothing here is logged with an
-    /// identifier.
+    /// identifier. An accepted knock that isn't dropped comes back to be
+    /// queued once the knocker has its answer ([`Relay::forward_knock`]).
     async fn knock(
         &self,
         mailbox: &str,
         door_id: &str,
         env: Envelope,
-    ) -> Result<String, RelayError> {
+    ) -> Result<KnockForward, RelayError> {
         use RelayError as E;
         if env.kind != Kind::Knock {
             return Err(E::new(
@@ -1298,35 +1900,25 @@ impl<S: Store> Relay<S> {
         }
         Metrics::inc(&self.metrics.accepted);
         Metrics::inc(&self.metrics.knocks_accepted);
-        let busy = self.limits.knocks_per_door;
-        if !self.rate_check(&format!("kd:{door_id}"), busy.max, window_ms(busy)) {
-            tracing::debug!(reason = "door_busy", "knock dropped");
-            return Ok(env.msg_id);
-        }
+        // Built before the busy check, so a dropped knock costs the same.
         let msg = NewMessage {
             msg_id: env.msg_id.clone(),
             sender: mailbox.to_owned(),
             json: serde_json::to_string(&env)
                 .map_err(|_| E::new(ErrorCode::Internal, "internal error"))?,
         };
-        match self
-            .store
-            .deliver_direct(&door.owner_mailbox, &msg, &self.limits, self.now_ms())
-            .await
-            .map_err(|e| internal(&e))?
-        {
-            DirectOutcome::Delivered => {
-                tracing::debug!("knock forwarded");
-                self.wake([&door.owner_mailbox]);
-            }
-            DirectOutcome::Duplicate => tracing::debug!("knock repeated"),
-            // Unlike `join`: a refusal would tell the knocker that the
-            // owner's queue is full.
-            DirectOutcome::QuotaExceeded => {
-                tracing::debug!(reason = "queue_full", "knock dropped");
-            }
+        let busy = self.limits.knocks_per_door;
+        if !self.rate_check(&format!("kd:{door_id}"), busy.max, window_ms(busy)) {
+            tracing::debug!(reason = "door_busy", "knock dropped");
+            return Ok(KnockForward {
+                door: door_id.to_owned(),
+                write: None,
+            });
         }
-        Ok(env.msg_id)
+        Ok(KnockForward {
+            door: door_id.to_owned(),
+            write: Some((door.owner_mailbox, msg)),
+        })
     }
 
     /// Register a door on behalf of the authenticated `mailbox` (ADR-006).
@@ -1587,8 +2179,8 @@ mod tests {
     fn ws_open_guards_count_up_and_each_drop_counts_down_once() {
         let m = Metrics::default();
         let value = |m: &Metrics| m.ws_open.load(Ordering::Relaxed);
-        let a = m.ws_open();
-        let b = m.ws_open();
+        let a = m.try_ws_open(usize::MAX).unwrap();
+        let b = m.try_ws_open(usize::MAX).unwrap();
         assert_eq!(value(&m), 2);
         drop(a);
         assert_eq!(value(&m), 1);

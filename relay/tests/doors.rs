@@ -256,6 +256,8 @@ async fn a_knock_is_delivered_to_the_owner_and_the_knocker_learns_nothing_more()
         r,
         json!({"t": "accepted", "msg_id": frame["env"]["msg_id"]})
     );
+    // The knock worker writes on its own clock.
+    h.relay.flush_knocks().await;
 
     let got = owner.deliver().await;
     assert_eq!(got, frame["env"], "forwarded verbatim");
@@ -279,6 +281,7 @@ async fn a_knock_waits_for_an_offline_owner() {
     let mut knocker = h.client(2).await;
     let frame = knock_frame(&knocker.mailbox, &id);
     assert_eq!(knocker.request(&frame).await["t"], "accepted");
+    h.relay.flush_knocks().await;
 
     // The owner connects later and gets it in the reconnect drain.
     h.clock.advance(Duration::from_secs(3 * 24 * 3600));
@@ -410,6 +413,69 @@ async fn per_door_overflow_is_accepted_and_dropped_silently() {
     assert_eq!(queued(&h, 1).await.len(), 11);
     // A dropped knock still counts against its sender's own limits.
     assert_eq!(knock_as(&h, 110, &door).await["code"], "rate_limited");
+}
+
+#[tokio::test]
+async fn forwarded_and_dropped_knocks_take_the_same_path_until_the_worker_writes() {
+    use agentconnect_relay::proto::parse_client_frame;
+    let h = Harness::start().await;
+    let door = open_door(&h, 1).await;
+    let knock = |n: u8| {
+        let mailbox = mailbox_of(&signing_key(n));
+        let frame = knock_frame(&mailbox, &door).to_string();
+        (
+            mailbox,
+            parse_client_frame(&frame, agentconnect_relay::DEFAULT_FRAME_MAX).unwrap(),
+        )
+    };
+    // SR-16: the answer is ready and nothing is written yet. Both kinds of
+    // knock come back to be queued for the knock worker.
+    let (mailbox, frame) = knock(2);
+    let (reply, forward) = h.relay.handle_deferred(&mailbox, None, frame).await;
+    let reply = serde_json::to_value(reply.unwrap()).unwrap();
+    assert_eq!(reply["t"], "accepted");
+    let forward = forward.expect("an accepted knock goes to the worker");
+    assert!(forward.forwards());
+    h.relay
+        .queue_knock(forward, agentconnect_relay::conn::SourceKey::unknown());
+    assert!(queued(&h, 1).await.is_empty());
+    h.relay.flush_knocks().await;
+    assert_eq!(queued(&h, 1).await.len(), 1);
+    // A busy door answers the same way and queues the same way; the worker
+    // writes nothing for it.
+    for n in 3..12 {
+        assert_eq!(knock_as(&h, n, &door).await["t"], "accepted");
+    }
+    let (mailbox, frame) = knock(12);
+    let (busy, forward) = h.relay.handle_deferred(&mailbox, None, frame).await;
+    let busy = serde_json::to_value(busy.unwrap()).unwrap();
+    assert_eq!(busy["t"], reply["t"]);
+    let forward = forward.expect("a dropped knock goes to the worker too");
+    assert!(!forward.forwards());
+    h.relay
+        .queue_knock(forward, agentconnect_relay::conn::SourceKey::unknown());
+    h.relay.flush_knocks().await;
+    assert_eq!(queued(&h, 1).await.len(), 10);
+}
+
+#[tokio::test]
+async fn the_knock_worker_writes_on_its_own_tick() {
+    let h = Harness::start().await;
+    let door = open_door(&h, 1).await;
+    let mut knocker = h.client(2).await;
+    let frame = knock_frame(&knocker.mailbox, &door);
+    assert_eq!(knocker.request(&frame).await["t"], "accepted");
+    // Answered, not written: the knocker's next frames never wait on it.
+    assert!(queued(&h, 1).await.is_empty());
+    h.timer
+        .advance(agentconnect_relay::relay::KNOCK_FLUSH_INTERVAL);
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while queued(&h, 1).await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the worker wrote the knock at its tick");
 }
 
 #[tokio::test]

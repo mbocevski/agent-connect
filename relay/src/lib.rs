@@ -11,21 +11,36 @@ use axum::routing::get;
 
 pub mod auth;
 pub mod config;
+pub mod conn;
 pub mod landing;
+pub mod logging;
 pub mod proto;
 pub mod quota;
 pub mod relay;
 mod replay;
 pub mod rest;
 pub mod restart;
+pub mod server;
 pub mod sqlite;
 pub mod store;
+pub mod timer;
 pub mod ws;
 
 pub use quota::Quotas;
 pub use relay::Relay;
+pub use server::{Server, ServerLimits};
 pub use sqlite::SqliteStore;
 pub use store::{DEFAULT_FRAME_MAX, Limits, Store};
+pub use ws::WsLimits;
+
+/// The operator's router: `/metrics` and `/healthz`, for a private
+/// listener (`AC_RELAY_METRICS_ADDR`), never the public one.
+pub fn metrics_app<S: Store>(relay: Arc<Relay<S>>) -> Router {
+    Router::new()
+        .route("/metrics", get(rest::metrics::<S>))
+        .route("/healthz", get(rest::healthz))
+        .with_state(relay)
+}
 
 /// Build the relay's HTTP router: REST, landing page and WebSocket.
 pub fn app<S: Store>(relay: Arc<Relay<S>>) -> Router {

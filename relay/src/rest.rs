@@ -273,14 +273,14 @@ async fn delete_door<S: Store>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn healthz() -> Json<serde_json::Value> {
+pub(crate) async fn healthz() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "protocol": agentconnect_core::PROTOCOL_VERSION,
     }))
 }
 
-async fn metrics<S: Store>(State(relay): State<Arc<Relay<S>>>) -> Response {
+pub(crate) async fn metrics<S: Store>(State(relay): State<Arc<Relay<S>>>) -> Response {
     (
         [(
             header::CONTENT_TYPE,
@@ -295,7 +295,6 @@ async fn metrics<S: Store>(State(relay): State<Arc<Relay<S>>>) -> Response {
 pub fn routes<S: Store>() -> Router<Arc<Relay<S>>> {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/metrics", get(metrics::<S>))
         .route("/v0/invites", axum::routing::post(create_invite::<S>))
         .route(
             "/v0/invites/{invite_id}",
