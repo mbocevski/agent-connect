@@ -58,6 +58,7 @@ data_dir = "~/ac"
 display_name = "bot"
 default_adapter = "webhook"
 keystore = "file"
+event_retention_days = 7
 
 [policy]
 auto_approve = true
@@ -77,6 +78,7 @@ callback_url = "http://127.0.0.1:8808/"
     assert cfg.display_name == "bot"
     assert cfg.default_adapter == "webhook"
     assert cfg.keystore == "file"
+    assert cfg.event_retention_days == 7
     assert cfg.auto_approve
     assert cfg.api_socket == Path("/tmp/x.sock")  # noqa: S108
     assert cfg.api_tcp_port == 7787
@@ -97,6 +99,8 @@ callback_url = "http://127.0.0.1:8808/"
         ('[relay]\nurl = "http://x"', "ws:// or wss://"),
         ('[relay]\nurl = "ws://relay.example"', "loopback"),
         ('[daemon]\nkeystore = "vault"', "keystore"),
+        ("[daemon]\nevent_retention_days = 0", "event_retention_days"),
+        ("[daemon]\nevent_retention_days = 366", "event_retention_days"),
         ("[api]\ntcp_port = 70000", "tcp_port"),
         ("[api]\ntcp_port = true", "tcp_port must be int"),
         ('[policy]\nauto_approve = "yes"', "auto_approve"),

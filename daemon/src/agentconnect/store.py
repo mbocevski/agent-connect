@@ -348,6 +348,11 @@ CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS attempts (
+    key TEXT PRIMARY KEY,
+    n INTEGER NOT NULL,
+    at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS floor_state (
     group_id TEXT PRIMARY KEY,
     holder TEXT,
@@ -3098,6 +3103,42 @@ class Store:
         with self.tx():
             self._db.execute("UPDATE events SET notified = 1 WHERE event_id = ?", (event_id,))
             self._db.execute("DELETE FROM event_acks WHERE event_id = ?", (event_id,))
+
+    def events_purge(self, before: int, keep: int) -> None:
+        """Retention: events stamped before ``before`` that every adapter has,
+        and any beyond the newest ``keep``. The event holding the agent's
+        highest number stays, so the agent's sequence never runs backwards."""
+        with self.tx():
+            self._db.execute(
+                "DELETE FROM events WHERE ((at < ? AND notified = 1) OR seq <= "
+                "(SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?)) "
+                "AND (agent_seq IS NULL OR agent_seq < "
+                "(SELECT MAX(agent_seq) FROM events))",
+                (before, keep),
+            )
+            self._db.execute(
+                "DELETE FROM event_acks WHERE event_id NOT IN "
+                "(SELECT event_id FROM events WHERE event_id IS NOT NULL)"
+            )
+
+    # -- attempts -------------------------------------------------------------
+
+    def attempt(self, key: str, now: int) -> int:
+        """Count one more give-up of the message ``key``; returns the count,
+        which survives restarts."""
+        with self.tx():
+            self._db.execute(
+                "INSERT INTO attempts (key, n, at) VALUES (?, 1, ?) "
+                "ON CONFLICT(key) DO UPDATE SET n = n + 1, at = excluded.at",
+                (key, now),
+            )
+            row = self._one("SELECT n FROM attempts WHERE key = ?", key)
+        return 0 if row is None else int(row[0])
+
+    def attempts_purge(self, before: int) -> None:
+        """Forget the counts last bumped before ``before``."""
+        with self.tx():
+            self._db.execute("DELETE FROM attempts WHERE at < ?", (before,))
 
     def unnotified_groups(self) -> list[str | None]:
         """The groups (``None``: events of no group) with events not every

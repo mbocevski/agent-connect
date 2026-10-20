@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
 
 import agentconnect_core as ac
-from agentconnect.limits import MAX_DEPTH, MAX_RECIPIENTS, U32_MAX
+from agentconnect.limits import MAX_DEPTH, MAX_RECIPIENTS, SENDER_PER_MINUTE, U32_MAX
 from agentconnect.policy import SafetyPolicy
 from agentconnect.runtime.engine import Engine, journal_key, new_msg_id
 from agentconnect_harness.cluster import WAIT, Node
@@ -156,6 +157,53 @@ async def test_json_too_deep_to_parse_is_malformed(group: GroupFixture) -> None:
     await unwedged(b, a, gid)
 
 
+LONE = '"\\ud800"'  # a JSON string that decodes to a lone surrogate
+
+
+def with_lone_surrogate(node: Node, where: str) -> bytes:
+    """An inner message with one string or key that decodes to a lone
+    surrogate at ``where``: valid JSON, and valid UTF-8 on the wire, inside
+    every other bound. No UTF-8 encoder takes the decoded string."""
+    inner = node.daemon.inner("a2a.message", {"parts": [{"text": "hi"}]}, ["*"])
+    deepest: Any = "MARK"
+    for _ in range(MAX_DEPTH - 4):  # the inner message, body, parts, the part
+        deepest = [deepest]
+    inner |= {
+        "text": {"body": {"parts": [{"text": "MARK"}]}},
+        "reply_to": {"reply_to": ["MARK"]},
+        "to": {"to": ["MARK"]},
+        "key": {"body": {"parts": [{"data": {"MARK": 1}}]}},
+        "deep": {"body": {"parts": [{"data": deepest}]}},
+    }[where]
+    return json.dumps(inner).replace('"MARK"', LONE).encode()
+
+
+@pytest.mark.parametrize("where", ["text", "reply_to", "to", "key", "deep"])
+async def test_a_lone_surrogate_anywhere_is_malformed(group: GroupFixture, where: str) -> None:
+    (a, b), gid = await group(2)
+    bad = raw_plaintext(a, gid, with_lone_surrogate(a, where))
+    assert await handled(b, a, bad) == "dropped"
+    assert audit_row(b, gid, bad)["reason"] == "malformed"
+    assert b.daemon.safety.violations(gid, a.me) == 1
+    assert not events(b, "message_failed")
+    assert not [d for d in b.adapter.deliveries if d.msg_id == bad]
+    await unwedged(b, a, gid)
+
+
+async def test_lone_surrogates_count_against_the_sender(group: GroupFixture) -> None:
+    """Past the sender's rate: each is dropped and counted, and the human
+    hears of it once, as ``repeated_violations``."""
+    (a, b), gid = await group(2)
+    n = SENDER_PER_MINUTE + 10
+    ids = [raw_plaintext(a, gid, with_lone_surrogate(a, "reply_to")) for _ in range(n)]
+    for msg_id in ids:
+        assert await handled(b, a, msg_id) == "dropped"
+    assert {audit_row(b, gid, msg_id)["reason"] for msg_id in ids} == {"malformed"}
+    assert b.daemon.safety.violations(gid, a.me) == n
+    assert len(events(b, "repeated_violations")) == 1
+    assert not events(b, "message_failed")
+
+
 @pytest.mark.parametrize(
     "fields",
     [
@@ -239,7 +287,10 @@ async def test_a_message_that_fails_in_handling_fails_alone(
         "msg_id": msg_id,
         "message_kind": "a2a.message",
         "reason": "RecursionError",
+        "count": 1,
     }
+    # Counted against the sender, like a malformed message.
+    assert b.daemon.safety.violations(gid, a.me) == 1
     # The human's, like the policy's other events: never the agent's.
     assert not b.adapter.of_type("message_failed")
     assert not [d for d in b.adapter.deliveries if d.msg_id == msg_id]
@@ -271,9 +322,12 @@ async def test_a_commit_that_fails_in_handling_fails_alone(
     await b.wait(lambda: bool(events(b, "message_failed")))
     (event,) = events(b, "message_failed")
     assert (event["message_kind"], event["reason"]) == ("commit", "ValueError")
-    # The core merged it, and the cached view follows the core.
+    # The core merged it, and the cached view follows the core; the
+    # bookkeeping it skipped leaves the group out of sync, and the human hears.
     await b.wait(lambda: b.epoch(gid) == a.epoch(gid))
-    assert not b.daemon.group_info(gid)["out_of_sync"]
+    info = b.daemon.group_info(gid)
+    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_failed")
+    assert [e["reason"] for e in events(b, "out_of_sync")] == ["commit_failed"]
     await unwedged(b, a, gid)
 
 

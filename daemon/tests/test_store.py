@@ -405,6 +405,39 @@ def test_events_are_notified_per_adapter(tmp_path: Path, opened: Opener) -> None
     assert s.unnotified_events() == []
 
 
+def test_events_are_kept_for_their_retention_and_bounded(tmp_path: Path, opened: Opener) -> None:
+    s = opened(tmp_path / "d.sqlite3")
+    for n in range(6):
+        s.add_event("g1", "member_joined", {}, 10 + n, f"ev-{n}")
+    s.add_event("g1", "message_failed", {}, 1, "human-only", agent=False)
+    for n in range(5):
+        s.mark_notified(f"ev-{n}")
+    # Older than the cutoff and handed over: gone. Not handed over yet: kept.
+    s.events_purge(before=13, keep=100)
+    assert [e["event_id"] for e in s.events()] == ["ev-3", "ev-4", "ev-5"]
+    # Past the cap the oldest go, handed over or not; the agent's newest
+    # number is kept, so its sequence never runs backwards.
+    s.events_purge(before=0, keep=1)
+    assert [e["event_id"] for e in s.events()] == ["ev-5"]
+    s.events_purge(before=100, keep=0)
+    assert [e["event_id"] for e in s.events()] == ["ev-5"]
+    s.add_event("g1", "member_joined", {}, 20, "ev-6")
+    assert [e["seq"] for e in s.agent_events()] == [6, 7]
+
+
+def test_attempts_are_counted_per_key_and_forgotten(tmp_path: Path, opened: Opener) -> None:
+    db = tmp_path / "d.sqlite3"
+    s = opened(db)
+    assert [s.attempt("a", 10) for _ in range(3)] == [1, 2, 3]
+    assert s.attempt("b", 20) == 1
+    s.close()
+    s = opened(db)
+    assert s.attempt("a", 30) == 4  # across restarts
+    s.attempts_purge(before=25)  # untouched since: gone
+    assert s.attempt("b", 40) == 1
+    assert s.attempt("a", 40) == 5
+
+
 @pytest.mark.timeout(120)
 def test_a_wake_costs_the_same_however_much_is_pending(tmp_path: Path, opened: Opener) -> None:
     """With one adapter far behind, what a delivery wake reads (the next

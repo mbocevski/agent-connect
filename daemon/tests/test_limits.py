@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ from agentconnect.limits import (
     GROUP_PER_MINUTE,
     MAX_DEPTH,
     MAX_MESSAGE_BYTES,
+    MAX_PAYLOAD_DEPTH,
     MAX_RECIPIENT_LEN,
     MAX_RECIPIENTS,
     MAX_TASK_ID,
@@ -24,6 +27,8 @@ from agentconnect.limits import (
     RateLimiter,
     content_problem,
     inner_problem,
+    json_too_deep,
+    loads,
     parse_inner,
     part_kind,
     too_deep,
@@ -113,6 +118,135 @@ def test_parse_inner_refuses_what_is_too_deep_or_not_an_object() -> None:
     assert parse_inner(json.dumps({"body": deep(MAX_DEPTH)})) is None
     depth = 200_000  # past what the JSON parser recurses to
     assert parse_inner("[" * depth + "]" * depth) is None
+
+
+LONE = "\ud800"  # what the JSON escape \ud800 decodes to: no UTF-8 encoder takes it
+
+
+def at_depth(levels: int, leaf: Any) -> Any:
+    value = leaf
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"kind": "a2a.message", "body": {"parts": [{"text": LONE}]}},
+        {"kind": "a2a.message", "body": {"parts": [{"text": "ok" + "\udfff"}]}},
+        {"kind": "a2a.message", "body": {"parts": [{"data": {LONE: 1}}]}},
+        {"kind": "a2a.message", "body": {"parts": [{"text": "x"}]}, "reply_to": [LONE]},
+        {"kind": "a2a.message", "body": {"parts": [{"text": "x"}]}, "to": [LONE]},
+        {"kind": LONE, "body": {}},
+        {LONE: "x", "kind": "a2a.message", "body": {}},
+        # At the deepest level allowed: the inner message, body, parts and the
+        # part are four of them.
+        {"kind": "a2a.message", "body": {"parts": [{"data": at_depth(MAX_DEPTH - 4, LONE)}]}},
+        {
+            "kind": "a2a.message",
+            "body": {"parts": [{"data": at_depth(MAX_DEPTH - 5, {LONE: 1})}]},
+        },
+    ],
+    ids=["text", "text-low", "key", "reply_to", "to", "kind", "top-key", "deep", "deep-key"],
+)
+def test_a_lone_surrogate_anywhere_is_malformed(message: dict[str, Any]) -> None:
+    text = json.dumps(message)  # escaped: valid JSON, and valid UTF-8 on the wire
+    assert text.isascii()
+    assert not too_deep(message)
+    assert parse_inner(text) is None
+    assert parse_inner(text.encode()) is None
+    assert inner_problem(message) == "malformed"
+    assert content_problem(message, 10) in ("malformed", "unknown_kind")
+
+
+def test_a_surrogate_pair_is_a_character() -> None:
+    message = {"kind": "a2a.message", "body": {"parts": [{"text": "\U0001f600"}]}}
+    text = json.dumps(message)
+    assert "\\ud83d\\ude00" in text
+    assert parse_inner(text) == message
+    assert inner_problem(message) is None
+
+
+def test_inner_text_is_utf8() -> None:
+    message = {"kind": "a2a.message", "body": {"parts": [{"text": "x"}]}}
+    assert parse_inner(json.dumps(message).encode("utf-16")) is None
+    assert parse_inner(b'{"kind": "\xed\xa0\x80"}') is None  # a surrogate, UTF-8 encoded
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "deep_"),
+    [
+        ("[" * 64 + "]" * 64, 64, False),
+        ("[" * 65 + "]" * 65, 64, True),
+        ('{"a":' * 65 + "1" + "}" * 65, 64, True),
+        ("[[], [], [[]]]", 2, True),
+        ("[[], [], []]", 2, False),
+        (json.dumps({"a": "[" * 1000}), 1, False),
+        (json.dumps({"a": '"[[[' + "{" * 10}), 1, False),
+        (json.dumps({"a": "\\" + "[" * 10}), 1, False),
+        ('["\\\\", [[[]]]]', 3, True),  # an escaped backslash ends the string
+        ('"' + "[" * 10, 3, True),  # unterminated: counted, never hidden
+        ("1", 0, False),
+    ],
+)
+def test_depth_is_read_from_json_text_without_parsing_it(
+    text: str, limit: int, deep_: bool
+) -> None:
+    assert json_too_deep(text, limit) is deep_
+
+
+def test_json_too_deep_is_refused_before_the_parser_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    parsed: list[str] = []
+    real = json.loads
+
+    def counting(text: Any, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(str(text)[:10])
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counting)
+    assert parse_inner("[" * (MAX_DEPTH + 1) + "]" * (MAX_DEPTH + 1)) is None
+    assert parse_inner(b'{"a":' + b"[" * 100_000 + b"]" * 100_000 + b"}") is None
+    with pytest.raises(ValueError, match="too deep"):
+        loads("[" * (MAX_PAYLOAD_DEPTH + 1) + "]" * (MAX_PAYLOAD_DEPTH + 1), MAX_PAYLOAD_DEPTH)
+    assert parsed == []
+    assert loads(b'{"a": [1]}') == {"a": [1]}
+    assert parsed == ['{"a": [1]}']
+
+
+# A child process (a crash must not take the test run with it) parses deep
+# JSON on a 512 KiB thread stack, the macOS default for a secondary thread.
+# Python 3.12 and 3.13 crash in json.loads there from a few thousand levels.
+SMALL_STACK_CHILD = """
+import sys, threading
+from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads, parse_inner
+threading.stack_size(512 * 1024)
+depth = int(sys.argv[1])
+text = '{"kind": "a2a.message", "x": ' + "[" * depth + "]" * depth + "}"
+out = []
+def run():
+    out.append(parse_inner(text))
+    try:
+        loads(text, MAX_PAYLOAD_DEPTH)
+    except ValueError:
+        out.append("refused")
+thread = threading.Thread(target=run)
+thread.start()
+thread.join()
+print(out)
+"""
+
+
+@pytest.mark.parametrize("depth", [MAX_DEPTH * 2 + 1, 4_000, 10_000, 500_000])
+def test_deep_json_is_refused_on_a_small_thread_stack(depth: int) -> None:
+    child = subprocess.run(
+        [sys.executable, "-c", SMALL_STACK_CHILD, str(depth)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert (child.returncode, child.stdout.strip()) == (0, "[None, 'refused']"), child.stderr
 
 
 @pytest.mark.parametrize(

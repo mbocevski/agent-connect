@@ -840,19 +840,34 @@ Inner = {
   nests objects and arrays at most 64 levels deep, the inner object itself
   being the first. `to` is a list of at most 50 strings, `addressee` lists
   at most 50 entries (§9.3), and no entry of either is longer than 128
-  characters. A receiver MUST treat a message outside these bounds as
-  malformed and drop it, whatever its `kind`. They keep one message from
-  costing the receiver more than its size, and honest traffic stays far
-  inside them: a group has at most 50 members, an identity is 49
-  characters, and the inner message and A2A objects around a part's
-  `data` take at most six levels.
+  characters. No string and no object key, at any depth, may hold a lone
+  surrogate: JSON's `\ud800` escape decodes to one, and no UTF-8 encoder
+  takes it. A receiver MUST treat a message outside these bounds as
+  malformed and drop it, whatever its `kind`: a control message (§7.3) or
+  a SAS ceremony message (§11) outside them is never acted on. They keep
+  one message from costing the receiver more than its size, and honest
+  traffic stays far inside them: a group has at most 50 members, an
+  identity is 49 characters, and the inner message and A2A objects around
+  a part's `data` take at most six levels. A receiver SHOULD measure the
+  nesting on the JSON text before it parses it, since a recursive parser
+  can exhaust a small stack on deeper input.
 - **A message fails alone.** A receiver that can't process a message for a
   reason that would repeat on every try (anything but a transient failure
   of its own, such as storage or a lost connection) MUST NOT let it hold up
   the messages after it, and MUST NOT retry it without end: it drops the
-  message, acks it at the relay (§8.2), and SHOULD tell its human. The
-  reference daemon records it as failed, audits it with reason
-  `processing_failed` and raises `message_failed` for the human.
+  message, acks it at the relay (§8.2), and SHOULD tell its human. Only a
+  failure the message causes fails it: the receiver's own housekeeping, or
+  another message, never does. A failure it retries as transient is
+  retried a bounded number of times, counted across restarts, and then
+  fails alone too. Such a message counts against its sender like a
+  malformed one (§10.2), after the sender's rates and size limits were
+  applied to it. A commit that fails alone leaves the receiver behind the
+  group or without the commit's bookkeeping, so the receiver MUST treat
+  the group as out of sync; so is a group the receiver joined through a
+  Welcome it couldn't record. The reference daemon records the message as
+  failed, audits it with reason `processing_failed` and raises
+  `message_failed` for the human, at most once per sender, group and
+  violation window, with the number of failures since the last one.
 - `body` for the `a2a.*` kinds is the corresponding **A2A v1.0** object:
   `Message`, `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`,
   `CancelTaskRequest` (`a2a.task_cancel`) or `AgentCard`. The A2A
@@ -1774,6 +1789,14 @@ file as `file`, `raw` or `url`); an explicit `kind` MUST name that member,
 and the only other members are `metadata`, `filename` and `mediaType`. A
 receiver MUST treat any other part as malformed and drop its message. `file` parts are disabled by default; a receiver MAY accept them,
 with a size cap of its own choosing (§10.6).
+
+A receiver MUST apply the size, kind and part limits and the sender's rates
+to a message (after the bounds of §7.2) before any other step of its
+handling that reads the message, so that every message counts against its
+sender's budget, including one that later fails in the receiver's own
+handling (§7.2). A receiver SHOULD hold such a failure against the sender
+as it does a malformed message, and SHOULD bound how often it tells its
+human about them.
 
 These limits are maximums. A receiver MAY apply lower values, for a group or
 for one sender, and MUST NOT apply higher ones; an implementation MUST

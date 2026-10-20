@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 import agentconnect_sdk
+from agentconnect.limits import MAX_PAYLOAD_DEPTH
 from agentconnect_sdk import (
     AgentConnect,
     AgentConnectError,
@@ -303,6 +304,31 @@ async def test_a_duplicate_while_the_handler_runs_is_busy(
     release.set()
     assert await running == "handled"
     assert calls == ["m1"]
+
+
+async def test_receive_refuses_deep_json_before_parsing_it(
+    agent: AgentConnect, secret: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python 3.12 and 3.13 crash in ``json.loads`` on deep JSON in a thread
+    with a small stack, which is where an embedder may run the SDK."""
+    parsed: list[int] = []
+    real = json.loads
+
+    def counting(text: Any, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(len(text))
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counting)
+    depth = MAX_PAYLOAD_DEPTH + 1
+    body = b'{"event": "message", "a2a": ' + b"[" * depth + b"]" * depth + b"}"
+    stamp = str(int(agent._clock()))
+    headers = {
+        "X-AgentConnect-Timestamp": stamp,
+        "X-AgentConnect-Signature": sign(secret, stamp, body),
+    }
+    with pytest.raises(ValueError, match="too deep"):
+        await agent.receive(headers, body)
+    assert parsed == []
 
 
 async def test_receive_verifies_before_dispatching(

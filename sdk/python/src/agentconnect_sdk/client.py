@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import json
 import os
 import secrets
 import time
@@ -34,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, override
 
 import httpx
 
+from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads
 from agentconnect_sdk import _log
 from agentconnect_sdk.dedupe import Deduper
 from agentconnect_sdk.errors import AgentConnectError, PayloadError
@@ -610,7 +610,7 @@ class AgentConnect:
         Returns ``handled``, ``duplicate`` or ``busy`` (answer 503 for
         ``busy``, 2xx otherwise)."""
         self._webhook_verifier().verify(headers, body)
-        payload = json.loads(body)
+        payload = loads(body, MAX_PAYLOAD_DEPTH)
         if not isinstance(payload, dict):
             msg = "body must be an object"
             raise ValueError(msg)
@@ -650,7 +650,7 @@ class AgentConnect:
                         resp.status_code,
                     )
                 async for frame in iter_sse(resp.aiter_lines()):
-                    payload = json.loads(frame.data)
+                    payload = loads(frame.data, MAX_PAYLOAD_DEPTH)
                     if isinstance(payload, dict):
                         await self.dispatch(payload)
                     if frame.id is not None and frame.id != "":
@@ -710,8 +710,10 @@ class AgentConnect:
                 if e.status != 0:
                     raise  # refused (bad token, no SSE adapter): reconnecting won't help
                 _log.LOG.warning("stream_closed")
-            except Exception:
-                _log.LOG.exception("handler_failed")
+            except Exception as e:
+                # The type only: the text of a handler's exception may quote
+                # the message it was handling.
+                _log.LOG.error("handler_failed: %s", type(e).__name__)
             if self.last_event_id != before:
                 delay = RECONNECT_DELAY
             await self._sleep(delay)
@@ -720,7 +722,7 @@ class AgentConnect:
 
 def _json(resp: httpx.Response) -> dict[str, Any]:
     try:
-        data = resp.json()
+        data = loads(resp.content, MAX_PAYLOAD_DEPTH)
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}

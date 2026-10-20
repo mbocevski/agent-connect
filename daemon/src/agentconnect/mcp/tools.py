@@ -17,15 +17,19 @@ here is a model.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from agentconnect import log
 from agentconnect.adapter import notice as adapter_notice
 from agentconnect.mcp.backend import ToolError
 from agentconnect.mcp.session import Session
+
+LOG = log.get("agentconnect.mcp")
 
 MAX_NAME = 80  # SPEC 4.2: group names are 1 to 80 characters
 WAIT_DEFAULT_SECS = 60.0
@@ -309,8 +313,41 @@ async def _events(b: Session, a: Args) -> dict[str, Any]:
 async def _wait(b: Session, a: Args) -> dict[str, Any]:
     # The session acknowledges the batch once this result is written.
     taken, more = await b.take(a.get("group"), bool(a["addressed_only"]), float(a["timeout_s"]))
-    messages = [message_view(t.payload) for t in taken]
+    messages = [writable_view(t.payload) for t in taken]
     return untrusted({"messages": messages, "more": more, "timed_out": not messages})
+
+
+def writable_view(payload: dict[str, Any]) -> dict[str, Any]:
+    """:func:`message_view`, or, for a message that can't be written to the
+    client as UTF-8 (a lone surrogate, which would end the stdio writer and
+    with it the server), a stand-in with its ids and ``failed``. It is
+    acknowledged with the rest of the batch: one message fails alone."""
+    view = message_view(payload)
+    try:
+        json.dumps(view, ensure_ascii=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError):
+        LOG.warning("mcp_message_unencodable")
+        return {
+            "group": _plain(view.get("group")),
+            "msg_id": _plain(view.get("msg_id")),
+            "kind": _plain(view.get("kind")),
+            "untrusted": True,
+            "notice": UNTRUSTED_NOTE,
+            "text": "",
+            "failed": "unencodable",
+        }
+    return view
+
+
+def _plain(value: Any) -> str | None:
+    """``value`` if it is a string UTF-8 can carry, else ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value
 
 
 async def _knock_inspect(b: Session, a: Args) -> dict[str, Any]:

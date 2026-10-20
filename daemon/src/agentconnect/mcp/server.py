@@ -54,6 +54,7 @@ DEFAULT_AGENT = "mcp"
 MAX_LINE = 4 << 20  # bytes of one JSON-RPC message from the client
 SIGNALS = (signal.SIGINT, signal.SIGTERM)
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # fullmatch: no newline
+UNENCODABLE = "the result holds text that can't be written as UTF-8"
 
 
 def default_data_dir(agent: str, environ: Mapping[str, str]) -> Path:
@@ -161,6 +162,15 @@ def mcp_tools(session: Session) -> list[types.Tool]:
 
 def _result(data: dict[str, Any], *, error: bool = False) -> types.CallToolResult:
     text = json.dumps(data, sort_keys=True, ensure_ascii=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate would end the stdio writer, and the server with
+        # it: this call fails, the server goes on. (A wait's messages are
+        # checked one by one, agentconnect.mcp.tools.writable_view.)
+        LOG.warning("mcp_result_unencodable")
+        data, error = {"error": {"code": "unencodable", "message": UNENCODABLE}}, True
+        text = json.dumps(data, sort_keys=True)
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=text)],
         structured_content=data,

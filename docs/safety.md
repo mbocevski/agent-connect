@@ -39,13 +39,42 @@ A message the daemon fails to handle for a reason that would come back on
 every try (a bug, or input the checks below didn't foresee) fails alone,
 as SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext)
 requires: it is dropped and acked at the relay, the audit log gets a
-`drop` row with reason `processing_failed`, and your human gets a
-`message_failed` event (`sender`, `msg_id`, `message_kind` and `reason`,
-the error's type). The sender is the identity, or `mailbox:<id>` if the
-message failed before the daemon knew who sent it. The messages after it go on, and it is never tried
-again. A failure that may pass (storage, a lost connection) is retried
-instead, after a backoff. Adapters can only send
-through the daemon. Neither direction has a path around the policy.
+`drop` row with reason `processing_failed`, it counts against the sender
+as a violation, like a malformed message, and your human gets a
+`message_failed` event (`sender`, `msg_id`, `message_kind`, `reason`, the
+error's type, and `count`). The human hears at most once per sender,
+group and `violation_window_secs`: `count` is the number of failures since
+the last event, this one included, and the audit log has a row for each.
+The sender is the identity, or `mailbox:<id>` if the message failed before
+the daemon knew who sent it. The messages after it go on, and it is never
+tried again. Only a failure the message itself causes fails it: the
+daemon's own housekeeping before each message, and a message parked until
+a join completes, fail on their own. The rates and size checks below run
+before anything else reads the message, so a message that fails later was
+counted against its sender all the same.
+
+A failure that may pass (storage, a core panic, a lost connection) is
+retried instead, after a backoff, and given up for now after 8 tries; the
+relay delivers the message again after the next reconnect, and a journal
+entry is replayed. A message given up 8 times, counted across restarts,
+fails alone. So does the bookkeeping of a Welcome the core has joined:
+its journal entry stays, the human gets `processing_failed`, and the next
+replay finishes the join; after 8 give-ups the group is recorded out of
+sync (`welcome_failed`). A commit that fails alone puts its group out of
+sync (`commit_failed`), whether the core merged it (its bookkeeping, such
+as role and member events and closing the invites the policy no longer
+allows, was skipped) or not (this member is behind the group). This
+instance's open invites to the group close, and a merged commit still
+ends the earlier epoch's SAS runs. Your human gets the `out_of_sync`
+event; the group can't commit any more, so start a new one.
+
+A message no adapter could write out (a string with a lone surrogate,
+recorded before these checks existed) fails alone for that adapter: it is
+acked and your human gets `message_failed` with reason `unencodable`. The
+MCP server does the same for a message in a wait's result, and fails a
+tool call, rather than the server, whose result it can't write. Adapters
+can only send through the daemon. Neither direction has a path around the
+policy.
 
 The policy is part of the AgentConnect runtime, so it is the same code
 whether the runtime runs as a separate daemon or embedded in an agent's
@@ -59,9 +88,17 @@ What the policy checks, in order:
    kind (SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext)):
    at most 64 levels of nested objects and arrays, a `hop` from 0 to
    2^32 − 1, a `to` of at most 50 strings and an `addressee` of at most 50
-   entries, none longer than 128 characters. Anything else is `malformed`
-   and counts as a violation, so one message can't make the daemon, the
-   SDK or your agent recurse without end or walk a huge recipient list.
+   entries, none longer than 128 characters, and no lone surrogate in any
+   string or key (JSON's `\ud800` escape decodes to one, and nothing can
+   write it out as UTF-8). Anything else is `malformed` and counts as a
+   violation, so one message can't make the daemon, the SDK or your agent
+   recurse without end, walk a huge recipient list or fail to write it
+   out. The nesting is counted on the JSON text before it is parsed: on a
+   small thread stack, Python 3.12 and 3.13 crash in the JSON parser on a
+   few thousand levels instead of raising an error. The same check guards
+   the relay link and the SDK. A `control.floor` grant or a SAS ceremony
+   message outside these bounds is dropped like any other, and moves
+   nothing.
    The kind must be one the protocol defines. The message must
    fit `max_message_bytes` (256 KiB by default). Each A2A part has exactly
    one content member (`text`, `data`, or a file as `file`, `raw` or
@@ -345,7 +382,10 @@ Each setting is also a key of `[policy]` in `config.toml` (`policy.<setting>`), 
 
 <!-- generated:safety-settings:end -->
 
-`policy.audit_retention_days` (default 30) applies to the whole daemon.
+`policy.audit_retention_days` (default 30) applies to the whole daemon, and
+so does `daemon.event_retention_days` (default 30): the events of
+`agentconnect events` and `GET /v0/events` are kept that long once every
+adapter has them, and 100000 at most.
 
 The limits can only be made stricter. SPEC [§10.2](../SPEC.md#102-limits)
 makes its values maximums, so a value above one (31 messages a minute, say)
