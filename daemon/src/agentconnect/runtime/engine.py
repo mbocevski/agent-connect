@@ -75,7 +75,13 @@ from agentconnect.identity import (
     open_core_client,
 )
 from agentconnect.keystore import DataDirLock, Keystore, open_keystore
-from agentconnect.limits import DRAIN_RATE_MULTIPLE, KNOWN_KINDS, DrainBudget
+from agentconnect.limits import (
+    DRAIN_RATE_MULTIPLE,
+    KNOWN_KINDS,
+    MAX_TASK_ID,
+    TASK_UPDATE_KINDS,
+    DrainBudget,
+)
 from agentconnect.policy import (
     HUMAN_ONLY_KINDS,
     Decision,
@@ -309,6 +315,28 @@ def _core_error(e: Exception) -> str:
     if kind == "unauthorized":
         return "unauthorized_commit"
     return "rejected"
+
+
+# What a peer answers with task updates (SPEC 9.3): a message, which may
+# start or continue a task, and a cancel, which the canceled status answers.
+REQUEST_KINDS = frozenset({"a2a.message", "a2a.task_cancel"})
+
+
+def _request_task(kind: str, body: dict[str, Any]) -> str | None:
+    """The task an own request names: a follow-up's ``taskId``, a cancel's
+    ``id``; ``None`` for a new request."""
+    task = body.get("id" if kind == "a2a.task_cancel" else "taskId")
+    return task if isinstance(task, str) and 0 < len(task) <= MAX_TASK_ID else None
+
+
+def _asked(to: list[str] | None, addressee: list[str] | None) -> list[str] | None:
+    """The identities an own request asks (SPEC 9.3): its ``addressee``,
+    else the members ``to`` names; ``None`` for every member."""
+    if addressee is not None:
+        return list(addressee)
+    if to is None or len(to) == 0 or "*" in to:
+        return None
+    return list(to)
 
 
 KNOCK_REQUEST_PREFIX = "kn-"  # knock request ids, 19 characters (agentconnect.runtime.knocks)
@@ -1948,6 +1976,17 @@ class Engine:
                 hop = max(hop, max(known) + 1)
         return hop
 
+    def _requested(self, group_id: str, identity: str, inner: dict[str, Any]) -> bool:
+        """SPEC 9.3: whether a received task update answers a message this
+        instance sent (``reply_to``), from a member it asked, about the task
+        it named, if it named one (:meth:`Store.requested_task`)."""
+        task = task_of(inner)
+        refs = inner.get("reply_to")
+        if task is None or not isinstance(refs, list):
+            return False
+        mine = [r for r in refs[:MAX_REPLY_TO] if isinstance(r, str)]
+        return self.store.requested_task(group_id, mine, identity, task)
+
     def _card_problem(self, inner: dict[str, Any]) -> str:
         """Why a received Agent Card can't be used, or ``""``. A card the A2A
         types can't parse is ``malformed`` (its signature couldn't be checked,
@@ -2007,6 +2046,11 @@ class Engine:
             moderator,
             holder,
         )
+        # SPEC 9.3: a task update triggers only the instance that asked for
+        # the task, and only then has the task budget (SPEC 10.2).
+        requested = self._requested(group.group_id, identity, inner)
+        if inner["kind"] in TASK_UPDATE_KINDS and not requested:
+            addressed = False
         # One decision: SPEC 7.2 (unknown kinds are ignored), 7.3, 9.3, 10.2
         # (size, parts, rates; a replayed journal entry was counted when the
         # core first processed it), 10.3 and require_approval.
@@ -2025,6 +2069,7 @@ class Engine:
                 drain_exempt=lambda: self._drain_exempt(group.group_id, identity),
                 card_changed=self._card_changed(group.group_id, identity, inner),
                 card_problem=self._card_problem(inner),
+                requested=requested,
             )
         )
         if (
@@ -4161,6 +4206,16 @@ class Engine:
             payload["floor"] = True  # this instance's own: taken when sealed
         with self.store.tx():
             self.store.record_hop(group.group_id, msg_id, hop, self.now())
+            if kind in REQUEST_KINDS:
+                # SPEC 9.3: what a peer may answer with task updates that
+                # trigger this instance.
+                self.store.record_request(
+                    group.group_id,
+                    msg_id,
+                    _request_task(kind, body),
+                    _asked(to, addressee),
+                    self.now(),
+                )
             self.safety.audit(
                 group.group_id,
                 "out",

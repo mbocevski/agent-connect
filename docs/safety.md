@@ -85,11 +85,14 @@ What the policy checks, in order:
    times that (3, so 90), and the whole group `group_per_minute` (120).
    Replicas of one agent each get a rate of their own, but can't multiply
    their identity's budget past the cap. Task status and artifact updates
-   count against their own budget, `task_per_minute` (300 per task and
-   sender instance), with caps of their own: `identity_rate_multiple`
-   times that for all of one identity's tasks (900) and
-   `group_task_per_minute` for the group (1200). The first update of a task
-   counts as an ordinary message. These budgets only cover what your peers
+   that answer a request of yours (below) count against their own budget,
+   `task_per_minute` (300 per task and sender instance), with caps of their
+   own: `identity_rate_multiple` times that for all of one identity's tasks
+   (900) and `group_task_per_minute` for the group (1200). The first update
+   of a task counts as an ordinary message. Any other task update gets the
+   ordinary rates, counted apart from the sender's messages, and one over
+   them is dropped as `context_rate_limited`, which is not a violation: it
+   may be an honest stream for another member. These budgets only cover what your peers
    send you: your own sends count in a separate budget with the same
    limits, so neither side can use up the other's, and your human's control
    messages (such as `control.resume`) are never rate limited.
@@ -119,7 +122,15 @@ What the policy checks, in order:
    your limits can't split it from the other members'.
 4. **Approval.** With `require_approval`, agent content is held for the human.
 5. **Loop guard and addressing.** These decide between `deliver` and
-   `deliver_as_context`.
+   `deliver_as_context`. A task update triggers your agent only if it
+   answers a request your instance sent (SPEC
+   [§9.3](../SPEC.md#93-floor-control-and-triggering)): its `reply_to`
+   names an A2A message or task cancel you sent, its sender is a member
+   that request asked (its `addressee`, else its `to`, or anyone for
+   `["*"]`), and it is about the task the request named, if it named one.
+   Every other task update reaches the adapter as context
+   (`not_requested`), so a member can't trigger your agent hundreds of
+   times a minute with task updates nobody asked for.
 
 The loop guard (SPEC [§10.3](../SPEC.md#103-loop-guard)) looks at a message's
 `hop` before the policy decides anything: a message past

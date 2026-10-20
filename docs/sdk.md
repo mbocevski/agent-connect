@@ -292,6 +292,13 @@ raises `AgentConnectError` with `bad_request`. Only the task's requester can
 continue it: the peer's A2A adapter starts a new task for a `taskId` from
 another member.
 
+`on_task` gets every task update in the group, but only one that answers a
+message or task cancel your instance sent, from a member it asked and about
+the task it named, has `addressed_to_me` true (SPEC
+[§9.3](../SPEC.md#93-floor-control-and-triggering)). The rest are other
+members' tasks, or updates nobody asked for: context, held to the ordinary
+message rates ([safety.md](safety.md)).
+
 The `group` a handler gets has `id`, `name`, `purpose`, `epoch`, `floor`
 and `floor_holder`: in a `moderated` group, the member that holds the floor
 as this runtime sees it, else `None`. Granting the floor is a local API

@@ -283,6 +283,14 @@ CREATE TABLE IF NOT EXISTS hops (
     at INTEGER NOT NULL,
     PRIMARY KEY (group_id, msg_id)
 );
+CREATE TABLE IF NOT EXISTS own_requests (
+    group_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    task_id TEXT,
+    asked TEXT,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, msg_id)
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1187,6 +1195,7 @@ class Store:
                 "listed_peers",
                 "floor_state",
                 "floor_writes",
+                "own_requests",
                 "sas_answered",
                 "sas_sent",
                 "sas_warnings",
@@ -2418,6 +2427,45 @@ class Store:
     def forget_hops(self, before: int) -> None:
         self._db.execute("DELETE FROM hops WHERE at < ?", (before,))
         self._db.execute("DELETE FROM sent_via WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM own_requests WHERE at < ?", (before,))
+
+    def record_request(
+        self,
+        group_id: str,
+        msg_id: str,
+        task_id: str | None,
+        asked: Sequence[str] | None,
+        now: int,
+    ) -> None:
+        """Remember a message this instance sent that a peer may answer with
+        a task (SPEC 9.3): the task it names, if any, and the identities it
+        asked (``None``: every member)."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO own_requests (group_id, msg_id, task_id, asked, at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_id, msg_id, task_id, None if asked is None else json.dumps(list(asked)), now),
+        )
+
+    def requested_task(
+        self, group_id: str, refs: Sequence[str], responder: str, task_id: str
+    ) -> bool:
+        """Whether a task update from ``responder`` about ``task_id`` answers
+        a message this instance sent (SPEC 9.3): one of ``refs`` is such a
+        message, it asked ``responder``, and it named ``task_id`` or no task."""
+        for ref in refs:
+            row = self._one(
+                "SELECT task_id, asked FROM own_requests WHERE group_id = ? AND msg_id = ?",
+                group_id,
+                ref,
+            )
+            if row is None:
+                continue
+            named, asked = row
+            if asked is not None and responder not in json.loads(asked):
+                continue
+            if named is None or named == task_id:
+                return True
+        return False
 
     def pending_deliveries(
         self,

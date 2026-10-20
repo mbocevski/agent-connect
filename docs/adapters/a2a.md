@@ -310,7 +310,11 @@ SPEC §10.2 applies to everything the adapter and the facade send:
 - Each member may send 30 messages a minute, and a group 120.
 - Streamed task updates (`a2a.task_status`, `a2a.task_artifact`) have their
   own budget: 300 a minute per task. A task's first update counts as one
-  ordinary message. Updates over the budget are not sent.
+  ordinary message. Updates over the budget are not sent. The requester
+  grants that budget, and is triggered, only because the updates answer its
+  own request (`reply_to`, as the adapter sets it); every other member gets
+  them as context at the ordinary message rates, so it may miss some of a
+  fast stream.
 - Parts may be `text` or `data`. A reply with a `file` part (`raw` or
   `url`) is not sent. Inbound messages with one never reach the adapter.
 

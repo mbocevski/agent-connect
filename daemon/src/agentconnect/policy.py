@@ -543,6 +543,9 @@ class Inbound:
     drain_exempt: Callable[[], bool] = lambda: False  # SPEC 8.2/10.2
     card_changed: bool = False  # an Agent Card that differs from the one kept
     card_problem: str = ""  # an unusable card: malformed (unparsable), bad_signature
+    # A task update answering a message this instance sent (SPEC 9.3): only
+    # such an update triggers the agent and has the task budget.
+    requested: bool = False
 
     @property
     def kind(self) -> str:
@@ -654,14 +657,23 @@ class SafetyPolicy:
             return drop(problem)
         if m.card_problem:
             return drop(m.card_problem)  # SPEC 10.5: not used, and held against it
+        unrequested = m.kind in TASK_UPDATE_KINDS and not m.requested
         if (
             not m.replayed
             and not m.drain_exempt()
             and not self.limiter.allow_inner(
-                m.group_id, m.instance, m.kind, m.inner.get("body"), limits, identity=m.sender
+                m.group_id,
+                m.instance,
+                m.kind,
+                m.inner.get("body"),
+                limits,
+                identity=m.sender,
+                requested=not unrequested,
             )
         ):
-            return drop("rate_limited")
+            # Another member's task may be honest at any rate its daemon
+            # allows: dropping its progress here is no violation.
+            return drop("context_rate_limited" if unrequested else "rate_limited")
         if m.kind in HUMAN_ONLY_KINDS and m.origin != "human":
             return drop("not_human")  # SPEC 7.3: an agent can't resume
         if m.kind == "control.close" and m.sender != m.owner:
@@ -701,6 +713,8 @@ class SafetyPolicy:
                 return decision
         if m.hop > m.max_turns:
             return as_context("loop_guard")  # SPEC 10.3: don't trigger the agent
+        if unrequested:
+            return as_context("not_requested")  # SPEC 9.3: no task we asked for
         if not m.addressed:
             return as_context("not_addressed")  # SPEC 9.3
         return DELIVER

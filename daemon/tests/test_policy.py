@@ -75,6 +75,7 @@ def inbound(  # noqa: PLR0913
     drain: bool = False,
     owner: str = BOB,
     instance: str | None = None,
+    requested: bool = True,
 ) -> Inbound:
     return Inbound(
         G,
@@ -88,6 +89,7 @@ def inbound(  # noqa: PLR0913
         addressed,
         replayed=replayed,
         drain_exempt=lambda: drain,
+        requested=requested,
     )
 
 

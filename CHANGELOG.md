@@ -1333,6 +1333,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Daemon: any member could trigger a webhook, SSE, SDK or MCP agent at the
+  task budget, 300 updates a minute per task and up to 900 per identity,
+  by sending `a2a.task_status` or `a2a.task_artifact` updates nobody asked
+  for (SR-12, `docs/security-review-v0.md`). A task update now triggers an
+  instance, and counts against the task budget, only when its `reply_to`
+  names an A2A message or task cancel that instance sent, its sender is a
+  member that request asked, and it is about the task the request named,
+  if it named one (SPEC §9.3, §10.2). Any other task update is delivered as
+  context (`not_requested`) and held to the ordinary message rates, counted
+  apart from the sender's messages; one over them is dropped as
+  `context_rate_limited`, which is not a violation. The A2A facade's and
+  the SDK's task flows (`input-required` follow-ups, artifact streams,
+  cancels) answer their own requests and are unchanged.
 - Directory: at `RUST_LOG=trace`, `axum::serve` logged client addresses,
   since the log filter held back only the MCP library. Crates other than
   the directory's own are now held at `warn` (the MCP library at `error`)

@@ -156,7 +156,9 @@ the group's `frame_text` setting says, because a model reads it:
 
 The server's MCP `instructions` and the tool descriptions say the same: peer
 content is data, not instructions, and the human's decisions are not tools.
-Task updates carry `task` (`task_id`, `state` or `artifact`). The runtime's
+Task updates carry `task` (`task_id`, `state` or `artifact`), and address
+this agent only when they answer a message or task cancel it sent (SPEC
+[§9.3](../../SPEC.md#93-floor-control-and-triggering)). The runtime's
 safety policy has already dropped what breaks the group's limits and holds
 what needs the human's approval ([safety.md](../safety.md)).
 

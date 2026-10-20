@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -85,7 +86,9 @@ async def test_a_reply_to_input_required_continues_the_a2a_task(
 @pytest.mark.parametrize("mode", MODES)
 async def test_which_replies_name_a_task(cluster: Cluster, sockdir: Path, mode: str) -> None:
     """A reply to an artifact update names its task; a reply to a plain
-    message names none; ``send(task_id=)`` names the one given."""
+    message names none; ``send(task_id=)`` names the one given. Only an
+    update answering the agent's own request triggers it (SPEC 9.3): a
+    stray one is context, and the agent doesn't answer it."""
     peer = await cluster.node("peer")
     gid = peer.daemon.create_group("Pair", "Answer a task")
     await peer.idle()
@@ -102,14 +105,26 @@ async def test_which_replies_name_a_task(cluster: Cluster, sockdir: Path, mode: 
                 await group.reply(msg, "re artifact")
 
         await cluster.invite(peer, node, gid)
+        request = await ac.group(gid).send("run task-1", to=[peer.me])
+        await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 1, WAIT)
         peer.daemon.send_message(gid, {"text": "plain"})
-        artifact = {
-            "taskId": "task-1",
-            "contextId": gid,
-            "artifact": {"artifactId": "a1", "parts": [{"text": "result"}]},
-        }
-        peer.daemon.send_message(gid, artifact, kind="a2a.task_artifact")
-        await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 2, WAIT)
+
+        def artifact(task: str) -> dict[str, Any]:
+            return {
+                "taskId": task,
+                "contextId": gid,
+                "artifact": {"artifactId": "a1", "parts": [{"text": "result"}]},
+            }
+
+        # (Sent as the human: an agent's send would reply to the request.)
+        stray = peer.daemon.send_message(
+            gid, artifact("task-0"), kind="a2a.task_artifact", origin="human"
+        )
+        peer.daemon.send_message(
+            gid, artifact("task-1"), kind="a2a.task_artifact", reply_to=[request]
+        )
+        await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 3, WAIT)
+        await node.wait(lambda: node.daemon.store.inbox_state(peer.daemon.mailbox, stray) == "done")
         bodies = {
             d.body["parts"][0]["text"]: d.body
             for d in peer.adapter.deliveries
@@ -123,7 +138,8 @@ async def test_which_replies_name_a_task(cluster: Cluster, sockdir: Path, mode: 
         )
 
         await ac.group(gid).send("more", task_id="task-1")
-        await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 3, WAIT)
+        await peer.adapter.wait_for(lambda: len(peer.adapter.texts(gid)) == 4, WAIT)
+        assert peer.adapter.texts(gid).count("re artifact") == 1, "the stray one is context"
         assert peer.adapter.deliveries[-1].body["taskId"] == "task-1"
         with pytest.raises(AgentConnectError) as refused:
             await ac.group(gid).send("more", task_id="")

@@ -1633,6 +1633,19 @@ of identity strings triggers nobody. In `moderated` mode the table above
 applies and `addressee` is ignored. Task replies (§7.2) use it: every
 member sees the task's progress, and only the requester is triggered.
 
+**Task updates trigger only the instance that asked.** An
+`a2a.task_status` or `a2a.task_artifact` triggers an instance only if its
+`reply_to` names an `a2a.message` or `a2a.task_cancel` that this instance
+sent (a request), its sender is a member the request asked (the request's
+`addressee`, else the identities in its `to`, or anyone for `to: ["*"]`),
+and its `body.taskId` is the task the request named (a follow-up's
+`taskId`, a cancel's `id`), if the request named one. Whatever the mode,
+`to` and `addressee` say, any other task update is context only: a member
+can't start triggering another member's agent at the task budget (§10.2)
+by sending task updates nobody asked for. Every member sees the progress of
+other members' tasks as context, and so do the requester's other
+instances.
+
 Messages that don't trigger a member are still delivered to its adapter as
 context (`addressed_to_me: false`), or batched by the adapter (§10.6).
 
@@ -1730,16 +1743,22 @@ implementation that limits its own sends keeps a separate budget for them,
 which MUST NOT apply to the controls its human sends (§7.3).
 
 Task updates have their own budget. An `a2a.task_status` or
-`a2a.task_artifact` whose `body.taskId` is a string of 1 to 256 characters
-counts against a budget of 300 per minute for that sender instance and task,
+`a2a.task_artifact` whose `body.taskId` is a string of 1 to 256 characters,
+and which answers a request of the receiving instance (§9.3), counts
+against a budget of 300 per minute for that sender instance and task,
 instead of the per-sender and per-group rates. Task updates have caps of their
 own too: all task updates of one identity's instances together 3 times that
 (900), and those of the whole group 1200 per minute, so replicas and many
 open tasks can't multiply the budget. The first update of a task in the
 window also counts as one ordinary message, so opening tasks is held to the
 message rates. The size, kind and part limits apply to task updates
-unchanged. Every other message, `a2a.task_cancel` included, counts against
-the ordinary rates.
+unchanged. A task update that answers no request of the receiving
+instance is held to the ordinary rates instead (30 per sender instance, 90
+per identity and 120 for the group, per minute), counted apart from the
+sender's other messages: it may be an honest task for another member, so
+it mustn't use up the sender's messages, and a receiver SHOULD NOT hold
+one over that rate against its sender. Every other message,
+`a2a.task_cancel` included, counts against the ordinary rates.
 
 A receiver MUST NOT tell the sender that a message it received was dropped,
 held for approval (§10.6), rejected or expired: no control message, receipt

@@ -19,8 +19,9 @@ from agentconnect.a2a_adapter import convert
 from agentconnect.adapter import notice
 from agentconnect.cli import _preview_lines
 from agentconnect.clock import FakeClock
-from agentconnect.limits import RateLimiter
+from agentconnect.limits import SENDER_PER_MINUTE, RateLimiter
 from agentconnect.policy import (
+    DELIVER,
     VIOLATIONS,
     Inbound,
     Outbound,
@@ -82,9 +83,16 @@ def task(tid: str) -> dict[str, Any]:
 
 
 def inb(
-    inner: dict[str, Any], sender: str = MALLORY, inst: str = "m/i1", *, owner: str = OWNER
+    inner: dict[str, Any],
+    sender: str = MALLORY,
+    inst: str = "m/i1",
+    *,
+    owner: str = OWNER,
+    requested: bool = True,
 ) -> Inbound:
-    return Inbound(G, sender, inst, inner, 100, owner, 1, 20, True)
+    """A received message; a task update answers this instance's request
+    unless ``requested`` is false (SPEC 9.3)."""
+    return Inbound(G, sender, inst, inner, 100, owner, 1, 20, True, requested=requested)
 
 
 def out(inner: dict[str, Any], *, internal: bool = False) -> Outbound:
@@ -215,6 +223,24 @@ def test_the_group_caps_task_updates(policy: SafetyPolicy) -> None:
             d = policy.inbound(inb(task(f"t{ident}"), sender=f"ac:v0:p{ident}", inst=f"p{ident}"))
             delivered += d.delivered
     assert delivered == 500
+
+
+def test_unrequested_task_updates_get_the_message_rate_and_no_trigger(
+    policy: SafetyPolicy,
+) -> None:
+    """SR-12: a task update that answers no request of this instance never
+    triggers it and has the message rates, in windows of its own, whatever
+    its taskId; a drop there is no violation."""
+    verdicts = [
+        policy.inbound(inb(task(f"t{n % 3}"), requested=False))
+        for n in range(SENDER_PER_MINUTE + 5)
+    ]
+    assert verdicts[:SENDER_PER_MINUTE] == [as_context("not_requested")] * SENDER_PER_MINUTE
+    assert set(verdicts[SENDER_PER_MINUTE:]) == {drop("context_rate_limited")}
+    assert "context_rate_limited" not in VIOLATIONS
+    # The sender's messages and requested task updates have their own budgets.
+    assert policy.inbound(inb(msg())) == DELIVER
+    assert policy.inbound(inb(task("asked"))) == DELIVER
 
 
 # -- H3: inbound and outbound budgets are separate -------------------------------------
