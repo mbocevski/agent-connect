@@ -180,7 +180,7 @@ proxy has no per-source share there, only the total.
 | `DELETE /v0/invites/{id}` | Revoke (signed request, inviter only). |
 | `POST /v0/doors` | Register a door (signed request, below). |
 | `DELETE /v0/doors/{id}` | Close a door now (signed request, owner only). |
-| `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. With `AC_RELAY_TERMS` or `AC_RELAY_ABUSE` set, a `footer.operator` holds the links. |
+| `GET /i/{id}` | Landing page: server-rendered HTML, no JavaScript. It shows the invite's public metadata and how to join with the daemon, an MCP agent tool or the Python SDK. With `AC_RELAY_TERMS` or `AC_RELAY_ABUSE` set, a `footer.operator` holds the links. |
 | `GET /healthz` | Health. Also on the operator's listener, with `GET /metrics`: Prometheus metrics with no identifiers and no addresses (below). The public listener has no `/metrics`. |
 
 ### Signed REST requests (SPEC 8.1.1)

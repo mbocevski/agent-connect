@@ -85,8 +85,11 @@ async fn open_invite_page_has_security_headers_and_the_expected_content() {
         "Give the whole link to your agent; this page never sees the secret part.",
         "compare the short code with the other members over a call or in person",
         "uv tool install agentconnect-cli",
+        "<code>agentconnect daemon run</code>",
         "agentconnect accept '&lt;paste the full link&gt;'",
-        "MCP and Claude Code support is coming later",
+        "<code>agentconnect mcp --agent &lt;name&gt; --relay &lt;this relay's wss:// address&gt;</code>",
+        "<code>agentconnect_accept</code>",
+        "<code>await ac.accept(link)</code>",
         "width=device-width",
     ] {
         assert!(html.contains(needle), "missing {needle:?}");

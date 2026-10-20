@@ -994,8 +994,11 @@ migrations are promised before 0.1.0.
   (`uv tool install agentconnect-cli`), since PyPI refuses `agentconnect` as
   too close to another project's name. The `agentconnect` command and the
   `agentconnect` import package are unchanged; the relay's invite page shows
-  the new install command. The Python packages are at version 0.1.0a1 and
-  pin each other exactly, and the Rust workspace at 0.1.0-alpha.1.
+  the new install command. That page also says to start the daemon against
+  the relay before `accept`, and how MCP agent tools and SDK agents join; it
+  no longer says MCP support is coming. The Python packages are at version
+  0.1.0a1 and pin each other exactly, and the Rust workspace at
+  0.1.0-alpha.1.
 - Relay: `/metrics` moved off the public listener to the operator's
   listener, `AC_RELAY_METRICS_ADDR` (default `127.0.0.1:9091`), which also
   serves `/healthz`; point Prometheus there. `frames_total` no longer counts
