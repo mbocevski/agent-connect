@@ -177,7 +177,7 @@ jobs:
           ls -l pypi
           one() {
             local n
-            n=$(compgen -G "pypi/$1" | wc -l)
+            n=$( (compgen -G "pypi/$1" || true) | wc -l)
             if [[ "$n" != 1 ]]; then echo "::error::expected one pypi/$1, found $n"; exit 1; fi
           }
           for platform in manylinux_2_28_x86_64 manylinux_2_28_aarch64 macosx_*_arm64 macosx_*_x86_64; do
