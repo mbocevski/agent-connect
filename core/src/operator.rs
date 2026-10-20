@@ -211,6 +211,14 @@ mod tests {
     }
 
     #[test]
+    fn one_link_alone_is_not_empty() {
+        let terms = links(&[("AC_X_TERMS", "https://example.org/terms")]).unwrap();
+        assert!(!terms.is_empty());
+        let abuse = links(&[("AC_X_ABUSE", "mailto:abuse@example.org")]).unwrap();
+        assert!(!abuse.is_empty());
+    }
+
+    #[test]
     fn valid_links_are_kept_trimmed_and_labelled_in_order() {
         let l = links(&[
             ("AC_X_TERMS", "  https://example.org/terms?v=2#top "),
