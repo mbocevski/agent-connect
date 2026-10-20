@@ -4,9 +4,11 @@
 mod common;
 
 use agentconnect_core::operator::OperatorLinks;
+use agentconnect_directory::config::Config;
 use agentconnect_directory::http::CSP;
 use axum::http::StatusCode;
-use common::{HOST, Harness, identity};
+use common::{HOST, Harness, RELAY, identity};
+use serde_json::{Value, json};
 
 const NOTICE: &str = "Maintenance <script>alert(1)</script> tonight: [x](y) ] & *more*";
 const NOTICE_HTML: &str = "<p class=\"notice\" role=\"note\">Maintenance \
@@ -231,9 +233,8 @@ abuse</a></p>\n</footer>"
 }
 
 #[tokio::test]
-async fn the_csp_and_the_well_known_file_are_unchanged() {
+async fn the_csp_is_unchanged() {
     let mut h = listed().await;
-    let plain_known = h.get("/.well-known/agentconnect-directory.json").await.body;
     configure(&mut h, Some(NOTICE), Some(TERMS), Some(ABUSE));
     for (path, status) in HTML_PAGES {
         let r = h.get(path).await;
@@ -249,11 +250,114 @@ async fn the_csp_and_the_well_known_file_are_unchanged() {
         "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; \
 form-action 'self'; frame-ancestors 'none'"
     );
-    let known = h.get("/.well-known/agentconnect-directory.json").await;
-    assert_eq!(known.body, plain_known);
-    let mut keys: Vec<String> = known.json().as_object().unwrap().keys().cloned().collect();
-    keys.sort();
-    assert_eq!(keys, ["directory", "relays", "token_keys", "v"]);
+}
+
+const DIRECTORY_FILE: &str = "/.well-known/agentconnect-directory.json";
+
+async fn directory_file(h: &Harness) -> (String, Value) {
+    let r = h.get(DIRECTORY_FILE).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        r.header("content-type").as_deref(),
+        Some("application/json")
+    );
+    (r.text(), r.json())
+}
+
+#[tokio::test]
+async fn the_directory_file_is_unchanged_without_links() {
+    let mut h = listed().await;
+    configure(&mut h, Some(NOTICE), None, None);
+    let (text, v) = directory_file(&h).await;
+    // The same four fields, serialised as before the links existed.
+    let before = json!({
+        "v": 0,
+        "directory": HOST,
+        "relays": [RELAY],
+        "token_keys": v["token_keys"],
+    })
+    .to_string();
+    assert_eq!(text, before);
+    assert!(!text.contains("terms") && !text.contains("abuse") && !text.contains("null"));
+}
+
+#[tokio::test]
+async fn the_directory_file_carries_the_links_as_specified() {
+    let mut h = listed().await;
+    let (plain, plain_v) = directory_file(&h).await;
+    configure(&mut h, Some(NOTICE), Some(TERMS), Some(ABUSE));
+    let (_, v) = directory_file(&h).await;
+    assert_eq!(v["terms"], TERMS);
+    assert_eq!(v["abuse"], ABUSE);
+    let mut rest = v.clone();
+    let obj = rest.as_object_mut().unwrap();
+    obj.remove("terms");
+    obj.remove("abuse");
+    assert_eq!(rest, plain_v);
+    assert_eq!(rest.to_string(), plain);
+
+    // Each field on its own; an https abuse page instead of an address.
+    for (terms, abuse) in [
+        (Some(TERMS), None),
+        (None, Some("https://example.org/abuse")),
+    ] {
+        configure(&mut h, None, terms, abuse);
+        let (text, v) = directory_file(&h).await;
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("terms").and_then(Value::as_str), terms, "{text}");
+        assert_eq!(obj.get("abuse").and_then(Value::as_str), abuse, "{text}");
+        assert!(!text.contains("null"), "{text}");
+    }
+
+    // SPEC 13.2.7 allows https only: a loopback http link shows on the
+    // pages but is left out of the file.
+    configure(
+        &mut h,
+        None,
+        Some("http://127.0.0.1:8090/terms"),
+        Some("http://localhost/abuse"),
+    );
+    let (text, _) = directory_file(&h).await;
+    assert_eq!(text, plain);
+    assert!(
+        html(&h, "/", StatusCode::OK)
+            .await
+            .contains("href=\"http://127.0.0.1:8090/terms\"")
+    );
+}
+
+#[tokio::test]
+async fn configured_values_have_the_directory_file_forms() {
+    let lookup = |terms: &'static str, abuse: &'static str| {
+        move |k: &str| match k {
+            "AC_DIRECTORY_DB" => Some("memory:".to_owned()),
+            "AC_DIRECTORY_TOKEN_KEYS" => Some("k".to_owned()),
+            "AC_DIRECTORY_HOST" => Some(HOST.to_owned()),
+            "AC_DIRECTORY_RELAYS" => Some(RELAY.to_owned()),
+            "AC_DIRECTORY_TERMS" => Some(terms.to_owned()),
+            "AC_DIRECTORY_ABUSE" => Some(abuse.to_owned()),
+            _ => None,
+        }
+    };
+    let c = Config::from_lookup(lookup(TERMS, ABUSE)).unwrap();
+    let mut h = listed().await;
+    h.http.links = c.links;
+    let (_, v) = directory_file(&h).await;
+    let terms = v["terms"].as_str().unwrap();
+    let abuse = v["abuse"].as_str().unwrap();
+    assert!(terms.starts_with("https://") && !terms.contains(['(', ')']));
+    let addr = abuse.strip_prefix("mailto:").unwrap();
+    assert!(!addr.contains(['?', '&', ',', ';', '%']) && addr.matches('@').count() == 1);
+    for (terms, abuse) in [
+        ("https://example.org/(terms)", ABUSE),
+        (TERMS, "mailto:abuse@example.org?bcc=x@example.org"),
+        (TERMS, "mailto:a@example.org,b@example.org"),
+    ] {
+        assert!(
+            Config::from_lookup(lookup(terms, abuse)).is_err(),
+            "{terms} {abuse}"
+        );
+    }
 }
 
 #[tokio::test]

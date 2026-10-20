@@ -28,7 +28,11 @@ notice is backslash-escaped, so it stays plain text. `AC_DIRECTORY_TERMS` and
 `AC_DIRECTORY_ABUSE` add "Terms" and "Report abuse" links to the footer
 (`p.operator`), to the end of every Markdown copy and to an "Operator"
 section at the end of `llms.txt`. Unset, none of it is rendered. The
-well-known file doesn't carry them.
+directory file (`/.well-known/agentconnect-directory.json`, SPEC 13.2.7)
+carries them as `terms` and `abuse`: only an `https://` URL or, for
+`abuse`, a `mailto:` address, so a loopback `http://` link shows on the
+pages but not in the file. A field without a value is left out, never
+`null`, so with neither set the file is as before.
 
 In a listing's card, the card text (`div.card-text`) and the facts the
 directory checked (`dl.facts`) are separate lists, so a stylesheet can tell
@@ -132,7 +136,7 @@ block publishing or withdrawing the others.
 | `POST /v0/withdrawals` | Withdraw. The body is an IK-signed `Withdrawal`. |
 | `GET /v0/withdrawals?after=&limit=` | The feed of withdrawals and revocations. |
 | `POST /v0/revocations` | An operator-signed `TokenRevocation`. |
-| `GET /.well-known/agentconnect-directory.json` | The directory host, relays and operator token keys. |
+| `GET /.well-known/agentconnect-directory.json` | The directory host, relays and operator token keys, and `terms` and `abuse` when `AC_DIRECTORY_TERMS` and `AC_DIRECTORY_ABUSE` are set (SPEC 13.2.7). Informational: clients never fetch or follow the links on their own. |
 | `GET /healthz`, `GET /metrics` | Operations, with no identifiers. |
 
 A listing in JSON (search and MCP):

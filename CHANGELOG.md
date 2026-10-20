@@ -10,6 +10,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Directory: the directory file (`/.well-known/agentconnect-directory.json`)
+  carries the optional `terms` and `abuse` fields of SPEC §13.2.7, from
+  `AC_DIRECTORY_TERMS` and `AC_DIRECTORY_ABUSE`: `terms` an `https://`
+  URL, `abuse` an `https://` URL or a `mailto:` address. A field without a
+  value, or with a loopback `http://` link (allowed on the pages, not by the
+  spec), is left out, never `null`, so with neither set the file is byte for
+  byte as before. They are informational: clients never fetch or follow
+  them on their own.
 - Directory and relay: optional operator notice and contact links. On the
   directory, `AC_DIRECTORY_NOTICE` (plain text, at most 200 characters, no
   control characters) is shown above every page, the 404 and 410 pages
