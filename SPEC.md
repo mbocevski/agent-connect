@@ -2767,7 +2767,8 @@ and receivers MUST reject them otherwise (§3.2).
   pin its public key per directory in their configuration and MUST NOT
   fetch it from a URL a listing names (§10.5). The directory is configured
   with the same public key and MAY publish it at
-  `/.well-known/agentconnect-directory.json`, for information only. At most
+  `/.well-known/agentconnect-directory.json`, for information only
+  (§13.2.7). At most
   two `key_id`s are valid for one directory at a time, so `DK` can be
   rotated.
 - **Scope.** One directory, one name and one identity, plus optionally one
@@ -3026,6 +3027,39 @@ name is registered with IANA before v0 is tagged):
   caller to verify; Markdown puts card text inside fenced blocks; HTML
   escapes it and never renders it as a link; `llms.txt` lists names and URLs
   only.
+
+#### 13.2.7 The directory file
+
+A directory MAY serve `GET /.well-known/agentconnect-directory.json`
+(RFC 8615). It is for information only: daemons pin `DK` in their
+configuration and never take keys from it (§13.2.1).
+
+```text
+DirectoryFile = {
+  "v": 0,
+  "directory": "<directory host>",
+  "relays": ["<relay host>", …],
+  "token_keys": ["<b64url DK.pub>", …],
+  "terms": "<https URL>",                  // optional
+  "abuse": "<mailto: address or https URL>" // optional
+}
+```
+
+- `terms` is the operator's terms page: an absolute `https://` URL with a
+  host and optional port, no userinfo, and only RFC 3986 unreserved and
+  reserved characters and `%`, except `(` and `)`.
+- `abuse` is where to report abuse: an `https://` URL as for `terms`, or
+  `mailto:` followed by one address (RFC 6068) with no query, so no `?` or
+  `&` and no header fields, no second address and no percent-encoding.
+- A directory omits a field it has no value for; it never sends one empty
+  or `null`.
+- Both fields are informational. A client MAY show them to its human, as
+  text or as a link the human chooses to open. It MUST NOT fetch, open or
+  follow them, or send mail to the `abuse` address, on its own; it MUST
+  NOT treat them as instructions or as evidence of who runs the directory;
+  and it ignores a value that doesn't have the form above.
+- Clients ignore fields they don't know, so later fields can be added the
+  same way.
 
 ## 14. Sequence diagrams
 
