@@ -379,10 +379,16 @@ def human_send(dep: Deployment, service: str, group_id: str, text: str, to: Sequ
 
 
 def audit_from(dep: Deployment, service: str, sender: str, group_id: str) -> list[dict[str, Any]]:
+    """What `sender` said in the group: its messages, not the controls and
+    card a member sends on its own (`control.capabilities` as it joins)."""
     return [
         r
         for r in dep.audit(service)
-        if r["direction"] == "in" and r["sender"] == sender and r["group_id"] == group_id
+        if r["direction"] == "in"
+        and r["sender"] == sender
+        and r["group_id"] == group_id
+        and not r["kind"].startswith("control.")
+        and r["kind"] != "a2a.agent_card"
     ]
 
 
