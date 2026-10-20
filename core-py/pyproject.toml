@@ -2,6 +2,7 @@
 name = "agentconnect-core"
 version = "0.1.0a1"
 description = "Python bindings for the AgentConnect protocol core"
+readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 classifiers = ["Programming Language :: Rust", "Programming Language :: Python :: 3"]
