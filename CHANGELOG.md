@@ -1340,6 +1340,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Dependencies: `certifi` 2026.10.19 in `uv.lock` for GHSA-6q48-6c7w-9gw2
+  (its bundle trusted emSign roots whose intermediate keys are public).
 - Dependencies: `rustls-webpki` 0.103.16 for RUSTSEC-2026-0382 (certificate
   verification could accept chains through distrusted emSign intermediates
   whose private keys are public), here and in the directory fuzz workspace.
