@@ -331,10 +331,12 @@ nothing else: no door key, no listing, no card text.
   knocks, at most 64 from one source and 16 for one door; past any of them
   a knock is dropped behind its `accepted`, like one to a busy door). A single worker writes the queue every 250 ms, so neither the
   answer nor the store's load right after it depends on whether the knock
-  was forwarded. What remains: the worker's write at its next tick takes
-  store time only for a forwarded knock, and a knocker that keeps measuring
-  the store's latency across that tick can tell (with a 60,000-message owner
-  queue, about 46 ms against 7 ms). A knock answered `accepted` is held in
+  was forwarded. The worker's write at its next tick takes store time only
+  for a forwarded knock, but the queue checks are counters, so that time no
+  longer grows with the owner's queue: a knocker that keeps measuring the
+  store's latency across the tick tells forwarded from dropped at chance
+  (45% to 60% on the review's probe with a 60,000-message owner queue,
+  against 95% before the counters). A knock answered `accepted` is held in
   memory until that tick, so a crash can lose it; `accepted` for a knock
   was never a delivery promise.
 - Answers: `door_not_open` for an unknown, expired or closed door;

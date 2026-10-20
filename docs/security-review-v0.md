@@ -68,7 +68,7 @@ the protocol changes. Everything else is measured against
 |---|---|---|
 | High | 1 | Fixed in #67 |
 | Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); the rest open, follow-up task |
-| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 partly fixed in #74; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; the rest open, follow-up task |
+| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
@@ -541,7 +541,7 @@ store written the old way.
 | SR-13 | relay | No connection caps, no header-read timeout (axum sets no hyper timer), no WebSocket ping or idle timeout after authentication. Unauthenticated sockets are closed after 10 s, as they should be. | `main.rs:39-52`, `ws.rs:365-396`. Probe: unfinished headers held for 40 s; an idle authenticated socket held for 45 s. Confirmed. | Fixed in #74 |
 | SR-14 | relay, directory | At `RUST_LOG=trace`, `tungstenite` logs whole frames (`ct`, every id) and `axum::serve` logs client addresses; `relay/README.md` says logs never contain `ct`. The directory's filter clamps only `rmcp`, so it logs client addresses at trace too. Debug and info are clean. | `relay/src/main.rs:15-17`, `directory/src/lib.rs:37-40`. Probe: `TRACE tungstenite::protocol: Received message {"t": "send", "env": {... "ct": ...}}`. Confirmed. | Fixed in #74 (relay) and #77 (directory) |
 | SR-15 | relay | `connected` and `disconnected` lines log the mailbox tag next to the knock lines, and tags are an unkeyed 32-bit hash prefix, so anyone holding an id can find it. SPEC §8.3: knock paths log no identifier, hashed or not. `door_log_privacy.rs` doesn't go through `ws.rs`. | `ws.rs:125`, `ws.rs:174`, `proto.rs:43-50`. Confirmed in probe logs. | Fixed in #74 |
-| SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Partly fixed in #74 (residual, T-16) |
+| SR-16 | relay | Answer timing tells a knocker whether a busy door dropped its knock or forwarded it, which SPEC §8.3 hides by answering both `accepted`. | `relay.rs:885-889`. Probe: dropped knocks answered in a median of 108-359 µs, forwarded ones in 245-2011 µs. Confirmed. | Fixed in #74, the residual in #73 (T-16) |
 | SR-17 | relay | Join requests have only the 2 MiB frame cap, and the per-invite budget of 10 a minute is shared by anyone who knows the public `invite_id`: junk joins fill the inviter's queue in about 3.5 minutes and use up the real joiner's budget. | `relay.rs:756-827`, `proto.rs:249`. Confirmed. | Fixed in #73: `ct` at most 16 KiB, joins charged to the inviter's non-member queue |
 | SR-18 | relay | Deleted rows stay in the database file: `secure_delete` is off, so acked ciphertext and expired door mappings remain readable on disk. | `sqlite.rs:59-64`. Probe found acked ciphertext in the file after a checkpoint. Confirmed. | Fixed in #73: `secure_delete`, and a truncating WAL checkpoint every minute |
 | SR-19 | relay, web | Invite registration rejects only Cc characters, so bidi controls and zero-width characters in `group_name`, `inviter_name` and `purpose` reach the landing page unaltered (escaped, but reordering what the human reads). The CLI already replaces them. | `relay.rs:374-380`, `landing.rs:29-41`. Probe: U+202E accepted and rendered raw. Confirmed. | Fixed in #71: the three fields must be one-line text (SPEC §4.2, §13.1.2). |
@@ -792,8 +792,9 @@ another leaf's `instance_id`.
   dropped knocks look the same in the metrics, and the owner's checks run
   in the SPEC order. SR-15 and SR-16 leaked a little to the relay's logs and
   to the knocker's timing. #74 fixed the logs and moved the knock's write
-  off its answer's path; a knocker that keeps timing the relay across the
-  next write can still tell (SR-16 residual).
+  off its answer's path; #73's quota counters made the remaining write
+  cheap whatever the owner's queue, so timing the relay across it tells
+  nothing (SR-16 residual).
 - **Replay ledger.** 65,536 entries; through an honest relay a flooder
   can deliver at most about 2,600 knocks per mailbox in 65 minutes, so it
   can't fill it. A malicious relay can, which is relay denial of service.
@@ -1069,10 +1070,11 @@ One line per open item, ready to file.
   enqueue. Partly done in #74: the answer goes first and knocks are written
   by a worker on a 250 ms tick, forwarded and dropped alike, so the next
   frames' timing is at chance (52% on the review's probes, with a small and
-  a 60,000-message owner queue). Open: a knocker probing continuously across
-  the next tick still sees the write (46 ms against 7 ms with the large
-  queue); closing it needs the dropped path to cost the same in the store,
-  which the SR-05 quota counter would make cheap.
+  a 60,000-message owner queue). The residual, a knocker probing
+  continuously across the next tick seeing the write (46 ms against 7 ms
+  with the large queue), is gone with #73's quota counters: the same probe
+  tells the two apart at chance (45% to 60% single-shot accuracy, against
+  95% to 98% on main before it, on the same machine).
 - **T-17 (Low, SR-17, fixed in #73):** Relay: cap `join_request` `ct` and count joins in
   the non-member sub-quota.
 - **T-18 (Low, SR-18, fixed in #73):** Relay: `secure_delete` and periodic WAL
