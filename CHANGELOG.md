@@ -1431,8 +1431,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
     out of sync (`commit_unapplied`, `welcome_failed`). A locked or
     unavailable keyring is retried for as long as it takes, restarts
     included, and never consumes a message; no pending join lapses while a
-    Welcome waits for it, and a secret it kept from being deleted is
-    deleted once it opens.
+    Welcome waits for it. A secret the keystore couldn't delete (locked,
+    or a failing disk) is deleted on a later housekeeping pass, and one
+    that keeps failing holds up no other housekeeping.
   - The nesting pre-scan is linear on any input; it took seconds on a long
     string that never closed.
   - A `control.floor` grant or a SAS ceremony message outside the bounds

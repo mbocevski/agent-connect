@@ -401,6 +401,15 @@ def _waits_unbounded(e: BaseException) -> bool:
     return isinstance(e, KeystoreError | keyring.errors.KeyringError)
 
 
+def _deletion_deferred(e: BaseException) -> bool:
+    """Whether a failed secret deletion is the keystore's state (locked,
+    unavailable, a failing disk) and is tried again later, rather than a
+    bug (a name the keystore refuses, a bad argument), which is raised."""
+    if isinstance(e, KeystoreNameError):
+        return False
+    return isinstance(e, KeystoreError | keyring.errors.KeyringError | OSError)
+
+
 def _transient(e: BaseException) -> bool:
     """Whether a failure handling a frame may pass if the same frame is
     tried again: it comes from local state or a connection, not from the
@@ -1930,20 +1939,25 @@ class Engine:
             self._forget_secret(f"join/{invite_id}")
 
     def _forget_secret(self, name: str) -> None:
-        """Delete a secret whose invite or join ended (SPEC §6.3). A locked
-        keystore keeps it for now: it is deleted on a later housekeeping
-        pass, once the keystore opens (:meth:`_forget_kept_secrets`)."""
+        """Delete a secret whose invite or join ended (SPEC §6.3). If the
+        keystore can't delete it now (locked, unavailable, a failing disk),
+        it is kept for later: a later housekeeping pass deletes it
+        (:meth:`_forget_kept_secrets`). A name the keystore refuses is a
+        bug, and raised."""
         try:
             self.keystore.delete(name)
         except Exception as e:
-            if not _waits_unbounded(e):
+            if not _deletion_deferred(e):
                 raise
             kept = set(json.loads(self.store.kv_get(KEPT_SECRETS) or "[]")) | {name}
             self.store.kv_set(KEPT_SECRETS, json.dumps(sorted(kept)))
             LOG.warning("secret_kept", error=type(e).__name__)
 
     def _forget_kept_secrets(self) -> None:
-        """Delete the secrets a locked keystore kept, as far as it lets us."""
+        """Delete the secrets kept for later, as far as the keystore lets
+        us. One that fails, whatever the error, stays kept and holds up
+        nothing: the rest of the housekeeping pass goes on. The log has the
+        error's type, never the secret's name."""
         kept = json.loads(self.store.kv_get(KEPT_SECRETS) or "[]")
         if not kept:
             return
@@ -1952,8 +1966,7 @@ class Engine:
             try:
                 self.keystore.delete(name)
             except Exception as e:
-                if not _waits_unbounded(e):
-                    raise
+                LOG.warning("kept_secret_not_deleted", error=type(e).__name__)
                 left.append(name)
         self.store.kv_set(KEPT_SECRETS, json.dumps(left))
 

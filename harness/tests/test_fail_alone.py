@@ -675,18 +675,67 @@ async def test_secrets_a_locked_keyring_kept_go_once_it_opens(
     assert a.daemon.keystore.get(name) is not None  # kept while locked
     await a.daemon.expire()
     assert a.daemon.keystore.get(name) is None
-    # Any other failure to delete is no lock: it isn't kept for later.
-    a.daemon.store.kv_set(engine_module.KEPT_SECRETS, json.dumps([name]))
+    # A name the keystore refuses is a bug, not the store's state: raised.
+    with pytest.raises(KeystoreNameError):
+        a.daemon._forget_secret("Not A Name")
 
-    def broken(_name: str) -> None:
-        msg = "read-only file system"
-        raise OSError(msg)
 
-    monkeypatch.setattr(a.daemon.keystore, "delete", broken)
-    with pytest.raises(OSError, match="read-only"):
-        a.daemon._forget_secret(name)
-    with pytest.raises(OSError, match="read-only"):
-        a.daemon._forget_kept_secrets()
+async def test_a_kept_secret_that_fails_otherwise_holds_up_no_housekeeping(
+    cluster: Cluster, advance: Advance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept secret whose deletion fails some other way stays kept, and the
+    rest of the pass (invite and join expiry, retention) goes on."""
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    kept = "invite/kept-one"
+    a.daemon.store.kv_set(engine_module.KEPT_SECRETS, json.dumps([kept]))
+    delete = FileKeystore.delete
+
+    def failing(self: FileKeystore, name: str) -> None:
+        if name == kept:
+            msg = "the backend failed in some other way"
+            raise ValueError(msg)
+        delete(self, name)
+
+    monkeypatch.setattr(FileKeystore, "delete", failing)
+    made = await a.daemon.create_invite(gid, ttl_secs=600)
+    await advance(3600)
+    for _ in range(3):
+        await a.daemon._housekeeping()
+    assert a.daemon.store.invite(made["invite_id"])["status"] == "expired"  # ty: ignore[not-subscriptable]
+    assert a.daemon.keystore.get(f"invite/{made['invite_id']}") is None
+    assert json.loads(a.daemon.store.kv_get(engine_module.KEPT_SECRETS) or "[]") == [kept]
+
+
+async def test_a_secret_a_failing_disk_kept_goes_once_it_recovers(
+    cluster: Cluster, advance: Advance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SPEC 6.3: any failure to delete an ended invite's secret defers it to
+    the next housekeeping pass, not only a locked keyring."""
+    a = await cluster.node()
+    gid = a.daemon.create_group("G", "p")
+    await a.idle()
+    made = await a.daemon.create_invite(gid, ttl_secs=600)
+    name = f"invite/{made['invite_id']}"
+    delete = FileKeystore.delete
+    broken = [True]
+
+    def failing(self: FileKeystore, n: str) -> None:
+        if broken[0] and n == name:
+            raise OSError(30, "Read-only file system")
+        delete(self, n)
+
+    monkeypatch.setattr(FileKeystore, "delete", failing)
+    await advance(3600)
+    await a.daemon._housekeeping()
+    assert a.daemon.store.invite(made["invite_id"])["status"] == "expired"  # ty: ignore[not-subscriptable]
+    assert a.daemon.keystore.get(name) is not None
+    broken[0] = False  # the disk recovers
+    await advance(120)
+    await a.daemon._housekeeping()
+    assert a.daemon.keystore.get(name) is None
+    assert json.loads(a.daemon.store.kv_get(engine_module.KEPT_SECRETS) or "[]") == []
 
 
 async def test_the_welcome_flag_ends_with_the_welcome(

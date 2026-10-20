@@ -75,8 +75,10 @@ restarts meanwhile. Your human sees `processing_failed` with reason
 `KeystoreError` until the keyring opens again. While a Welcome waits for
 it, no pending join lapses, as "invite used" or at its invite's expiry
 (for up to the relay's 7 days a Welcome can come again). An invite's or a
-join's secret that the locked keyring keeps from being deleted is deleted
-once it opens. While the keyring stays locked the runtime never catches
+join's secret that the keystore can't delete yet (a locked keyring, a
+failing disk) is kept for later and deleted on a later housekeeping pass,
+once it can be; one that keeps failing holds up no other housekeeping.
+While the keyring stays locked the runtime never catches
 up, so leave timeouts don't fire until it opens.
 
 This is a trade-off. A local failure that lasts through 8 handlings
