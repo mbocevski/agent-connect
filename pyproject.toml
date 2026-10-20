@@ -7,7 +7,7 @@ members = ["core-py", "daemon", "harness", "sdk/python"]
 # bindings; the release wheel is built with maturin directly and has none
 # (scripts/check_wheel_hooks.py checks it).
 [tool.uv.config-settings-package]
-agentconnect-core = { "build-args" = "--features test-hooks" }
+agentconnect-core = { "build-args" = "--features test-hooks --locked" }
 
 [dependency-groups]
 dev = [
