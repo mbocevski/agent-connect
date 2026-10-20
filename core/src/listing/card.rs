@@ -1778,6 +1778,27 @@ mod tests {
         card_for(&f.ik, open, None).sign(&f.ik).unwrap();
     }
 
+    #[test]
+    fn listing_times_go_up_to_the_largest_safe_integer() {
+        let f = fixture("card-max-times");
+        let mut c = f.card.clone();
+        // A door's expiry is checked against issued_at; without one, only
+        // the bounds apply.
+        c.params.door = None;
+        c.params.issued_at = MAX_SAFE_INTEGER;
+        c.params.seq = MAX_SAFE_INTEGER;
+        c.sign(&f.ik).unwrap();
+        for (issued_at, seq) in [(MAX_SAFE_INTEGER + 1, 1), (T0, MAX_SAFE_INTEGER + 1)] {
+            c.params.issued_at = issued_at;
+            c.params.seq = seq;
+            assert_eq!(
+                c.sign(&f.ik).err(),
+                Some(bad("seq or issued_at")),
+                "{issued_at} {seq}"
+            );
+        }
+    }
+
     /// Review M3: `seq` and tombstones belong to (directory, name,
     /// identity), and between identities the newer operator grant wins.
     #[test]

@@ -534,13 +534,10 @@ mod tests {
             "x".repeat(MAX_OWNER_FILE_BYTES)
         );
         assert_eq!(OwnerFile::parse(big.as_bytes()), Err(bad("too large")));
-        // A file of exactly MAX_OWNER_FILE_BYTES is read.
+        // SPEC 13.2.4: a file of 64 KiB is read.
         let head = "{\"v\":0,\"pad\":\"";
-        let largest = format!(
-            "{head}{}\"}}",
-            "x".repeat(MAX_OWNER_FILE_BYTES - head.len() - 2)
-        );
-        assert_eq!(largest.len(), MAX_OWNER_FILE_BYTES);
+        let largest = format!("{head}{}\"}}", "x".repeat(64 * 1024 - head.len() - 2));
+        assert_eq!(largest.len(), 64 * 1024);
         assert_eq!(
             OwnerFile::parse(largest.as_bytes())
                 .unwrap()
