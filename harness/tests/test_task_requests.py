@@ -24,7 +24,7 @@ from a2a.types import Message, Part, Role, SendMessageRequest
 from agentconnect.a2a_adapter import convert
 from agentconnect.adapter import Delivery, RecordingAdapter
 from agentconnect.limits import SENDER_PER_MINUTE
-from agentconnect.runtime.engine import new_msg_id
+from agentconnect.runtime.engine import DaemonError, new_msg_id
 from agentconnect_harness.a2a_agents import AgentServer, ScriptedExecutor, a2a_node, a2a_of
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 
@@ -474,3 +474,147 @@ async def test_a_task_update_without_reply_to_answers_its_request(group: GroupFi
     assert await handled(a, b, more) == "done"
     assert delivered(a.adapter, more).inner["reply_to"] == [from_a]
     assert delivered(a.adapter, more).addressed_to_me
+
+
+# -- the final verification: no trick beats the bound, and an end is never lost --------
+
+
+def max_turns(node: Node, gid: str) -> int:
+    row = node.daemon.store.group(gid)
+    return -1 if row is None else int(row.policy["loop_guard"]["max_agent_turns"])
+
+
+def honest(  # noqa: PLR0913, PLR0917
+    node: Node, gid: str, task: str, state: str, to: Node, refs: list[str]
+) -> str:
+    """A task status update through the runtime's own send path."""
+    body = {"taskId": task, "contextId": gid, "status": {"state": state}}
+    return node.daemon.send_message(
+        gid, body, kind="a2a.task_status", reply_to=refs, addressee=[to.me]
+    )
+
+
+def fired(node: Node, ids: list[str]) -> list[str]:
+    return [d.msg_id for d in node.adapter.deliveries if d.msg_id in ids and d.addressed_to_me]
+
+
+async def test_every_trick_against_one_request_gives_three_triggers(cluster: Cluster) -> None:
+    b = await cluster.node("b")  # asks
+    a = await cluster.node("a")  # answers, and tries everything
+    a2 = await cluster.node("a2", identity_of=a)  # and its replica
+    gid = b.daemon.create_group("Pair", "One request")
+    await b.idle()
+    await cluster.invite(b, a, gid)
+    await cluster.invite(b, a2, gid)
+    request = b.daemon.send_message(gid, {"parts": [{"text": "do it"}]}, to=[a.me])
+    assert await handled(a, b, request) == "done"
+    assert await handled(a2, b, request) == "done"
+    spellings = [IR, "TASK_STATE_WORKING", "input-required", "INPUT_REQUIRED"]
+    spellings += ["TASK_STATE_AUTH_REQUIRED", "TASK_STATE_WORKING", "auth-required"]
+    ids = [update(a, gid, "t1", b, [request], s) for s in spellings]
+    ids.append(update(a, gid, "t2", b, [request]))  # a second task
+    ids.append(update(a, gid, "t1", b, [request, request], "TASK_STATE_COMPLETED"))
+    ids += [update(a, gid, "t1", b, [request], s) for s in ("failed", "TASK_STATE_REJECTED")]
+    ids.append(update(a, gid, "t1", b, [request]))  # after the end
+    ids.append(update(a, gid, "t3", b, [request]))  # a new task after the end
+    assert await handled(b, a, ids[-1]) == "done"
+    ids += [update(a2, gid, "t1", b, [request], s) for s in ("input-required", "completed")]
+    ids.append(update(a2, gid, "t9", b, [request], "TASK_STATE_AUTH_REQUIRED"))
+    assert await handled(b, a2, ids[-1]) == "done"
+    states = [delivered(b.adapter, m).body["status"]["state"] for m in fired(b, ids)]
+    assert states == [IR, "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED"]
+
+
+async def test_an_end_after_a_full_budget_of_progress_is_sent_and_triggers(
+    group: GroupFixture,
+) -> None:
+    """X1: the end state is exempt from the task budget its progress used,
+    on both sides, and is no violation."""
+    (a, b), gid = await group(2)
+    budget = 5
+    for n in (a, b):
+        n.daemon.update_safety(gid, {"task_per_minute": budget})
+    request = a.daemon.send_message(gid, {"parts": [{"text": "stream"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    ids = [honest(b, gid, "job", "TASK_STATE_WORKING", a, [request]) for _ in range(budget)]
+    # The sender's budget is spent: more progress is refused...
+    with pytest.raises(DaemonError) as refused:
+        honest(b, gid, "job", "TASK_STATE_WORKING", a, [request])
+    assert refused.value.code == "rate_limited"
+    # ...but not the end, which the requester takes as its trigger.
+    ids.append(honest(b, gid, "job", "TASK_STATE_COMPLETED", a, [request]))
+    assert await handled(a, b, ids[-1]) == "done"
+    assert fired(a, ids) == [ids[-1]]
+    assert a.daemon.safety.violations(gid, b.me) == 0
+    # The exemption is once per state: a repeated end has the budget again.
+    with pytest.raises(DaemonError):
+        honest(b, gid, "job", "TASK_STATE_COMPLETED", a, [request])
+
+
+async def test_with_inbound_approval_a_quick_tasks_end_follows_the_decision(
+    group: GroupFixture,
+) -> None:
+    """X2: the end that arrives while the task's first update waits is
+    held behind it, and released with it."""
+    (a, b), gid = await group(2)
+    a.daemon.update_safety(gid, {"require_approval": "inbound"})
+    request = a.daemon.send_message(gid, {"parts": [{"text": "quick"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    working = honest(b, gid, "job", "TASK_STATE_WORKING", a, [request])
+    done = honest(b, gid, "job", "TASK_STATE_COMPLETED", a, [request])
+    assert await handled(a, b, done) == "held"
+    held = {m["msg_id"]: m["hold_id"] for m in a.daemon.held_messages()}
+    assert set(held) == {working, done}
+    a.daemon.approve_message(held[working])
+    await a.wait(lambda: all(any(d.msg_id == m for d in a.adapter.deliveries) for m in held))
+    assert fired(a, [working, done]) == [done]
+    assert a.daemon.held_messages() == []
+
+
+async def test_rejecting_a_tasks_first_update_drops_its_end(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.update_safety(gid, {"require_approval": "inbound"})
+    request = a.daemon.send_message(gid, {"parts": [{"text": "quick"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    first = honest(b, gid, "job", IR, a, [request])
+    done = honest(b, gid, "job", "TASK_STATE_COMPLETED", a, [request])
+    assert await handled(a, b, done) == "held"
+    held = {m["msg_id"]: m["hold_id"] for m in a.daemon.held_messages()}
+    await a.daemon.reject_message(held[first])
+    assert a.daemon.held_messages() == []
+    for m in (first, done):
+        assert a.daemon.store.inbox_state(b.daemon.mailbox, m) == "dropped"
+    assert a.daemon.safety.violations(gid, b.me) == 0
+
+
+async def test_approving_a_held_trigger_releases_the_end_behind_it(group: GroupFixture) -> None:
+    (a, b), gid = await group(2)
+    a.daemon.update_safety(gid, {"require_approval": "inbound"})
+    request = a.daemon.send_message(gid, {"parts": [{"text": "ask me"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    asking = honest(b, gid, "job", IR, a, [request])
+    done = honest(b, gid, "job", "TASK_STATE_COMPLETED", a, [request])
+    assert await handled(a, b, done) == "held"
+    held = {m["msg_id"]: m["hold_id"] for m in a.daemon.held_messages()}
+    a.daemon.approve_message(held[asking])
+    await a.wait(lambda: all(any(d.msg_id == m for d in a.adapter.deliveries) for m in held))
+    assert fired(a, [asking, done]) == [asking, done]
+
+
+async def test_a_state_delivered_as_context_is_not_used_up(group: GroupFixture) -> None:
+    """X3: past the loop guard the end is context and doesn't use the
+    state; entered again once the guard allows it, it triggers, once."""
+    (a, b), gid = await group(2)
+    a.daemon.set_policy(gid, loop_guard={"max_agent_turns": 1})
+    await a.idle()
+    await a.wait(lambda: max_turns(a, gid) == 1)
+    request = a.daemon.send_message(gid, {"parts": [{"text": "go"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    late = update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED")  # hop 2 > 1
+    assert not await triggers(a, b, late)
+    a.daemon.set_policy(gid, loop_guard={"max_agent_turns": 20})
+    await a.idle()
+    await a.wait(lambda: max_turns(a, gid) == 20)
+    again = update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED")
+    assert await triggers(a, b, again)
+    assert not await triggers(a, b, update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED"))

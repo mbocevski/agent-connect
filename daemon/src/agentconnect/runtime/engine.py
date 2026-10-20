@@ -2145,16 +2145,9 @@ class Engine:
                 card_problem=self._card_problem(inner),
                 requested=requested,
                 progress=requested and not trigger,
+                trigger=trigger,
             )
         )
-        if granting is not None and state is not None and decision.verdict is not Verdict.DROP:
-            self.store.task_entered(
-                group.group_id,
-                granting,
-                identity,
-                state,
-                terminal=state in TERMINAL_STATES,
-            )
         if (
             decision.verdict is not Verdict.DROP
             and inner["kind"] == "control.floor"
@@ -2184,6 +2177,16 @@ class Engine:
             and addressed
             and hop <= _max_turns(policy)
         )
+        if granting is not None and trigger and triggers:
+            # SPEC 9.3: the state is used only when it triggers (now, or once
+            # approved); one delivered as context can trigger if entered again.
+            self.store.task_entered(
+                group.group_id,
+                granting,
+                identity,
+                str(state),
+                terminal=state in TERMINAL_STATES,
+            )
         body = inner.get("body") if isinstance(inner.get("body"), dict) else {}
         # Controls, cards and cancels reach adapters in their schema's shape
         # only: unknown fields stripped, card text capped (agentconnect.schemas).
@@ -2262,6 +2265,21 @@ class Engine:
         task = task_of(inner)
         if task is not None and refs:
             self.store.record_answered(group.group_id, task, refs[0], self.now())
+        state = self._own_trigger(group.group_id, inner)
+        if task is not None and state is not None:
+            self.store.record_sent_state(group.group_id, task, refs[0], state, self.now())
+
+    def _own_trigger(self, group_id: str, inner: dict[str, Any]) -> str | None:
+        """The state, if this instance's task update enters one its requester
+        acts on for the first time for the request it answers (SPEC 9.3): at
+        most three per request, so the send is never refused for the task's
+        budget and the requester always learns the outcome."""
+        state, task, refs = task_state(inner), task_of(inner), _refs(inner)
+        if not acts_on(state) or task is None or not refs:
+            return None
+        if self.store.sent_state(group_id, task, refs[0], str(state)):
+            return None
+        return state
 
     def _task_request(
         self, group_id: str, kind: str, body: dict[str, Any], addressee: list[str] | None
@@ -2848,20 +2866,7 @@ class Engine:
             if not self.store.set_held_status(hold_id, "approved"):
                 raise DaemonError("not_found", "no such held message")
             if item["direction"] == "in":
-                row = self.store.inbox_row(int(item["inbox_seq"] or 0))
-                if row is not None and row.state == "held" and row.delivery is not None:
-                    delivery = Delivery.from_json(row.delivery)
-                    self.store.set_inbox_state(row.seq, "pending")
-                    for key in [k for k in self._cursors if k[0] == group_id]:
-                        del self._cursors[key]
-                    self._cursor_gen[group_id] = self._cursor_gen.get(group_id, 0) + 1
-                    if delivery.addressed_to_me:
-                        self._triggered(
-                            group_id, delivery.hop, delivery.msg_id, delivery.sender.identity
-                        )
-                    self.safety.transcribe(
-                        group_id, "in", item["sender"], item["msg_id"], delivery.inner
-                    )
+                self._release_inbound(item)
             else:
                 payload = item["payload"] or {}
                 self._enqueue("app", group_id, payload)
@@ -2877,12 +2882,47 @@ class Engine:
                 events = [] if sent is None else [sent]
             if item["task_id"] is not None and item["direction"] == "in":
                 self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=True)
+                # The task's updates held behind this one (its request for
+                # input, its end) follow the human's decision (SPEC 9.3).
+                for queued in self._task_holds(item):
+                    if self.store.set_held_status(str(queued["hold_id"]), "approved"):
+                        self._release_inbound(queued)
+                        self._audit_hold(queued, "approved")
             self._audit_hold(item, "approved")
         self._notify_soon(events)
         self._delivery_wake.set()
         self._held_wake.set()
         self._pulse()
         return {"hold_id": hold_id, "group_id": group_id, "status": "approved"}
+
+    def _release_inbound(self, item: dict[str, Any]) -> None:
+        """Inside a transaction: an approved inbound message goes to the
+        adapters, triggering the agent if it would have when it arrived."""
+        group_id = str(item["group_id"])
+        row = self.store.inbox_row(int(item["inbox_seq"] or 0))
+        if row is None or row.state != "held" or row.delivery is None:
+            return
+        delivery = Delivery.from_json(row.delivery)
+        self.store.set_inbox_state(row.seq, "pending")
+        for key in [k for k in self._cursors if k[0] == group_id]:
+            del self._cursors[key]
+        self._cursor_gen[group_id] = self._cursor_gen.get(group_id, 0) + 1
+        if delivery.addressed_to_me:
+            self._triggered(group_id, delivery.hop, delivery.msg_id, delivery.sender.identity)
+        self.safety.transcribe(group_id, "in", item["sender"], item["msg_id"], delivery.inner)
+
+    def _task_holds(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        """The other held inbound updates of ``item``'s task (its sender's,
+        in its group), in the order they arrived."""
+        return [
+            other
+            for other in self.store.held_items()
+            if other["hold_id"] != item["hold_id"]
+            and other["direction"] == "in"
+            and other["group_id"] == item["group_id"]
+            and other["sender"] == item["sender"]
+            and other["task_id"] == item["task_id"]
+        ]
 
     def _audit_hold(self, item: dict[str, Any], decision: str) -> None:
         self.safety.audit(
@@ -2913,6 +2953,10 @@ class Engine:
                     self.store.set_inbox_state(row.seq, "dropped")
             if item["task_id"] is not None and item["direction"] == "in":
                 self.safety.decide_task(group_id, item["sender"], item["task_id"], approved=False)
+                # A task the human rejected (or let expire) ends there: the
+                # updates held behind its first go with it (SPEC 9.3).
+                for queued in self._task_holds(item):
+                    events.extend(self._drop_hold(queued, status, code))
             self._audit_hold(item, status)
             if status == "expired":
                 events.append(
@@ -4315,6 +4359,7 @@ class Engine:
                 size,
                 internal=internal,
                 grant=floor_grant,
+                trigger=self._own_trigger(group.group_id, inner) is not None,
             )
         )
         if decision.verdict is Verdict.DROP:

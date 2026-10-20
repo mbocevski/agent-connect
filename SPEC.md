@@ -1650,7 +1650,10 @@ requester acts on or learns the outcome from: `TASK_STATE_INPUT_REQUIRED`,
 `TASK_STATE_AUTH_REQUIRED`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`,
 `TASK_STATE_CANCELED` or `TASK_STATE_REJECTED` (the A2A 0.x names, such as
 `completed`, are the same states). Each request and granted task triggers
-at most once per such state, and not after it ended (a terminal state).
+at most once per such state, and not after it ended (a terminal state). A
+state counts as used only when it triggers: one delivered as context (past
+the loop guard, or to a member the floor rules don't trigger) can trigger
+when the task enters it again.
 Its other updates (`TASK_STATE_SUBMITTED`, `TASK_STATE_WORKING`, every
 artifact chunk, a repeated state) reach the requester as context, in order,
 before the one that triggers. A task that asks for input again does so in
@@ -1767,8 +1770,11 @@ and which a request of the receiving instance granted (§9.3), counts
 against a budget of 300 per minute for that sender instance and task,
 instead of the per-sender and per-group rates. The budget bounds the volume
 of a task's progress, which the requester takes as context; how often the
-task triggers it is bounded by the task's states (§9.3), not by a rate. A
-receiver keeps its requests for as long as a message can wait at the relay
+task triggers it is bounded by the task's states (§9.3), not by a rate. So
+a task update that triggers (at most three per request) MUST NOT be refused
+for the task's budget, by the receiver or the sender, nor held against its
+sender: a task whose progress used the budget would otherwise lose its end,
+the only update its requester acts on. A receiver keeps its requests for as long as a message can wait at the relay
 (7 days, §8.3), so a late or long task still triggers on its states. Task
 updates have caps of their own too: all task updates of one identity's
 instances together 3 times that (900), and those of the whole group 1200

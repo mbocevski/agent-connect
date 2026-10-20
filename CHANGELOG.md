@@ -1352,7 +1352,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   or long the task (SPEC §9.3, §10.2). Requests are kept for the relay's 7
   days. Any other task update is context (`not_requested`), held to the
   ordinary message rates apart from the sender's messages; one over them is
-  `context_rate_limited`, never a violation. The A2A facade takes answers
+  `context_rate_limited`, never a violation. An update that triggers is
+  never refused for the task budget its progress used, by the receiver or
+  the sender, and never counts as a violation; under inbound approval it is
+  held behind the task's first update and released, or dropped, with the
+  human's decision on it; and a state counts as used only once it triggers.
+  The A2A facade takes answers
   only from the members its request asked, and still streams every event of
   the task to its client. The A2A adapter keeps its agent's task map in the
   daemon's database, the newest 64 tasks per requesting instance, so a

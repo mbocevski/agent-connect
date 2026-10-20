@@ -314,6 +314,15 @@ CREATE TABLE IF NOT EXISTS answered_tasks (
     PRIMARY KEY (group_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS answered_tasks_at ON answered_tasks (at);
+CREATE TABLE IF NOT EXISTS sent_task_states (
+    group_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    msg_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (group_id, task_id, msg_id, state)
+);
+CREATE INDEX IF NOT EXISTS sent_task_states_at ON sent_task_states (at);
 CREATE TABLE IF NOT EXISTS a2a_agent_tasks (
     task_id TEXT PRIMARY KEY,
     group_id TEXT NOT NULL,
@@ -1232,6 +1241,7 @@ class Store:
                 "task_requests",
                 "request_tasks",
                 "answered_tasks",
+                "sent_task_states",
                 "a2a_agent_tasks",
                 "sas_answered",
                 "sas_sent",
@@ -2466,6 +2476,7 @@ class Store:
         self._db.execute("DELETE FROM sent_via WHERE at < ?", (before,))
         self._db.execute("DELETE FROM task_requests WHERE at < ?", (before,))
         self._db.execute("DELETE FROM answered_tasks WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM sent_task_states WHERE at < ?", (before,))
         self._db.execute("DELETE FROM request_tasks WHERE at < ?", (before,))
         self._db.execute("DELETE FROM a2a_agent_tasks WHERE at < ?", (before,))
 
@@ -2615,6 +2626,30 @@ class Store:
             "INSERT OR IGNORE INTO answered_tasks (group_id, task_id, msg_id, at) "
             "VALUES (?, ?, ?, ?)",
             (group_id, task_id, msg_id, now),
+        )
+
+    def record_sent_state(
+        self, group_id: str, task_id: str, msg_id: str, state: str, now: int
+    ) -> None:
+        """This instance's task ``task_id`` entered ``state`` in answer to
+        the request ``msg_id`` (SPEC 9.3)."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO sent_task_states (group_id, task_id, msg_id, state, at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (group_id, task_id, msg_id, state, now),
+        )
+
+    def sent_state(self, group_id: str, task_id: str, msg_id: str, state: str) -> bool:
+        return (
+            self._one(
+                "SELECT 1 FROM sent_task_states "
+                "WHERE group_id = ? AND task_id = ? AND msg_id = ? AND state = ?",
+                group_id,
+                task_id,
+                msg_id,
+                state,
+            )
+            is not None
         )
 
     def answered_request(self, group_id: str, task_id: str) -> str | None:

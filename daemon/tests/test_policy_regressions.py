@@ -90,6 +90,9 @@ def inb(  # noqa: PLR0913
     owner: str = OWNER,
     requested: bool = True,
     progress: bool = False,
+    trigger: bool = False,
+    hop: int = 1,
+    addressed: bool = True,
 ) -> Inbound:
     """A received message; a task update answers this instance's request
     unless ``requested`` is false (SPEC 9.3)."""
@@ -100,16 +103,17 @@ def inb(  # noqa: PLR0913
         inner,
         100,
         owner,
-        1,
+        hop,
         20,
-        True,
+        addressed,
         requested=requested,
         progress=progress,
+        trigger=trigger,
     )
 
 
-def out(inner: dict[str, Any], *, internal: bool = False) -> Outbound:
-    return Outbound(G, ME, "me/i1", inner, 100, internal=internal)
+def out(inner: dict[str, Any], *, internal: bool = False, trigger: bool = False) -> Outbound:
+    return Outbound(G, ME, "me/i1", inner, 100, internal=internal, trigger=trigger)
 
 
 # -- C1: control and card kinds carry no content -------------------------------------
@@ -259,6 +263,36 @@ def test_unrequested_task_updates_get_the_message_rate_and_no_trigger(
     assert policy.inbound(inb(task("asked"), progress=True)) == as_context("task_progress")
 
 
+def end(tid: str) -> dict[str, Any]:
+    return task(tid) | {"body": {"taskId": tid, "status": {"state": "TASK_STATE_COMPLETED"}}}
+
+
+def test_a_tasks_trigger_is_never_lost_to_its_budget(policy: SafetyPolicy) -> None:
+    """X1: a granted task's trigger (bounded per request) passes the task
+    budget its progress spent, on both sides; one that won't trigger (past
+    the loop guard, not addressed) has the budget like any update."""
+    policy.update(G, {"task_per_minute": 3})
+    for _ in range(3):
+        assert policy.inbound(inb(task("t"), progress=True)) == as_context("task_progress")
+    assert policy.inbound(inb(end("t"))) == drop("rate_limited")
+    assert policy.inbound(inb(end("t"), trigger=True)) == DELIVER
+    assert policy.inbound(inb(end("t"), trigger=True, hop=21)) == drop("rate_limited")
+    assert policy.inbound(inb(end("t"), trigger=True, addressed=False)) == drop("rate_limited")
+    for _ in range(3):
+        assert policy.outbound(out(task("t"))) == DELIVER
+    assert policy.outbound(out(end("t"))) == drop("rate_limited")
+    assert policy.outbound(out(end("t"), trigger=True)) == DELIVER
+
+
+def test_a_trigger_of_a_pending_task_is_held_behind_it(policy: SafetyPolicy) -> None:
+    """X2: under inbound approval, the task's progress waits for the
+    decision on its first update and is dropped; its trigger is held."""
+    policy.update(G, {"require_approval": "inbound"})
+    assert policy.inbound(inb(task("t"), progress=True)) == hold("require_approval")
+    assert policy.inbound(inb(task("t"), progress=True)) == drop("task_pending")
+    assert policy.inbound(inb(end("t"), trigger=True)) == hold("require_approval")
+
+
 def test_a_full_hold_queue_from_another_members_task_is_no_violation(
     policy: SafetyPolicy, store: Store
 ) -> None:
@@ -270,6 +304,8 @@ def test_a_full_hold_queue_from_another_members_task_is_no_violation(
     unrequested = policy.inbound(inb(task("t9"), requested=False))
     assert unrequested == drop("hold_queue_full")
     assert "hold_queue_full" not in VIOLATIONS
+    # Nor is a task's end that doesn't fit (X1: an end is never a violation).
+    assert policy.inbound(inb(end("t8"), trigger=True)) == drop("hold_queue_full")
     # Requested, the same overflow is the sender's.
     assert policy.inbound(inb(task("asked"))) == drop("hold_overflow")
 

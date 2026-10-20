@@ -89,7 +89,11 @@ What the policy checks, in order:
    `task_per_minute` (300 per task and sender instance), with caps of their
    own: `identity_rate_multiple` times that for all of one identity's tasks
    (900) and `group_task_per_minute` for the group (1200). The first update
-   of a task counts as an ordinary message. Any other task update gets the
+   of a task counts as an ordinary message. A task's update that triggers
+   your agent (it asks for input or ends, below) never counts against the
+   task's budget, on your side or the sender's, so a task whose progress
+   used the budget still delivers its end, and it is never a violation.
+   Any other task update gets the
    ordinary rates, counted apart from the sender's messages, and one over
    them is dropped as `context_rate_limited`, which is not a violation: it
    may be an honest stream for another member, and a member that joined
@@ -139,7 +143,9 @@ What the policy checks, in order:
    triggers only when the task enters a state your agent acts on or learns
    the outcome from: input required, auth required, completed, failed,
    canceled or rejected; once per state for each request, and nothing after
-   the task ended. Its progress (`submitted`, `working`, artifact chunks, a
+   the task ended; a state only counts as used once it triggers, so an end
+   that arrived as context (past the loop guard) can still trigger when sent
+   again. Its progress (`submitted`, `working`, artifact chunks, a
    repeated state) reaches the adapter as context (`task_progress`), in
    order, before the update that triggers, so the agent has the artifacts
    when the task completes. However late the first answer and however long
@@ -394,7 +400,12 @@ agent's held sends fails with `send_failed` code `group_gone`.
 artifact updates from a peer aren't held one by one. The first update of
 the task is held like any message; the updates that follow while it waits
 are dropped (`task_pending`), so intermediate updates sent before your
-decision are lost. Approving it lets the task's later inbound updates
+decision are lost, except one that would trigger your agent (the task
+asking for input or ending, once per request): it is held behind the first
+and follows your decision. Approving any held update of the task approves
+the task and releases the ones held behind it, so your agent still hears
+the end; rejecting it, or letting it expire, drops them with it, the end
+included. Approving it lets the task's later inbound updates
 through without a hold, for `task_approval_window_secs` (600 seconds, at
 most 3600, apart from how long a hold may wait) or until the task ends,
 whichever comes first; after that, the next update is held again as

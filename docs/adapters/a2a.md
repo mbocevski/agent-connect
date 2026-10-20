@@ -319,7 +319,8 @@ SPEC §10.2 applies to everything the adapter and the facade send:
 - Each member may send 30 messages a minute, and a group 120.
 - Streamed task updates (`a2a.task_status`, `a2a.task_artifact`) have their
   own budget: 300 a minute per task. A task's first update counts as one
-  ordinary message. Updates over the budget are not sent. The requester
+  ordinary message. Updates over the budget are not sent, except the task
+  asking for input or ending, once per request: those always go. The requester
   grants that budget only because the updates answer its own request
   (`reply_to`, as the adapter sets it), and is triggered only by the
   `input-required`, `auth-required` and final states; the rest of the
