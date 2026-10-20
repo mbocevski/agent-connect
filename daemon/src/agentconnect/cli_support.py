@@ -8,7 +8,7 @@ import json
 import re
 import time
 import unicodedata
-from collections.abc import Generator, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -342,10 +342,17 @@ def resolve_group(api: ApiClient, ref: str) -> str:
     raise CliError("ambiguous", f"{ref!r} matches {len(found)} groups; use more characters")
 
 
-def events_after(api: ApiClient, after: int = 0) -> Iterator[dict[str, Any]]:
-    """Every event with ``seq > after``, in order."""
+def events_after(
+    api: ApiClient, after: int = 0, on_gap: Callable[[int], None] | None = None
+) -> Iterator[dict[str, Any]]:
+    """Every event with ``seq > after``, in order. ``on_gap`` hears the
+    lowest ``seq`` left when retention removed some of them."""
     while True:
-        page = api.request("GET", f"/v0/events?after={after}")["events"]
+        reply = api.request("GET", f"/v0/events?after={after}")
+        if reply.get("gap") and on_gap is not None:
+            on_gap(int(reply.get("oldest_available", 0)))
+            on_gap = None
+        page = reply["events"]
         yield from page
         if not page:
             return

@@ -218,10 +218,12 @@ def test_a_floor_counter_starts_again_each_epoch_and_stays_below_2_to_the_32(ids
 
 
 async def test_one_failing_journal_entry_does_not_stop_the_replay() -> None:
-    """A pending entry that fails for good is logged and left pending; the
-    entries after it are replayed. A transient failure still goes to the
-    inbound worker, which retries the whole replay."""
+    """A pending entry that fails for good fails alone (SR-11): it is
+    recorded as failed and consumed, and the entries after it are replayed.
+    A transient failure still goes to the inbound worker, which retries the
+    whole replay."""
     done: list[str] = []
+    failed: list[str] = []
 
     async def replay(entry: dict[str, Any]) -> None:
         if entry["key"] == "poison":
@@ -230,12 +232,21 @@ async def test_one_failing_journal_entry_does_not_stop_the_replay() -> None:
             raise FailpointError
         done.append(str(entry["key"]))
 
+    async def fail(entry: dict[str, Any], error: Exception) -> bool:
+        assert isinstance(error, OverflowError)
+        failed.append(str(entry["key"]))
+        return True
+
     entries = [{"key": "poison"}, {"key": "next"}]
     fake = SimpleNamespace(
-        client=SimpleNamespace(journal_pending=lambda: entries), _replay_entry=replay
+        client=SimpleNamespace(journal_pending=lambda: entries),
+        _replay_entry=replay,
+        _fail_entry=fail,
+        _count=lambda _key: 1,
+        _uncount=lambda _key: None,
     )
     await Engine._replay_journal(fake)  # ty: ignore[invalid-argument-type]
-    assert done == ["next"]
+    assert (done, failed) == (["next"], ["poison"])
     entries[:] = [{"key": "transient"}, {"key": "after"}]
     with pytest.raises(FailpointError):
         await Engine._replay_journal(fake)  # ty: ignore[invalid-argument-type]

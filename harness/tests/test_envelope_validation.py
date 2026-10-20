@@ -13,7 +13,7 @@ import pytest
 
 from agentconnect.runtime.engine import _envelope_problem
 from agentconnect.store import GroupRow
-from agentconnect_harness.cluster import Cluster, Node, verify
+from agentconnect_harness.cluster import Cluster, Node
 from agentconnect_harness.proxy import RelayProxy
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
@@ -84,12 +84,15 @@ async def test_require_verified_holds_after_an_error_mid_processing(
     await b.wait(lambda: bool(cached(b, gid).policy.get("require_verified")))
     assert cached(b, gid).epoch == b.daemon.client.epoch(raw(gid))
     monkeypatch.undo()
-    # ...so an unverified peer's message is held until the human verifies.
+    # ...so an unverified peer's message is held, never delivered.
     a.daemon.send_message(gid, {"text": "held"})
     await b.wait(lambda: b.daemon.status()["inbox_pending"] == 1)
     assert b.adapter.texts(gid) == []
-    await verify(b, a, gid)
-    assert await b.wait_texts(gid, 1) == ["held"]
+    # The commit's bookkeeping was skipped: the group is out of sync, and
+    # the human has heard (SPEC 7.2).
+    info = b.daemon.group_info(gid)
+    assert (info["out_of_sync"], info["out_of_sync_reason"]) == (True, "commit_unapplied")
+    assert "out_of_sync" in {e["type"] for e in b.daemon.store.events(limit=1000)}
 
 
 def test_envelope_shapes() -> None:

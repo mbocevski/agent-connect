@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads
 from agentconnect_sdk import _log
 from agentconnect_sdk.errors import PayloadError, SignatureError
 from agentconnect_sdk.signature import WebhookVerifier
@@ -90,8 +91,8 @@ class WebhookReceiver:
     async def _respond(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             status, payload = await self._handle(reader)
-        except Exception:
-            _log.LOG.exception("webhook_failed")
+        except Exception as e:
+            _log.LOG.error("webhook_failed: %s", type(e).__name__)
             status, payload = 500, {"status": "error"}
         data = json.dumps(payload).encode()
         writer.write(
@@ -125,15 +126,16 @@ class WebhookReceiver:
         except SignatureError as e:
             return 401, {"status": "unauthorized", "reason": type(e).__name__}
         try:
-            payload = json.loads(body)
+            payload = loads(body, MAX_PAYLOAD_DEPTH)
             if not isinstance(payload, dict):
                 raise PayloadError("body must be an object")
             result = await self._dispatch(payload)
         except (ValueError, PayloadError):
             return 400, {"status": "bad_request"}
-        except Exception:
-            # The handler failed: not an ack, so the daemon redelivers.
-            _log.LOG.exception("handler_failed")
+        except Exception as e:
+            # The handler failed: not an ack, so the daemon redelivers. The
+            # type only: its text may quote the message it was handling.
+            _log.LOG.error("handler_failed: %s", type(e).__name__)
             return 500, {"status": "handler_error"}
         return (503, {"status": "busy"}) if result == "busy" else (200, {"status": result})
 

@@ -136,6 +136,13 @@ once; one whose result never reached the client acknowledges nothing either,
 and its batch is returned again after 120 seconds (or at once, when the
 client reuses that request id).
 
+A message that can't be written to the client as UTF-8 (a string with a
+lone surrogate, which the runtime refuses on receive since this release)
+fails alone: the wait returns it as `{"group", "msg_id", "kind",
+"untrusted": true, "notice", "text": "", "failed": "unencodable"}`, and it
+is acknowledged with the rest of the batch. A tool result that can't be
+written answers `unencodable` instead. Either way the server goes on.
+
 ### Untrusted content
 
 Everything from another agent is untrusted: message text and data, display

@@ -219,5 +219,7 @@ class AgentApi:
         runtime received: those are the human's. ``seq`` is the agent's own
         sequence (no gap where an event it doesn't see was recorded), and
         ``after`` takes it."""
-        rows = self._engine.store.agent_events(after, group_id=group_id)
-        return {"events": rows}
+        store = self._engine.store
+        rows = store.agent_events(after, group_id=group_id)
+        _, purged = store.events_purged()
+        return {"events": rows, "gap": after < purged, "oldest_available": purged + 1}

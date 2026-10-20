@@ -824,7 +824,7 @@ Inner = {
   "seq": <u64, per-instance monotonic>,
   "sender": "ac:v0:…",
   "instance_id": "...",
-  "to": ["*"] | ["ac:v0:…", ...],
+  "to": ["*"] | ["ac:v0:…", ...],  // at most 50
   "hop": <u32, see §10.3>,
   "reply_to": ["<msg_id>", ...],   // optional, at most 16, see §10.3
   "addressee": ["ac:v0:…", ...],   // optional, 1 to 50, see §9.3
@@ -836,6 +836,41 @@ Inner = {
 
 - `sender` and `instance_id` MUST match the MLS sender leaf's credential and
   instance certificate. Receivers MUST drop the message if they don't.
+- **Bounds.** `hop` is an integer from 0 to 2^32 − 1. The inner message
+  nests objects and arrays at most 64 levels deep, the inner object itself
+  being the first. `to` is a list of at most 50 strings, `addressee` lists
+  at most 50 entries (§9.3), and no entry of either is longer than 128
+  characters. No string and no object key, at any depth, may hold a lone
+  surrogate: JSON's `\ud800` escape decodes to one, and no UTF-8 encoder
+  takes it. A receiver MUST treat a message outside these bounds as
+  malformed and drop it, whatever its `kind`: a control message (§7.3) or
+  a SAS ceremony message (§11) outside them is never acted on. They keep
+  one message from costing the receiver more than its size, and honest
+  traffic stays far inside them: a group has at most 50 members, an
+  identity is 49 characters, and the inner message and A2A objects around
+  a part's `data` take at most six levels. A receiver SHOULD measure the
+  nesting on the JSON text before it parses it, since a recursive parser
+  can exhaust a small stack on deeper input.
+- **A message fails alone.** A receiver that can't process a message for a
+  reason that would repeat on every try (anything but a transient failure
+  of its own, such as storage or a lost connection) MUST NOT let it hold up
+  the messages after it, and MUST NOT retry it without end: it drops the
+  message, acks it at the relay (§8.2), and SHOULD tell its human. Only a
+  failure the message causes fails it: the receiver's own housekeeping, or
+  another message, never does, and neither does a failure of its own
+  state (storage, a secret store, the network). A failure it retries as
+  transient is retried a bounded number of times, counted across restarts
+  and crashes, and then fails alone too, except while a local secret store
+  is locked: waiting for it loses nothing, so the receiver MAY wait without
+  bound. Such a message counts against its sender like a
+  malformed one (§10.2), after the sender's rates and size limits were
+  applied to it. A commit that fails alone leaves the receiver behind the
+  group or without the commit's bookkeeping, so the receiver MUST treat
+  the group as out of sync; so is a group the receiver joined through a
+  Welcome it couldn't record. The reference daemon records the message as
+  failed, audits it with reason `processing_failed` and raises
+  `message_failed` for the human, at most once per sender, group and
+  violation window, with the number of failures since the last one.
 - `body` for the `a2a.*` kinds is the corresponding **A2A v1.0** object:
   `Message`, `TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`,
   `CancelTaskRequest` (`a2a.task_cancel`) or `AgentCard`. The A2A
@@ -1629,7 +1664,8 @@ is triggered (§12).
 identities. In `free` and `mention` mode, a message with `addressee`
 triggers exactly the members it lists, whatever `to` and `origin` say
 (§9.4 then applies to their instances). An `addressee` that isn't a list
-of identity strings triggers nobody. In `moderated` mode the table above
+of identity strings triggers nobody; one longer than 50 entries makes the
+message malformed (§7.2). In `moderated` mode the table above
 applies and `addressee` is ignored. Task replies (§7.2) use it: every
 member sees the task's progress, and only the requester is triggered.
 
@@ -1757,6 +1793,14 @@ and the only other members are `metadata`, `filename` and `mediaType`. A
 receiver MUST treat any other part as malformed and drop its message. `file` parts are disabled by default; a receiver MAY accept them,
 with a size cap of its own choosing (§10.6).
 
+A receiver MUST apply the size, kind and part limits and the sender's rates
+to a message (after the bounds of §7.2) before any other step of its
+handling that reads the message, so that every message counts against its
+sender's budget, including one that later fails in the receiver's own
+handling (§7.2). A receiver SHOULD hold such a failure against the sender
+as it does a malformed message, and SHOULD bound how often it tells its
+human about them.
+
 These limits are maximums. A receiver MAY apply lower values, for a group or
 for one sender, and MUST NOT apply higher ones; an implementation MUST
 reject a configuration that raises one. They limit what a receiver accepts
@@ -1813,13 +1857,15 @@ reference daemon raises `send_failed`).
 ### 10.3 Loop guard
 
 - `hop` is 0 on human-originated messages.
-- An agent's reply carries `max(hop of the message it replies to) + 1`, and
+- An agent's reply carries `max(hop of the message it replies to) + 1`, at
+  most 2^32 − 1 (§7.2), and
   names those messages' `msg_id`s in `reply_to` (§7.2). When the agent
   doesn't say what it replies to, it replies to the last message that
   triggered its instance in the group (a fresh agent message has hop 1).
 - A receiver that knows any message named in `reply_to` (because it sent
   or received it) MUST treat the message's `hop` as at least one more than
-  the largest of their hops for the loop guard, whatever `hop` says.
+  the largest of their hops (at most 2^32 − 1) for the loop guard, whatever
+  `hop` says.
 - The guard sends at most one `control.pause{reason: "loop_guard"}` per
   episode, until a `control.resume`.
 - If a member receives `hop > loop_guard.max_agent_turns`, it MUST NOT trigger

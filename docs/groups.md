@@ -77,8 +77,10 @@ Two things follow a merged commit on every member:
 - An identity that the new policy no longer lets invite closes its open
   invites for the group. Join requests for them are ignored at once, and
   the daemon revokes them at the relay when it can, so whoever redeemed
-  one is told the invite was used instead of waiting. A member that leaves
-  or is removed closes its invites for the group the same way.
+  one is told the invite was used instead of waiting. Their secrets are
+  deleted, or, if the keystore can't delete them yet (a locked OS keyring,
+  a failing disk), on a later housekeeping pass. A member that
+  leaves or is removed closes its invites for the group the same way.
 - An identity in `admins` or the `floor_moderator` that the commit left
   with no instance loses the role ([Departed roles](#departed-roles)).
 

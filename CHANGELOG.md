@@ -956,6 +956,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- Daemon: events are no longer kept for good. The events of
+  `agentconnect events` and `GET /v0/events` are kept for
+  `daemon.event_retention_days` (default 30, 1 to 365) once every adapter
+  has them, the human-only ones only once the human token has read them,
+  and 100000 at most, oldest first. `GET /v0/events` answers `gap` and
+  `oldest_available`, and `agentconnect events` warns when events it
+  asks for are gone.
 - Relay: `/metrics` moved off the public listener to the operator's
   listener, `AC_RELAY_METRICS_ADDR` (default `127.0.0.1:9091`), which also
   serves `/healthz`; point Prometheus there. `frames_total` no longer counts
@@ -1372,6 +1379,67 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   follow-up after a restart continues the task. An agent's task update sent
   without `reply_to` names its task's request. The SDK's `reply_status`
   and `reply_artifact` answers to one message are about one task.
+- Daemon: one authenticated peer message could wedge a receiver's inbound
+  handling (SR-11 and SR-54, `docs/security-review-v0.md`). A `hop` of
+  2^63 or more overflowed, and a `data` part nested 2,000 levels deep
+  recursed past Python's limit; either left the message unacked at the
+  relay and its journal entry pending, kept the receiver from catching up,
+  blocked its leave timeouts and told nobody. Every inner message is now
+  bounded (SPEC §7.2): a `hop` from 0 to 2^32 − 1, at most 64 levels of
+  nesting, and a `to` and an `addressee` of at most 50 entries of at most
+  128 characters; anything else is `malformed`, dropped and counted against
+  the sender, and replies never carry a `hop` past 2^32 − 1. A message
+  that fails in the daemon's own handling for any other reason that would
+  repeat now fails alone: it is recorded as failed, its journal entry is
+  consumed, the relay is acked, the audit log gets a `drop` row with reason
+  `processing_failed` (a security row) and the human gets a
+  `message_failed` event (human token only). Storage errors and lost
+  connections are still retried. The relay link drops a frame nested too
+  deep to parse instead of failing on it. The core's JSON parsers already
+  stopped at 128 levels; a regression test now holds them to it.
+  Following review:
+  - A string or object key with a lone surrogate (the JSON escape
+    `\ud800`) is `malformed` too; one in a delivered text crashed an MCP
+    agent's server on every restart. A message an adapter can't write out
+    anyway is acked for that adapter and reported (`message_failed`,
+    reason `unencodable`), and the MCP server fails that one message, or
+    that one tool call, never the server.
+  - JSON nesting is counted on the text before it is parsed, on receive,
+    on journal replay, on the relay link and in the SDK: Python 3.12 and
+    3.13 crash in the JSON parser on a small thread stack instead of
+    raising an error.
+  - The rate and size checks run before anything else reads a message, a
+    message that fails alone counts against its sender as a violation,
+    and the human gets at most one `message_failed` per sender, group and
+    violation window, with a `count` of the failures since the last one.
+  - Only a failure the message causes fails it: a failure in the daemon's
+    housekeeping, or in a message parked until a join completes, fails
+    neither the frame nor the Welcome.
+  - A commit that fails alone, merged by the core or not, puts its group
+    out of sync (`commit_unapplied`) and closes this instance's invites to
+    it, and a merged one still ends the earlier epoch's SAS runs; before,
+    a merged commit's skipped bookkeeping (closing invites, role and
+    member events, ending SAS runs) went unnoticed.
+  - A Welcome the core joined but the daemon couldn't record keeps its
+    journal entry for the replay to finish, and the human gets
+    `processing_failed`; before, the joined group was orphaned for good.
+  - A failure that comes from local state rather than the message (the
+    OS, memory, the network, storage, a core panic) is retried. A message
+    is counted before each handling, so one that crashes the daemon is
+    counted too, and after 8 handlings that never finished, counted across
+    restarts, it fails alone; a commit or a Welcome then leaves its group
+    out of sync (`commit_unapplied`, `welcome_failed`). A locked or
+    unavailable keyring is retried for as long as it takes, restarts
+    included, and never consumes a message; no pending join lapses while a
+    Welcome waits for it. A secret the keystore couldn't delete (locked,
+    or a failing disk) is deleted on a later housekeeping pass, and one
+    that keeps failing holds up no other housekeeping.
+  - The nesting pre-scan is linear on any input; it took seconds on a long
+    string that never closed.
+  - A `control.floor` grant or a SAS ceremony message outside the bounds
+    is dropped and moves nothing.
+  - Failures on paths that handle peer data are logged by their type, never
+    their text or traceback.
 - Directory: at `RUST_LOG=trace`, `axum::serve` logged client addresses,
   since the log filter held back only the MCP library. Crates other than
   the directory's own are now held at `warn` (the MCP library at `error`)

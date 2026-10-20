@@ -90,9 +90,18 @@ HOLD_OUTCOMES = frozenset({"approved", "rejected", "cancelled", "expired"})
 # Refusals that say a sender tried what it may not, rather than sent too
 # much: a human's or the owner's control, a control or card from an agent,
 # content smuggled into a control, card or cancel, a part the group doesn't
-# allow, a card that fails its pinned key.
+# allow, a card that fails its pinned key, and a message that failed in this
+# daemon's own handling (it fails alone, and may be an attack).
 SECURITY_DROPS = frozenset(
-    {"not_human", "not_owner", "not_for_agents", "malformed", "part_kind", "bad_signature"}
+    {
+        "not_human",
+        "not_owner",
+        "not_for_agents",
+        "malformed",
+        "part_kind",
+        "bad_signature",
+        "processing_failed",
+    }
 )
 
 
@@ -338,6 +347,11 @@ CREATE INDEX IF NOT EXISTS a2a_agent_tasks_peer
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS attempts (
+    key TEXT PRIMARY KEY,
+    n INTEGER NOT NULL,
+    at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS floor_state (
     group_id TEXT PRIMARY KEY,
@@ -3089,6 +3103,79 @@ class Store:
         with self.tx():
             self._db.execute("UPDATE events SET notified = 1 WHERE event_id = ?", (event_id,))
             self._db.execute("DELETE FROM event_acks WHERE event_id = ?", (event_id,))
+
+    def events_purge(self, before: int, keep: int) -> None:
+        """Retention: events stamped before ``before`` that every adapter
+        has, human-only ones (no agent number) only once the human read them
+        (:meth:`events_read`), and any beyond the newest ``keep``, read or
+        not. The event holding the agent's highest number stays, so the
+        agent's sequence never runs backwards. The highest number gone, in
+        each sequence, is kept (:meth:`events_purged`)."""
+        gone = (
+            "((at < ? AND notified = 1 AND (agent_seq IS NOT NULL OR seq <= ?)) OR seq <= "
+            "(SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?)) "
+            "AND (agent_seq IS NULL OR agent_seq < (SELECT MAX(agent_seq) FROM events))"
+        )
+        args = (before, self._human_read(), keep)
+        with self.tx():
+            row = self._one(f"SELECT MAX(seq), MAX(agent_seq) FROM events WHERE {gone}", *args)  # noqa: S608 - constant
+            if row is None or row[0] is None:
+                return
+            seq, agent_seq = self.events_purged()
+            self.kv_set("events/purged", str(max(seq, int(row[0]))))
+            if row[1] is not None:
+                self.kv_set("events/purged_agent", str(max(agent_seq, int(row[1]))))
+            self._db.execute(f"DELETE FROM events WHERE {gone}", args)  # noqa: S608 - constant
+            self._db.execute(
+                "DELETE FROM event_acks WHERE event_id NOT IN "
+                "(SELECT event_id FROM events WHERE event_id IS NOT NULL)"
+            )
+
+    def events_purged(self) -> tuple[int, int]:
+        """The highest ``seq`` and the highest agent number retention removed
+        (0: none): a reader asking for events after less than that missed
+        some."""
+        return (
+            int(self.kv_get("events/purged") or "0"),
+            int(self.kv_get("events/purged_agent") or "0"),
+        )
+
+    def events_read(self, seq: int) -> None:
+        """The human has read every event up to ``seq`` (it never moves back)."""
+        if seq > self._human_read():
+            self.kv_set("events/human_read", str(seq))
+
+    def _human_read(self) -> int:
+        return int(self.kv_get("events/human_read") or "0")
+
+    # -- attempts -------------------------------------------------------------
+
+    def attempt(self, key: str, now: int) -> int:
+        """Count one more handling of the message ``key``; returns the
+        count, which survives restarts."""
+        with self.tx():
+            self._db.execute(
+                "INSERT INTO attempts (key, n, at) VALUES (?, 1, ?) "
+                "ON CONFLICT(key) DO UPDATE SET n = n + 1, at = excluded.at",
+                (key, now),
+            )
+            row = self._one("SELECT n FROM attempts WHERE key = ?", key)
+        return 0 if row is None else int(row[0])
+
+    def attempt_count(self, key: str) -> int:
+        """The give-ups counted for the message ``key`` (0: none)."""
+        row = self._one("SELECT n FROM attempts WHERE key = ?", key)
+        return 0 if row is None else int(row[0])
+
+    def attempt_clear(self, key: str) -> None:
+        """The message ``key`` is handled: its count goes."""
+        with self.tx():
+            self._db.execute("DELETE FROM attempts WHERE key = ?", (key,))
+
+    def attempts_purge(self, before: int) -> None:
+        """Forget the counts last bumped before ``before``."""
+        with self.tx():
+            self._db.execute("DELETE FROM attempts WHERE at < ?", (before,))
 
     def unnotified_groups(self) -> list[str | None]:
         """The groups (``None``: events of no group) with events not every

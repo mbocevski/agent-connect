@@ -82,6 +82,8 @@ VIOLATIONS = frozenset(
         "not_owner",
         "hold_overflow",
         "bad_signature",
+        # A message that failed in the receiver's own handling (SPEC 7.2).
+        "processing_failed",
     }
 )
 APPROVAL_MODES = ("off", "inbound", "outbound", "both")
@@ -578,6 +580,7 @@ class Inbound:
     # first time for its request (SPEC 9.3): at most three per request, so it
     # is never refused for the task's budget, which its progress used.
     trigger: bool = False
+    admitted: bool = False  # SafetyPolicy.admit passed it already
 
     @property
     def kind(self) -> str:
@@ -683,16 +686,16 @@ class SafetyPolicy:
 
     # -- decisions ----------------------------------------------------------
 
-    def inbound(self, m: Inbound) -> Decision:  # noqa: PLR0911, PLR0912
-        """The decision for a received message. Counts it against the rates
-        (except replays and the reconnect drain)."""
-        settings = self.settings(m.group_id)
-        limits = settings.limits(m.sender)
+    def admit(self, m: Inbound) -> Decision | None:
+        """SPEC 10.2 before anything else reads a received message: its size,
+        shape and parts, then the sender's rates, which count it (except
+        replays and the reconnect drain). A drop, or ``None``. It comes first
+        so that a message that fails later in its handling was counted
+        against its sender all the same (SPEC 7.2)."""
+        limits = self.settings(m.group_id).limits(m.sender)
         problem = content_problem(m.inner, m.size, limits)
         if problem is not None:
             return drop(problem)
-        if m.card_problem:
-            return drop(m.card_problem)  # SPEC 10.5: not used, and held against it
         unrequested = m.kind in TASK_UPDATE_KINDS and not m.requested
         if (
             not m.replayed
@@ -714,6 +717,18 @@ class SafetyPolicy:
             # allows: dropping its progress here is no violation. It never
             # triggers, so a flood costs only a bounded audit share.
             return drop("context_rate_limited" if unrequested else "rate_limited")
+        return None
+
+    def inbound(self, m: Inbound) -> Decision:  # noqa: PLR0911, PLR0912
+        """The decision for a received message: :meth:`admit` first, unless
+        it passed already (``m.admitted``), then the rest of the policy."""
+        refused = None if m.admitted else self.admit(m)
+        if refused is not None:
+            return refused
+        settings = self.settings(m.group_id)
+        unrequested = m.kind in TASK_UPDATE_KINDS and not m.requested
+        if m.card_problem:
+            return drop(m.card_problem)  # SPEC 10.5: not used, and held against it
         if m.kind in HUMAN_ONLY_KINDS and m.origin != "human":
             return drop("not_human")  # SPEC 7.3: an agent can't resume
         if m.kind == "control.close" and m.sender != m.owner:

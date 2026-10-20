@@ -19,6 +19,7 @@ from websockets.http11 import Request, Response
 import agentconnect_core as ac
 from agentconnect.backoff import Backoff
 from agentconnect.clock import FakeClock
+from agentconnect.limits import MAX_PAYLOAD_DEPTH
 from agentconnect.relay import (
     CAUGHT_UP,
     NotConnectedError,
@@ -91,6 +92,47 @@ class Watch:
                 await self.event.wait()
 
         await asyncio.wait_for(loop(), 5)
+
+
+async def test_a_frame_nested_too_deep_to_parse_is_dropped(rng: random.Random) -> None:
+    """JSON past the parser's own recursion limit is an unparsable frame,
+    not an error that ends the link (SR-11)."""
+    frames: list[dict[str, Any]] = []
+
+    async def on_frame(frame: dict[str, Any]) -> None:
+        frames.append(frame)
+
+    link = RelayLink("ws://127.0.0.1:1", "relay.test", instance(rng), FakeClock(), on_frame)
+    depth = 200_000
+    await link._dispatch("[" * depth + "]" * depth)
+    await link._dispatch(json.dumps({"t": "deliver", "env": {}}))
+    assert [f["t"] for f in frames] == ["deliver"]
+
+
+async def test_a_deep_frame_is_dropped_before_it_is_parsed(
+    rng: random.Random, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python 3.12 and 3.13 crash in ``json.loads`` on a small thread stack
+    before ``RecursionError``: depth is counted on the text first."""
+    frames: list[dict[str, Any]] = []
+
+    async def on_frame(frame: dict[str, Any]) -> None:
+        frames.append(frame)
+
+    link = RelayLink("ws://127.0.0.1:1", "relay.test", instance(rng), FakeClock(), on_frame)
+    parsed: list[int] = []
+    real = json.loads
+
+    def counting(text: Any, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(len(text))
+        return real(text, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", counting)
+    depth = MAX_PAYLOAD_DEPTH + 1  # well within the parser's own limit
+    await link._dispatch('{"t": "deliver", "env": ' + "[" * depth + "]" * depth + "}")
+    await link._dispatch(b'{"t": "deliver", "env": {}}')
+    assert [f["t"] for f in frames] == ["deliver"]
+    assert len(parsed) == 1
 
 
 async def test_link_authenticates_routes_replies_and_reconnects(  # noqa: PLR0915

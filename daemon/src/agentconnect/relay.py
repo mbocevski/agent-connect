@@ -24,6 +24,7 @@ import agentconnect_core as ac
 from agentconnect import log
 from agentconnect.backoff import Backoff
 from agentconnect.clock import Clock, unix_seconds
+from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads
 
 LOG = log.get("agentconnect.relay")
 
@@ -155,7 +156,7 @@ class RelayLink:
 
     async def _authenticate(self, ws: ClientConnection) -> None:
         """SPEC 8.2. Every malformed frame raises ``ValueError`` (reconnect)."""
-        challenge = json.loads(await asyncio.wait_for(ws.recv(), REQUEST_TIMEOUT))
+        challenge = loads(await asyncio.wait_for(ws.recv(), REQUEST_TIMEOUT), MAX_PAYLOAD_DEPTH)
         if not isinstance(challenge, dict) or challenge.get("t") != "challenge":
             msg = "expected a challenge"
             raise ValueError(msg)
@@ -175,7 +176,7 @@ class RelayLink:
         await ws.send(
             json.dumps({"t": "auth", "sig_key": b64(self._instance.public_key), "sig": b64(sig)})
         )
-        ready = json.loads(await asyncio.wait_for(ws.recv(), REQUEST_TIMEOUT))
+        ready = loads(await asyncio.wait_for(ws.recv(), REQUEST_TIMEOUT), MAX_PAYLOAD_DEPTH)
         if (
             not isinstance(ready, dict)
             or ready.get("t") != "ready"
@@ -186,8 +187,8 @@ class RelayLink:
 
     async def _dispatch(self, raw: str | bytes) -> None:
         try:
-            frame = json.loads(raw)
-        except ValueError:
+            frame = loads(raw, MAX_PAYLOAD_DEPTH)
+        except (ValueError, RecursionError):  # not UTF-8 JSON, or nested too deep
             LOG.warning("relay_frame_unparsable")
             return
         if not isinstance(frame, dict):

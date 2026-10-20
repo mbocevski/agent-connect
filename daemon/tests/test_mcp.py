@@ -9,13 +9,14 @@ import json
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import httpx
 import pytest
 from typer.testing import CliRunner
 
 import agentconnect.mcp as mcp_package
+import agentconnect.mcp.server as server_module
 import agentconnect.mcp.tools as tools_module
 from agentconnect.cli import app
 from agentconnect.clock import FakeClock
@@ -450,6 +451,56 @@ async def test_a_failed_ack_loses_nothing(owned: Path, status: int, code: str) -
     await call_tool(s, "agentconnect_events", {}, request_id=3)  # retries what failed
     assert sorted(owner.acks) == [["1"], ["2"]]
     await s.close()
+
+
+class AsciiOwner(Owner):
+    """Answers with ASCII-escaped JSON, as the daemon's API does: a lone
+    surrogate reaches the client as the escape ``\\ud800``."""
+
+    @override
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v0/deliveries":
+            return super().handle(request)
+        self.requests.append(request)
+        self.polls += 1
+        rows = self.deliveries.pop(0) if self.deliveries else []
+        body = {"deliveries": rows, "more": False, "lease": f"lease-{self.polls}"}
+        return httpx.Response(200, content=json.dumps(body).encode())
+
+
+async def test_a_message_that_cant_be_written_out_fails_alone(owned: Path) -> None:
+    """The stdio writer can't encode a lone surrogate; it used to end the
+    server, and the unacknowledged batch ended the next one too."""
+    owner = AsciiOwner()
+    bad = row(1, "m1")
+    bad["message"]["a2a"] = {"parts": [{"text": "\ud800"}]}
+    owner.deliveries = [[bad, row(2, "m2")]]
+    s = session_for(owned, owner)
+    await s.open()
+    result = await call_tool(s, "agentconnect_wait", {"timeout_s": 0}, request_id=1)
+    result.model_dump_json(by_alias=True, exclude_none=True)  # what the writer does
+    assert returned(result) == ["m1", "m2"]
+    failed, ok = result.structured_content["messages"]
+    assert (failed["failed"], failed["text"], failed["untrusted"]) == ("unencodable", "", True)
+    assert "failed" not in ok
+    await s.result_written(1, ["m1", "m2"])
+    assert owner.acks == [["1", "2"]]
+    await s.close()
+
+
+def test_only_writable_ids_reach_a_stand_in() -> None:
+    assert tools_module._plain("m1") == "m1"
+    assert tools_module._plain(1) is None
+    assert tools_module._plain("\ud800") is None
+
+
+def test_a_result_that_cant_be_written_out_is_an_error() -> None:
+    result = server_module._result({"groups": [{"name": "\ud800"}]})
+    assert result.is_error
+    assert result.structured_content == {
+        "error": {"code": "unencodable", "message": server_module.UNENCODABLE}
+    }
+    result.model_dump_json(by_alias=True, exclude_none=True)
 
 
 async def test_a_result_that_was_never_written_is_not_acknowledged(owned: Path) -> None:

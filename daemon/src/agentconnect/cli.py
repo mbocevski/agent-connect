@@ -1617,6 +1617,10 @@ def send(  # noqa: PLR0913, PLR0917
                 typer.echo(f"Note: {hint}")
 
 
+def _events_gone(oldest: int) -> None:
+    typer.echo(f"warning: events before {oldest} are gone (daemon.event_retention_days)", err=True)
+
+
 @app.command()
 def events(
     follow: Annotated[
@@ -1630,12 +1634,13 @@ def events(
 ) -> None:
     """Print daemon events (one JSON object per line with --json). Uses the
     human token: the safety policy's events (held messages, violations) are
-    the human's."""
+    the human's, and kept until read here. Warns on stderr when events it
+    asks for are gone (daemon.event_retention_days)."""
     with guard(as_json):
         api = connect(config, human=True)
         try:
             while True:
-                for ev in events_after(api, after):
+                for ev in events_after(api, after, _events_gone):
                     after = int(ev["seq"])
                     if as_json:
                         emit_json(ev)

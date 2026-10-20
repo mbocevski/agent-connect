@@ -19,6 +19,7 @@ Example file::
     display_name = "build-bot"
     adapters = ["webhook"]          # where groups deliver: webhook, sse, mcp, a2a
     keystore = "auto"               # auto | keyring | file
+    event_retention_days = 30       # events are kept this long (and 100000 at most)
 
     [policy]
     auto_approve = false            # approve JoinRequests without a human
@@ -122,6 +123,9 @@ MAX_PENDING_JOINS_PER_INVITE = 32
 # the relay's 7-day message lifetime, after which the proposal can't arrive.
 MIN_LEAVE_TIMEOUT_SECS = 3600
 MAX_LEAVE_TIMEOUT_SECS = 7 * 86_400
+# How long the events for the local API and the CLI are kept.
+DEFAULT_EVENT_RETENTION_DAYS = 30
+MAX_EVENT_RETENTION_DAYS = 365
 
 
 class ConfigError(ValueError):
@@ -168,6 +172,7 @@ class Config:
     # list; empty: `default_adapter` alone (`none`: none).
     adapters: tuple[str, ...] = ()
     keystore: str = "auto"
+    event_retention_days: int = DEFAULT_EVENT_RETENTION_DAYS
     auto_approve: bool = False
     api_socket: Path | None = None
     api_tcp_port: int = 0
@@ -436,6 +441,14 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "`auto`",
         "`keyring` (the OS keyring), `file` (0600 files in the data directory), or "
         "`auto` (the keyring when one is usable, files otherwise).",
+    ),
+    ConfigKey(
+        "daemon.event_retention_days",
+        "event_retention_days",
+        shown_default(DEFAULT_EVENT_RETENTION_DAYS),
+        f"Days an event (`agentconnect events`, `GET /v0/events`) is kept once every "
+        f"adapter has it (1 to {MAX_EVENT_RETENTION_DAYS}). Past 100000 events the "
+        "oldest go first, whether adapters have them or not.",
     ),
     ConfigKey(
         "policy.auto_approve",
@@ -1100,6 +1113,14 @@ def _resolve_relay(values: dict[str, Any]) -> None:
             raise ConfigError(msg) from None
 
 
+def _event_retention(daemon: Mapping[str, Any]) -> int:
+    days = _typed(daemon, "event_retention_days", int, DEFAULT_EVENT_RETENTION_DAYS)
+    if not 1 <= days <= MAX_EVENT_RETENTION_DAYS:
+        msg = f"daemon.event_retention_days must be 1..{MAX_EVENT_RETENTION_DAYS}"
+        raise ConfigError(msg)
+    return days
+
+
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
@@ -1146,6 +1167,7 @@ def load_config(
         "default_adapter": _typed(daemon, "default_adapter", str, "none"),
         "adapters": _adapters(daemon),
         "keystore": keystore,
+        "event_retention_days": _event_retention(daemon),
         "auto_approve": _typed(policy, "auto_approve", bool, False),
         "api_socket": Path(socket_raw).expanduser() if socket_raw else None,
         "api_tcp_port": port,

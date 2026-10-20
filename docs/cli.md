@@ -385,7 +385,7 @@ agentconnect send [OPTIONS] GROUP TEXT
 
 ### `agentconnect events`
 
-Print daemon events (one JSON object per line with --json). Uses the human token: the safety policy's events (held messages, violations) are the human's.
+Print daemon events (one JSON object per line with --json). Uses the human token: the safety policy's events (held messages, violations) are the human's, and kept until read here. Warns on stderr when events it asks for are gone (daemon.event_retention_days).
 
 ```text
 agentconnect events [OPTIONS]

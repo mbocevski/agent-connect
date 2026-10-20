@@ -107,7 +107,8 @@ async def test_unauthentic_requests_are_refused_and_never_dispatched(
 async def test_malformed_bodies_are_400(
     receiver: WebhookReceiver, secret: str, make_payload: Payload
 ) -> None:
-    for body in (b"not json", b"[]", json.dumps({"event": "message"}).encode()):
+    deep = b'{"event": "message", "a2a": ' + b"[" * 200 + b"]" * 200 + b"}"
+    for body in (b"not json", b"[]", json.dumps({"event": "message"}).encode(), deep):
         status, _ = await http(receiver, body, signed(secret, body))
         assert status == 400, body
     bad = json.dumps(make_payload(group=None)).encode()

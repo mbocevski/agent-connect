@@ -33,8 +33,81 @@ that silence a rule for every implementation. A dropped send fails with an
 error your agent sees.
 
 The decision is recorded with the message, in one place in the daemon, and
-adapters only receive what was recorded as delivered. Adapters can only send
-through the daemon. Neither direction has a path around the policy.
+adapters only receive what was recorded as delivered.
+
+A message the daemon fails to handle for a reason that would come back on
+every try (a bug, or input the checks below didn't foresee) fails alone,
+as SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext)
+requires: it is dropped and acked at the relay, the audit log gets a
+`drop` row with reason `processing_failed`, it counts against the sender
+as a violation, like a malformed message, and your human gets a
+`message_failed` event (`sender`, `msg_id`, `message_kind`, `reason`, the
+error's type, and `count`). The human hears at most once per sender,
+group and `violation_window_secs`: `count` is the number of failures since
+the last event, this one included, and the audit log has a row for each.
+The sender is the identity, or `mailbox:<id>` if the message failed before
+the daemon knew who sent it. The messages after it go on, and it is never
+tried again. Only a failure the message itself causes fails it: the
+daemon's own housekeeping before each message, and a message parked until
+a join completes, fail on their own. The rates and size checks below run
+before anything else reads the message, so a message that fails later was
+counted against its sender all the same.
+
+A failure that comes from local state rather than from the message
+(storage, the OS, a core panic, the network, a lost connection) may pass,
+so it is retried instead, after a backoff, and given up for now after 8
+tries; the relay delivers the message again after the next reconnect, and
+a journal entry is replayed. Each handling of a message is counted before
+it starts, in a write of its own, and the count is cleared once the
+message is handled; so a message that crashes the daemon is counted too.
+After 8 handlings that never finished, counted across restarts, the
+message fails alone (reason `RetriesExhausted` when the last one
+crashed). The bookkeeping of a Welcome the core has joined is retried the
+same way: its journal entry stays, the human gets `processing_failed`,
+and the next replay finishes the join; after 8 the group is recorded out
+of sync (`welcome_failed`).
+
+A locked or unavailable keystore (an OS keyring still locked after a
+login, say) is the one exception: it says nothing about the message, and waiting
+loses nothing, so a message that needs a secret from it is retried for as
+long as it takes and never fails alone for it, however often the daemon
+restarts meanwhile. Your human sees `processing_failed` with reason
+`KeystoreError` until the keyring opens again. While a Welcome waits for
+it, no pending join lapses, as "invite used" or at its invite's expiry
+(for up to the relay's 7 days a Welcome can come again). An invite's or a
+join's secret that the keystore can't delete yet (a locked keyring, a
+failing disk) is kept for later and deleted on a later housekeeping pass,
+once it can be; one that keeps failing holds up no other housekeeping.
+While the keyring stays locked the runtime never catches
+up, so leave timeouts don't fire until it opens.
+
+This is a trade-off. A local failure that lasts through 8 handlings
+(each gives up after about 2 minutes of retries, and the next waits for a
+reconnect: about 15 to 20 minutes in all) now drops the message, or puts
+its group out of sync, where it used to be retried without end and hold up
+every message after it. To recover from a dropped message (`message_failed`),
+fix the local cause and ask the sender to send it again: the daemon won't
+take the same `msg_id` twice, but the sender's agent can resend the
+content. A group out of sync can't be repaired: start a new group and
+invite the others again (or have its owner invite you to one), and leave
+the old one with `agentconnect leave`; if no member commits the leave,
+it ends locally after `groups.leave_timeout_secs`.
+
+A commit that fails alone puts its group out of
+sync (`commit_unapplied`), whether the core merged it (its bookkeeping, such
+as role and member events and closing the invites the policy no longer
+allows, was skipped) or not (this member is behind the group). This
+instance's open invites to the group close, and a merged commit still
+ends the earlier epoch's SAS runs. Your human gets the `out_of_sync`
+event; the group can't commit any more, so start a new one.
+
+A message no adapter could write out (a string with a lone surrogate,
+recorded before these checks existed) fails alone for that adapter: it is
+acked and your human gets `message_failed` with reason `unencodable`. The
+MCP server does the same for a message in a wait's result, and fails a
+tool call, rather than the server, whose result it can't write. Adapters
+can only send through the daemon. Neither direction has a path around the
+policy.
 
 The policy is part of the AgentConnect runtime, so it is the same code
 whether the runtime runs as a separate daemon or embedded in an agent's
@@ -44,7 +117,22 @@ agent's data directory.
 
 What the policy checks, in order:
 
-1. **Content.** The kind must be one the protocol defines. The message must
+1. **Content.** First the shape every message must have, whatever its
+   kind (SPEC [§7.2](../SPEC.md#72-inner-message-mls-application-plaintext)):
+   at most 64 levels of nested objects and arrays, a `hop` from 0 to
+   2^32 − 1, a `to` of at most 50 strings and an `addressee` of at most 50
+   entries, none longer than 128 characters, and no lone surrogate in any
+   string or key (JSON's `\ud800` escape decodes to one, and nothing can
+   write it out as UTF-8). Anything else is `malformed` and counts as a
+   violation, so one message can't make the daemon, the SDK or your agent
+   recurse without end, walk a huge recipient list or fail to write it
+   out. The nesting is counted on the JSON text before it is parsed: on a
+   small thread stack, Python 3.12 and 3.13 crash in the JSON parser on a
+   few thousand levels instead of raising an error. The same check guards
+   the relay link and the SDK. A `control.floor` grant or a SAS ceremony
+   message outside these bounds is dropped like any other, and moves
+   nothing.
+   The kind must be one the protocol defines. The message must
    fit `max_message_bytes` (256 KiB by default). Each A2A part has exactly
    one content member (`text`, `data`, or a file as `file`, `raw` or
    `url`), an optional `kind` that names it, and otherwise only
@@ -327,7 +415,15 @@ Each setting is also a key of `[policy]` in `config.toml` (`policy.<setting>`), 
 
 <!-- generated:safety-settings:end -->
 
-`policy.audit_retention_days` (default 30) applies to the whole daemon.
+`policy.audit_retention_days` (default 30) applies to the whole daemon, and
+so does `daemon.event_retention_days` (default 30): an event of
+`agentconnect events` and `GET /v0/events` is kept that long once every
+adapter has it, and the policy's own events, which only the human sees,
+until `agentconnect events` (or `GET /v0/events` with the human token)
+has read them. Past 100000 events the oldest go, read or not. A reader
+asking for events that are gone is told: `GET /v0/events` answers
+`gap: true` with `oldest_available`, and `agentconnect events` prints a
+warning.
 
 The limits can only be made stricter. SPEC [§10.2](../SPEC.md#102-limits)
 makes its values maximums, so a value above one (31 messages a minute, say)
@@ -356,7 +452,7 @@ When a message is held, the daemon records a `message_held` event with its
 metadata (who, which kind, its size, when the hold expires), never its
 content, in the same transaction as the hold, so a crash can't lose it.
 The policy's events (`message_held`, `held_expired`,
-`repeated_violations`) are for the human: they are not passed to the
+`repeated_violations`, `message_failed`) are for the human: they are not passed to the
 agent's adapter, and `GET /v0/events` leaves them out for the agent token
 (`agentconnect events` uses the human token). An agent that heard of a hold
 could tell the sender, which SPEC [§10.2](../SPEC.md#102-limits) forbids.
@@ -500,7 +596,7 @@ classes that never push each other out:
 
 | Class | Rows |
 |---|---|
-| security | in a group: what reached the agent or left it with content (delivered messages and task status and artifact updates, a changed Agent Card's text), holds and how they ended (the human's approvals, rejections and cancellations, and expiries), and refusals of what a sender may not do: `not_human`, `not_owner`, `not_for_agents`, `malformed` (content smuggled into a control, card or cancel), `part_kind` and `bad_signature`. For a knock, the human's approval or rejection |
+| security | in a group: what reached the agent or left it with content (delivered messages and task status and artifact updates, a changed Agent Card's text), holds and how they ended (the human's approvals, rejections and cancellations, and expiries), and refusals of what a sender may not do: `not_human`, `not_owner`, `not_for_agents`, `malformed` (content smuggled into a control, card or cancel, or a message past the bounds above), `part_kind`, `bad_signature` and `processing_failed`. For a knock, the human's approval or rejection |
 | decisions | delivered controls that change state (`control.close`, `control.pause`, `control.resume`, `control.floor`) and task cancels; a knock's hold and its expiry |
 | routine | the other deliveries, which carry no content and change nothing: an unchanged Agent Card, `control.leave`, `control.capabilities` |
 | drops | every other refusal: over a rate or a size, a full held queue, a task waiting for your decision, a join request or a knock refused, and so on |
