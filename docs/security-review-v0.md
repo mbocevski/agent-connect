@@ -67,7 +67,7 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); the rest open, follow-up task |
+| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); SR-12 fixed in #89; the rest open, follow-up task |
 | Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted |
 
@@ -91,7 +91,7 @@ the protocol changes. Everything else is measured against
 - The other Medium findings are local attacks on the daemon's loopback
   transports (SR-08 to SR-10), and authenticated peer messages that stall a
   receiver's inbound queue or trigger its agent beyond the message rates
-  (SR-11, SR-12).
+  (SR-11; SR-12, fixed in #89).
 - `cargo audit`, `cargo deny check` and `pip-audit` found no vulnerable
   dependency. Nine fuzz targets, three of them new, ran for 10 minutes each
   without a crash.
@@ -488,7 +488,13 @@ journal entry, ack and tell the human.
   agent up to 900 times a minute instead of 90, which undoes the §12
   "Agent loops" bound.
 - **Component:** daemon (`limits.py:283-300`, `policy.py:647-702`).
-- **Status:** open (T-12).
+- **Status:** fixed in #89. The daemon records the A2A messages and task
+  cancels it sends. A task update triggers an instance, and counts against
+  the task budget, only when its `reply_to` names one of them, its sender is
+  a member that request asked, and its `taskId` is the task the request
+  named, if it named one (SPEC §9.3, §10.2). Any other task update is
+  context only, held to the ordinary message rates in windows apart from
+  the sender's messages, and a drop there is not a violation.
 - **Confirmed.**
 
 Any `a2a.task_status` or `a2a.task_artifact` with a `taskId` counts
@@ -622,7 +628,7 @@ there is a negative test (the attack fails).
 | Link leaked after exhaustion | The secret authenticates joins only; closed invites refused; secrets deleted | `engine.py` (`_on_join_request`, `_forget_invite_requests`) | `harness/tests/test_daemon_flows.py::test_an_exhausted_invite_is_not_reused`; `harness/tests/test_expiry.py::test_expired_invites_and_joins_lose_their_secrets` | Covered |
 | Malicious member | Roles and policy checked by every receiver | `core/src/policy.rs`, `group.rs` (`inspect_commit`) | `core/src/group/tests.rs::member_removing_another_member_is_rejected`, `::non_owner_policy_change_is_rejected`; `core/src/group/group_mode_tests.rs::unauthorized_commits_are_rejected_and_fork_only_the_committer`; `harness/tests/test_group_roles.py::test_a_policy_change_beyond_the_committers_role_is_rejected_by_every_member` | Covered |
 | | Removal starts a new epoch | `group.rs` (`remove`, `remove_instances`) | `core/tests/group.rs::removed_member_cannot_decrypt_next_epoch`; `relay/tests/delivery.rs::a_removed_member_gets_the_removing_commit_then_nothing` | Covered |
-| | Endpoint policy (§10) | see "Prompt-injected peer" | | Weakened by SR-11 and SR-12 |
+| | Endpoint policy (§10) | see "Prompt-injected peer" | | Weakened by SR-11 (SR-12 fixed in #89) |
 | Removed member | Forward secrecy across epochs | OpenMLS; `group.rs` (`is_active`) | `core/tests/group.rs::removed_member_cannot_decrypt_next_epoch`, `::member_that_missed_its_removal_cannot_decrypt_either` | Partial (test gap 3) |
 | | Previous epoch kept for one epoch only | `core/src/mls.rs` (`MAX_PAST_EPOCHS = 1`) | `core/src/group/tests.rs::grace_window_sender_must_have_been_a_member_then` (positive only) | Gap (test gap 4) |
 | Quantum adversary | One hybrid suite, no negotiation | `core/src/lib.rs`, `core/src/mls.rs` (`CS`, `precheck_key_package`) | `core/tests/key_package.rs::wrong_ciphersuite_is_rejected`; `core/src/mls.rs::derive_hpke_keypair_matches_the_hpke_pq_known_answer` | Covered |
@@ -632,11 +638,11 @@ there is a negative test (the attack fails).
 | Compromised host | Encrypted-at-rest storage | see the last rows | | Covered, except SR-27 |
 | | Updates heal after re-key | `group.rs` (`update`) | `core/tests/group.rs::update_commits_converge_and_change_sas` | Positive only (test gap 6) |
 | Prompt-injected peer agent | Untrusted framing and scope (§10.1) | `daemon/.../payloads.py`, `adapter.py` | `harness/tests/test_safety_policy.py::test_scope_and_framing_reach_the_webhook_sse_and_the_sdk`; `daemon/tests/test_a2a_adapter.py::test_peer_metadata_cannot_override_the_framing` | Covered |
-| | Limits (§10.2), lower only, silent drops | `daemon/.../limits.py`, `policy.py` | `harness/tests/test_limits_e2e.py::test_receivers_drop_what_breaks_the_limits`, `::test_receivers_rate_limit_a_flooding_sender`; `daemon/tests/test_policy.py::test_limits_can_only_be_lowered` | Covered; SR-11, SR-12 |
+| | Limits (§10.2), lower only, silent drops | `daemon/.../limits.py`, `policy.py` | `harness/tests/test_limits_e2e.py::test_receivers_drop_what_breaks_the_limits`, `::test_receivers_rate_limit_a_flooding_sender`; `daemon/tests/test_policy.py::test_limits_can_only_be_lowered`; `harness/tests/test_unsolicited_task_updates.py` | Covered; SR-11 (SR-12 fixed in #89) |
 | | Approval hooks and SAS verification human-only | `runtime/api.py` (`ROUTE_SPECS`), `mcp/tools.py` | `daemon/tests/test_human_only_routes.py::test_every_route_is_classified_and_the_deciding_ones_need_the_human_token`; `daemon/tests/test_no_auto_approve.py::test_the_agent_api_has_no_deciding_method`; `harness/tests/test_mcp.py::test_the_tools_are_the_agent_scope_only` | Covered |
 | | Control and card bodies stripped; cards checked against pinned keys only | `engine.py`, `schemas.py`, `a2a_adapter/cards.py` | `harness/tests/test_safety_policy.py::test_content_under_control_or_card_kinds_never_reaches_the_agent`, `::test_a_signed_card_reaches_a_peer_unchanged_and_a_forged_one_is_dropped` | Covered |
 | Agent loops | Loop guard | `engine.py` (`_received_hop`, `_reply_hop`, `_loop_guard`) | `harness/tests/test_loop_guard.py::test_replies_carry_hop_and_the_guard_pauses`, `::test_an_agent_resume_is_ignored`, `::test_a_hop_below_the_referenced_messages_is_raised` | Covered; SR-33 |
-| | Rate limits, own sends included | `limits.py`, `policy.py` | `harness/tests/test_limits_e2e.py::test_senders_refuse_to_break_the_limits` | Covered; SR-12 |
+| | Rate limits, own sends included | `limits.py`, `policy.py` | `harness/tests/test_limits_e2e.py::test_senders_refuse_to_break_the_limits`; `harness/tests/test_unsolicited_task_updates.py` | Covered (SR-12 fixed in #89) |
 | | Floor modes | `runtime/floor.py`, `engine.py` (`addressed_to_me`) | `harness/tests/test_floor.py::test_grants_the_policy_does_not_allow_are_ignored`; `harness/tests/test_group_acceptance.py::test_mention_mode_unaddressed_does_not_trigger_and_a_two_agent_loop_pauses` | Covered; SR-35 |
 | Malicious software distributor | Reproducible builds | `.github/workflows/repro.yml` | CI job only | Linux only |
 | | Signed releases with provenance | `.github/workflows/release.yml`, `justfile` (`release-verify`) | none | Gap (SR-39) |
@@ -755,8 +761,8 @@ What a malicious member can do, with a modified daemon:
 
 1. Read every message of every epoch it is a member of.
 2. Send content to everyone, within the receivers' limits, and trigger
-   their agents under the floor rules; SR-12 raises that to the task
-   budget, SR-33 keeps the loop guard from pausing it.
+   their agents under the floor rules (SR-12, fixed in #89, raised that
+   to the task budget); SR-33 keeps the loop guard from pausing it.
 3. Commit an Update at any time, and so choose the next short code (SR-01).
 4. Add identities if its identity satisfies `invite`, remove others if it
    satisfies `remove`, change the policy if it is the owner, and change
@@ -930,7 +936,8 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   register writes, `repeated_violations`, hop records, the loop-guard
   reset, `close_requested`, holds, transcript rows, adapter deliveries,
   stored cards, A2A agent calls and task continuation or cancellation, and
-  facade replies. The gaps are SR-11, SR-12, SR-33 to SR-38 and SR-53.
+  facade replies. The gaps are SR-11, SR-33 to SR-38 and SR-53 (SR-12 is
+  fixed in #89).
 - **SAS verification stays human.** `set_verified` is reachable only from
   the human-token verify route, which requires the epoch shown and refuses
   `stale_epoch`; the CLI re-reads the epoch and the code before it records
@@ -1055,7 +1062,7 @@ One line per open item, ready to file.
 - **T-11 (Medium, SR-11, SR-54):** Daemon: bound `hop` to u32, limit body
   depth and size of `to` and `addressee`, and fail a poison message per
   message (ack, consume, tell the human).
-- **T-12 (Medium, SR-12):** Daemon: task budget and triggering only for
+- **T-12 (Medium, SR-12, fixed in #89):** Daemon: task budget and triggering only for
   updates that reply to this instance's own message; update SPEC §9.3 and
   §10.2.
 - **T-13 (Low, SR-13):** Relay: header-read timeout, accept concurrency
