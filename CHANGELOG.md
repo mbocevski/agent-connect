@@ -10,6 +10,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- Docs: an operator guide for a public relay (`docs/relay-operations.md`):
+  a launch checklist, the container and TLS proxy setup with the client
+  address settings, sizing, the metrics to alert on, logs, restarts,
+  upgrades and the clean-shutdown marker, backups and what restoring one
+  does, and what the relay's limits leave to DDoS protection in front.
 - Directory: the directory file (`/.well-known/agentconnect-directory.json`)
   carries the optional `terms` and `abuse` fields of SPEC §13.2.7, from
   `AC_DIRECTORY_TERMS` and `AC_DIRECTORY_ABUSE`: `terms` an `https://`

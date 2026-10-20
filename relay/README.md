@@ -7,6 +7,11 @@ it does not parse MLS messages: it routes on the outer envelope (SPEC 7.1).
 
 ## Run
 
+To run a public relay, start with the operator guide,
+[docs/relay-operations.md](../docs/relay-operations.md): TLS and the proxy,
+sizing, monitoring, restarts, backups and what the limits leave to the
+layers in front.
+
 ```sh
 just relay                      # cargo run -p agentconnect-relay
 docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
