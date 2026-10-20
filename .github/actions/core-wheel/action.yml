@@ -18,6 +18,14 @@ runs:
     # token (docker-options splits on spaces): HOME, and with it Cargo and
     # rustup, moves under the workspace so a single prefix remap covers
     # every path.
+    #
+    # HOME is a tmpfs. openmls_sqlite_storage 0.3.0 embeds its SQL
+    # migrations with refinery 0.9, which lists them in the directory's
+    # readdir order (fixed in refinery 0.10, which the crate can't use yet).
+    # On the runners' ext4 that order depends on the filesystem's hash seed,
+    # so two runners build different wheels; a tmpfs lists files in the
+    # order they were created, which unpacking the same .crate gives.
+    # Remove this once the crate is on refinery 0.10.
     - uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1.51.0
       with:
         command: build
@@ -32,4 +40,5 @@ runs:
         docker-options: >-
           -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
           -e HOME=${{ github.workspace }}/.container-home
+          --tmpfs ${{ github.workspace }}/.container-home:exec
           -e RUSTFLAGS=--remap-path-prefix=${{ github.workspace }}=/src

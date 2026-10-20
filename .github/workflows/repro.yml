@@ -70,6 +70,12 @@ jobs:
         with:
           name: sums-${{ matrix.arch }}-${{ matrix.attempt }}
           path: SHA256SUMS
+      # The artifacts themselves, so a mismatch can be diffed (diffoscope).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.arch }}-${{ matrix.attempt }}
+          path: dist/agentconnect_core-*.whl
+          retention-days: 7
 
   compare:
     name: compare (${{ matrix.arch }})
