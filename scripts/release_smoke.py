@@ -3,9 +3,9 @@
 
 usage: release_smoke.py <version> <relay-url>
 
-Checks that `agentconnect version` reports <version>, then starts
-`agentconnect mcp --agent t --relay <relay-url>` and talks MCP to it over
-stdio: `initialize` must name the server and the version, and `tools/list`
+Checks that `agentconnect --version` and `agentconnect version --json` report
+<version>, then starts `agentconnect mcp --agent t --relay <relay-url>` and
+talks MCP to it over stdio: `initialize` must name the server and the version, and `tools/list`
 must list the agent tools and none of the human-only operations. Closing
 stdin must stop the server with exit code 0.
 
@@ -39,14 +39,24 @@ class SmokeError(Exception):
 
 
 def check_version(cli: str, version: str) -> None:
+    """`agentconnect --version` (`agentconnect <version> (protocol vN)`) and
+    `agentconnect version --json` both report <version>."""
+    line = subprocess.run(  # noqa: S603 - the installed CLI, fixed arguments
+        [cli, "--version"], capture_output=True, text=True, check=True, timeout=60
+    ).stdout.strip()
+    words = line.split()
+    if len(words) < 2 or words[:2] != ["agentconnect", version]:  # noqa: PLR2004
+        msg = f"agentconnect --version printed {line!r}, expected 'agentconnect {version} ...'"
+        raise SmokeError(msg)
+    print(f"ok: agentconnect --version: {line}")
     out = subprocess.run(  # noqa: S603 - the installed CLI, fixed arguments
         [cli, "version", "--json"], capture_output=True, text=True, check=True, timeout=60
     ).stdout
     got = json.loads(out)["version"]
     if got != version:
-        msg = f"agentconnect version reports {got!r}, expected {version!r}"
+        msg = f"agentconnect version --json reports {got!r}, expected {version!r}"
         raise SmokeError(msg)
-    print(f"ok: agentconnect version {got}")
+    print(f"ok: agentconnect version --json: {got}")
 
 
 class Server:

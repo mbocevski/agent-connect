@@ -29,6 +29,8 @@ migrations are promised before 0.1.0.
   against the public relay. A manual run of the workflow is a dry run that
   publishes nothing. `just release-verify` checks the images' provenance too,
   and `just changelog-cut` prepares a release's CHANGELOG section.
+- CLI: `agentconnect --version` prints the version and the protocol
+  version, as `agentconnect version` does, and exits.
 - macOS x86_64 (Intel) is supported: releases ship an `agentconnect-core`
   wheel for it.
 - Docs: an Install section in the README (the install command, platforms,

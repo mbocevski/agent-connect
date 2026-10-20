@@ -2303,6 +2303,22 @@ def knocks(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             )
 
 
+def _print_version(value: bool) -> None:
+    if value:
+        typer.echo(f"agentconnect {__version__} (protocol v{agentconnect_core.PROTOCOL_VERSION})")
+        raise typer.Exit
+
+
 @app.callback()
-def main() -> None:
+def main(
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            is_eager=True,
+            callback=_print_version,
+            help="Show the version and exit (the `version` command has --json).",
+        ),
+    ] = False,
+) -> None:
     """AgentConnect CLI."""
