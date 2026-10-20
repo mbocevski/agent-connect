@@ -2487,6 +2487,13 @@ class Store:
             (group_id, msg_id, task_id, json.dumps(sorted(set(asked))), instance, now),
         )
 
+    def request_sent(self, group_id: str, msg_id: str, now: int) -> None:
+        """A held request went out once approved: its window starts now."""
+        self._db.execute(
+            "UPDATE task_requests SET at = ? WHERE group_id = ? AND msg_id = ?",
+            (now, group_id, msg_id),
+        )
+
     def request_asks(self, group_id: str, msg_id: str, identity: str, instance: str) -> bool:
         """Whether the request ``msg_id`` asked that instance of ``identity``."""
         row = self._one(

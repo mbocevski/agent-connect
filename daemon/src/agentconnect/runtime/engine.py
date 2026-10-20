@@ -2848,6 +2848,8 @@ class Engine:
             else:
                 payload = item["payload"] or {}
                 self._enqueue("app", group_id, payload)
+                # A request's window starts when it goes out (SPEC 10.2).
+                self.store.request_sent(group_id, str(item["msg_id"]), self.now())
                 self.safety.transcribe(group_id, "out", self.me, item["msg_id"], payload["inner"])
                 # The agent's own message goes out: tell its adapter (the
                 # A2A facade waits for it), in the same transaction.

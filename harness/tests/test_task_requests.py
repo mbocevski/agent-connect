@@ -131,6 +131,21 @@ async def test_the_task_is_bound_to_the_instance_that_opened_it(cluster: Cluster
     assert not await triggers(a, x2, update(x2, gid, "t2", a, [request]))
 
 
+async def test_a_held_request_counts_from_when_it_is_sent(
+    group: GroupFixture, advance: Advance
+) -> None:
+    """A request held for the human's approval starts its window when the
+    human lets it go, not when the agent queued it."""
+    (a, b), gid = await group(2)
+    b.daemon.update_safety(gid, {"require_approval": "outbound"})
+    request = b.daemon.send_message(gid, {"text": "please"}, to=[a.me])
+    await advance(900)
+    (held,) = b.daemon.held_messages()
+    b.daemon.approve_message(held["hold_id"])
+    assert await handled(a, b, request) == "done"
+    assert await triggers(b, a, update(a, gid, "t1", b, [request]))
+
+
 # -- F2: the adapter that asked is the one triggered -----------------------------------
 
 
