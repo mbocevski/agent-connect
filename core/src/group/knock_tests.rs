@@ -317,12 +317,15 @@ fn add_knocker_needs_a_fresh_group_of_this_identity() {
     // Owned but created by another identity, or created but owned by
     // another: either is refused.
     let me = s.owner.instance().identity();
-    for (created_by, owner) in [(other.id(), me.to_owned()), (me.to_owned(), other.id())] {
+    for (case, (created_by, owner)) in [(other.id(), me.to_owned()), (me.to_owned(), other.id())]
+        .into_iter()
+        .enumerate()
+    {
         let mut half = forged_group_with(&s.owner, &created_by, &GroupPolicy::default_for(&owner));
         assert_eq!(
             half.add_knocker(&s.owner, &v).unwrap_err(),
             Error::NotPermitted("not a group this identity created and owns"),
-            "created_by {created_by}, owner {owner}"
+            "case {case}"
         );
     }
     // A floor other than free.
