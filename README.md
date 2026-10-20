@@ -205,7 +205,14 @@ Platform support:
 | Linux x86_64 | every pull request | relay and directory binaries and images, `agentconnect-core` wheel, all Python packages |
 | Linux arm64 | every pull request, not required to merge | relay and directory binaries and images, `agentconnect-core` wheel |
 | macOS arm64 | every pull request, not required to merge | `agentconnect-core` wheel |
-| macOS x86_64 | each release, after publishing | `agentconnect-core` wheel |
+| macOS x86_64 | each release, after publishing | `agentconnect-core` wheel; installing also needs a Rust toolchain and OpenSSL (below) |
+
+On Intel Macs the install builds `cryptography` from source. `pyjwt[crypto]`
+and, through `a2a-sdk[signing]`, `google-auth` need it; it has published no
+x86_64 macOS wheel since 49.0.0, and every release that still has one
+(48.0.1 and older) is affected by a published advisory (48.0.1 by
+GHSA-jwv3-5hgf-82ww, GHSA-m2h6-j472-rp4c and GHSA-g6cj-pr64-35w5), so the
+install doesn't pin back to one.
 
 Releases publish the relay and directory container images for
 `linux/amd64` and `linux/arm64` on ghcr.io. Linux
@@ -242,9 +249,9 @@ allow` would also take pre-releases of every dependency. The Python SDK is
 It needs Python 3.12 or later. The native part, `agentconnect-core`, has
 wheels for Linux x86_64 and arm64 (manylinux 2.28) and macOS arm64 and
 x86_64; anywhere else pip and uv build it from the source distribution,
-which needs a Rust toolchain. On Intel Macs one dependency, `cryptography`,
-has no wheel either, so the install builds it too, which needs a Rust
-toolchain and OpenSSL. Windows is not supported.
+which needs a Rust toolchain. On Intel Macs the install also builds the
+`cryptography` dependency, which needs a Rust toolchain and OpenSSL
+([why](#status)). Windows is not supported.
 
 There is no built-in relay: `relay.url` is required. To use the public
 relay, set it in `~/.config/agentconnect/config.toml`
