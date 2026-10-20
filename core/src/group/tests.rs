@@ -1006,3 +1006,104 @@ fn own_messages_come_back_as_echoes() {
     let leave = gs[1].propose_leave(&cs[1]).unwrap();
     assert_eq!(gs[1].process(&cs[1], &leave), Ok(Event::OwnEcho));
 }
+
+/// The bindings' fingerprint is the epoch authenticator, and it changes with
+/// the epoch.
+#[test]
+fn the_state_fingerprint_follows_the_epoch() {
+    let (cs, mut gs) = trio();
+    let before = gs[0].state_fingerprint_for_testing();
+    assert_eq!(before, gs[0].state_fingerprint());
+    assert_eq!(before, gs[1].state_fingerprint_for_testing());
+    assert_eq!(before.len(), 32);
+    let out = gs[0].update(&cs[0]).unwrap();
+    gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
+    assert_ne!(gs[0].state_fingerprint_for_testing(), before);
+}
+
+/// SPEC 11.2: the commitment is the one `sas::commitment` gives for this
+/// group, epoch, instance, peer and nonce, and a different nonce gives a
+/// different one.
+#[test]
+fn a_sas_commitment_binds_the_run() {
+    let (cs, gs) = trio();
+    let rng = Rng::for_test("sas-commitment");
+    let n1 = crate::sas::SasNonce::generate(&rng).unwrap();
+    let n2 = crate::sas::SasNonce::generate(&rng).unwrap();
+    let peer = cs[1].instance().identity();
+    let c1 = gs[0].sas_commitment(&cs[0], peer, &n1);
+    assert_eq!(
+        c1,
+        crate::sas::commitment(
+            gs[0].group_id(),
+            gs[0].epoch(),
+            cs[0].instance().identity(),
+            cs[0].instance().instance_id(),
+            peer,
+            n1.expose(),
+        )
+    );
+    assert_ne!(c1, gs[0].sas_commitment(&cs[0], peer, &n2));
+}
+
+/// SPEC 11.4: a code needs the peer's identity and instance to be one
+/// member's: the right identity with another instance id gives none.
+#[test]
+fn a_sas_code_needs_the_peers_own_instance() {
+    let (cs, gs) = trio();
+    let rng = Rng::for_test("sas-code-peer");
+    let own = crate::sas::SasNonce::generate(&rng).unwrap();
+    let peer_nonce: [u8; crate::sas::NONCE_LEN] = rng.array().unwrap();
+    let peer = cs[1].instance();
+    let code = |identity: &str, instance: u64| {
+        gs[0].sas_code(&cs[0], gs[0].epoch(), &own, identity, instance, &peer_nonce)
+    };
+    assert!(code(peer.identity(), peer.instance_id()).is_ok());
+    assert_eq!(
+        code(peer.identity(), peer.instance_id() ^ 1),
+        Err(Error::UnknownMember)
+    );
+    assert_eq!(
+        code(cs[2].instance().identity(), peer.instance_id()),
+        Err(Error::UnknownMember)
+    );
+}
+
+/// The instance check runs on the leaves as the commit leaves them: the
+/// committer's leaf as its update path changed it.
+#[test]
+fn unique_instances_are_checked_on_the_updated_leaf() {
+    let (_, gs) = trio();
+    let members = gs[0].members().unwrap();
+    let none = BTreeSet::new();
+    assert_eq!(check_unique_instances(&members, &none, None, &[]), Ok(()));
+    // Leaf 1 updated to leaf 2's identity and instance: two leaves name
+    // one instance.
+    let taken = LeafInfo {
+        identity: members[2].identity.clone(),
+        instance_id: members[2].instance_id,
+        sig_key: Vec::new(),
+    };
+    assert_eq!(
+        check_unique_instances(&members, &none, Some(&(1, taken.clone())), &[]),
+        Err(Error::Unauthorized(REPEATED_INSTANCE))
+    );
+    // Unless leaf 2 is removed by the same commit.
+    let removed = BTreeSet::from([2]);
+    assert_eq!(
+        check_unique_instances(&members, &removed, Some(&(1, taken)), &[]),
+        Ok(())
+    );
+}
+
+/// SPEC 11.4: a run's code comes only from the current epoch, and only an
+/// epoch an I-JSON integer can name.
+#[test]
+fn sas_runs_take_only_the_current_representable_epoch() {
+    use crate::sas::MAX_EPOCH;
+    assert!(sas_epoch_ok(5, 5));
+    assert!(!sas_epoch_ok(4, 5) && !sas_epoch_ok(6, 5));
+    assert!(sas_epoch_ok(MAX_EPOCH, MAX_EPOCH));
+    assert!(!sas_epoch_ok(MAX_EPOCH + 1, MAX_EPOCH + 1));
+    assert!(!sas_epoch_ok(u64::MAX, u64::MAX));
+}

@@ -1017,6 +1017,14 @@ fn check_unique_instances(
     Ok(())
 }
 
+/// Whether a SAS run naming `epoch` may derive its code in a group at
+/// epoch `current` (SPEC 11.4): only the current epoch, and only one that
+/// an I-JSON integer can name (no group gets past 2^53 - 1 one commit at a
+/// time, but a Welcome can start a group at any epoch).
+fn sas_epoch_ok(epoch: u64, current: u64) -> bool {
+    epoch == current && epoch <= sas::MAX_EPOCH
+}
+
 /// Whether every admin and the floor moderator of `policy` is `owner`.
 fn roles_only_for(policy: &GroupPolicy, owner: &str) -> bool {
     policy.admins.iter().all(|a| a == owner)
@@ -1733,7 +1741,7 @@ impl Group {
 
     /// [`Group::state_fingerprint`] for the bindings' tests. Only with the
     /// `test-hooks` feature, which release builds leave off.
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     #[must_use]
     pub fn state_fingerprint_for_testing(&self) -> Vec<u8> {
         self.mls.epoch_authenticator().as_slice().to_vec()
@@ -1778,7 +1786,7 @@ impl Group {
         peer_instance: u64,
         peer_nonce: &[u8; sas::NONCE_LEN],
     ) -> Result<Sas> {
-        if epoch != self.epoch() || epoch > sas::MAX_EPOCH {
+        if !sas_epoch_ok(epoch, self.epoch()) {
             return Err(Error::WrongEpoch);
         }
         if peer_identity == client.instance().identity() {

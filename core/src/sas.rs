@@ -240,6 +240,23 @@ mod tests {
     }
 
     #[test]
+    fn a_participant_prints_without_its_nonce() {
+        let rng = Rng::for_test("participant-debug");
+        let (id, _) = ids(&rng);
+        let nonce: [u8; NONCE_LEN] = rng.array().unwrap();
+        let p = Participant {
+            identity: &id,
+            instance_id: 7,
+            nonce: &nonce,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.starts_with("Participant {"));
+        assert!(dbg.contains(&id) && dbg.contains("instance_id: 7"));
+        assert!(!dbg.contains("nonce"));
+        assert!(!dbg.contains(&format!("{:?}", &nonce[..4])));
+    }
+
+    #[test]
     fn renderings_take_the_leading_bits() {
         let sas = Sas {
             bytes: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],

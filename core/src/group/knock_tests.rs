@@ -314,6 +314,17 @@ fn add_knocker_needs_a_fresh_group_of_this_identity() {
         given.add_knocker(&s.owner, &v).unwrap_err(),
         Error::NotPermitted("not a group this identity created and owns")
     );
+    // Owned but created by another identity, or created but owned by
+    // another: either is refused.
+    let me = s.owner.instance().identity();
+    for (created_by, owner) in [(other.id(), me.to_owned()), (me.to_owned(), other.id())] {
+        let mut half = forged_group_with(&s.owner, &created_by, &GroupPolicy::default_for(&owner));
+        assert_eq!(
+            half.add_knocker(&s.owner, &v).unwrap_err(),
+            Error::NotPermitted("not a group this identity created and owns"),
+            "created_by {created_by}, owner {owner}"
+        );
+    }
     // A floor other than free.
     let mut moderated = s.fresh_group();
     let policy = GroupPolicy {
@@ -788,6 +799,17 @@ fn a_replayed_knock_join_is_checked_against_the_listing() {
             .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
             .unwrap_err(),
         Error::KnockWelcome("name")
+    );
+    // A group with the listing's name and creator, but without the listed
+    // identity among its members.
+    let lookalike = forged_group(&s.knocker, s.owner.instance().identity());
+    row.group_id = lookalike.group_id().to_vec();
+    s.knocker.store().journal_put(&row).unwrap();
+    assert_eq!(
+        s.knocker
+            .join_knock_journaled(&k, &s.expect(), &w, "key", b"")
+            .unwrap_err(),
+        Error::KnockWelcome("the other member is not the listed identity")
     );
 }
 

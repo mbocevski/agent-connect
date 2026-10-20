@@ -25,4 +25,9 @@ exclude_re = [
     # confirmed commit, which has both properties, matches the stored hash, so
     # any other message just costs a lookup.
     'core/src/group\.rs:[0-9]+:48: replace && with \|\| in Group::process_inner$',
+    # libcrux derives keys of exactly these lengths for the one suite, so
+    # both checks are false together.
+    'core/src/knock\.rs:.*: replace \|\| with && in Door::derive$',
+    # HPKE open authenticates: a successful open returns the sealed probe.
+    'core/src/knock\.rs:.*: replace match guard p == PROBE with true in Door::check_key_pair$',
 ]

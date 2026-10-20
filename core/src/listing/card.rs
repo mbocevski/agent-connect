@@ -1700,6 +1700,8 @@ mod tests {
         ];
         assert_eq!(big.sign(&f.ik), Err(bad("too large")));
         assert_eq!(err(&vec![b' '; MAX_LISTING_BYTES + 1]), bad("too large"));
+        // MAX_LISTING_BYTES is still read (and blank input isn't JSON).
+        assert_eq!(err(&vec![b' '; MAX_LISTING_BYTES]), bad("json"));
     }
 
     #[test]
@@ -1823,6 +1825,7 @@ mod tests {
         // Listings of other names are not comparable.
         let mut other = card_for(old, stored.token().clone(), None);
         other.params.name = "other-name".into();
+        other.params.seq = 8;
         other.params.token =
             f.dk.issue_token(
                 &rng,
@@ -1905,6 +1908,18 @@ mod tests {
         assert_eq!(
             ListingCard::from_unsigned_json(&vec![b' '; 2 * MAX_LISTING_BYTES + 1]),
             Err(bad("too large"))
+        );
+        assert_eq!(
+            ListingCard::from_unsigned_json(&vec![b' '; 2 * MAX_LISTING_BYTES]),
+            Err(bad("json"))
+        );
+        // The proto3 default rule doesn't apply inside `params`: a `false`
+        // there fails only the schema.
+        let mut v4: Value = serde_json::from_slice(&f.card.to_unsigned_json().unwrap()).unwrap();
+        v4["capabilities"]["extensions"][0]["params"]["x"] = json!(false);
+        assert_eq!(
+            ListingCard::from_unsigned_json(&jcs(&v4).unwrap()),
+            Err(bad("schema"))
         );
     }
 
@@ -2068,6 +2083,11 @@ mod tests {
                 "too large",
                 vec![b' '; 2 * MAX_LISTING_BYTES + 1],
                 bad("too large"),
+            ),
+            (
+                "the largest size read",
+                vec![b' '; 2 * MAX_LISTING_BYTES],
+                bad("json"),
             ),
         ];
         for (name, bytes, e) in cases {

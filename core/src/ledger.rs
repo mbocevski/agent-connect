@@ -238,6 +238,25 @@ mod tests {
     }
 
     #[test]
+    fn a_purge_keeps_the_key_package_refs_still_in_force() {
+        let r = ids("ledger-refs", 3);
+        let mut ledger = MemoryLedger::default();
+        assert!(ledger.is_empty());
+        remember_once(&mut ledger, &r[0].0, &r[0].1, 200).unwrap();
+        assert!(!ledger.is_empty());
+        ledger.purge(200);
+        // The KeyPackage stays used under any other request id until its
+        // `forget_after`, and is free once that has passed.
+        assert_eq!(
+            remember_once(&mut ledger, &r[1].0, &r[0].1, 300),
+            Err(Error::Replayed)
+        );
+        ledger.purge(201);
+        assert!(ledger.is_empty());
+        remember_once(&mut ledger, &r[2].0, &r[0].1, 300).unwrap();
+    }
+
+    #[test]
     fn a_full_ledger_refuses_and_never_evicts() {
         let r = ids("ledger-full", 3);
         let mut ledger = MemoryLedger::with_capacity(2);

@@ -185,8 +185,10 @@ mod tests {
             r4.admits(&w.listing(&b, 1, T0), None),
             Err(Error::InvalidListing("token older than the name's newest"))
         );
-        // `accept` never lowers the mark.
+        // `accept` never lowers the mark, and a tie keeps its holder.
         r4.accept(&w.listing(&a, 9, T0 - 60));
+        assert_eq!(r4.high_water, Some((T0, a.id())));
+        r4.accept(&w.listing(&b, 1, T0));
         assert_eq!(r4.high_water, Some((T0, a.id())));
     }
 }
