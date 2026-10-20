@@ -314,15 +314,16 @@ CREATE TABLE IF NOT EXISTS answered_tasks (
     PRIMARY KEY (group_id, task_id)
 );
 CREATE INDEX IF NOT EXISTS answered_tasks_at ON answered_tasks (at);
-CREATE TABLE IF NOT EXISTS sent_task_states (
+CREATE TABLE IF NOT EXISTS asked_requests (
     group_id TEXT NOT NULL,
-    task_id TEXT NOT NULL,
     msg_id TEXT NOT NULL,
-    state TEXT NOT NULL,
+    task_id TEXT,
+    sent TEXT NOT NULL DEFAULT '[]',
+    ended INTEGER NOT NULL DEFAULT 0,
     at INTEGER NOT NULL,
-    PRIMARY KEY (group_id, task_id, msg_id, state)
+    PRIMARY KEY (group_id, msg_id)
 );
-CREATE INDEX IF NOT EXISTS sent_task_states_at ON sent_task_states (at);
+CREATE INDEX IF NOT EXISTS asked_requests_at ON asked_requests (at);
 CREATE TABLE IF NOT EXISTS a2a_agent_tasks (
     task_id TEXT PRIMARY KEY,
     group_id TEXT NOT NULL,
@@ -1241,7 +1242,7 @@ class Store:
                 "task_requests",
                 "request_tasks",
                 "answered_tasks",
-                "sent_task_states",
+                "asked_requests",
                 "a2a_agent_tasks",
                 "sas_answered",
                 "sas_sent",
@@ -2476,7 +2477,7 @@ class Store:
         self._db.execute("DELETE FROM sent_via WHERE at < ?", (before,))
         self._db.execute("DELETE FROM task_requests WHERE at < ?", (before,))
         self._db.execute("DELETE FROM answered_tasks WHERE at < ?", (before,))
-        self._db.execute("DELETE FROM sent_task_states WHERE at < ?", (before,))
+        self._db.execute("DELETE FROM asked_requests WHERE at < ?", (before,))
         self._db.execute("DELETE FROM request_tasks WHERE at < ?", (before,))
         self._db.execute("DELETE FROM a2a_agent_tasks WHERE at < ?", (before,))
 
@@ -2628,29 +2629,53 @@ class Store:
             (group_id, task_id, msg_id, now),
         )
 
-    def record_sent_state(
-        self, group_id: str, task_id: str, msg_id: str, state: str, now: int
-    ) -> None:
-        """This instance's task ``task_id`` entered ``state`` in answer to
-        the request ``msg_id`` (SPEC 9.3)."""
+    def record_asked(self, group_id: str, msg_id: str, *, task_id: str | None, now: int) -> None:
+        """Remember a request this instance received that asked it (SPEC
+        9.3), and the task it names, if any: this instance's answer to it may
+        trigger its requester."""
         self._db.execute(
-            "INSERT OR IGNORE INTO sent_task_states (group_id, task_id, msg_id, state, at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (group_id, task_id, msg_id, state, now),
+            "INSERT OR IGNORE INTO asked_requests (group_id, msg_id, task_id, at) "
+            "VALUES (?, ?, ?, ?)",
+            (group_id, msg_id, task_id, now),
         )
 
-    def sent_state(self, group_id: str, task_id: str, msg_id: str, state: str) -> bool:
-        return (
-            self._one(
-                "SELECT 1 FROM sent_task_states "
-                "WHERE group_id = ? AND task_id = ? AND msg_id = ? AND state = ?",
-                group_id,
-                task_id,
-                msg_id,
-                state,
-            )
-            is not None
+    def answer_triggers(self, group_id: str, msg_id: str, task_id: str, state: str) -> bool:
+        """Whether this instance's update of ``task_id`` entering ``state``
+        (one the requester acts on) answers the received request ``msg_id``
+        as the requester's grant takes it (SPEC 9.3): the request asked this
+        instance, ``task_id`` is its task (the one it named, else the first
+        this instance answered it with, or none yet), which hasn't ended or
+        entered ``state`` before."""
+        row = self._one(
+            "SELECT task_id, sent, ended FROM asked_requests WHERE group_id = ? AND msg_id = ?",
+            group_id,
+            msg_id,
         )
+        return (
+            row is not None
+            and row[0] in (None, task_id)
+            and not row[2]
+            and state not in json.loads(row[1])
+        )
+
+    def answered_asked(
+        self, group_id: str, msg_id: str, task_id: str, state: str | None, *, terminal: bool
+    ) -> None:
+        """This instance sent an update of ``task_id`` answering the
+        received request ``msg_id``: the first task answering it becomes its
+        task, and a ``state`` that triggers the requester
+        (:meth:`answer_triggers`) is used; a terminal one ends the task."""
+        self._db.execute(
+            "UPDATE asked_requests SET task_id = ? "
+            "WHERE group_id = ? AND msg_id = ? AND task_id IS NULL",
+            (task_id, group_id, msg_id),
+        )
+        if state is not None:
+            self._db.execute(
+                "UPDATE asked_requests SET sent = json_insert(sent, '$[#]', ?), "
+                "ended = MAX(ended, ?) WHERE group_id = ? AND msg_id = ? AND task_id = ?",
+                (state, int(terminal), group_id, msg_id, task_id),
+            )
 
     def answered_request(self, group_id: str, task_id: str) -> str | None:
         row = self._one(

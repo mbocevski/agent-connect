@@ -320,7 +320,9 @@ SPEC §10.2 applies to everything the adapter and the facade send:
 - Streamed task updates (`a2a.task_status`, `a2a.task_artifact`) have their
   own budget: 300 a minute per task. A task's first update counts as one
   ordinary message. Updates over the budget are not sent, except the task
-  asking for input or ending, once per request: those always go. The requester
+  asking for input or ending, once per state for the request it answers:
+  those always go. That holds only for the task of a request this instance
+  received and that asked it; any other update has the budget. The requester
   grants that budget only because the updates answer its own request
   (`reply_to`, as the adapter sets it), and is triggered only by the
   `input-required`, `auth-required` and final states; the rest of the

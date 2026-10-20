@@ -93,6 +93,13 @@ What the policy checks, in order:
    your agent (it asks for input or ends, below) never counts against the
    task's budget, on your side or the sender's, so a task whose progress
    used the budget still delivers its end, and it is never a violation.
+   Your daemon lets your agent's own update past its rates only when it
+   answers a request your instance received and that asked it, on that
+   request's task (the one it named, else the first your agent answered it
+   with), entering that state for the first time and before the task
+   ended. A new task id, a `reply_to` naming a message nobody sent, or a
+   repeated state gets your rates like any other update, so a looping agent
+   can't use ends or requests for input to get past them.
    Any other task update gets the
    ordinary rates, counted apart from the sender's messages, and one over
    them is dropped as `context_rate_limited`, which is not a violation: it

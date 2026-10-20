@@ -499,8 +499,13 @@ journal entry, ack and tell the human.
   small, fixed number of times, and a member triggers another's agent with
   task updates only as often as that agent sends it requests, which its own
   send rate bounds. Any other task update is context at the ordinary rates,
-  never a violation. The A2A facade takes answers only from the members its
-  request asked (found in the PR's review).
+  never a violation. An update that triggers passes the task budget its
+  progress used. The sender exempts its own update only when it answers a
+  request its instance received and that asked it, on that request's task,
+  entering a state for the first time before the task ended, so an agent
+  can't invent requests or tasks to get past its own rates. The A2A facade
+  takes answers only from the members its request asked (found in the PR's
+  review).
 - **Confirmed.**
 
 Any `a2a.task_status` or `a2a.task_artifact` with a `taskId` counts

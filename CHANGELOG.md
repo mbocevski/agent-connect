@@ -1354,9 +1354,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   ordinary message rates apart from the sender's messages; one over them is
   `context_rate_limited`, never a violation. An update that triggers is
   never refused for the task budget its progress used, by the receiver or
-  the sender, and never counts as a violation; under inbound approval it is
-  held behind the task's first update and released, or dropped, with the
-  human's decision on it; and a state counts as used only once it triggers.
+  the sender, and never counts as a violation. The sender exempts its own
+  update only when it answers a request its instance received and that
+  asked it, on that request's task, entering a state for the first time
+  before the task ended, and keeps that record for 7 days; a new `taskId`
+  or a `reply_to` no peer sent gets the sender's rates. Under inbound
+  approval, an update that triggers is held behind the task's first update
+  and released, or dropped, with the human's decision on it. A state counts
+  as used only once it triggers.
   The A2A facade takes answers
   only from the members its request asked, and still streams every event of
   the task to its client. The A2A adapter keeps its agent's task map in the

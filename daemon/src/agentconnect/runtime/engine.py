@@ -2167,6 +2167,16 @@ class Engine:
             LOG.info("message_dropped", group=log.hid(group.group_id), reason=decision.reason)
             return None, decision, kind, guard_hop
         self.store.record_hop(group.group_id, msg_id, hop, self.now())
+        if inner["kind"] in REQUEST_KINDS and addressed and identity != self.me:
+            # SPEC 9.3: the requester's grant, as this instance's answer
+            # sees it (_own_trigger).
+            raw = inner.get("body")
+            self.store.record_asked(
+                group.group_id,
+                msg_id,
+                task_id=_request_task(inner["kind"], raw if isinstance(raw, dict) else {}),
+                now=self.now(),
+            )
         if inner["kind"] in HUMAN_ONLY_KINDS:
             self._reset_loop_guard(group.group_id)
         if decision.verdict is Verdict.DELIVER:
@@ -2265,19 +2275,23 @@ class Engine:
         task = task_of(inner)
         if task is not None and refs:
             self.store.record_answered(group.group_id, task, refs[0], self.now())
-        state = self._own_trigger(group.group_id, inner)
-        if task is not None and state is not None:
-            self.store.record_sent_state(group.group_id, task, refs[0], state, self.now())
+            state = self._own_trigger(group.group_id, inner)
+            self.store.answered_asked(
+                group.group_id, refs[0], task, state, terminal=state in TERMINAL_STATES
+            )
 
     def _own_trigger(self, group_id: str, inner: dict[str, Any]) -> str | None:
-        """The state, if this instance's task update enters one its requester
-        acts on for the first time for the request it answers (SPEC 9.3): at
-        most three per request, so the send is never refused for the task's
-        budget and the requester always learns the outcome."""
+        """The state, if this instance's task update triggers its requester
+        as the requester's grant takes it (SPEC 9.3): its first ``reply_to``
+        is a request this instance received that asked it, the task is that
+        request's, and the state is one the requester acts on, entered for
+        the first time and before the task ended. At most three per received
+        request, so the send is never refused for the task's budget and the
+        requester always learns the outcome; anything else has the rates."""
         state, task, refs = task_state(inner), task_of(inner), _refs(inner)
         if not acts_on(state) or task is None or not refs:
             return None
-        if self.store.sent_state(group_id, task, refs[0], str(state)):
+        if not self.store.answer_triggers(group_id, refs[0], task, str(state)):
             return None
         return state
 

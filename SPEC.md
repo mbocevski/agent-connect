@@ -1774,8 +1774,18 @@ task triggers it is bounded by the task's states (§9.3), not by a rate. So
 a task update that triggers (at most three per request) MUST NOT be refused
 for the task's budget, by the receiver or the sender, nor held against its
 sender: a task whose progress used the budget would otherwise lose its end,
-the only update its requester acts on. A receiver keeps its requests for as long as a message can wait at the relay
-(7 days, §8.3), so a late or long task still triggers on its states. Task
+the only update its requester acts on. The sender exempts an update only
+when it answers as the requester's grant takes it: its first `reply_to`
+is a request the sending instance received and that asked it, it is about
+that request's task (the one the request named, else the first task the
+instance answered it with), and it enters a state the requester acts on
+for the first time, before the task ended. Any other task update the agent
+sends, under a new `taskId` or naming a `reply_to` no peer sent, counts
+against the sender's own rates like any other, so an agent that loops on
+ends or requests for input is held to them. A receiver keeps its requests,
+and a sender the requests it received, for as long as a message can wait
+at the relay (7 days, §8.3), so a late or long task still triggers on its
+states. Task
 updates have caps of their own too: all task updates of one identity's
 instances together 3 times that (900), and those of the whole group 1200
 per minute, so replicas and many open tasks can't multiply the budget. The

@@ -618,3 +618,138 @@ async def test_a_state_delivered_as_context_is_not_used_up(group: GroupFixture) 
     again = update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED")
     assert await triggers(a, b, again)
     assert not await triggers(a, b, update(b, gid, "job", a, [request], "TASK_STATE_COMPLETED"))
+
+
+# -- Y1: the sender's exemption mirrors the receiver's grant ----------------------------
+
+
+WORKING = "TASK_STATE_WORKING"
+COMPLETED = "TASK_STATE_COMPLETED"
+FAILED = "TASK_STATE_FAILED"
+
+
+def sent_until_refused(send: Callable[[int], str], tries: int = 500) -> int:
+    """How many of ``tries`` sends the sender's own policy queued before it
+    refused one for its rates."""
+    for n in range(tries):
+        try:
+            send(n)
+        except DaemonError as refused:
+            code = refused.code
+            break
+    else:
+        return tries
+    assert code == "rate_limited"
+    return n
+
+
+def goes_out(  # noqa: PLR0913, PLR0917
+    node: Node, gid: str, task: str, state: str, to: Node, refs: list[str]
+) -> bool:
+    """Whether the sender's own policy queues this task update."""
+    return sent_until_refused(lambda _n: honest(node, gid, task, state, to, refs), 1) == 1
+
+
+def fill(node: Node, gid: str, task: str, to: Node, refs: list[str]) -> int:
+    """Progress on ``task`` until the sender's budget refuses it."""
+    return sent_until_refused(lambda _n: honest(node, gid, task, WORKING, to, refs))
+
+
+async def asked(group: GroupFixture, budget: int) -> tuple[Node, Node, str, str]:
+    """a asks b; b's task budget is ``budget`` a minute."""
+    (a, b), gid = await group(2)
+    b.daemon.update_safety(gid, {"task_per_minute": budget})
+    request = a.daemon.send_message(gid, {"parts": [{"text": "do it"}]}, to=[b.me])
+    assert await handled(b, a, request) == "done"
+    return a, b, gid, request
+
+
+async def test_invented_answers_get_the_rates_of_any_task_update(
+    group: GroupFixture, advance: Advance
+) -> None:
+    """Y1: an agent can't send states its requester acts on past its own
+    rates by inventing them: new task ids, or ``reply_to`` ids no peer sent,
+    are held to the rates of any other task update, each minute."""
+    budget = 20  # the identity's task cap, 3 times that, stays above 30
+    a, b, gid, request = await asked(group, budget)
+    # Ordinary task updates: each new task opens with a message, and one
+    # task has its budget.
+    new_tasks = sent_until_refused(lambda n: honest(b, gid, f"w{n}", WORKING, a, [request]))
+    assert new_tasks == SENDER_PER_MINUTE
+    await advance(61)
+    assert fill(b, gid, "job", a, [request]) == budget
+    for state in (COMPLETED, FAILED, IR):
+        await advance(61)
+        fresh = sent_until_refused(lambda n, s=state: honest(b, gid, f"{s}{n}", s, a, [request]))
+        assert fresh == new_tasks
+        await advance(61)
+        made_up = sent_until_refused(
+            lambda n, s=state: honest(b, gid, f"same-{s}", s, a, [f"made-up-{n}"])
+        )
+        assert made_up == budget
+
+
+async def test_an_answer_to_a_received_request_is_exempt_once_per_state(
+    group: GroupFixture,
+) -> None:
+    """X1 under Y1: the answer to a request this instance received sends
+    its request for input and its end past the budget its progress used,
+    once each; a repeat, or anything after the end, has the budget again."""
+    a, b, gid, request = await asked(group, 2)
+    assert fill(b, gid, "job", a, [request]) == 2
+    assert goes_out(b, gid, "job", IR, a, [request])
+    assert not goes_out(b, gid, "job", IR, a, [request])
+    end = honest(b, gid, "job", COMPLETED, a, [request])
+    assert not goes_out(b, gid, "job", COMPLETED, a, [request])
+    assert not goes_out(b, gid, "job", FAILED, a, [request])
+    assert await triggers(a, b, end)
+
+
+async def test_a_request_that_asked_another_member_exempts_nothing(
+    group: GroupFixture,
+) -> None:
+    (a, b, c), gid = await group(3)
+    for n in (b, c):
+        n.daemon.update_safety(gid, {"task_per_minute": 2})
+    request = a.daemon.send_message(gid, {"parts": [{"text": "for c"}]}, addressee=[c.me])
+    assert await handled(b, a, request) == "done"
+    assert await handled(c, a, request) == "done"
+    for n in (b, c):
+        assert fill(n, gid, "job", a, [request]) == 2
+    assert not goes_out(b, gid, "job", COMPLETED, a, [request])
+    assert goes_out(c, gid, "job", COMPLETED, a, [request])
+
+
+async def test_only_the_task_bound_to_the_request_is_exempt(
+    group: GroupFixture, advance: Advance
+) -> None:
+    """The first task the agent answers a request with is its task, and a
+    request that names a task binds that one."""
+    a, b, gid, request = await asked(group, 2)
+    for task in ("job", "other"):
+        assert fill(b, gid, task, a, [request]) == 2
+    assert not goes_out(b, gid, "other", COMPLETED, a, [request])
+    assert goes_out(b, gid, "job", COMPLETED, a, [request])
+    await advance(61)  # the identity's task cap is 3 times the budget
+    follow_up = a.daemon.send_message(
+        gid, {"parts": [{"text": "more"}], "taskId": "named"}, to=[b.me]
+    )
+    assert await handled(b, a, follow_up) == "done"
+    for task in ("first", "named"):
+        assert fill(b, gid, task, a, [follow_up]) == 2
+    assert not goes_out(b, gid, "first", IR, a, [follow_up])
+    assert goes_out(b, gid, "named", IR, a, [follow_up])
+
+
+async def test_the_exemptions_used_survive_a_restart(group: GroupFixture) -> None:
+    a, b, gid, request = await asked(group, 2)
+    assert fill(b, gid, "job", a, [request]) == 2
+    assert goes_out(b, gid, "job", IR, a, [request])
+    await b.restart()
+    # The rate windows start empty again; the request, its task and the
+    # states sent for it are in the database.
+    assert fill(b, gid, "job", a, [request]) == 2
+    assert not goes_out(b, gid, "job", IR, a, [request])
+    assert fill(b, gid, "other", a, [request]) == 2
+    assert not goes_out(b, gid, "other", COMPLETED, a, [request])
+    assert goes_out(b, gid, "job", COMPLETED, a, [request])
