@@ -31,7 +31,7 @@ hkdf = "0.13.0"
 hmac = "0.13.0"
 # OpenMLS is pre-1.0: pin exactly. The PQ hybrid ciphersuite is behind the
 # `draft-ietf-mls-pq-ciphersuites` feature (SPEC §3.1, ADR-001 §2).
-openmls = { version = "=0.9.1", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls = { version = "=0.9.2", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_basic_credential = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_libcrux_crypto = { version = "=0.4.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_memory_storage = { version = "=0.6.0", features = ["draft-ietf-mls-pq-ciphersuites"] }
@@ -74,7 +74,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # NFC for the one-line text rule (SPEC §13.1.2), pinned exactly to the
 # release whose tables are Unicode 17.0.0, like unicode-properties below.
-unicode-normalization = { version = "=0.1.25", default-features = false }
+unicode-normalization = { version = "=0.1.26", default-features = false }
 # Unicode general categories and the `Emoji` property for the one-line text
 # rule (SPEC §13.1.2), pinned exactly: its tables are Unicode 17.0.0, which
 # the SPEC names.
