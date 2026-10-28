@@ -178,11 +178,13 @@ class Config:
     api_tcp_port: int = 0
     relay_rest_url: str | None = None
     webhook_url: str | None = None
+    webhook_socket: Path | None = None
     webhook_allow_remote: bool = False
     webhook_timeout: int = 120
     sse_retention: int = 3600
     sdk_handler_timeout: int = 120
     a2a_local_agent_url: str | None = None
+    a2a_local_agent_socket: Path | None = None
     a2a_local_agent_token_file: Path | None = None
     a2a_card_keys_file: Path | None = None
     a2a_facade_port: int = 0
@@ -477,8 +479,17 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "webhook_url",
         "none",
         "Where the webhook adapter POSTs. Required when `daemon.adapters` lists "
-        '`webhook` (or `default_adapter = "webhook"`). Loopback unless '
-        "`webhook.allow_remote` is set.",
+        '`webhook` (or `default_adapter = "webhook"`), unless `webhook.callback_socket` '
+        "is set. Loopback unless `webhook.allow_remote` is set.",
+    ),
+    ConfigKey(
+        "webhook.callback_socket",
+        "webhook_socket",
+        "none",
+        "A Unix socket the webhook adapter POSTs to instead, checked by its server's "
+        "user before a byte is sent ([adapters/webhook.md](adapters/webhook.md)); "
+        "`callback_url`, if set, still gives the path and `Host`. Required in the "
+        "separate-OS-user mode.",
     ),
     ConfigKey(
         "webhook.allow_remote",
@@ -514,8 +525,17 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "a2a.local_agent_url",
         "a2a_local_agent_url",
         "none",
-        "Base URL of the local A2A agent (`http://` or `https://`) that the A2A adapter "
-        "hands group messages to ([adapters/a2a.md](adapters/a2a.md)).",
+        "Base URL of the local A2A agent (loopback `http://` or `https://`) that the A2A "
+        "adapter hands group messages to ([adapters/a2a.md](adapters/a2a.md)). Messages "
+        "go only there, whatever the agent's card names.",
+    ),
+    ConfigKey(
+        "a2a.local_agent_socket",
+        "a2a_local_agent_socket",
+        "none",
+        "A Unix socket the local A2A agent listens on: every request goes there, "
+        "checked by its server's user before a byte is sent, and `local_agent_url` "
+        "gives the `Host` and paths. Required in the separate-OS-user mode.",
     ),
     ConfigKey(
         "a2a.local_agent_token_file",
@@ -827,9 +847,20 @@ def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
     url = _typed(table, "local_agent_url", str, "") or None
     if url is not None:
         parts = urlsplit(url)
-        if parts.scheme not in ("http", "https") or not parts.netloc:
+        if parts.scheme not in ("http", "https") or parts.hostname is None or parts.hostname == "":
             msg = f"a2a.local_agent_url must be http:// or https://, got {url!r}"
             raise ConfigError(msg)
+        if "@" in parts.netloc:
+            msg = "a2a.local_agent_url must not carry credentials"
+            raise ConfigError(msg)
+        if not _is_loopback(parts.hostname):
+            # The local agent gets every message and its token: this host only.
+            msg = f"a2a.local_agent_url must be loopback, got {url!r}"
+            raise ConfigError(msg)
+    uds = _path(table, "local_agent_socket")
+    if uds is not None and url is None:
+        msg = "a2a.local_agent_socket needs a2a.local_agent_url (its Host and paths)"
+        raise ConfigError(msg)
     port = _typed(table, "facade_port", int, 0)
     if not 0 <= port <= 65535:  # noqa: PLR2004
         msg = "a2a.facade_port must be 0..65535"
@@ -844,6 +875,7 @@ def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
         raise ConfigError(msg)
     return {
         "a2a_local_agent_url": url,
+        "a2a_local_agent_socket": uds,
         "a2a_local_agent_token_file": _path(table, "local_agent_token_file"),
         "a2a_card_keys_file": _path(table, "card_keys_file"),
         "a2a_facade_port": port,
@@ -1172,6 +1204,7 @@ def load_config(
         "api_socket": Path(socket_raw).expanduser() if socket_raw else None,
         "api_tcp_port": port,
         "webhook_url": _typed(webhook, "callback_url", str, "") or None,
+        "webhook_socket": _path(webhook, "callback_socket"),
         "webhook_allow_remote": _typed(webhook, "allow_remote", bool, False),
         "webhook_timeout": _typed(webhook, "timeout_secs", int, 120),
         "sse_retention": _typed(sse, "retention_secs", int, 3600),
@@ -1190,8 +1223,8 @@ def load_config(
         check_callback_url(values["webhook_url"], values["webhook_allow_remote"])
     _resolve_relay(values)
     cfg = Config(**values)
-    if cfg.webhook_url is None and "webhook" in cfg.adapter_names:
-        msg = 'adapter "webhook" needs webhook.callback_url'
+    if cfg.webhook_url is None and cfg.webhook_socket is None and "webhook" in cfg.adapter_names:
+        msg = 'adapter "webhook" needs webhook.callback_url or webhook.callback_socket'
         raise ConfigError(msg)
     if not cfg.a2a_enabled and "a2a" in cfg.adapter_names:
         msg = 'adapter "a2a" needs a2a.local_agent_url or a2a.facade_port'

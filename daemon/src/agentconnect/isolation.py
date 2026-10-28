@@ -184,6 +184,14 @@ def _inside(a: Path, b: Path) -> bool:
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
 
 
+def receiver_uids(cfg: Config) -> frozenset[int]:
+    """Who may serve a receiver the daemon delivers to on a Unix socket: the
+    daemon's own user, or in the separate-OS-user mode the agent users."""
+    if not cfg.isolation:
+        return frozenset({os.geteuid()})
+    return frozenset(resolve_uid(u) for u in cfg.isolation_agent_users)
+
+
 def check_config(cfg: Config, euid: int, agent_uids: set[int], human_uids: set[int]) -> None:
     """The parts of the setup that don't need the filesystem."""
     if euid == 0:
@@ -191,6 +199,14 @@ def check_config(cfg: Config, euid: int, agent_uids: set[int], human_uids: set[i
         raise IsolationError(msg)
     if cfg.api_tcp_port:
         msg = "isolation needs the Unix socket: a TCP peer's user can't be checked"
+        raise IsolationError(msg)
+    # Deliveries go to the agents' receivers only over sockets whose server's
+    # user is checked: on a port, any local user could take them (SR-10).
+    if cfg.webhook_url is not None and cfg.webhook_socket is None:
+        msg = "isolation needs webhook.callback_socket: a TCP receiver's user can't be checked"
+        raise IsolationError(msg)
+    if cfg.a2a_local_agent_url is not None and cfg.a2a_local_agent_socket is None:
+        msg = "isolation needs a2a.local_agent_socket: a TCP agent's user can't be checked"
         raise IsolationError(msg)
     if agent_uids & human_uids:
         msg = "isolation: a user can't be both an agent user and a human user"

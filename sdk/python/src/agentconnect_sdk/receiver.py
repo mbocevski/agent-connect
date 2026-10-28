@@ -11,13 +11,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import stat
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads
 from agentconnect_sdk import _log
-from agentconnect_sdk.errors import PayloadError, SignatureError
+from agentconnect_sdk.errors import AgentConnectError, PayloadError, SignatureError
 from agentconnect_sdk.signature import WebhookVerifier
 
 MAX_BODY = 1 << 20
@@ -46,6 +49,11 @@ class WebhookReceiver:
     handled payload, 503 when the same id is still being handled, 500 when
     the handler raised (the daemon redelivers), 401 for a request that is not
     authentic, 400 for a malformed body.
+
+    With ``path`` it listens on a Unix socket there instead (mode 0660, so
+    the daemon's user can connect through the group of a setgid directory in
+    the separate-OS-user mode). The daemon checks the user serving it before
+    it sends a delivery (``webhook.callback_socket``).
     """
 
     def __init__(
@@ -54,10 +62,13 @@ class WebhookReceiver:
         verifier: WebhookVerifier,
         host: str = "127.0.0.1",
         port: int = 0,
+        *,
+        path: Path | None = None,
     ) -> None:
         self._dispatch = dispatch
         self._verifier = verifier
         self._host, self._port = host, port
+        self.path = path
         self._server: asyncio.Server | None = None
 
     @property
@@ -69,9 +80,22 @@ class WebhookReceiver:
         return str(host), int(port)
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(
-            self._serve, self._host, self._port, limit=MAX_HEADER
-        )
+        if self.path is None:
+            self._server = await asyncio.start_server(
+                self._serve, self._host, self._port, limit=MAX_HEADER
+            )
+            return
+        with contextlib.suppress(FileNotFoundError):
+            if not stat.S_ISSOCK(self.path.lstat().st_mode):
+                msg = f"{self.path} exists and is not a socket; refusing to replace it"
+                raise AgentConnectError("bad_config", msg)
+            self.path.unlink()  # left behind by an earlier run
+        old = os.umask(0o007)  # never connectable by others, not even briefly
+        try:
+            self._server = await asyncio.start_unix_server(self._serve, self.path, limit=MAX_HEADER)
+        finally:
+            os.umask(old)
+        self.path.chmod(0o660)
 
     async def close(self) -> None:
         if self._server is not None:
@@ -81,6 +105,8 @@ class WebhookReceiver:
                 close_clients()  # connections accepted but not yet served
             await self._server.wait_closed()
             self._server = None
+            if self.path is not None:
+                self.path.unlink(missing_ok=True)
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:

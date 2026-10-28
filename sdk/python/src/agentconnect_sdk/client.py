@@ -621,11 +621,18 @@ class AgentConnect:
             raise ValueError(msg)
         return await self.dispatch(payload)
 
-    def webhook_receiver(self, host: str = "127.0.0.1", port: int | None = None) -> WebhookReceiver:
+    def webhook_receiver(
+        self, host: str = "127.0.0.1", port: int | None = None, *, path: Path | None = None
+    ) -> WebhookReceiver:
         """The built-in webhook server (attach mode); ``await
-        receiver.start()``. ``port`` defaults to the port of the daemon's
-        ``webhook.callback_url``."""
+        receiver.start()``. It listens on the Unix socket ``path``, else on
+        ``port``; with neither, on the daemon's ``webhook.callback_socket``,
+        else on the port of its ``webhook.callback_url``."""
         self._attached()
+        if path is None and port is None:
+            path = self._settings.callback_socket
+        if path is not None:
+            return WebhookReceiver(self.dispatch, self._webhook_verifier(), path=path)
         chosen = port if port is not None else self._settings.callback_port
         if chosen is None:
             msg = "no port: pass port= or set webhook.callback_url in the daemon config"
@@ -683,7 +690,7 @@ class AgentConnect:
         daemon's callback (needs ``webhook-secret``), ``sse`` reads the
         daemon's event stream, reconnecting with ``Last-Event-ID``, and
         ``auto`` picks ``webhook`` when the daemon config has a
-        ``webhook.callback_url``, else ``sse``."""
+        ``webhook.callback_url`` or ``webhook.callback_socket``, else ``sse``."""
         if self._host is not None:
             if mode != "auto":
                 msg = "an embedded runtime delivers in-process; mode must be auto"
@@ -692,7 +699,8 @@ class AgentConnect:
             return
         chosen = mode
         if chosen == "auto":
-            chosen = "sse" if self._settings.callback_url is None else "webhook"
+            webhook = self._settings.callback_url or self._settings.callback_socket
+            chosen = "sse" if webhook is None else "webhook"
         if chosen == "webhook":
             receiver = self.webhook_receiver(host, port)
             await receiver.start()

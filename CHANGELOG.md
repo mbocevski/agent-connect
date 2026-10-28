@@ -8,6 +8,22 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+### Added
+
+- Receivers on Unix sockets: `webhook.callback_socket` and
+  `a2a.local_agent_socket`. The daemon delivers to the socket only after
+  checking that its server runs as the daemon's user, or as one of
+  `isolation.agent_users` in the separate-OS-user mode. The SDK's
+  `WebhookReceiver` listens on a socket with `path=`, and
+  `AgentConnect.serve()` uses the configured `callback_socket`.
+
+### Changed
+
+- `a2a.local_agent_url` must be a loopback `http://` or `https://` URL
+  without credentials; anything else stops the daemon at start.
+- The separate-OS-user mode refuses a webhook or local A2A agent on a port:
+  set `webhook.callback_socket` or `a2a.local_agent_socket`.
+
 ### Removed
 
 - The `spikes/mls-xwing` crate. Its findings and decisions stay in
@@ -23,6 +39,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Another local user can no longer read or ack away deliveries by listening
+  where a receiver should be (SR-10). On a receiver socket, the daemon
+  checks the server's user before writing; any other user's socket gets
+  nothing, the delivery is retried and nothing is lost. A receiver on a
+  port keeps that risk outside the separate-OS-user mode.
+- The A2A adapter sends messages and `local_agent_token` only to
+  `local_agent_url` (or its socket): a card naming another endpoint is
+  refused and logged as `a2a_card_endpoint_mismatch`, and environment
+  proxies and redirects are ignored (SR-30, for the adapter).
 - Update `ctutils` to 0.4.4 (RUSTSEC-2026-0385), reached through
   `digest` and `hmac` in the core and the relay.
 - Drop `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387) by removing the

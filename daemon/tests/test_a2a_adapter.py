@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
-from collections.abc import AsyncIterator
+import shutil
+import socket
+import tempfile
+import threading
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +39,7 @@ from agentconnect.a2a_adapter import adapter as adapter_module
 from agentconnect.a2a_adapter.adapter import message_id
 from agentconnect.a2a_adapter.seen import Seen
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
+from agentconnect.isolation import PeerCred
 from agentconnect.runtime.engine import DaemonError
 from agentconnect.schemas import normalize
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor, ScriptedExecutor
@@ -618,3 +624,181 @@ def test_a_signed_card_survives_normalising_and_verifies() -> None:
     parsed = convert.parse_card(shaped)
     assert parsed is not None
     assert cards.signature_status(parsed, {"k1": public}) == "verified"
+
+
+# -- where messages go: the configured endpoint only (SR-10, SR-30) -----------
+
+
+class Listener:
+    """A server on a thread that records every connection's bytes and
+    answers nothing: a squatter, or a proxy that must never be used."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        if path is None:
+            self._sock = socket.create_server(("127.0.0.1", 0))
+            self.url = f"http://127.0.0.1:{self._sock.getsockname()[1]}/"
+        else:
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.bind(str(path))
+            self._sock.listen(8)
+            self.url = ""
+        self._sock.settimeout(0.05)
+        self.received: list[bytes] = []
+        self._open = True
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while self._open:
+            try:
+                conn, _ = self._sock.accept()
+            except TimeoutError:
+                continue
+            with conn:
+                conn.settimeout(0.5)
+                try:
+                    self.received.append(conn.recv(65536))
+                except TimeoutError:
+                    self.received.append(b"")
+
+    def close(self) -> list[bytes]:
+        self._open = False
+        self._thread.join(timeout=5)
+        self._sock.close()
+        return self.received
+
+
+@pytest.fixture
+def sockdir() -> Iterator[Path]:
+    d = Path(tempfile.mkdtemp(prefix="ac-a2a-", dir="/tmp"))
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def log_events(err: str) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in err.splitlines() if line.startswith("{")]
+
+
+async def test_the_agent_on_a_socket_gets_its_messages(sockdir: Path, tmp_path: Path) -> None:
+    agent = AgentServer(HelloWorldExecutor(), "uds", uds=sockdir / "a2a.sock")
+    await agent.start()
+    try:
+        adapter, sent = await started(
+            A2AOptions(
+                local_agent_url=agent.url,
+                local_agent_socket=sockdir / "a2a.sock",
+                receiver_uids=frozenset({os.geteuid()}),
+                data_dir=tmp_path,
+            )
+        )
+        d = delivery("m1", text("over the socket"))
+        assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.ACK
+        await sent.wait_for(1)
+        assert len(received(agent)) == 1
+        await adapter.aclose()
+    finally:
+        await agent.stop()
+
+
+async def test_an_agent_socket_of_another_user_is_a_retry(
+    sockdir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    other = os.geteuid() + 1
+    monkeypatch.setattr(
+        "agentconnect.isolation.peer_credentials", lambda _s: PeerCred(uid=other, gid=other)
+    )
+    squatter = Listener(sockdir / "a2a.sock")
+    adapter, sent = await started(
+        A2AOptions(
+            local_agent_url="http://localhost/",
+            local_agent_socket=sockdir / "a2a.sock",
+            local_agent_token=secrets.token_urlsafe(16),
+            receiver_uids=frozenset({os.geteuid()}),
+            data_dir=tmp_path,
+        )
+    )
+    d = delivery("m1", text("not for a squatter"))
+    assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.RETRY
+    await adapter.aclose()
+    got = squatter.close()
+    assert got  # it was dialled, and refused before a byte was written
+    assert all(b == b"" for b in got)
+    assert sent.calls == []
+    refused = [
+        e for e in log_events(capsys.readouterr().err) if e["event"] == "a2a_receiver_refused"
+    ]
+    assert refused
+    assert str(other) in refused[0]["reason"]
+
+
+async def test_a_card_naming_another_endpoint_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    elsewhere = Listener()
+    agent = AgentServer(HelloWorldExecutor(), "liar", card_url=elsewhere.url)
+    await agent.start()
+    try:
+        adapter, sent = await started(
+            A2AOptions(
+                local_agent_url=agent.url,
+                local_agent_token=secrets.token_urlsafe(16),
+                data_dir=tmp_path,
+            )
+        )
+        d = delivery("m1", text("stay here"))
+        assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.RETRY
+        assert adapter.capabilities().agent_card is None
+        await adapter.aclose()
+    finally:
+        await agent.stop()
+    assert elsewhere.close() == []
+    assert received(agent) == []
+    assert sent.calls == []
+    (mismatch, *_) = [
+        e for e in log_events(capsys.readouterr().err) if e["event"] == "a2a_card_endpoint_mismatch"
+    ]
+    assert mismatch["configured_endpoint"] == agent.url.rstrip("/")
+    assert mismatch["card_endpoint"] == elsewhere.url.rstrip("/")
+
+
+async def test_a_card_on_the_socket_naming_another_endpoint_is_refused(
+    sockdir: Path, tmp_path: Path
+) -> None:
+    agent = AgentServer(
+        HelloWorldExecutor(), "liar", uds=sockdir / "a2a.sock", card_url="http://agent.example.org/"
+    )
+    await agent.start()
+    try:
+        adapter, _sent = await started(
+            A2AOptions(
+                local_agent_url=agent.url,
+                local_agent_socket=sockdir / "a2a.sock",
+                receiver_uids=frozenset({os.geteuid()}),
+                data_dir=tmp_path,
+            )
+        )
+        d = delivery("m1", text("stay here"))
+        assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.RETRY
+        await adapter.aclose()
+    finally:
+        await agent.stop()
+    assert received(agent) == []
+
+
+async def test_environment_proxies_are_ignored(
+    hello: AgentServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = Listener()
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(var, proxy.url)
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    adapter, sent = await started(A2AOptions(local_agent_url=hello.url, data_dir=tmp_path))
+    d = delivery("m1", text("direct, please"))
+    assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.ACK
+    await sent.wait_for(1)
+    await adapter.aclose()
+    assert proxy.close() == []

@@ -140,10 +140,11 @@ async def test_task_status_and_artifact_replies(cluster: Cluster, sockdir: Path)
     await bob.close()
 
 
+@pytest.mark.parametrize("over", ["tcp", "socket"])
 async def test_messages_queue_while_the_webhook_is_down_and_arrive_in_order(
-    cluster: Cluster, sockdir: Path
+    cluster: Cluster, sockdir: Path, over: str
 ) -> None:
-    alice, bob, gid = await pair(cluster, sockdir, started=False)
+    alice, bob, gid = await pair(cluster, sockdir, started=False, hook_socket=over == "socket")
     handled: list[str] = []
     done = asyncio.Event()
 

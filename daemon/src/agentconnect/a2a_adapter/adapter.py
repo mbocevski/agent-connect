@@ -44,6 +44,7 @@ from collections.abc import AsyncIterator, Coroutine, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import httpx
 from a2a.client import A2ACardResolver, A2AClientError, Client, ClientConfig, ClientFactory
@@ -73,6 +74,8 @@ from agentconnect.adapter import (
     Sender,
 )
 from agentconnect.clock import Clock, unix_seconds
+from agentconnect.isolation import receiver_uids
+from agentconnect.sockets import PeerMismatchError, receiver_async_transport
 from agentconnect.tasks import cancel_and_wait
 
 if TYPE_CHECKING:
@@ -93,6 +96,10 @@ class A2AOptions:
     """The adapter's configuration (``[a2a]`` in config.toml)."""
 
     local_agent_url: str | None = None
+    # A Unix socket every request to the local agent goes to, served by one
+    # of receiver_uids (SR-10); local_agent_url then gives Host and paths.
+    local_agent_socket: Path | None = None
+    receiver_uids: frozenset[int] = frozenset()
     local_agent_token: str | None = field(default=None, repr=False)
     card_keys: Mapping[str, PyJWK] = field(default_factory=dict, repr=False)
     facade_port: int | None = None  # None: no facade; 0: any free port
@@ -109,6 +116,8 @@ class A2AOptions:
             token = text or None
         return A2AOptions(
             local_agent_url=config.a2a_local_agent_url,
+            local_agent_socket=config.a2a_local_agent_socket,
+            receiver_uids=receiver_uids(config),
             local_agent_token=token,
             card_keys=cards.load_jwks(config.a2a_card_keys_file),
             facade_port=config.a2a_facade_port if config.a2a_facade_port > 0 else None,
@@ -286,8 +295,20 @@ class A2AAdapter:
             headers = {}
             if self.options.local_agent_token is not None:
                 headers["Authorization"] = f"Bearer {self.options.local_agent_token}"
+            uds = self.options.local_agent_socket
+            transport = (
+                None if uds is None else receiver_async_transport(uds, self.options.receiver_uids)
+            )
             # No read timeout: a stream may stay quiet while the agent works.
-            self._http = httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30.0, read=None))
+            # No environment proxies and no redirects: the token and the
+            # messages go to local_agent_url (or its socket) and nowhere else.
+            self._http = httpx.AsyncClient(
+                headers=headers,
+                timeout=httpx.Timeout(30.0, read=None),
+                transport=transport,
+                trust_env=False,
+                follow_redirects=False,
+            )
             await self._load_card()
         if self.options.facade_port is not None and self.facade is None:
             self.facade_token = self._facade_token()
@@ -451,6 +472,9 @@ class A2AAdapter:
                 stream = aiter(self._plain.send_message(request))
                 first = await anext(stream, None)
         except A2AClientError as e:
+            refused = _refusal(e)
+            if refused is not None:
+                LOG.warning("a2a_receiver_refused", reason=str(refused))
             LOG.warning(
                 "a2a_local_unreachable", group=log.hid(group.group_id), error=type(e).__name__
             )
@@ -543,7 +567,20 @@ class A2AAdapter:
             async with asyncio.timeout(CARD_TIMEOUT):
                 card = await resolver.get_agent_card()
         except (A2AError, httpx.HTTPError, TimeoutError) as e:
+            refused = _refusal(e)
+            if refused is not None:
+                LOG.warning("a2a_receiver_refused", reason=str(refused))
             LOG.warning("a2a_card_unavailable", error=type(e).__name__)
+            return False
+        elsewhere = _other_endpoint(card, self.options.local_agent_url)
+        if elsewhere is not None:
+            # The client would send the token and messages where the card
+            # says: only the configured endpoint is trusted (SR-10).
+            LOG.warning(
+                "a2a_card_endpoint_mismatch",
+                configured_endpoint=_origin(self.options.local_agent_url),
+                card_endpoint=_origin(elsewhere),
+            )
             return False
         status = cards.signature_status(card, self.options.card_keys)
         if status == "invalid":
@@ -563,3 +600,38 @@ class A2AAdapter:
     def _forget(self, group_id: str) -> None:
         for table in (self._groups, self._cards, self._peers, self._context):
             table.pop(group_id, None)
+
+
+def _refusal(e: BaseException) -> PeerMismatchError | None:
+    """The receiver check behind a client error, if that was the cause."""
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, PeerMismatchError):
+            return cur
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _endpoint(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url)
+    default = {"http": 80, "https": 443}.get(parts.scheme)
+    return parts.scheme, (parts.hostname or "").lower(), parts.port or default
+
+
+def _origin(url: str) -> str:
+    """``scheme://host:port`` of ``url``: what is compared, and safe to log
+    (no path, query or credentials)."""
+    scheme, host, port = _endpoint(url)
+    return f"{scheme}://{host}:{port}"
+
+
+def _other_endpoint(card: AgentCard, configured: str) -> str | None:
+    """An interface URL of ``card`` whose scheme, host or port isn't the
+    configured endpoint's, or ``None``."""
+    want = _endpoint(configured)
+    for interface in card.supported_interfaces:
+        if _endpoint(interface.url) != want:
+            return interface.url
+    return None

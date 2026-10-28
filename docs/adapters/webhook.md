@@ -31,6 +31,32 @@ The callback must be a loopback address (`127.0.0.0/8`, `::1` or
 URL must then use `https`, because message text travels in the body. Redirects
 are never followed. See [config.md](../config.md).
 
+### On a Unix socket
+
+On a loopback port, another local user who listens there while the receiver
+is down reads every delivery and can ack it away with a bare `204`. A
+receiver on a Unix socket avoids that:
+
+```toml
+[webhook]
+callback_socket = "/run/agentconnect-recv/agent/hook.sock"
+```
+
+The daemon then sends every request to that socket. Before it writes a byte,
+it asks the kernel which user serves the socket (`SO_PEERCRED` on Linux,
+`getpeereid(2)` on macOS) and requires the daemon's own user, or in the
+separate-OS-user mode one of `isolation.agent_users`
+([isolation.md](../isolation.md)). Any other user's socket is a retry: the
+delivery stays queued, nothing is sent, and `webhook_receiver_refused` is
+logged with the path and both user IDs. `callback_url`, if set, still gives
+the path and `Host` of each request; without it they are `/` and
+`localhost`. The separate-OS-user mode requires `callback_socket`.
+
+The SDK serves the socket with `AgentConnect.serve()`, which picks it up
+from the daemon's config, or `webhook_receiver(path=...)`
+([sdk.md](../sdk.md)). Other frameworks can too: `uvicorn --uds`, gunicorn
+`bind = "unix:..."` or aiohttp `UnixSite`. The signature check is the same.
+
 ## Request
 
 Each delivery is `POST <callback_url>` with a JSON body and these headers:

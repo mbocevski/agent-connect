@@ -4,6 +4,7 @@ agent (a2a-sdk, on loopback), and what it streams back reaches the group."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -67,9 +68,12 @@ async def one_to_one(cluster: Cluster, agent: AgentServer) -> tuple[Node, Node, 
     return a, b, gid
 
 
-async def test_helloworld_one_to_one(cluster: Cluster) -> None:
+@pytest.mark.parametrize("over", ["tcp", "socket"])
+async def test_helloworld_one_to_one(cluster: Cluster, sockdir: Path, over: str) -> None:
     executor = HelloWorldExecutor()
-    agent = AgentServer(executor, "helloworld")
+    # On a socket, every request goes there and its server's user is checked.
+    uds = sockdir / "agent.sock"
+    agent = AgentServer(executor, "helloworld", uds=uds if over == "socket" else None)
     await agent.start()
     try:
         a, b, gid = await one_to_one(cluster, agent)

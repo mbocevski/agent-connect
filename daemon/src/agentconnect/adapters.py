@@ -6,14 +6,17 @@ from agentconnect.adapter import Adapter
 from agentconnect.clock import Clock
 from agentconnect.config import Config
 from agentconnect.deliveries import DeliveryQueue
+from agentconnect.isolation import receiver_uids
+from agentconnect.sockets import receiver_async_transport
 from agentconnect.sse import SseAdapter
 from agentconnect.tokens import load_token
-from agentconnect.webhook import SECRET_FILE, WebhookAdapter
+from agentconnect.webhook import SECRET_FILE, SOCKET_URL, WebhookAdapter
 
 
 def build_adapters(config: Config, clock: Clock) -> list[Adapter]:
     """The adapters named by ``daemon.adapters`` (or ``daemon.default_adapter``),
-    in that order: ``webhook`` (needs ``webhook.callback_url``), ``sse``,
+    in that order: ``webhook`` (needs ``webhook.callback_url`` or
+    ``webhook.callback_socket``, checked by its server's user), ``sse``,
     ``mcp`` (the delivery queue that MCP sessions attached to this daemon pull
     from, docs/adapters/mcp.md) and ``a2a``. The A2A adapter
     (docs/adapters/a2a.md) also runs whenever ``a2a.local_agent_url`` or
@@ -29,11 +32,22 @@ def build_adapters(config: Config, clock: Clock) -> list[Adapter]:
     adapters: list[Adapter] = []
     names = config.adapter_names
     for name in names:
-        if name == "webhook" and config.webhook_url is not None:
+        if name == "webhook" and (config.webhook_url or config.webhook_socket) is not None:
             config.data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             secret = load_token(config.data_dir / SECRET_FILE)
+            transport = (
+                None
+                if config.webhook_socket is None
+                else receiver_async_transport(config.webhook_socket, receiver_uids(config))
+            )
             adapters.append(
-                WebhookAdapter(config.webhook_url, secret, clock, timeout=config.webhook_timeout)
+                WebhookAdapter(
+                    config.webhook_url or SOCKET_URL,
+                    secret,
+                    clock,
+                    transport=transport,
+                    timeout=config.webhook_timeout,
+                )
             )
         elif name == "sse":
             adapters.append(SseAdapter(clock, config.sse_retention))
