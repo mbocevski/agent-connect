@@ -63,7 +63,11 @@ provenance; the release notes give its digest.
 
 On SIGTERM (what Docker, systemd and Kubernetes send) or SIGINT the
 directory stops accepting connections, waits for the requests in flight and
-exits with status 0.
+exits with status 0. Connections still open after
+`AC_DIRECTORY_SHUTDOWN_GRACE_SECS` (8 s) are dropped and it exits anyway;
+the default fits inside Docker's 10 s stop timeout. With a longer grace,
+give the supervisor a longer stop timeout too (`docker stop -t`,
+`stop_grace_period`, `TimeoutStopSec`).
 
 ## Configuration
 
@@ -79,6 +83,7 @@ exits with status 0.
 | `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6), `/0` included, are refused. Write IPv4 proxies as IPv4 blocks: a peer on an IPv4-mapped IPv6 address is matched as IPv4. |
 | `AC_DIRECTORY_TRUST_ANY_PROXY` | unset | `1` allows the broad blocks above. |
 | `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
+| `AC_DIRECTORY_SHUTDOWN_GRACE_SECS` | `8` | After SIGTERM or SIGINT, how long open connections may hold the exit up (1 to 3600 seconds). |
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `AC_DIRECTORY_FONT_DIR` | none | A directory of font files (`.woff2`, `.woff`, `.ttf`, `.otf`) served at `/static/fonts/<file>`, for a replacement stylesheet to load with `@font-face`. Setting it adds `font-src 'self'` to the Content-Security-Policy; without it the policy has no `font-src`. Only regular files directly in the directory are served: no symlinks or subdirectories. |
 | `AC_DIRECTORY_NAME` | none | The operator's name for the site, e.g. `Example directory`: the home page's heading and the header's site name, with "AgentConnect directory" above the heading and after the name in page titles (`Example directory · AgentConnect directory`). It is trimmed, and may not be empty, hold control characters or be longer than 80 characters. |

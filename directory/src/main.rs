@@ -25,22 +25,44 @@ fn invalid(e: impl Into<String>) -> std::io::Error {
 /// signal that arrives after the "listening" line still stops the
 /// directory gracefully. As PID 1 in a container, a process without a
 /// SIGTERM handler ignores SIGTERM until it is killed.
+/// A signal whose handler can't be installed is logged and never fires.
 fn stop_signal() -> impl Future<Output = ()> {
     #[cfg(unix)]
-    let handlers = {
+    let (int, term) = {
         use tokio::signal::unix::{SignalKind, signal};
-        signal(SignalKind::interrupt()).and_then(|int| Ok((int, signal(SignalKind::terminate())?)))
+        let install = |kind: SignalKind, name: &'static str| {
+            signal(kind)
+                .inspect_err(|e| {
+                    tracing::warn!(signal = name, error = %e, "cannot install a signal handler");
+                })
+                .ok()
+        };
+        (
+            install(SignalKind::interrupt(), "SIGINT"),
+            install(SignalKind::terminate(), "SIGTERM"),
+        )
     };
     async move {
         #[cfg(unix)]
-        if let Ok((mut int, mut term)) = handlers {
-            tokio::select! {
-                _ = int.recv() => {}
-                _ = term.recv() => {}
+        {
+            async fn fired(sig: Option<tokio::signal::unix::Signal>) {
+                match sig {
+                    Some(mut s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
             }
-            return;
+            tokio::select! {
+                () = fired(int) => {}
+                () = fired(term) => {}
+            }
         }
-        let _ = tokio::signal::ctrl_c().await;
+        #[cfg(not(unix))]
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(signal = "Ctrl-C", error = %e, "cannot install a signal handler");
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -114,12 +136,33 @@ async fn serve<S: Store>(
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     let stop = stop_signal();
     tracing::info!(addr = %listener.local_addr()?, "directory listening");
-    axum::serve(
+    // On the signal the listener closes and connections drain, for at most
+    // the grace: an unfinished request mustn't hold the exit up until the
+    // supervisor kills the process.
+    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(
         listener,
         app(dir, http).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(stop)
-    .await
+    .with_graceful_shutdown(async move {
+        stop.await;
+        tracing::info!("shutting down");
+        let _ = stopping.send(());
+    });
+    let grace = config.shutdown_grace;
+    tokio::select! {
+        result = server => result,
+        () = async {
+            if stopped.await.is_ok() {
+                tokio::time::sleep(grace).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::warn!(grace_secs = grace.as_secs(), "connections still open after the shutdown grace");
+            Ok(())
+        }
+    }
 }
 
 #[tokio::main]

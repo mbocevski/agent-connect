@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use agentconnect_core::identity::canonical_relay_host;
 use agentconnect_core::operator::{OperatorLinks, web_url};
@@ -10,6 +11,11 @@ use agentconnect_core::operator::{OperatorLinks, web_url};
 pub const DEFAULT_ADDR: &str = "127.0.0.1:8090";
 /// `AC_DIRECTORY_DB` value for a throwaway in-memory store.
 pub const MEMORY_DB: &str = "memory:";
+/// Default `AC_DIRECTORY_SHUTDOWN_GRACE_SECS`: under Docker's 10 s stop
+/// timeout, so `docker stop` ends in a clean exit, not a kill.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
+/// The longest shutdown grace accepted, in seconds.
+pub const MAX_SHUTDOWN_GRACE_SECS: u64 = 3600;
 
 /// An address block, `addr/prefix` (or a single address).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +182,26 @@ pub struct Config {
     /// `AC_DIRECTORY_TERMS` and `AC_DIRECTORY_ABUSE`: the operator's terms
     /// page and abuse contact, shown in every page's footer.
     pub links: OperatorLinks,
+    /// `AC_DIRECTORY_SHUTDOWN_GRACE_SECS`: how long connections still open
+    /// after SIGTERM or SIGINT may hold the exit up.
+    pub shutdown_grace: Duration,
+}
+
+/// `AC_DIRECTORY_SHUTDOWN_GRACE_SECS`: whole seconds, 1 to
+/// [`MAX_SHUTDOWN_GRACE_SECS`].
+fn shutdown_grace(v: Option<String>) -> Result<Duration, String> {
+    let Some(v) = v else {
+        return Ok(DEFAULT_SHUTDOWN_GRACE);
+    };
+    v.parse::<u64>()
+        .ok()
+        .filter(|s| (1..=MAX_SHUTDOWN_GRACE_SECS).contains(s))
+        .map(Duration::from_secs)
+        .ok_or_else(|| {
+            format!(
+                "AC_DIRECTORY_SHUTDOWN_GRACE_SECS must be 1 to {MAX_SHUTDOWN_GRACE_SECS} seconds: {v}"
+            )
+        })
 }
 
 fn list(v: Option<String>) -> Vec<String> {
@@ -270,6 +296,7 @@ impl Config {
             .map(|n| site_text("AC_DIRECTORY_NOTICE", "notice", &n, MAX_NOTICE))
             .transpose()?;
         let links = OperatorLinks::from_lookup("AC_DIRECTORY", &get)?;
+        let shutdown_grace = shutdown_grace(get("AC_DIRECTORY_SHUTDOWN_GRACE_SECS"))?;
         Ok(Self {
             addr,
             db,
@@ -290,6 +317,7 @@ impl Config {
             home,
             notice,
             links,
+            shutdown_grace,
         })
     }
 
@@ -461,6 +489,20 @@ mod tests {
             assert!(Config::from_lookup(lookup(&bad)).is_err(), "{bad:?}");
         }
         let _ = Config::from_env();
+    }
+
+    #[test]
+    fn the_shutdown_grace_defaults_below_dockers_stop_timeout() {
+        assert_eq!(with(&[]).unwrap().shutdown_grace, Duration::from_secs(8));
+        let c = with(&[("AC_DIRECTORY_SHUTDOWN_GRACE_SECS", "3")]).unwrap();
+        assert_eq!(c.shutdown_grace, Duration::from_secs(3));
+        for bad in ["0", "-1", "x", "", "3601"] {
+            let err = with(&[("AC_DIRECTORY_SHUTDOWN_GRACE_SECS", bad)]).unwrap_err();
+            assert!(
+                err.contains("AC_DIRECTORY_SHUTDOWN_GRACE_SECS"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     fn with(extra: &[(&'static str, &'static str)]) -> Result<Config, String> {

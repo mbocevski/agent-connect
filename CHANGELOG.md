@@ -18,6 +18,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - The directory shuts down gracefully on SIGTERM as well as SIGINT, like
   the relay. As PID 1 in its image it ignored SIGTERM, so `docker stop`
   and redeploys waited out the stop timeout and killed it (exit 137).
+  Connections still open after `AC_DIRECTORY_SHUTDOWN_GRACE_SECS`
+  (default 8 s, under Docker's 10 s) no longer hold the exit up.
 
 ### Security
 
