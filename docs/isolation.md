@@ -22,6 +22,7 @@ is no user boundary to put between them.
 | data directory (`/var/lib/agentconnect`) | `agentconnect` | 0700 | keys, both databases, `api-token`, `human-token`, `webhook-secret` (0600 each) |
 | agent directory (`/run/agentconnect`) | `agentconnect:agentconnect` | 0750 | the API socket (0660), copies of `api-token` and `webhook-secret` (0640) |
 | `/etc/agentconnect/config.toml` | `root:agentconnect` | 0640 | the configuration; no secrets |
+| receiver directory (`/run/agentconnect-recv/<agent>`) | `<agent>:agentconnect` | 2750 | the agent's webhook or A2A socket (0660) |
 
 - **The socket is group-accessible.** Agents' users join the `agentconnect`
   group. The agent directory holds only agent-scope material: the human
@@ -41,6 +42,16 @@ is no user boundary to put between them.
   so one agent user can't take all 48 of the agent token's requests in
   progress and leave another agent user's requests `503 busy`
   ([api.md](api.md#transport)).
+- **Deliveries go only to the agents' users.** The webhook and A2A
+  receivers are Unix sockets (`webhook.callback_socket`,
+  `a2a.local_agent_socket`). Before the daemon writes a delivery, it checks
+  that the socket's server runs as one of `isolation.agent_users`; another
+  user's socket at that path gets nothing, and the delivery is retried
+  (`webhook_receiver_refused`, `a2a_receiver_refused`, with both UIDs). A
+  receiver on a port can't be checked, so the mode refuses one, and a
+  receiver socket with no `isolation.agent_users` (nobody to deliver to)
+  stops the start too. The receiver directory's permissions are defence in
+  depth, not the boundary.
 - **The human token is gated by UID as well.** A request that carries the
   human token is refused with `403 peer_refused` unless it comes from the
   daemon's own UID or an `isolation.human_users` entry. This is on top of the
@@ -52,6 +63,9 @@ is no user boundary to put between them.
   - it runs as root;
   - the API is on TCP (`api.tcp_port`), where the peer's user can't be
     checked;
+  - a webhook or local A2A agent is set without its socket
+    (`webhook.callback_url` without `webhook.callback_socket`,
+    `a2a.local_agent_url` without `a2a.local_agent_socket`);
   - the data directory isn't owned by the daemon's user with mode 0700, or a
     token or `webhook-secret` isn't a regular file owned by it with mode 0600;
   - the agent directory isn't owned by the daemon's user and
@@ -134,7 +148,14 @@ The files are in [`packaging/`](../packaging/).
    ```
 
 4. Add each agent user to the group: `sudo usermod -aG agentconnect agent`.
-   The user must log in again for the group to apply.
+   The user must log in again for the group to apply. For an agent that
+   receives deliveries (webhook or A2A), add its receiver directory to the
+   tmpfiles file (the commented line shows how), run
+   `sudo systemd-tmpfiles --create agentconnect.conf` again, and point
+   `webhook.callback_socket` or `a2a.local_agent_socket` at a socket in it.
+   The directory is setgid `agentconnect`, so the agent's socket gets that
+   group and the daemon can connect. Keep it out of `/tmp` and home
+   directories: the unit gives the daemon a private `/tmp` and no homes.
 5. Let the human run the CLI as the daemon's user. Edit
    `packaging/sudoers.d/agentconnect` (replace `alice`) and install it with
    `sudo visudo -f /etc/sudoers.d/agentconnect`.
@@ -185,6 +206,13 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/network.yggdrasill.agentc
 
 The human runs `sudo -u _agentconnect agentconnect ... --config
 /usr/local/etc/agentconnect/config.toml`.
+
+For an agent that receives deliveries, create its receiver directory with
+the agent's user, the daemon's group and the setgid bit, for example
+`sudo install -d -m 2750 -o agent -g _agentconnect /usr/local/var/run/agentconnect-recv/agent`
+(after `sudo install -d -m 0755 /usr/local/var/run/agentconnect-recv`), and
+point `webhook.callback_socket` or `a2a.local_agent_socket` at a socket in
+it.
 
 ## Agents
 

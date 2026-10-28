@@ -30,6 +30,7 @@ class Settings:
     socket: Path
     tcp_port: int
     callback_url: str | None
+    callback_socket: Path | None = None
 
     @property
     def callback_port(self) -> int | None:
@@ -72,6 +73,7 @@ def load_settings(
     socket = api.get("socket")
     port = api.get("tcp_port", 0)
     callback = webhook.get("callback_url")
+    callback_socket = webhook.get("callback_socket")
     return Settings(
         data_dir=data_dir,
         # Where the daemon binds it: a path over the platform's limit is
@@ -83,6 +85,11 @@ def load_settings(
         ),
         tcp_port=port if isinstance(port, int) and not isinstance(port, bool) else 0,
         callback_url=callback if isinstance(callback, str) and callback else None,
+        callback_socket=(
+            Path(callback_socket).expanduser()
+            if isinstance(callback_socket, str) and callback_socket
+            else None
+        ),
     )
 
 

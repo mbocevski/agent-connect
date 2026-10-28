@@ -148,10 +148,16 @@ class _Check:
     """The checks around ``connect()``: the short directory before it, the
     server's UID after it, both before a byte is written."""
 
-    def __init__(self, token_dir: Path, credentials: CredentialProvider | None) -> None:
-        self.token_dir = token_dir
-        self.expected = token_owner(token_dir)
+    def __init__(
+        self, expected: Iterable[int], whose: str, credentials: CredentialProvider | None
+    ) -> None:
+        self.expected = frozenset(expected)
+        self.whose = whose  # who the expected UIDs are, for the refusal
         self._credentials = credentials or _system_credentials
+
+    @classmethod
+    def token_dir_owner(cls, token_dir: Path, credentials: CredentialProvider | None) -> _Check:
+        return cls({token_owner(token_dir)}, f"the owner of {token_dir}", credentials)
 
     @staticmethod
     def before(path: str) -> None:
@@ -177,15 +183,16 @@ class _Check:
         except OSError:
             msg = f"cannot read the credentials of the server at {path}; nothing was sent"
             raise PeerMismatchError(msg) from None
-        if uid != self.expected:
+        if uid not in self.expected:
+            wanted = " or ".join(str(u) for u in sorted(self.expected)) or "none"
             msg = (
-                f"the socket at {path} is served by uid {uid}, not uid {self.expected} "
-                f"(the owner of {self.token_dir}); nothing was sent"
+                f"the socket at {path} is served by uid {uid}, not uid {wanted} "
+                f"({self.whose}); nothing was sent"
             )
             raise PeerMismatchError(msg)
 
 
-_TCP_REFUSED = "the local API is reached over its Unix socket only"
+_TCP_REFUSED = "only the Unix socket is dialled"
 
 
 class _SyncBackend(httpcore.NetworkBackend):
@@ -281,7 +288,7 @@ def local_transport(
         max_keepalive_connections=_LIMITS.max_keepalive_connections,
         keepalive_expiry=_LIMITS.keepalive_expiry,
         uds=path,
-        network_backend=_SyncBackend(_Check(token_dir, credentials)),
+        network_backend=_SyncBackend(_Check.token_dir_owner(token_dir, credentials)),
     )
     return transport
 
@@ -297,6 +304,27 @@ def local_async_transport(
         max_keepalive_connections=_LIMITS.max_keepalive_connections,
         keepalive_expiry=_LIMITS.keepalive_expiry,
         uds=path,
-        network_backend=_AsyncBackend(_Check(token_dir, credentials)),
+        network_backend=_AsyncBackend(_Check.token_dir_owner(token_dir, credentials)),
+    )
+    return transport
+
+
+def receiver_async_transport(
+    socket: Path, uids: Iterable[int], *, credentials: CredentialProvider | None = None
+) -> httpx.AsyncBaseTransport:
+    """The daemon's transport to a receiver it delivers to (the webhook, the
+    local A2A agent) on the Unix socket at ``socket``: every request goes
+    there, whatever its URL names, and each connection's server must run as
+    one of ``uids`` before a byte is written (:class:`PeerMismatchError`
+    otherwise; the caller retries). ``credentials`` replaces the kernel's
+    answer in tests."""
+    path = str(socket)
+    transport = httpx.AsyncHTTPTransport(uds=path, trust_env=False)
+    transport._pool = httpcore.AsyncConnectionPool(
+        max_connections=_LIMITS.max_connections,
+        max_keepalive_connections=_LIMITS.max_keepalive_connections,
+        keepalive_expiry=_LIMITS.keepalive_expiry,
+        uds=path,
+        network_backend=_AsyncBackend(_Check(uids, "a user this daemon delivers to", credentials)),
     )
     return transport

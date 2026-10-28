@@ -31,3 +31,11 @@ def test_the_data_directory_comes_from_the_environment_then_the_config(tmp_path:
     assert default == tmp_path / ".local/share/agentconnect"
     xdg = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "xdg")}
     assert load_settings(config_path=missing, environ=xdg).data_dir == tmp_path / "xdg/agentconnect"
+
+
+def test_the_callback_socket_comes_from_the_config(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('[webhook]\ncallback_socket = "~/hook.sock"\n', encoding="utf-8")
+    settings = load_settings(config_path=config, environ={"HOME": str(tmp_path)})
+    assert settings.callback_socket == Path("~/hook.sock").expanduser()
+    assert settings.callback_url is None

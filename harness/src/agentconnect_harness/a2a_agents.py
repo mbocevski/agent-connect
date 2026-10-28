@@ -22,9 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import os
+import socket
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, override
 
+import uvicorn
 from a2a.helpers.proto_helpers import new_task
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -190,18 +194,48 @@ class _BearerOnly:
         await self._app(scope, receive, send)
 
 
-class AgentServer:
-    """An A2A agent on ``127.0.0.1``."""
+class _UnixServer(LoopbackServer):
+    """:class:`LoopbackServer` on a Unix socket at ``path`` instead."""
 
-    def __init__(
+    def __init__(self, app: Any, path: Path) -> None:
+        super().__init__(app)
+        self._path = path
+
+    @override
+    async def start(self) -> int:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(str(self._path))
+        config = uvicorn.Config(
+            self._app, lifespan="off", access_log=False, log_level="warning", log_config=None
+        )
+        config.load()
+        server = uvicorn.Server(config)
+        server.lifespan = config.lifespan_class(config)
+        await server.startup(sockets=[sock])
+        self._server = server
+        return 0
+
+
+class AgentServer:
+    """An A2A agent on ``127.0.0.1``, or on a Unix socket at ``uds``
+    (its card then names ``url``). ``card_url`` makes the card name
+    another endpoint than the one it is served from."""
+
+    def __init__(  # noqa: PLR0913
         self,
         executor: AgentExecutor,
         name: str,
         skills: list[str] | None = None,
         streaming: bool = True,
         token: str | None = None,
+        *,
+        uds: Path | None = None,
+        url: str = "http://localhost/",
+        card_url: str | None = None,
     ) -> None:
         self.executor = executor
+        self.uds, self._card_url = uds, card_url
+        self._uds_url = url
         self.name = name
         self._skills = skills or ["chat"]
         self._streaming = streaming
@@ -217,15 +251,24 @@ class AgentServer:
             await holder["app"](scope, receive, send)
 
         root: Any = app if self._token is None else _BearerOnly(app, self._token)
-        self._server = LoopbackServer(root)
-        port = await self._server.start()
-        self.url = f"http://127.0.0.1:{port}/"
+        if self.uds is not None:
+            self._server = _UnixServer(root, self.uds)
+            await self._server.start()
+            self.url = self._uds_url
+        else:
+            self._server = LoopbackServer(root)
+            port = await self._server.start()
+            self.url = f"http://127.0.0.1:{port}/"
         self.card = AgentCard(
             name=self.name,
             description=f"{self.name}, a test agent",
             version="1.0.0",
             supported_interfaces=[
-                AgentInterface(url=self.url, protocol_binding="JSONRPC", protocol_version="1.0")
+                AgentInterface(
+                    url=self._card_url or self.url,
+                    protocol_binding="JSONRPC",
+                    protocol_version="1.0",
+                )
             ],
             capabilities=AgentCapabilities(streaming=self._streaming),
             default_input_modes=["text/plain"],
@@ -264,6 +307,8 @@ async def a2a_node(
     def make(config: Any, _clock: Any) -> list[Any]:
         options = A2AOptions(
             local_agent_url=None if agent is None else agent.url,
+            local_agent_socket=None if agent is None else agent.uds,
+            receiver_uids=frozenset({os.geteuid()}),
             facade_port=0 if facade else None,
             data_dir=config.data_dir,
         )

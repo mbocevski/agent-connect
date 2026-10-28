@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import stat
+import tempfile
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 import pytest_asyncio
 
-from agentconnect_sdk import AgentConnect, Group, Message, sign
+from agentconnect_sdk import AgentConnect, AgentConnectError, Group, Message, sign
 from agentconnect_sdk.receiver import WebhookReceiver
 
 Payload = Callable[..., dict[str, Any]]
@@ -204,3 +208,88 @@ async def test_an_unexpected_server_error_is_500(
 def test_address_needs_a_started_server(agent: AgentConnect) -> None:
     with pytest.raises(RuntimeError, match="not started"):
         _ = agent.webhook_receiver(port=0).address
+
+
+# -- on a Unix socket (SR-10) ---------------------------------------------------
+
+
+@pytest.fixture
+def sockdir() -> Iterator[Path]:
+    # /tmp, not $TMPDIR: socket paths are limited to about 100 bytes.
+    d = Path(tempfile.mkdtemp(prefix="ac-hook-", dir="/tmp"))
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+async def post_unix(path: Path, body: bytes, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    reader, writer = await asyncio.open_unix_connection(str(path))
+    lines = ["POST /hook HTTP/1.1", "host: localhost", f"content-length: {len(body)}"]
+    lines += [f"{k}: {v}" for k, v in headers.items()]
+    writer.write("\r\n".join(lines).encode() + b"\r\n\r\n" + body)
+    await writer.drain()
+    writer.write_eof()
+    raw = await reader.read()
+    writer.close()
+    head, _, rest = raw.partition(b"\r\n\r\n")
+    return int(head.split()[1]), json.loads(rest)
+
+
+async def test_the_receiver_serves_a_unix_socket(
+    agent: AgentConnect, sockdir: Path, secret: str, make_payload: Payload
+) -> None:
+    got: list[str] = []
+
+    @agent.on_message
+    async def handle(msg: Message, _group: Group) -> None:
+        got.append(msg.raw_text)
+
+    path = sockdir / "hook.sock"
+    path.touch()  # a stale file from an earlier run is not replaced...
+    with pytest.raises(AgentConnectError, match="not a socket"):
+        await agent.webhook_receiver(path=path).start()
+    path.unlink()
+    server = agent.webhook_receiver(path=path)
+    await server.start()
+    try:
+        # The daemon's user (the group, in the separate-OS-user mode) connects.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o660
+        assert server.path == path
+        body = json.dumps(make_payload(msg_id="m1")).encode()
+        assert await post_unix(path, body, signed(secret, body)) == (200, {"status": "handled"})
+        assert got == ["hello"]
+    finally:
+        await server.close()
+    # ...but a socket left behind is.
+    stale = agent.webhook_receiver(path=path)
+    await stale.start()
+    await stale.close()
+    assert not path.exists()
+
+
+async def test_serve_listens_on_the_configured_socket(  # noqa: PLR0913, PLR0917
+    isolated_env: None,
+    data_dir: Path,
+    sockdir: Path,
+    tmp_path: Path,
+    secret: str,
+    make_payload: Payload,
+) -> None:
+    path = sockdir / "hook.sock"
+    config = tmp_path / "daemon.toml"
+    config.write_text(f'[webhook]\ncallback_socket = "{path}"\n', encoding="utf-8")
+    agent = AgentConnect(data_dir=data_dir, config_path=config)
+    got: list[str] = []
+
+    @agent.on_message
+    async def handle(msg: Message, _group: Group) -> None:
+        got.append(msg.raw_text)
+
+    ready = asyncio.Event()
+    task = asyncio.create_task(agent.serve(ready=ready))
+    await asyncio.wait_for(ready.wait(), 5)
+    body = json.dumps(make_payload(msg_id="m2")).encode()
+    assert await post_unix(path, body, signed(secret, body)) == (200, {"status": "handled"})
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await agent.aclose()
+    assert got == ["hello"]

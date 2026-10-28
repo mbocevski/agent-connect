@@ -23,7 +23,12 @@ signed afresh, so a captured request stops verifying after the receiver's
 skew window (5 minutes in the SDK).
 
 The callback is loopback unless the config opts in (``webhook.allow_remote``)
-and then it must be ``https``; redirects are never followed.
+and then it must be ``https``; redirects are never followed. With
+``webhook.callback_socket`` it is a Unix socket instead, and the receiver's
+server must run as the expected user before a byte is written
+(:func:`agentconnect.sockets.receiver_async_transport`): anything else is a
+``RETRY``, so another local user can neither read a delivery nor ack it
+away.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ from agentconnect.adapter import (
 from agentconnect.backoff import Backoff
 from agentconnect.clock import Clock, unix_seconds
 from agentconnect.payloads import encode, event_payload, message_payload
+from agentconnect.sockets import PeerMismatchError
 from agentconnect.tasks import cancel_and_wait
 
 LOG = log.get("agentconnect.webhook")
@@ -58,6 +64,8 @@ SIGNATURE_HEADER = "X-AgentConnect-Signature"
 TIMESTAMP_HEADER = "X-AgentConnect-Timestamp"
 SIGNATURE_VERSION = "v0"
 SECRET_FILE = "webhook-secret"  # noqa: S105 - a file name
+# The URL a socket receiver is sent to when no callback_url names its path.
+SOCKET_URL = "http://localhost/"
 EVENT_QUEUE_LIMIT = 1000
 
 
@@ -148,6 +156,11 @@ class WebhookAdapter:
         self._quiet.clear()
         try:
             resp = await self._http.post(self.url, content=body, headers=headers)
+        except PeerMismatchError as e:
+            # Not the agent's receiver: nothing was sent; the path and both
+            # UIDs, never the delivery.
+            LOG.warning("webhook_receiver_refused", reason=str(e))
+            return False
         except httpx.HTTPError as e:
             LOG.warning("webhook_unreachable", error=type(e).__name__)
             return False

@@ -196,7 +196,12 @@ somewhere else. Whoever redeems an invite still needs the human's approval
 at that daemon.
 
 `serve(mode="auto")` picks `webhook` when the daemon config has a
-`callback_url`, else `sse`. `ac.webhook_receiver(host, port)`,
+`callback_url` or a `callback_socket`, else `sse`. With `callback_socket`
+the receiver listens on that Unix socket (mode 0660), which the daemon
+checks before it sends a delivery
+([adapters/webhook.md](adapters/webhook.md#on-a-unix-socket)); a stale
+socket left there is replaced, any other file is refused with
+`bad_config`. `ac.webhook_receiver(host, port)` (or `path=` for a socket),
 `await ac.receive(headers, body)` (for your own web framework) and
 `await ac.stream(group_id, last_event_id)` exist in attach mode only; in
 embedded mode they raise `AgentConnectError` with code `embedded`.

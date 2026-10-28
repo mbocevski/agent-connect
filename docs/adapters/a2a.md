@@ -55,11 +55,49 @@ When the daemon starts, the adapter reads the agent's card from
 to every group it joins, and to members who join later, as an
 `a2a.agent_card` message.
 
+The adapter sends messages and `local_agent_token` only to
+`local_agent_url`. On a port, a card whose interface URLs name another
+scheme, host or port is refused: it isn't loaded, nothing is sent,
+deliveries wait and are retried, and `a2a_card_endpoint_mismatch` is
+logged with both endpoints (scheme, host and port only). So is a card with
+a URL that can't be parsed (a port out of range, for example), on a port or
+on a socket; the daemon keeps running. The adapter ignores `HTTP_PROXY`,
+`HTTPS_PROXY` and `ALL_PROXY` and never follows a redirect, so neither the
+token nor a message leaves through a proxy or to another address.
+
+### On a Unix socket
+
+On a loopback port, another local user who listens there while the agent is
+down gets `local_agent_token` and every message, and its replies reach the
+group as the agent's. An agent on a Unix socket avoids that:
+
+```toml
+[a2a]
+local_agent_url = "http://localhost/"
+local_agent_socket = "/run/agentconnect-recv/agent/a2a.sock"
+```
+
+Every request then goes to the socket, whatever URL the card names, so the
+card's URLs aren't compared with `local_agent_url` there: an agent whose card
+names the address it was written for (`http://localhost:9999/`, say) works
+as it is. `local_agent_url` must then be `http://`: the socket carries plain
+HTTP, and the server's user, not a certificate, authenticates the agent.
+Before
+the adapter writes a byte, it checks which user serves the socket
+(`SO_PEERCRED` on Linux, `getpeereid(2)` on macOS): the daemon's own user,
+or in the separate-OS-user mode one of `isolation.agent_users`
+([isolation.md](../isolation.md)). Any other user's socket gets nothing,
+the delivery is retried, and `a2a_receiver_refused` is logged with the path
+and both user IDs. An a2a-sdk agent on Starlette serves a socket with
+`uvicorn --uds <path>`. The separate-OS-user mode requires
+`local_agent_socket`.
+
 ## Configuration
 
 | Key | Default | Meaning |
 |---|---|---|
-| `local_agent_url` | none | Base URL of the local A2A agent (`http://` or `https://`). Without it, only the facade runs. |
+| `local_agent_url` | none | Base URL of the local A2A agent: `http://` or `https://` on a loopback host (`127.0.0.0/8`, `::1` or `localhost`), with no credentials. Without it, only the facade runs. |
+| `local_agent_socket` | none | A Unix socket the local agent listens on. Every request goes there, and `local_agent_url` gives the `Host` and paths. Required in the separate-OS-user mode. |
 | `local_agent_token_file` | none | A file holding a bearer token the adapter sends to the local agent. |
 | `card_keys_file` | none | A JWKS file with the public keys you trust to sign Agent Cards. |
 | `facade_port` | `0` | The facade's port on `127.0.0.1`. `0` turns the facade off. |
