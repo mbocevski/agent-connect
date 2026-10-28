@@ -20,7 +20,7 @@ repos:
       - id: check-shebang-scripts-are-executable
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.1
+    rev: v0.17.2
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -77,7 +77,7 @@ repos:
         require_serial: true
 
   - repo: https://github.com/vale-cli/vale
-    rev: v3.24.0
+    rev: v3.25.1
     hooks:
       - id: vale
         types: [markdown]
