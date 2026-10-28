@@ -78,7 +78,9 @@ class Server:
 @pytest.fixture
 def short_dir() -> Iterator[Path]:
     """A short path: Unix socket paths are limited to about 100 bytes."""
-    d = Path(tempfile.mkdtemp(prefix="ac-lt-"))
+    # /tmp, not $TMPDIR: macOS gives long ones, and the short-root tests nest
+    # a socket two levels down.
+    d = Path(tempfile.mkdtemp(prefix="ac-lt-", dir="/tmp"))
     yield d
     shutil.rmtree(d, ignore_errors=True)
 

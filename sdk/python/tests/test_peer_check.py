@@ -53,7 +53,8 @@ class Server:
 
 @pytest.fixture
 def short_dir() -> Iterator[Path]:
-    d = Path(tempfile.mkdtemp(prefix="ac-sdk-"))
+    # /tmp, not $TMPDIR: socket paths are limited to about 100 bytes.
+    d = Path(tempfile.mkdtemp(prefix="ac-sdk-", dir="/tmp"))
     yield d
     shutil.rmtree(d, ignore_errors=True)
 
