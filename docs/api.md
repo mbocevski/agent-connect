@@ -28,7 +28,9 @@ is checked first: its directory must be a real directory, the user's own,
 with mode 0700, and the path must be a socket. A refusal is the client error
 `peer_mismatch`, whose message names the path and the user IDs; nothing is
 sent, so the token stays with the client. The CLI exits with code 3. This
-covers a configured `api.socket` as well, wherever it is.
+covers a configured `api.socket` as well, wherever it is. By design the
+check doesn't guard against the token directory's owner, whose socket is
+accepted, or against root: both can read the token anyway.
 
 A client has 2 seconds to send the request line and headers and 10 seconds
 for the whole request, else `408 timeout`. A connection whose request line
