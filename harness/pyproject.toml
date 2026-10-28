@@ -10,7 +10,7 @@ dependencies = [
     "agentconnect-sdk",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "websockets>=17.2",
+    "websockets>=17.3",
 ]
 
 [tool.uv.sources]
