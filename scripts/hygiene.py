@@ -9,6 +9,8 @@ usage:
     hygiene.py msg FILE           scan a commit message file (commit-msg)
     hygiene.py range BASE         scan commit messages in BASE..HEAD (CI)
     hygiene.py text               scan stdin (PR title/body)
+    hygiene.py pr AUTHOR          scan stdin (PR title, a blank line, body) for a PR by
+                                  AUTHOR; a Dependabot PR's generated body is skipped
 """
 
 from __future__ import annotations
@@ -35,6 +37,14 @@ ALLOWED_PHRASES: tuple[str, ...] = (
     "claude-agent-sdk",
     "claude_agent_sdk",
 )
+
+# The GitHub login of Dependabot as the API reports it (`dependabot[bot]`) and as
+# `gh pr view --json author` does (`app/dependabot`). Neither can be a user
+# name: `[`, `]` and `/` aren't allowed in one. Its generated PR description
+# quotes upstream release notes and commit lists, which we can't edit (it
+# rewrites them on every rebase), so only the title is checked; its commit
+# messages are still checked.
+DEPENDABOT_LOGINS: frozenset[str] = frozenset({"dependabot[bot]", "app/dependabot"})
 
 # Character classes like `cl[a]ude` keep this file from matching itself.
 FORBIDDEN: tuple[tuple[str, str], ...] = (
@@ -119,6 +129,11 @@ def main(argv: list[str]) -> int:
         findings = _scan_range(args[0])
     elif mode == "text":
         findings = scan(sys.stdin.read(), "text")
+    elif mode == "pr" and len(args) == 1:
+        text = sys.stdin.read()
+        if args[0] in DEPENDABOT_LOGINS:
+            text = text.partition("\n")[0]
+        findings = scan(text, "text")
     else:
         print(__doc__, file=sys.stderr)
         return 2

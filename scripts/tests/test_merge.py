@@ -30,7 +30,12 @@ esac
 """
 
 
-def _pr(state: str = "CLEAN", title: str = "nonsense title") -> str:
+def _pr(
+    state: str = "CLEAN",
+    title: str = "nonsense title",
+    body: str = "",
+    author: str = "octocat",
+) -> str:
     return json.dumps(
         {
             "state": "OPEN",
@@ -39,7 +44,8 @@ def _pr(state: str = "CLEAN", title: str = "nonsense title") -> str:
             "mergeStateStatus": state,
             "labels": [],
             "title": title,
-            "body": "",
+            "body": body,
+            "author": {"login": author},
         }
     )
 
@@ -103,3 +109,27 @@ def test_verified_commits_pass_the_signature_gate(tmp_path: Path) -> None:
     result = _run(tmp_path, _pr(), _sigs(("aaa1111", GOOD)))
     assert result.returncode != 0
     assert "not a Conventional Commit" in result.stderr
+
+
+FLAGGED = "Merge pull request #1 from someone/cl" + "aude/branch"
+
+
+def test_a_flagged_body_on_a_human_pr_is_refused(tmp_path: Path) -> None:
+    pr = _pr(title="build(deps): bump x", body=FLAGGED)
+    result = _run(tmp_path, pr, _sigs(("aaa1111", GOOD)))
+    assert result.returncode != 0
+    assert "AI-tool attribution" in result.stderr
+
+
+@pytest.mark.parametrize("login", ["app/dependabot", "dependabot[bot]"])
+def test_a_flagged_body_on_a_dependabot_pr_is_not_checked(tmp_path: Path, login: str) -> None:
+    pr = _pr(title="build(deps): bump x", body=FLAGGED, author=login)
+    result = _run(tmp_path, pr, _sigs(("aaa1111", GOOD)))
+    assert "AI-tool attribution" not in result.stderr
+
+
+def test_a_flagged_title_on_a_dependabot_pr_is_refused(tmp_path: Path) -> None:
+    pr = _pr(title="build(deps): bump x for " + "cl" + "aude", author="app/dependabot")
+    result = _run(tmp_path, pr, _sigs(("aaa1111", GOOD)))
+    assert result.returncode != 0
+    assert "AI-tool attribution" in result.stderr
