@@ -1,8 +1,9 @@
 # Spike: OpenMLS with the X-Wing ciphersuite
 
 - **Date:** 2026-10-17
-- **Code:** `spikes/mls-xwing/` (each item is an integration test under
-  `tests/`)
+- **Code:** removed after the decision it informed (go for OpenMLS with the
+  X-Wing suite, below). It was a throwaway crate, `spikes/mls-xwing/`, whose
+  items were integration tests; it is still in the `v0.1.0a1` tag.
 - **Question:** Can `core/` be built on OpenMLS with the post-quantum hybrid
   ciphersuite of SPEC §3.1, and what has to change in SPEC first?
 
@@ -265,11 +266,8 @@ for one's own leaf that any other member commits. Use that for v0.
 
 ### 7. Sizes and latency
 
-Test: `t7_measure` (`#[ignore]`d). Run it with:
-
-```text
-cargo test --release -p agentconnect-spike-mls-xwing --test t7_measure -- --ignored --nocapture
-```
+Test: `t7_measure` (`#[ignore]`d), in the removed spike crate. To rerun it,
+check out the `v0.1.0a1` tag and run it there.
 
 Setup:
 
