@@ -106,7 +106,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "a2a-sdk", extras = ["http-server"], specifier = ">=1.2.2" },
+    { name = "a2a-sdk", extras = ["http-server"], specifier = ">=1.2.3" },
     { name = "agentconnect-cli", editable = "daemon" },
     { name = "agentconnect-sdk", editable = "sdk/python" },
     { name = "pytest", specifier = ">=9.1.1" },
