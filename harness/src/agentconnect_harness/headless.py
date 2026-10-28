@@ -84,7 +84,8 @@ async def headless(  # noqa: PLR0913
 ) -> Headless:
     """``started=False`` leaves the webhook unreachable until :meth:`Headless.up`.
     ``hook_socket=True`` puts the webhook receiver on a Unix socket in
-    ``sockdir``, checked by its server's user. ``tcp=True`` serves the API on a loopback port (TLS) instead of a socket."""
+    ``sockdir``, checked by its server's user. ``tcp=True`` serves the API on a
+    loopback port (TLS) instead of a socket."""
     secret = secrets.token_urlsafe(16)
     hook_path = sockdir / f"{name}-hook.sock" if hook_socket else None
 
