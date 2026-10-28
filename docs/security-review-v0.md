@@ -394,7 +394,7 @@ mailbox and per source address, and a SPEC rule for deleting idle groups.
   needs the opt-in TCP mode and a hostile local user, so it is not High.
 - **Component:** daemon (`apiclient.py:24-42`, `mcp/backend.py:262-283`),
   SDK (`agentconnect_sdk/client.py:337-340`, `client.py:490`), `runtime/api.py:1650-1656`.
-- **Status:** fixed. The TCP API is TLS only, with a self-signed
+- **Status:** fixed in #107. The TCP API is TLS only, with a self-signed
   certificate in the data directory; the clients trust only that
   certificate, pinned by its SHA-256 next to the token, and send nothing to
   another server. The design is in `docs/api.md` (TLS on loopback TCP).
@@ -942,7 +942,7 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   0600 (0660 for the group in separate-OS-user mode); TCP binds only
   `127.0.0.1` and refuses any `Origin` and a foreign `Host`; clients check
   the socket server's UID before sending (SR-09, fixed in #103); TCP is TLS
-  with a certificate the clients pin (SR-08, fixed). SR-28 is the gap.
+  with a certificate the clients pin (SR-08, fixed in #107). SR-28 is the gap.
 - **Separate-OS-user mode:** the peer's UID is checked with `SO_PEERCRED`
   or `getpeereid` before the request is read; the human token is accepted
   only from the daemon's UID or `human_users`; TCP and root are refused;
@@ -1091,7 +1091,7 @@ One line per open item, ready to file.
 - **T-07 (Medium, SR-07, SR-43):** (done in #71) Relay: quotas for open invites and new
   groups per mailbox, REST limits per mailbox and address, and a SPEC rule
   for deleting idle groups and stale memberships.
-- **T-08 (Medium, SR-08, fixed):** Daemon: stop sending bearer tokens to
+- **T-08 (Medium, SR-08, fixed in #107):** Daemon: stop sending bearer tokens to
   an unauthenticated server over loopback TCP. Done with TLS and a pinned
   certificate.
 - **T-09 (Medium, SR-09, fixed in #103):** Daemon, SDK, MCP: check the short socket
