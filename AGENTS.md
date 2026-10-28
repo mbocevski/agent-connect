@@ -186,5 +186,7 @@ Enforcement: `scripts/hygiene.py` runs at three points.
 | CI (`hygiene` job) | Every commit message in the PR, plus the PR title and body |
 
 `just merge` also checks the PR title and body, and squash-merges with an
-empty body. If the checker flags something legitimate, add it to
+empty body. For a PR whose author is Dependabot, both checks skip the
+generated body (it quotes upstream notes and Dependabot rewrites it on every
+rebase) and still check the title and every commit message. If the checker flags something legitimate, add it to
 `ALLOWED_PHRASES` in `scripts/hygiene.py`, with a test.

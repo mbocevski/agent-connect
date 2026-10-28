@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import sys
 from pathlib import Path
 
@@ -77,6 +78,29 @@ def test_files_mode_reports_and_fails(tmp_path: Path) -> None:
     assert hygiene.main(["files", str(good), str(bad)]) == 1
 
 
+def _pr_text(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO(text))
+
+
+@pytest.mark.parametrize("author", ["octocat", "dependabot", "someone[bot]"])
+def test_pr_mode_checks_the_body_of_other_authors(
+    monkeypatch: pytest.MonkeyPatch, author: str
+) -> None:
+    _pr_text(monkeypatch, f"build(deps): bump x\n\nfrom {AI}/branch\n")
+    assert hygiene.main(["pr", author]) == 1
+
+
+@pytest.mark.parametrize("author", ["dependabot[bot]", "app/dependabot"])
+def test_pr_mode_skips_a_dependabot_body_but_not_its_title(
+    monkeypatch: pytest.MonkeyPatch, author: str
+) -> None:
+    _pr_text(monkeypatch, f"build(deps): bump x\n\nfrom {AI}/branch\n")
+    assert hygiene.main(["pr", author]) == 0
+    _pr_text(monkeypatch, f"build(deps): bump {AI}\n\nbody\n")
+    assert hygiene.main(["pr", author]) == 1
+
+
 def test_bad_usage() -> None:
     assert hygiene.main([]) == 2
     assert hygiene.main(["nope"]) == 2
+    assert hygiene.main(["pr"]) == 2

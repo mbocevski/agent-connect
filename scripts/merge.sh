@@ -14,7 +14,7 @@ pr="${1:?usage: just merge <pr-number>}"
 root="$(git rev-parse --show-toplevel)"
 fail() { echo "merge refused: $*" >&2; exit 1; }
 
-pr_json="$(gh pr view "$pr" --json state,isDraft,baseRefName,mergeStateStatus,labels,title,body)"
+pr_json="$(gh pr view "$pr" --json state,isDraft,baseRefName,mergeStateStatus,labels,title,body,author)"
 field() { jq -r "$1" <<<"$pr_json"; }
 
 [[ "$(field .state)" == "OPEN" ]] || fail "PR #$pr is $(field .state)"
@@ -58,7 +58,7 @@ title="$(field .title)"
 cc='^(feat|fix|docs|test|refactor|perf|build|ci|chore|revert|style)(\([a-z0-9,-]+\))?!?: .+'
 [[ "$title" =~ $cc ]] || fail "PR title is not a Conventional Commit: '$title'"
 jq -r '.title + "\n" + (.body // "")' <<<"$pr_json" \
-    | uv run --frozen python "$root/scripts/hygiene.py" text \
+    | uv run --frozen python "$root/scripts/hygiene.py" pr "$(field '.author.login')" \
     || fail "PR title/body contains AI-tool attribution or tooling references"
 
 checks_json="$(gh pr checks "$pr" --json name,bucket 2>/dev/null || echo '[]')"
