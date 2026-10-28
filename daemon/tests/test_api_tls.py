@@ -177,6 +177,7 @@ class Server:
                     self.received.append(raw.recv(65536))
                 continue
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(self.cert_dir / CERT_FILE, self.cert_dir / KEY_FILE)
             try:
                 conn = ctx.wrap_socket(raw, server_side=True)

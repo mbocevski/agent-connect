@@ -93,6 +93,7 @@ async def test_attach_over_tcp_refuses_a_server_without_the_pinned_certificate(
 
     def serve() -> None:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(short_dir / CERT_FILE, short_dir / KEY_FILE)
         for _ in range(2):
             raw, _ = listener.accept()

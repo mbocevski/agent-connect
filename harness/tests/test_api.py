@@ -411,6 +411,7 @@ def _served_fingerprint(port: int) -> str:
     whatever its dates."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.verify_mode = ssl.CERT_NONE  # only to look at the certificate
     with (
         socket.create_connection(("127.0.0.1", port)) as raw,
