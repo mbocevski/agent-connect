@@ -8,6 +8,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+### Security
+
+- Update `ctutils` to 0.4.4 (RUSTSEC-2026-0385), reached through
+  `digest` and `hmac` in the core and the relay.
+
 ## [0.1.0a1] - 2026-10-20
 
 The first pre-release, a research preview. Compatibility between previews:
