@@ -258,6 +258,23 @@ def test_the_local_agent_url_must_be_loopback(tmp_path: Path, url: str) -> None:
         load(tmp_path, f'[a2a]\nlocal_agent_url = "{url}"\n')
 
 
+@pytest.mark.parametrize("url", ["http://127.0.0.1:99999/", "http://127.0.0.1:abc/"])
+def test_the_local_agent_url_needs_a_valid_port(tmp_path: Path, url: str) -> None:
+    with pytest.raises(ConfigError, match=r"a2a\.local_agent_url"):
+        load(tmp_path, f'[a2a]\nlocal_agent_url = "{url}"\n')
+
+
+def test_a_local_agent_socket_carries_plain_http(tmp_path: Path) -> None:
+    # TLS over the socket would fail every delivery; the server's user is
+    # what authenticates the agent there.
+    with pytest.raises(ConfigError, match="https"):
+        load(
+            tmp_path,
+            '[a2a]\nlocal_agent_url = "https://localhost/"\n'
+            'local_agent_socket = "/run/agent/a2a.sock"\n',
+        )
+
+
 @pytest.mark.parametrize("url", ["http://127.0.0.1:9999/", "https://localhost/", "http://[::1]:1/"])
 def test_a_loopback_local_agent_url_is_accepted(tmp_path: Path, url: str) -> None:
     assert load(tmp_path, f'[a2a]\nlocal_agent_url = "{url}"\n').a2a_local_agent_url == url
@@ -285,6 +302,17 @@ def test_isolation_refuses_tcp_receivers(
 ) -> None:
     with pytest.raises(IsolationError, match=message):
         check_config(_isolated(short_dir, **receiver), EUID + 2, {EUID + 1}, set())
+
+
+def test_isolation_needs_an_agent_user_to_deliver_to(short_dir: Path) -> None:
+    cfg = _config(
+        short_dir,
+        isolation=True,
+        isolation_agent_dir=short_dir / "agents",
+        webhook_socket=short_dir / "hook.sock",
+    )
+    with pytest.raises(IsolationError, match="agent_users"):
+        check_config(cfg, EUID + 2, set(), set())
 
 
 def test_isolation_accepts_socket_receivers(short_dir: Path) -> None:

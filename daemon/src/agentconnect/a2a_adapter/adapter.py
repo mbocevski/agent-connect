@@ -572,10 +572,14 @@ class A2AAdapter:
                 LOG.warning("a2a_receiver_refused", reason=str(refused))
             LOG.warning("a2a_card_unavailable", error=type(e).__name__)
             return False
-        elsewhere = _other_endpoint(card, self.options.local_agent_url)
+        pinned = (
+            None if self.options.local_agent_socket is not None else self.options.local_agent_url
+        )
+        elsewhere = _other_endpoint(card, pinned)
         if elsewhere is not None:
-            # The client would send the token and messages where the card
-            # says: only the configured endpoint is trusted (SR-10).
+            # On TCP the client would send the token and messages where the
+            # card says: only the configured endpoint is trusted (SR-10). On
+            # the socket every request goes there, so only an unusable URL is.
             LOG.warning(
                 "a2a_card_endpoint_mismatch",
                 configured_endpoint=_origin(self.options.local_agent_url),
@@ -614,24 +618,35 @@ def _refusal(e: BaseException) -> PeerMismatchError | None:
     return None
 
 
-def _endpoint(url: str) -> tuple[str, str, int | None]:
-    parts = urlsplit(url)
+def _endpoint(url: str) -> tuple[str, str, int | None] | None:
+    """Scheme, host and port of ``url``; ``None`` when it can't be parsed
+    (a port out of range or not a number, an IPv6 host without brackets)."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
     default = {"http": 80, "https": 443}.get(parts.scheme)
-    return parts.scheme, (parts.hostname or "").lower(), parts.port or default
+    return parts.scheme, (parts.hostname or "").lower(), port or default
 
 
 def _origin(url: str) -> str:
     """``scheme://host:port`` of ``url``: what is compared, and safe to log
     (no path, query or credentials)."""
-    scheme, host, port = _endpoint(url)
+    endpoint = _endpoint(url)
+    if endpoint is None:
+        return "(unparsable)"
+    scheme, host, port = endpoint
     return f"{scheme}://{host}:{port}"
 
 
-def _other_endpoint(card: AgentCard, configured: str) -> str | None:
-    """An interface URL of ``card`` whose scheme, host or port isn't the
-    configured endpoint's, or ``None``."""
-    want = _endpoint(configured)
+def _other_endpoint(card: AgentCard, configured: str | None) -> str | None:
+    """An interface URL of ``card`` that can't be parsed or, with a
+    ``configured`` endpoint, whose scheme, host or port isn't its; else
+    ``None``."""
+    want = None if configured is None else _endpoint(configured)
     for interface in card.supported_interfaces:
-        if _endpoint(interface.url) != want:
+        found = _endpoint(interface.url)
+        if found is None or (configured is not None and found != want):
             return interface.url
     return None

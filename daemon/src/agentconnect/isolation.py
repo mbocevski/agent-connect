@@ -208,6 +208,11 @@ def check_config(cfg: Config, euid: int, agent_uids: set[int], human_uids: set[i
     if cfg.a2a_local_agent_url is not None and cfg.a2a_local_agent_socket is None:
         msg = "isolation needs a2a.local_agent_socket: a TCP agent's user can't be checked"
         raise IsolationError(msg)
+    if (cfg.webhook_socket or cfg.a2a_local_agent_socket) is not None and not agent_uids:
+        # Only an agent user may serve a receiver: with none, every
+        # delivery would be refused and retried forever.
+        msg = "isolation: a receiver socket is set but isolation.agent_users is empty"
+        raise IsolationError(msg)
     if agent_uids & human_uids:
         msg = "isolation: a user can't be both an agent user and a human user"
         raise IsolationError(msg)

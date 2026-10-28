@@ -20,7 +20,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 ### Changed
 
 - `a2a.local_agent_url` must be a loopback `http://` or `https://` URL
-  without credentials; anything else stops the daemon at start.
+  without credentials and with a valid port, and `http://` with
+  `a2a.local_agent_socket`; anything else stops the daemon at start.
 - The separate-OS-user mode refuses a webhook or local A2A agent on a port:
   set `webhook.callback_socket` or `a2a.local_agent_socket`.
 
@@ -45,9 +46,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   nothing, the delivery is retried and nothing is lost. A receiver on a
   port keeps that risk outside the separate-OS-user mode.
 - The A2A adapter sends messages and `local_agent_token` only to
-  `local_agent_url` (or its socket): a card naming another endpoint is
-  refused and logged as `a2a_card_endpoint_mismatch`, and environment
-  proxies and redirects are ignored (SR-30, for the adapter).
+  `local_agent_url` (or its socket): on a port, a card naming another
+  endpoint is refused and logged as `a2a_card_endpoint_mismatch`, and the
+  adapter's client ignores environment proxies and redirects (SR-30, fixed
+  for the A2A adapter only; the facade's push client still uses the
+  environment).
 - Update `ctutils` to 0.4.4 (RUSTSEC-2026-0385), reached through
   `digest` and `hmac` in the core and the relay.
 - Drop `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387) by removing the

@@ -764,28 +764,61 @@ async def test_a_card_naming_another_endpoint_is_refused(
     assert mismatch["card_endpoint"] == elsewhere.url.rstrip("/")
 
 
-async def test_a_card_on_the_socket_naming_another_endpoint_is_refused(
-    sockdir: Path, tmp_path: Path
+@pytest.mark.parametrize("card_url", ["http://localhost:9999/", "http://agent.example.org/"])
+async def test_on_a_socket_the_cards_own_url_doesnt_matter(
+    sockdir: Path, tmp_path: Path, card_url: str
 ) -> None:
-    agent = AgentServer(
-        HelloWorldExecutor(), "liar", uds=sockdir / "a2a.sock", card_url="http://agent.example.org/"
-    )
+    # An agent's card names the URL it was written with; on a socket every
+    # request goes to the socket anyway, so the card isn't pinned.
+    agent = AgentServer(HelloWorldExecutor(), "uds", uds=sockdir / "a2a.sock", card_url=card_url)
     await agent.start()
     try:
-        adapter, _sent = await started(
+        adapter, sent = await started(
             A2AOptions(
-                local_agent_url=agent.url,
+                local_agent_url="http://localhost/",
                 local_agent_socket=sockdir / "a2a.sock",
                 receiver_uids=frozenset({os.geteuid()}),
                 data_dir=tmp_path,
             )
         )
-        d = delivery("m1", text("stay here"))
+        d = delivery("m1", text("through the socket"))
+        assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.ACK
+        await sent.wait_for(1)
+        await adapter.aclose()
+    finally:
+        await agent.stop()
+    assert len(received(agent)) == 1
+
+
+@pytest.mark.parametrize("over", ["tcp", "socket"])
+@pytest.mark.parametrize("card_url", ["http://127.0.0.1:99999/", "http://127.0.0.1:abc/"])
+async def test_a_card_with_a_broken_url_is_refused_and_the_adapter_keeps_running(
+    sockdir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], over: str, card_url: str
+) -> None:
+    # Whoever answers local_agent_url chooses the card: a malformed URL in it
+    # must not stop the runtime.
+    uds = sockdir / "a2a.sock" if over == "socket" else None
+    agent = AgentServer(HelloWorldExecutor(), "broken", uds=uds, card_url=card_url)
+    await agent.start()
+    try:
+        adapter, sent = await started(
+            A2AOptions(
+                local_agent_url=agent.url,
+                local_agent_socket=uds,
+                receiver_uids=frozenset({os.geteuid()}),
+                data_dir=tmp_path,
+            )
+        )
+        d = delivery("m1", text("anyone?"))
         assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.RETRY
+        assert adapter.capabilities().agent_card is None
         await adapter.aclose()
     finally:
         await agent.stop()
     assert received(agent) == []
+    assert sent.calls == []
+    events = [e["event"] for e in log_events(capsys.readouterr().err)]
+    assert "a2a_card_endpoint_mismatch" in events
 
 
 async def test_environment_proxies_are_ignored(

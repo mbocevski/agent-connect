@@ -48,8 +48,10 @@ is no user boundary to put between them.
   that the socket's server runs as one of `isolation.agent_users`; another
   user's socket at that path gets nothing, and the delivery is retried
   (`webhook_receiver_refused`, `a2a_receiver_refused`, with both UIDs). A
-  receiver on a port can't be checked, so the mode refuses one. The
-  receiver directory's permissions are defence in depth, not the boundary.
+  receiver on a port can't be checked, so the mode refuses one, and a
+  receiver socket with no `isolation.agent_users` (nobody to deliver to)
+  stops the start too. The receiver directory's permissions are defence in
+  depth, not the boundary.
 - **The human token is gated by UID as well.** A request that carries the
   human token is refused with `403 peer_refused` unless it comes from the
   daemon's own UID or an `isolation.human_users` entry. This is on top of the

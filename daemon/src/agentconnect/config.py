@@ -535,7 +535,8 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "none",
         "A Unix socket the local A2A agent listens on: every request goes there, "
         "checked by its server's user before a byte is sent, and `local_agent_url` "
-        "gives the `Host` and paths. Required in the separate-OS-user mode.",
+        "(`http://`: the socket carries plain HTTP) gives the `Host` and paths; the "
+        "card's URLs aren't compared with it. Required in the separate-OS-user mode.",
     ),
     ConfigKey(
         "a2a.local_agent_token_file",
@@ -857,9 +858,19 @@ def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
             # The local agent gets every message and its token: this host only.
             msg = f"a2a.local_agent_url must be loopback, got {url!r}"
             raise ConfigError(msg)
+        try:
+            _ = parts.port
+        except ValueError:
+            msg = f"a2a.local_agent_url has an invalid port: {url!r}"
+            raise ConfigError(msg) from None
     uds = _path(table, "local_agent_socket")
     if uds is not None and url is None:
         msg = "a2a.local_agent_socket needs a2a.local_agent_url (its Host and paths)"
+        raise ConfigError(msg)
+    if uds is not None and url is not None and urlsplit(url).scheme == "https":
+        # Plain HTTP over the socket: the server's user authenticates the
+        # agent there, and TLS would fail every delivery.
+        msg = "a2a.local_agent_socket carries plain HTTP, not https: use an http:// local_agent_url"
         raise ConfigError(msg)
     port = _typed(table, "facade_port", int, 0)
     if not 0 <= port <= 65535:  # noqa: PLR2004
