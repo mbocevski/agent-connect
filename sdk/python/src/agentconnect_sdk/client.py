@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, override
 import httpx
 
 from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads
+from agentconnect.sockets import PeerMismatchError, local_async_transport
 from agentconnect_sdk import _log
 from agentconnect_sdk.dedupe import Deduper
 from agentconnect_sdk.errors import AgentConnectError, PayloadError
@@ -349,7 +350,9 @@ class AgentConnect:
         self._secret = webhook_secret
         port = tcp_port if tcp_port is not None else self._settings.tcp_port
         if transport is None and port == 0:
-            transport = httpx.AsyncHTTPTransport(uds=str(socket or self._settings.socket))
+            transport = local_async_transport(
+                socket or self._settings.socket, self._settings.data_dir
+            )
         self._base = f"http://127.0.0.1:{port}" if port else "http://agentconnectd"
         self._http: httpx.AsyncClient | None = httpx.AsyncClient(
             transport=transport, base_url=self._base, timeout=30, trust_env=False
@@ -502,6 +505,8 @@ class AgentConnect:
             resp = await http.request(
                 method, path, json=body, headers={"authorization": f"Bearer {self._token}"}
             )
+        except PeerMismatchError as e:
+            raise AgentConnectError(e.code, str(e)) from None
         except httpx.TransportError:
             raise AgentConnectError("not_running", "cannot reach the daemon") from None
         data = _json(resp)
@@ -655,6 +660,8 @@ class AgentConnect:
                         await self.dispatch(payload)
                     if frame.id is not None and frame.id != "":
                         self.last_event_id = frame.id
+        except PeerMismatchError as e:
+            raise AgentConnectError(e.code, str(e)) from None
         except httpx.TransportError as e:
             raise AgentConnectError("not_running", "the event stream closed") from e
 

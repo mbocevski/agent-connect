@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from agentconnect.config import Config
-from agentconnect.sockets import bind_path
+from agentconnect.sockets import PeerMismatchError, local_transport
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 
 
@@ -31,7 +31,7 @@ class ApiClient:
             self._transport: httpx.BaseTransport = httpx.HTTPTransport()
             self._base = f"http://127.0.0.1:{config.api_tcp_port}"
         else:
-            self._transport = httpx.HTTPTransport(uds=str(bind_path(config.socket_path)))
+            self._transport = local_transport(config.socket_path, config.data_dir)
             self._base = "http://agentconnectd"
 
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
@@ -40,6 +40,8 @@ class ApiClient:
                 resp = c.request(
                     method, path, json=body, headers={"authorization": f"Bearer {self._token}"}
                 )
+        except PeerMismatchError as e:
+            raise ApiClientError(0, e.code, str(e)) from None
         except httpx.TransportError:
             msg = "cannot reach the daemon"
             raise ApiClientError(0, "not_running", msg) from None

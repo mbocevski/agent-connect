@@ -17,6 +17,21 @@ its data directory (`agentconnectd.sock`, mode 0600). With `api.tcp_port` set
 then refuses requests that carry an `Origin` header or a `Host` other than
 `127.0.0.1:<port>` or `localhost:<port>`.
 
+On the Unix socket, the clients check the server before they send a byte.
+The CLI, the Python SDK and `agentconnect mcp` attached to a runtime ask the
+kernel which user serves the socket (`SO_PEERCRED` on Linux, `getpeereid(2)`
+on macOS and the BSDs) and refuse unless it is the owner of the directory
+they read the token from: the data directory, or the agent directory in the
+separate-OS-user mode ([isolation.md](isolation.md)). A socket at the short
+path (`/tmp/agentconnect-<uid>/`, used when the configured path is too long)
+is checked first: its directory must be a real directory, the user's own,
+with mode 0700, and the path must be a socket. A refusal is the client error
+`peer_mismatch`, whose message names the path and the user IDs; nothing is
+sent, so the token stays with the client. The CLI exits with code 3. This
+covers a configured `api.socket` as well, wherever it is. By design the
+check doesn't guard against the token directory's owner, whose socket is
+accepted, or against root: both can read the token anyway.
+
 A client has 2 seconds to send the request line and headers and 10 seconds
 for the whole request, else `408 timeout`. A connection whose request line
 and headers haven't all arrived is unfinished; one whose headers arrived is

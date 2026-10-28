@@ -417,7 +417,11 @@ token is refused over TCP and human commands use the socket.
   sends, and can forge answers, including the short code.
 - **Component:** daemon (`sockets.py:57-64`, used by `apiclient.py:33`,
   `mcp/backend.py:271`, `sdk/.../settings.py:79`).
-- **Status:** open (T-09).
+- **Status:** fixed in #103. Every client connects through one transport
+  (`agentconnect.sockets.local_transport`) that checks the short directory
+  with `lstat` and then the server's UID against the owner of the token's
+  directory, before sending a byte; a configured `api.socket` is covered
+  too.
 - **Confirmed.**
 
 When the configured socket path is longer than 103 bytes, everything uses
@@ -926,8 +930,9 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   token in logs, URLs, errors, process arguments or child processes.
 - **Socket and TCP:** the socket is bound under umask 077 and then set to
   0600 (0660 for the group in separate-OS-user mode); TCP binds only
-  `127.0.0.1` and refuses any `Origin` and a foreign `Host`. SR-08, SR-09
-  and SR-28 are the gaps.
+  `127.0.0.1` and refuses any `Origin` and a foreign `Host`; clients check
+  the socket server's UID before sending (SR-09, fixed in #103). SR-08 and SR-28 are
+  the gaps.
 - **Separate-OS-user mode:** the peer's UID is checked with `SO_PEERCRED`
   or `getpeereid` before the request is read; the human token is accepted
   only from the daemon's UID or `human_users`; TCP and root are refused;
@@ -1076,7 +1081,7 @@ One line per open item, ready to file.
 - **T-08 (Medium, SR-08):** Daemon: stop sending bearer tokens over
   loopback TCP (server proof plus request MACs, or the human token only on
   the socket).
-- **T-09 (Medium, SR-09):** Daemon, SDK, MCP: check the short socket
+- **T-09 (Medium, SR-09, fixed in #103):** Daemon, SDK, MCP: check the short socket
   directory and socket owner before connecting.
 - **T-10 (Medium, SR-10):** Daemon: Unix-socket callbacks, or a receiver
   MAC before a 2xx counts as an ack; required in separate-OS-user mode.

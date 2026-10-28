@@ -32,6 +32,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   rejected private message can no longer advance the sender ratchet, and
   an external commit that truncates and regrows the ratchet tree no longer
   brings removed leaves back.
+- The CLI, the Python SDK and `agentconnect mcp` attached to a runtime
+  check the local API socket before sending anything (SR-09). The server's
+  user, read from the kernel, must own the directory the token came from,
+  and a socket at the short `/tmp/agentconnect-<uid>/` path must sit in a
+  private 0700 directory. Another local user's socket, at the short path or
+  at a configured `api.socket`, used to receive the tokens and invite links
+  and could forge answers, short codes included. Now the client refuses it
+  with `peer_mismatch` (CLI exit code 3).
 
 ## [0.1.0a1] - 2026-10-20
 

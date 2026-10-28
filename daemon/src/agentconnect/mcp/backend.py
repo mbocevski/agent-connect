@@ -35,7 +35,7 @@ from agentconnect.runtime import (
     Runtime,
     error_reply,
 )
-from agentconnect.sockets import bind_path
+from agentconnect.sockets import PeerMismatchError, local_async_transport
 from agentconnect.tokens import API_TOKEN_FILE
 
 POLL_SECS = 60  # one GET /v0/deliveries waits at most this long
@@ -268,7 +268,7 @@ class AttachBackend:
             transport = (
                 httpx.AsyncHTTPTransport()
                 if config.api_tcp_port
-                else httpx.AsyncHTTPTransport(uds=str(bind_path(config.socket_path)))
+                else local_async_transport(config.socket_path, config.data_dir)
             )
         base = (
             f"http://127.0.0.1:{config.api_tcp_port}"
@@ -288,6 +288,8 @@ class AttachBackend:
     ) -> dict[str, Any]:
         try:
             resp = await self._http.request(method, path, json=body, params=params or None)
+        except PeerMismatchError as e:
+            raise ToolError(e.code, str(e), 503) from None
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             raise OwnerGoneError(sent=False) from e
         except httpx.TransportError as e:

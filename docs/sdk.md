@@ -322,7 +322,10 @@ owner may.
 
 Errors are `AgentConnectError` with the local API's `code` and HTTP
 `status` in both modes, for example `not_found` (404) for an unknown group
-or `forbidden` (403) when the owner's last instance tries to leave.
+or `forbidden` (403) when the owner's last instance tries to leave. In
+attach mode, `peer_mismatch` (status 0) means the socket isn't the
+daemon's: another OS user serves it, or its short directory isn't private.
+Nothing was sent ([api.md](api.md#transport)).
 `leave()` answers `leaving`: the group goes once another member commits the
 leave, which the `left` event reports ([groups.md](groups.md#leaving)).
 

@@ -203,6 +203,15 @@ token gets `human_only`, and the human token, should an agent get hold of
 it, gets `peer_refused` from any user but the daemon's and the
 `human_users`.
 
+Agents check the daemon too. Before sending the token, the CLI, the SDK and
+`agentconnect mcp` check that the socket's server runs as the owner of the
+directory the token came from: `agentconnect` for the agent directory, and
+for the human's `sudo -u agentconnect` commands, the data directory. A
+socket that another user serves is refused with `peer_mismatch` and gets
+nothing ([api.md](api.md#transport)). By design that leaves out the
+daemon's user, whose socket is accepted, and root: both can read the
+token anyway.
+
 ## What it doesn't cover
 
 - **Root and the daemon's user.** Root can read everything; so can code that

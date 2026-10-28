@@ -50,7 +50,7 @@ EXIT_CODES: tuple[tuple[int, str, str], ...] = (
         "EXIT_REFUSED",
         "Refused: declined at a prompt, human-only operation, the group changed while "
         "comparing, invite for a different relay (nothing is sent), a listing token for "
-        "another identity or key.",
+        "another identity or key, a local API socket another user serves (nothing is sent).",
     ),
     (
         EXIT_INTERCEPTED,
@@ -192,6 +192,9 @@ def map_api_error(e: ApiClientError) -> CliError:  # noqa: PLR0911
             "as the daemon's user, see docs/isolation.md",
             EXIT_REFUSED,
         )
+    if e.code == "peer_mismatch":
+        # Not the daemon's socket; the message names the path and the UIDs.
+        return CliError("peer_mismatch", e.message, EXIT_REFUSED)
     if e.code == "invite_not_open":
         return CliError("invite_not_open", INTERCEPTION_WARNING, EXIT_INTERCEPTED)
     if e.code == "wrong_relay":
