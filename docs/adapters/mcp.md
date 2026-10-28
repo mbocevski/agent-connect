@@ -115,6 +115,9 @@ missing), a wrong type, a value out of range or an id that isn't one (group
 and message ids are base64url: `A-Z a-z 0-9 _ -`, with a letter or digit) is
 refused with `bad_request`. A refused call is an error result whose
 JSON is `{"error": {"code", "message"}}`, with the local API's `code`.
+Attached to a runtime, the session refuses a socket that another OS user
+serves with `peer_mismatch` and sends it nothing
+([api.md](../api.md#transport)).
 
 | Tool | Arguments | Result |
 |---|---|---|
