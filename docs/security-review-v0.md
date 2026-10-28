@@ -446,7 +446,7 @@ owner.
   separate-OS-user mode too.
 - **Component:** daemon (`webhook.py:150-160`, `config.py:705-724`,
   `a2a_adapter/adapter.py:207-212`, `adapter.py:461-482`).
-- **Status:** fixed. The webhook and the local A2A agent can be on Unix
+- **Status:** fixed in #108. The webhook and the local A2A agent can be on Unix
   sockets (`webhook.callback_socket`, `a2a.local_agent_socket`), and the
   daemon checks the socket server's UID before it writes a byte: the
   daemon's own, or an `isolation.agent_users` entry in separate-OS-user
@@ -592,7 +592,7 @@ store written the old way.
 | SR-27 | daemon | The A2A adapter's `a2a-seen.db` is a plain SQLite file (0600) in the data directory, against "there is no unencrypted on-disk mode" (SPEC §12). It holds SHA-256 hashes of `msg_id`s, which the relay also sees. | `a2a_adapter/seen.py:22-30`. By reading. | Open (T-27) |
 | SR-28 | daemon | Unauthenticated connections fill the local API's 64 slots and lock the human out (503) for 10 s at a time. In separate-OS-user mode any listed agent user can do it without a token. | `runtime/api.py:63-70`, `api.py:1552-1558`. Probe: human request 503 while 64 idle connections were held. Confirmed. | Open (T-28) |
 | SR-29 | daemon | `check_agent_dir` accepts a group-writable agent directory (0770, 0730) and doesn't check its parents, so an agent user may be able to replace the socket and show the human forged approvals or a forged code. | `isolation.py:158-180`. Probe: 770 and 730 accepted. Confirmed. | Open (T-29) |
-| SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Open (T-30): fixed for the adapter's client (`trust_env=False`, no redirects); the facade's push client remains |
+| SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Open (T-30): fixed for the adapter's client in #108 (`trust_env=False`, no redirects); the facade's push client remains |
 | SR-31 | daemon | Facade push-notification URLs are not screened, so the facade token holder can make the daemon POST task updates to any address. | `a2a_adapter/facade.py:346`. By reading. | Open (T-31) |
 | SR-32 | daemon | `GET /v0/status` with the agent token counts a group hidden from the agent (an approved knock before the knocker joins) and lists its id in `out_of_sync`. | `engine.py:3616-3628`, `runtime/agent.py:58-63`, `api.py:1426-1427`. Confirmed. | Open (T-32) |
 | SR-33 | daemon | The agent's `reply_to` choice resets the loop-guard hop: two agents that keep naming the human's first message never reach `max_agent_turns`. | `engine.py:1672-1691`, `engine.py:1518-1524`, `mcp/tools.py:283-288`. Probe: eight replies at hop 1, no pause. Confirmed. | Open (T-33) |
@@ -952,7 +952,7 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   remembers seen signatures; no redirects and no environment proxies. There
   is no inbound callback route; replies go through the authenticated API.
   A receiver on a Unix socket is checked by its server's UID before a byte
-  is sent (SR-10, fixed); a TCP receiver, outside separate-OS-user mode,
+  is sent (SR-10, fixed in #108); a TCP receiver, outside separate-OS-user mode,
   isn't.
 - **A2A facade, MCP and SSE:** the facade binds loopback and checks `Host`,
   `Origin` and the client address; MCP tool descriptions and instructions
@@ -1093,7 +1093,7 @@ One line per open item, ready to file.
   the socket).
 - **T-09 (Medium, SR-09, fixed in #103):** Daemon, SDK, MCP: check the short socket
   directory and socket owner before connecting.
-- **T-10 (Medium, SR-10, fixed):** Daemon: Unix-socket callbacks, or a receiver
+- **T-10 (Medium, SR-10, fixed in #108):** Daemon: Unix-socket callbacks, or a receiver
   MAC before a 2xx counts as an ack; required in separate-OS-user mode.
 - **T-11 (Medium, SR-11, SR-54, fixed in #87):** Daemon: bound `hop` to u32, limit body
   depth and size of `to` and `addressee`, and fail a poison message per
