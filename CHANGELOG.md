@@ -13,6 +13,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - The `spikes/mls-xwing` crate. Its findings and decisions stay in
   `docs/spikes/mls-xwing.md`.
 
+### Fixed
+
+- The directory shuts down gracefully on SIGTERM as well as SIGINT, like
+  the relay. As PID 1 in its image it ignored SIGTERM, so `docker stop`
+  and redeploys waited out the stop timeout and killed it (exit 137).
+
 ### Security
 
 - Update `ctutils` to 0.4.4 (RUSTSEC-2026-0385), reached through

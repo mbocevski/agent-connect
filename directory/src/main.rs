@@ -20,6 +20,30 @@ fn invalid(e: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, e.into())
 }
 
+/// SIGINT (Ctrl-C) or SIGTERM (what docker, systemd and Kubernetes send).
+/// The handlers are installed by the call, not on the first poll, so a
+/// signal that arrives after the "listening" line still stops the
+/// directory gracefully. As PID 1 in a container, a process without a
+/// SIGTERM handler ignores SIGTERM until it is killed.
+fn stop_signal() -> impl Future<Output = ()> {
+    #[cfg(unix)]
+    let handlers = {
+        use tokio::signal::unix::{SignalKind, signal};
+        signal(SignalKind::interrupt()).and_then(|int| Ok((int, signal(SignalKind::terminate())?)))
+    };
+    async move {
+        #[cfg(unix)]
+        if let Ok((mut int, mut term)) = handlers {
+            tokio::select! {
+                _ = int.recv() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 async fn serve<S: Store>(
     store: S,
     config: Config,
@@ -88,14 +112,13 @@ async fn serve<S: Store>(
         links: config.links.clone(),
     };
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
+    let stop = stop_signal();
     tracing::info!(addr = %listener.local_addr()?, "directory listening");
     axum::serve(
         listener,
         app(dir, http).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+    .with_graceful_shutdown(stop)
     .await
 }
 

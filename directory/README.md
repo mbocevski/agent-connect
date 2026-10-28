@@ -61,6 +61,10 @@ Releases publish the image for `linux/amd64` and `linux/arm64` as
 `ghcr.io/mbocevski/agentconnect-directory:<version>`, signed and with build
 provenance; the release notes give its digest.
 
+On SIGTERM (what Docker, systemd and Kubernetes send) or SIGINT the
+directory stops accepting connections, waits for the requests in flight and
+exits with status 0.
+
 ## Configuration
 
 | Variable | Default | Meaning |
