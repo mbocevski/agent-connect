@@ -1920,9 +1920,17 @@ class ApiServer:
             self._pending.remove(pending)
 
     def _evict(self, pending: Pending) -> None:
-        """Close a connection that hasn't sent its request (``busy``)."""
+        """Close a connection that hasn't sent its request (``busy``). On
+        loopback TCP, one still in its TLS handshake is closed without a
+        word: a plaintext answer there would read to the client as a server
+        that doesn't speak TLS, the sign of another process on the port."""
         self._unpend(pending)
         LOG.info("api_connection_evicted")
+        if self._tls is not None and pending.writer.get_extra_info("ssl_object") is None:
+            pending.writer.transport.abort()
+            if pending.task is not None:
+                pending.task.cancel()
+            return
         data = json.dumps({"code": "busy", "message": "too many unfinished requests"}).encode()
         pending.writer.write(
             f"HTTP/1.1 503 {STATUS_TEXT[503]}\r\ncontent-type: application/json\r\n"

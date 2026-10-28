@@ -90,11 +90,23 @@ the certificate and its fingerprint from the directory they read the token
 from, on every connection, so a rotated certificate needs no restart of the
 client. They trust only that certificate: OpenSSL checks it, its dates and
 `127.0.0.1`, and the client then compares the presented certificate's
-SHA-256 with the fingerprint. Any other server on the port (plain HTTP,
-another certificate, an expired one) gets the TLS handshake and nothing
-else, and the client fails with `peer_mismatch`. With no certificate in the
-directory, the client reports that the daemon isn't running. Plain HTTP on
-the port is never answered.
+SHA-256 with the fingerprint. Any other server on the port gets the TLS
+handshake (the client's hello) and nothing else, and no request byte. What
+the client reports depends on how that server answers:
+
+- It answers with something other than TLS (plain HTTP, for example), or
+  with a certificate that fails the check (another one, an expired one):
+  `peer_mismatch`, CLI exit code 3. A daemon still running from before the
+  upgrade to TLS answers plain HTTP: restart it.
+- It closes the connection or doesn't answer the hello (a silent listener,
+  or a busy daemon that closes a connection still in its handshake to make
+  room): the daemon isn't reachable, `not_running` and CLI exit code 5,
+  after at most the 5-second handshake timeout.
+
+With no certificate in the directory, the client reports that the daemon
+isn't running. The daemon never writes plaintext on the port: a plain HTTP
+request gets no answer, and a connection it closes before the handshake
+has finished gets no answer either.
 
 Other clients trust the certificate file the same way, for example:
 

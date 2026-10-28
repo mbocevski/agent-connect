@@ -371,6 +371,30 @@ class _Pinning:
             f"certificate pinned in {self.token_dir}): {why}; nothing was sent"
         )
 
+    def handshake_failed(self, e: httpcore.ConnectError) -> Exception:
+        """What a failed handshake means. A server that hangs up before its
+        certificate arrives is unreachable (a busy daemon closes connections
+        still in their handshake, and so does a silent squatter): not proof
+        of another server. A certificate that fails verification, or an
+        answer that isn't TLS, is."""
+        cause = e.__cause__ or e
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return self.refused(cause.verify_message or cause)
+        if isinstance(cause, ssl.SSLEOFError | ssl.SSLZeroReturnError) or (
+            isinstance(cause, OSError) and not isinstance(cause, ssl.SSLError)
+        ):
+            msg = (
+                f"the server on {HOST}:{self.port} closed the connection during the TLS "
+                "handshake; the daemon may be busy or restarting; nothing was sent"
+            )
+            return httpcore.ConnectError(msg)
+        if isinstance(cause, ssl.SSLError):
+            return self.refused(
+                f"{cause}, not TLS with that certificate (a daemon started before the "
+                "upgrade to TLS answers like this: restart it)"
+            )
+        return self.refused(cause)
+
 
 class _SyncPinnedStream(httpcore.NetworkStream):
     """A TCP stream that carries nothing until :meth:`start_tls` has
@@ -408,7 +432,7 @@ class _SyncPinnedStream(httpcore.NetworkStream):
         except httpcore.ConnectTimeout:
             raise
         except httpcore.ConnectError as e:
-            raise self._pinning.refused(e.__cause__ or e) from None
+            raise self._pinning.handshake_failed(e) from None
         try:
             check_peer(tls.get_extra_info("ssl_object"), pin)
         except PinError as e:
@@ -456,7 +480,7 @@ class _AsyncPinnedStream(httpcore.AsyncNetworkStream):
         except httpcore.ConnectTimeout:
             raise
         except httpcore.ConnectError as e:
-            raise self._pinning.refused(e.__cause__ or e) from None
+            raise self._pinning.handshake_failed(e) from None
         try:
             check_peer(tls.get_extra_info("ssl_object"), pin)
         except PinError as e:

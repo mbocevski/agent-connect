@@ -792,6 +792,43 @@ async def test_a_connection_that_sent_nothing_gives_way_first(
         await server.stop()
 
 
+async def test_an_honest_client_closed_mid_handshake_is_told_busy_not_impostor(
+    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loopback TCP: a connection still in its TLS handshake has sent
+    nothing the server has read, so it gives way first. The server closes it
+    without writing (a plaintext 503 would read as a non-TLS server), and the
+    CLI reports the daemon unreachable, never a different server on the
+    port."""
+    monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 0)
+    server, connect, _host, _secure = await listener(cluster, sockdir, "tcp")
+    held: list[socket.socket] = []
+    # Hold every handshake, so the client is still in its own when the pool
+    # fills up behind it.
+    gate = asyncio.Event()
+    handshake = server._handshake
+
+    async def held_handshake(writer: asyncio.StreamWriter, tls: ssl.SSLContext) -> bool:
+        await gate.wait()
+        return await handshake(writer, tls)
+
+    monkeypatch.setattr(server, "_handshake", held_handshake)
+    client = ApiClient(server.daemon.config, human=True)
+    try:
+        request = asyncio.create_task(asyncio.to_thread(client.request, "GET", "/v0/status"))
+        await until(lambda: len(server._pending) == 1)
+        for _ in range(MAX_PENDING):
+            held.append(connect())  # bare connects: the client is the oldest
+        with pytest.raises(ApiClientError) as e:
+            await asyncio.wait_for(request, WAIT)
+        assert e.value.code == "not_running"
+    finally:
+        gate.set()
+        for s in held:
+            s.close()
+        await server.stop()
+
+
 @pytest.mark.parametrize("burst", [1, 2, 8])
 async def test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one(
     cluster: Cluster, sockdir: Path, burst: int, monkeypatch: pytest.MonkeyPatch

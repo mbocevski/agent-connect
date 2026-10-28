@@ -158,10 +158,11 @@ class Server:
     """A loopback TCP server on a thread, for ``connections`` connections.
     With ``tls``, each connection does a TLS handshake with the certificate
     in ``cert_dir`` as it is at that moment, records the decrypted bytes and
-    answers 200; without, it records the raw bytes and closes."""
+    answers 200; without, it records the raw bytes, sends ``answer`` and
+    closes."""
 
-    def __init__(self, cert_dir: Path | None, connections: int = 1) -> None:
-        self.cert_dir = cert_dir
+    def __init__(self, cert_dir: Path | None, connections: int = 1, answer: bytes = b"") -> None:
+        self.cert_dir, self.answer = cert_dir, answer
         self.received: list[bytes] = []
         self._sock = socket.create_server(("127.0.0.1", 0))
         self.port = self._sock.getsockname()[1]
@@ -175,6 +176,7 @@ class Server:
             if self.cert_dir is None:
                 with raw:
                     self.received.append(raw.recv(65536))
+                    raw.sendall(self.answer)
                 continue
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -248,8 +250,11 @@ def test_the_server_context_serves_the_pinned_certificate(pinned: Path) -> None:
     assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
+PLAIN_ANSWER = b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n"
+
+
 def test_a_plain_squatter_gets_no_request(pinned: Path, rng: random.Random) -> None:
-    server, secret = Server(None), token(rng)
+    server, secret = Server(None, answer=PLAIN_ANSWER), token(rng)
     with pytest.raises(PeerMismatchError) as e:
         get(local_tcp_transport(server.port, pinned), server.port, secret)
     (got,) = server.done()
@@ -258,10 +263,26 @@ def test_a_plain_squatter_gets_no_request(pinned: Path, rng: random.Random) -> N
     assert b"HTTP/" not in got
     assert e.value.code == "peer_mismatch"
     assert str(server.port) in str(e.value)
+    # A daemon started before the upgrade to TLS answers like this one.
+    assert "restart" in str(e.value)
+
+
+def test_a_server_that_hangs_up_mid_handshake_is_unreachable_not_an_impostor(
+    pinned: Path, rng: random.Random
+) -> None:
+    # A busy daemon closing a connection still in its handshake, or a
+    # squatter that answers nothing: neither is shown as a different server.
+    server, secret = Server(None), token(rng)
+    with pytest.raises(httpx.ConnectError) as e:
+        get(local_tcp_transport(server.port, pinned), server.port, secret)
+    assert not isinstance(e.value, PeerMismatchError)
+    (got,) = server.done()
+    assert secret.encode() not in got
+    assert b"HTTP/" not in got
 
 
 async def test_a_plain_squatter_gets_no_request_async(pinned: Path, rng: random.Random) -> None:
-    server, secret = Server(None), token(rng)
+    server, secret = Server(None, answer=PLAIN_ANSWER), token(rng)
     with pytest.raises(PeerMismatchError):
         await aget(local_async_tcp_transport(server.port, pinned), server.port, secret)
     (got,) = server.done()

@@ -29,7 +29,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   a self-signed certificate in its data directory (`api-tls.crt`, its key
   `api-tls.key` and its fingerprint `api-tls.sha256`, each 0600), valid for
   90 days and replaced 30 days before it expires. Other clients trust it
-  with, for example, `curl --cacert <data-dir>/api-tls.crt`.
+  with, for example, `curl --cacert <data-dir>/api-tls.crt`. Restart a
+  daemon that uses TCP after upgrading: the new CLI and SDK report a daemon
+  still serving plain HTTP as `peer_mismatch`.
 
 ### Removed
 
@@ -79,8 +81,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   They trust only the certificate pinned in the directory they read the
   token from. Another local user listening on the port while the daemon
   was down used to receive the human or agent token and invite links and
-  could forge answers, short codes included; now it gets the TLS handshake
-  only, and the client fails with `peer_mismatch`.
+  could forge answers, short codes included; now it gets the client's TLS
+  hello and no request byte. The client reports `peer_mismatch` when that
+  server answers with something other than TLS or with another
+  certificate, and that the daemon isn't reachable when it hangs up or
+  stays silent.
 
 ## [0.1.0a1] - 2026-10-20
 
