@@ -21,7 +21,7 @@ from agentconnect.runtime.api import ApiServer
 from agentconnect.sockets import receiver_async_transport
 from agentconnect.sse import SseAdapter
 from agentconnect.webhook import SOCKET_URL, WebhookAdapter
-from agentconnect_harness.cluster import Cluster, Node, serve_api
+from agentconnect_harness.cluster import Cluster, Node, serve_api, serve_api_tcp
 from agentconnect_sdk import AgentConnect
 from agentconnect_sdk.receiver import WebhookReceiver
 
@@ -79,11 +79,13 @@ async def headless(  # noqa: PLR0913
     auto_approve: bool = True,
     started: bool = True,
     hook_socket: bool = False,
+    tcp: bool = False,
     **config: Any,
 ) -> Headless:
     """``started=False`` leaves the webhook unreachable until :meth:`Headless.up`.
     ``hook_socket=True`` puts the webhook receiver on a Unix socket in
-    ``sockdir``, checked by its server's user."""
+    ``sockdir``, checked by its server's user. ``tcp=True`` serves the API on a
+    loopback port (TLS) instead of a socket."""
     secret = secrets.token_urlsafe(16)
     hook_path = sockdir / f"{name}-hook.sock" if hook_socket else None
 
@@ -106,10 +108,11 @@ async def headless(  # noqa: PLR0913
         webhook_url=UNREACHABLE if mode == "webhook" else None,
         **config,
     )
-    server = await serve_api(node, sockdir)
+    server = await (serve_api_tcp(node) if tcp else serve_api(node, sockdir))
     sdk = AgentConnect(
         data_dir=node.config.data_dir,
-        socket=Path(str(server.address)),
+        socket=None if tcp else Path(str(server.address)),
+        tcp_port=node.config.api_tcp_port if tcp else None,
         webhook_secret=secret,
         clock=lambda: cluster.clock.unix_millis() / 1000,
     )

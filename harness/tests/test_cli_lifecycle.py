@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -16,6 +17,7 @@ import pytest_asyncio
 from typer.testing import CliRunner
 
 from agentconnect import cli_support
+from agentconnect.api_tls import CERT_FILE
 from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.sas import label
@@ -309,9 +311,12 @@ async def test_policy_route_only_tightens_for_agents(
     def post(token_file: str, value: bool) -> int:
         token = (a.config.data_dir / token_file).read_text(encoding="ascii").strip()
         resp = httpx.post(
-            f"http://127.0.0.1:{port}/v0/groups/{gid}/policy",
+            f"https://127.0.0.1:{port}/v0/groups/{gid}/policy",
             json={"require_verified": value},
             headers={"authorization": f"Bearer {token}"},
+            # As curl --cacert: trust only the daemon's certificate.
+            verify=ssl.create_default_context(cafile=a.config.data_dir / CERT_FILE),
+            trust_env=False,
         )
         return resp.status_code
 

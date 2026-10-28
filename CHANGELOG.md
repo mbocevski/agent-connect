@@ -24,6 +24,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `a2a.local_agent_socket`; anything else stops the daemon at start.
 - The separate-OS-user mode refuses a webhook or local A2A agent on a port:
   set `webhook.callback_socket` or `a2a.local_agent_socket`.
+- The local API on loopback TCP (`api.tcp_port`, `--tcp-port`, the SDK's
+  `tcp_port=`) is HTTPS only: `https://127.0.0.1:<port>`. The daemon keeps
+  a self-signed certificate in its data directory (`api-tls.crt`, its key
+  `api-tls.key` and its fingerprint `api-tls.sha256`, each 0600), valid for
+  90 days and replaced 30 days before it expires. Other clients trust it
+  with, for example, `curl --cacert <data-dir>/api-tls.crt`. Restart a
+  daemon that uses TCP after upgrading: the new CLI and SDK report a daemon
+  still serving plain HTTP as `peer_mismatch`.
 
 ### Removed
 
@@ -68,6 +76,16 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   at a configured `api.socket`, used to receive the tokens and invite links
   and could forge answers, short codes included. Now the client refuses it
   with `peer_mismatch` (CLI exit code 3).
+- Over loopback TCP, the CLI, the Python SDK and `agentconnect mcp` attached
+  to a runtime authenticate the daemon before sending anything (SR-08).
+  They trust only the certificate pinned in the directory they read the
+  token from. Another local user listening on the port while the daemon
+  was down used to receive the human or agent token and invite links and
+  could forge answers, short codes included; now it gets the client's TLS
+  hello and no request byte. The client reports `peer_mismatch` when that
+  server answers with something other than TLS or with another
+  certificate, and that the daemon isn't reachable when it hangs up or
+  stays silent.
 
 ## [0.1.0a1] - 2026-10-20
 

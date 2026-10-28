@@ -8,6 +8,7 @@ requires-python = ">=3.12"
 dependencies = [
     "a2a-sdk[http-server,signing]>=1.2.3",
     "agentconnect-core==0.1.0a1",
+    "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "keyring>=25.7.0",
     "mcp>=2.3.0",

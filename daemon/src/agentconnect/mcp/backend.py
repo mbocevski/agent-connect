@@ -35,7 +35,12 @@ from agentconnect.runtime import (
     Runtime,
     error_reply,
 )
-from agentconnect.sockets import PeerMismatchError, local_async_transport
+from agentconnect.sockets import (
+    PeerMismatchError,
+    local_async_tcp_transport,
+    local_async_transport,
+    tcp_base_url,
+)
 from agentconnect.tokens import API_TOKEN_FILE
 
 POLL_SECS = 60  # one GET /v0/deliveries waits at most this long
@@ -266,15 +271,11 @@ class AttachBackend:
             raise ToolError("not_running", msg, 503) from None
         if transport is None:
             transport = (
-                httpx.AsyncHTTPTransport()
+                local_async_tcp_transport(config.api_tcp_port, config.data_dir)
                 if config.api_tcp_port
                 else local_async_transport(config.socket_path, config.data_dir)
             )
-        base = (
-            f"http://127.0.0.1:{config.api_tcp_port}"
-            if config.api_tcp_port
-            else "http://agentconnectd"
-        )
+        base = tcp_base_url(config.api_tcp_port) if config.api_tcp_port else "http://agentconnectd"
         self._http = httpx.AsyncClient(
             transport=transport,
             base_url=base,

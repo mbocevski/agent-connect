@@ -37,15 +37,18 @@ import contextlib
 import json
 import os
 import re
+import ssl
 import stat
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentconnect import log
+from agentconnect.api_tls import ensure_certificate, server_context
 from agentconnect.cli_json import APPROVAL, HELD, KNOCK_INSPECT, KNOCK_SUMMARY, KNOCKS, LISTING
+from agentconnect.clock import Clock, SystemClock
 from agentconnect.deliveries import DeliveryQueue
 from agentconnect.isolation import PeerGate
 from agentconnect.runtime.agent import AgentApi, a2a_text
@@ -62,6 +65,7 @@ LOG = log.get("agentconnect.api")
 MAX_BODY = 1 << 20
 MAX_HEADER = 16 << 10
 HEADER_TIMEOUT = 2.0  # seconds to send the request line and the headers
+RENEW_RETRY_SECS = 3600.0  # a failed certificate renewal is tried again after this
 READ_TIMEOUT = 10.0  # seconds to send a whole request
 # Connections whose request line and headers haven't all arrived (no token
 # checked yet), in all and per peer UID where the socket reports one (the
@@ -1297,9 +1301,19 @@ class ApiServer:
     """Serves the control API for one :class:`Engine`."""
 
     def __init__(
-        self, daemon: Engine, gate: PeerGate | None = None, agent: AgentApi | None = None
+        self,
+        daemon: Engine,
+        gate: PeerGate | None = None,
+        agent: AgentApi | None = None,
+        *,
+        cert_clock: Clock | None = None,
     ) -> None:
         self.daemon = daemon
+        # The TCP certificate's dates are checked against clients' real
+        # clocks, so they come from the system clock, not the engine's.
+        self._cert_clock: Clock = cert_clock or SystemClock()
+        self._tls: ssl.SSLContext | None = None
+        self._renewal: asyncio.Task[None] | None = None
         self.agent = agent or AgentApi(daemon)
         # Peer-credential checks; a no-op unless isolation.enabled.
         self.gate = gate if gate is not None else PeerGate.from_config(daemon.config)
@@ -1823,6 +1837,8 @@ class ApiServer:
         self._idle.clear()
         conn = Connection()
         try:
+            if self._tls is not None and not await self._handshake(writer, self._tls):
+                return
             status, payload = await self._request(reader, conn, pending)
             if isinstance(payload, DeliveryPoll):
                 answer = await payload.run(reader)
@@ -1846,6 +1862,26 @@ class ApiServer:
             self._connections -= 1
             if self._connections == 0:
                 self._idle.set()
+
+    @staticmethod
+    async def _handshake(writer: asyncio.StreamWriter, tls: ssl.SSLContext) -> bool:
+        """TLS on loopback TCP, within the header timeout; ``False`` when
+        the client didn't complete it (nothing is answered then)."""
+        raw = writer.transport
+        try:
+            async with asyncio.timeout(HEADER_TIMEOUT):
+                await writer.start_tls(tls)
+        except (TimeoutError, OSError):  # ssl.SSLError is an OSError
+            return False
+        finally:
+            # Closed during the handshake (evicted, or the server stopping),
+            # asyncio can hand back no TLS transport and leave the writer
+            # without one: give it back the closed one, so closing the
+            # writer and its finaliser still work.
+            # Typed as never None; it is None after such a handshake.
+            if cast("asyncio.BaseTransport | None", writer.transport) is None:
+                setattr(writer, "_transport", raw)  # noqa: B010 - private, not in the stubs
+        return writer.get_extra_info("ssl_object") is not None
 
     def _admit(self, writer: asyncio.StreamWriter) -> Pending:
         """Count a new connection as pending until its request line and
@@ -1893,9 +1929,17 @@ class ApiServer:
             self._pending.remove(pending)
 
     def _evict(self, pending: Pending) -> None:
-        """Close a connection that hasn't sent its request (``busy``)."""
+        """Close a connection that hasn't sent its request (``busy``). On
+        loopback TCP, one still in its TLS handshake is closed without a
+        word: a plaintext answer there would read to the client as a server
+        that doesn't speak TLS, the sign of another process on the port."""
         self._unpend(pending)
         LOG.info("api_connection_evicted")
+        if self._tls is not None and pending.writer.get_extra_info("ssl_object") is None:
+            pending.writer.transport.abort()
+            if pending.task is not None:
+                pending.task.cancel()
+            return
         data = json.dumps({"code": "busy", "message": "too many unfinished requests"}).encode()
         pending.writer.write(
             f"HTTP/1.1 503 {STATUS_TEXT[503]}\r\ncontent-type: application/json\r\n"
@@ -1998,12 +2042,19 @@ class ApiServer:
         cfg = self.daemon.config
         if cfg.api_tcp_port:
             port = cfg.api_tcp_port
+            # TLS only, with the certificate clients pin (api_tls, SR-08).
+            cert = ensure_certificate(cfg.data_dir, self._cert_clock.now())
+            self._tls = server_context(cert)
+            # The handshake runs in _serve_one, once the connection is
+            # counted, so connections that never finish it are held to the
+            # same limits as ones that never finish their headers.
             self._server = await asyncio.start_server(
                 self._serve, "127.0.0.1", port, limit=MAX_HEADER
             )
             sock = self._server.sockets[0].getsockname()
             self._port = int(sock[1])
-            self.address = f"http://127.0.0.1:{sock[1]}"
+            self.address = f"https://127.0.0.1:{sock[1]}"
+            self._renewal = asyncio.ensure_future(self._renew(cert.renew_at.timestamp()))
         else:
             # A configured path over the platform's limit binds at a short
             # private path the CLI and SDK derive the same way (sockets.py).
@@ -2027,8 +2078,27 @@ class ApiServer:
             self.address = path
         LOG.info("api_listening", transport="tcp" if cfg.api_tcp_port else "unix")
 
+    async def _renew(self, due: float) -> None:
+        """Replace the TCP certificate ahead of its expiry while running;
+        new handshakes use the new one, and clients read the new pin."""
+        cfg = self.daemon.config
+        while True:
+            await self._cert_clock.sleep_until(due)
+            try:
+                cert = ensure_certificate(cfg.data_dir, self._cert_clock.now())
+                if self._tls is not None:
+                    self._tls.load_cert_chain(cert.cert, cert.key)
+            except (OSError, ValueError) as e:  # ssl.SSLError is an OSError
+                LOG.warning("api_tls_renewal_failed", error=type(e).__name__)
+                due = self._cert_clock.unix_millis() / 1000 + RENEW_RETRY_SECS
+                continue
+            due = cert.renew_at.timestamp()
+
     async def stop(self) -> None:
         self._stopping.set()
+        if self._renewal is not None:
+            await cancel_and_wait(self._renewal)
+            self._renewal = None
         for stream in list(self._streams):
             stream.stop()
         if self._server is not None:

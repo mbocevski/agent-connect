@@ -202,7 +202,8 @@ def status(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
 def daemon_run(
     config: ConfigOpt = None,
     tcp_port: Annotated[
-        int, typer.Option("--tcp-port", help="Serve the API on 127.0.0.1:<port> instead.")
+        int,
+        typer.Option("--tcp-port", help="Serve the API over TLS on 127.0.0.1:<port> instead."),
     ] = 0,
 ) -> None:
     """Run agentconnectd in the foreground (JSON logs on stderr).

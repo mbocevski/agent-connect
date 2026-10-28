@@ -95,7 +95,7 @@ class Runtime:
 
     @property
     def api_address(self) -> Path | str | None:
-        """The local API's socket path (or ``http://127.0.0.1:<port>``)
+        """The local API's socket path (or ``https://127.0.0.1:<port>``)
         once started; ``None`` before, or when the API isn't served."""
         return None if self._api is None else self._api.address
 

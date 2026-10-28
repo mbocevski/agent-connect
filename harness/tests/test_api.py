@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import shutil
 import signal
 import socket
+import ssl
 import stat
 import tempfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +22,18 @@ import pytest_asyncio
 from typer.testing import CliRunner
 
 from agentconnect import daemon as daemon_host
+from agentconnect.api_tls import CERT_FILE, FINGERPRINT_FILE, LIFETIME, RENEW_BEFORE, read_pin
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import app
+from agentconnect.clock import FakeClock, SystemClock
 from agentconnect.config import Config
+from agentconnect.mcp.backend import AttachBackend, OwnerGoneError, ToolError
 from agentconnect.runtime.api import MAX_PENDING, MAX_PENDING_HARD, ApiServer
+from agentconnect.sockets import local_async_tcp_transport
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token
 from agentconnect_harness.relay import on_free_port
+from agentconnect_sdk import AgentConnect, AgentConnectError
 
 
 class Api:
@@ -362,7 +369,20 @@ async def _tcp_api(node: Node, port: int) -> ApiServer:
 async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
     node = await cluster.node("t")
     server = await on_free_port(lambda port: _tcp_api(node, port))
-    assert str(server.address).startswith("http://127.0.0.1:")
+    assert str(server.address).startswith("https://127.0.0.1:")
+    port = node.daemon.config.api_tcp_port
+    # Plain HTTP gets no answer: the port speaks TLS only.
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(b"GET /v0/status HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n")
+    await writer.drain()
+    assert b"HTTP/1.1" not in await asyncio.wait_for(reader.read(), WAIT)
+    writer.close()
+    # A stock client that trusts only the certificate file, as curl --cacert.
+    cacert = ssl.create_default_context(cafile=node.config.data_dir / CERT_FILE)
+    headers = {"authorization": f"Bearer {api_token(server, 'agent')}"}
+    async with httpx.AsyncClient(verify=cacert, trust_env=False) as c:
+        resp = await c.get(f"https://127.0.0.1:{port}/v0/status", headers=headers)
+    assert resp.status_code == 200
     client = ApiClient(node.daemon.config)
     info = await asyncio.to_thread(client.request, "GET", "/v0/status")
     assert info["identity"] == node.me
@@ -386,6 +406,48 @@ async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
     result = await asyncio.to_thread(runner.invoke, app, ["status", "--config", str(cfg_file)])
     assert result.exit_code == 5
     assert "cannot reach" in result.output
+
+
+def _served_fingerprint(port: int) -> str:
+    """The SHA-256 of the certificate the server on ``port`` presents,
+    whatever its dates."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.verify_mode = ssl.CERT_NONE  # only to look at the certificate
+    with (
+        socket.create_connection(("127.0.0.1", port)) as raw,
+        ctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls,
+    ):
+        der = tls.getpeercert(True)
+    assert der is not None
+    return hashlib.sha256(der).hexdigest()
+
+
+async def test_the_tcp_certificate_is_renewed_while_running(cluster: Cluster) -> None:
+    node = await cluster.node("renew")
+    cert_clock = FakeClock(SystemClock().now())
+
+    async def start(port: int) -> ApiServer:
+        node.daemon.config = node.config.with_overrides(api_tcp_port=port)
+        server = ApiServer(node.daemon, cert_clock=cert_clock)
+        await server.start()
+        return server
+
+    server = await on_free_port(start)
+    port = node.daemon.config.api_tcp_port
+    pin_file = node.config.data_dir / FINGERPRINT_FILE
+    first = pin_file.read_text(encoding="ascii").strip()
+    assert await asyncio.to_thread(_served_fingerprint, port) == first
+    await until(lambda: cert_clock.sleepers == 1)
+    cert_clock.advance(LIFETIME - RENEW_BEFORE)
+    await until(lambda: pin_file.read_text(encoding="ascii").strip() != first)
+    second = pin_file.read_text(encoding="ascii").strip()
+    # New handshakes present the new certificate; the next renewal waits.
+    assert await asyncio.to_thread(_served_fingerprint, port) == second
+    await until(lambda: cert_clock.sleepers == 1)
+    await server.stop()
+    assert cert_clock.sleepers == 0
 
 
 async def test_cli_errors(tmp_path: Path) -> None:
@@ -515,7 +577,8 @@ async def test_tcp_api_refuses_browser_requests(cluster: Cluster) -> None:
     node = await cluster.node("tcp")
     server = await on_free_port(lambda port: _tcp_api(node, port))
     auth = {"authorization": f"Bearer {api_token(server, 'agent')}"}
-    async with httpx.AsyncClient(base_url=str(server.address)) as c:
+    transport = local_async_tcp_transport(server._port or 0, node.config.data_dir)
+    async with httpx.AsyncClient(transport=transport, base_url=str(server.address)) as c:
         assert (await c.get("/v0/status", headers=auth)).status_code == 200
         bad_origin = {**auth, "origin": "https://evil.example"}
         assert (await c.get("/v0/status", headers=bad_origin)).status_code == 403
@@ -541,11 +604,12 @@ async def test_half_sent_connections_dont_keep_the_human_out(
         node = await cluster.node("half-tcp")
         server = await on_free_port(lambda port: _tcp_api(node, port))
         port = int(str(server.address).rsplit(":", 1)[1])
-        transport = httpx.AsyncHTTPTransport()
+        transport = local_async_tcp_transport(port, node.config.data_dir)
         base, host = str(server.address), f"127.0.0.1:{port}"
+        pinned = read_pin(node.config.data_dir).context
 
         async def connect() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-            return await asyncio.open_connection("127.0.0.1", port)
+            return await asyncio.open_connection("127.0.0.1", port, ssl=pinned)
 
     else:
         api = await serve(cluster, "half", sockdir, auto_approve=False)
@@ -581,8 +645,24 @@ def whole_request(host: str, token: str, path: str = "/v0/status") -> bytes:
     return f"GET {path} HTTP/1.1\r\nhost: {host}\r\nauthorization: Bearer {token}\r\n\r\n".encode()
 
 
+def _read_all(sock: ssl.SSLSocket) -> bytes:
+    sock.settimeout(WAIT)
+    data = b""
+    try:
+        while chunk := sock.recv(65536):
+            data += chunk
+    except (ssl.SSLError, ConnectionResetError):
+        return data or b"reset"
+    finally:
+        sock.close()
+    return data
+
+
 async def status_of(sock: socket.socket) -> bytes:
     """The status code the server answered on ``sock``, once it closed."""
+    if isinstance(sock, ssl.SSLSocket):  # loopback TCP: blocking reads on a thread
+        data = await asyncio.to_thread(_read_all, sock)
+        return data if data == b"reset" else data.split(b" ", 2)[1] if data else b"closed"
     loop = asyncio.get_running_loop()
     sock.setblocking(False)
     data = b""
@@ -596,14 +676,32 @@ async def status_of(sock: socket.socket) -> bytes:
     return data.split(b" ", 2)[1] if data else b"closed"
 
 
-async def listener(cluster: Cluster, sockdir: Path, over: str) -> tuple[ApiServer, Any, str]:
-    """An API server on the Unix socket or loopback TCP, a function making
-    blocking connections to it, and the Host its requests name."""
+Secure = Callable[[], Awaitable[socket.socket]]
+
+
+async def listener(
+    cluster: Cluster, sockdir: Path, over: str
+) -> tuple[ApiServer, Callable[[], socket.socket], str, Secure]:
+    """An API server on the Unix socket or loopback TCP; a function making
+    blocking connections to it that send nothing; the Host its requests
+    name; and a coroutine making a connection a request can be written to
+    (on TCP: after the TLS handshake, which needs the event loop)."""
     if over == "tcp":
         node = await cluster.node("tcp")
         server = await on_free_port(lambda port: _tcp_api(node, port))
         port = int(str(server.address).rsplit(":", 1)[1])
-        return server, lambda: socket.create_connection(("127.0.0.1", port)), f"127.0.0.1:{port}"
+        pinned = read_pin(node.config.data_dir).context
+
+        def bare() -> socket.socket:
+            return socket.create_connection(("127.0.0.1", port))
+
+        def handshake() -> socket.socket:
+            return pinned.wrap_socket(bare(), server_hostname="127.0.0.1")
+
+        async def secure() -> socket.socket:
+            return await asyncio.to_thread(handshake)
+
+        return server, bare, f"127.0.0.1:{port}", secure
     api = await serve(cluster, "unix", sockdir, auto_approve=False)
 
     def connect() -> socket.socket:
@@ -611,7 +709,10 @@ async def listener(cluster: Cluster, sockdir: Path, over: str) -> tuple[ApiServe
         s.connect(str(api.server.address))
         return s
 
-    return api.server, connect, "ac"
+    async def plain() -> socket.socket:
+        return connect()
+
+    return api.server, connect, "ac", plain
 
 
 @pytest.mark.parametrize("n", [12, 24, 40, 60])
@@ -622,14 +723,14 @@ async def test_requests_that_arrive_together_all_get_through(
     """Whole requests that arrive together, as an SDK's parallel calls do,
     are all answered: a connection whose headers arrived never gives way,
     and the server reads what has arrived before it closes anything."""
-    server, connect, host = await listener(cluster, sockdir, over)
+    server, _connect, host, secure = await listener(cluster, sockdir, over)
     token = api_token(server, "agent")
     socks = []
     try:
-        for _ in range(n):  # blocking: all of them are in before the loop runs
-            s = connect()
+        for _ in range(n):
+            socks.append(await secure())
+        for s in socks:  # blocking: all of them are in before the loop runs
             s.sendall(whole_request(host, token))
-            socks.append(s)
         statuses = await asyncio.gather(*(status_of(s) for s in socks))
         assert statuses == [b"200"] * n
     finally:
@@ -645,15 +746,15 @@ async def test_connects_behind_a_whole_request_dont_close_it(
     """Loopback TCP, where any local user can connect: with the pool full
     of half-sent connections, the human's whole request is answered even
     when bare connects land right behind it."""
-    server, connect, host = await listener(cluster, sockdir, "tcp")
+    server, connect, host, secure = await listener(cluster, sockdir, "tcp")
     held: list[socket.socket] = []
     try:
         for _ in range(MAX_PENDING):
-            s = connect()
+            s = await secure()
             s.sendall(b"GET /v0/status HTTP/1.1\r\n")
             held.append(s)
         await until(lambda: len(server._pending) == MAX_PENDING)
-        human = connect()
+        human = await secure()
         human.sendall(whole_request(host, api_token(server, "human")))
         for _ in range(burst):  # the kernel completes them before the loop runs
             held.append(connect())
@@ -670,7 +771,7 @@ async def test_a_connection_that_sent_nothing_gives_way_first(
     """Past the limit, an unfinished connection that has sent nothing is
     closed before an older one that has sent part of its request, and only
     once it has waited EVICT_AFTER."""
-    server, connect, host = await listener(cluster, sockdir, "unix")
+    server, connect, host, _secure = await listener(cluster, sockdir, "unix")
     held: list[socket.socket] = []
     try:
         partial = connect()
@@ -693,19 +794,93 @@ async def test_a_connection_that_sent_nothing_gives_way_first(
         await server.stop()
 
 
+async def _code_of(who: str, config: Config, sockdir: Path) -> str:  # noqa: PLR0911
+    """The error code the CLI, the SDK or MCP attach reports for a status
+    request (``ok`` when it succeeds)."""
+    if who == "cli":
+        try:
+            await asyncio.to_thread(ApiClient(config, human=True).request, "GET", "/v0/status")
+        except ApiClientError as e:
+            return e.code
+        return "ok"
+    if who == "sdk":
+        sdk = AgentConnect(
+            data_dir=config.data_dir,
+            tcp_port=config.api_tcp_port,
+            config_path=sockdir / "none.toml",
+        )
+        try:
+            await sdk.status()
+        except AgentConnectError as e:
+            return e.code
+        finally:
+            await sdk.aclose()
+        return "ok"
+    backend = AttachBackend(config, "daemon")
+    try:
+        await backend.groups()
+    except OwnerGoneError:
+        return "not_running"  # the session reports it so (mcp/session.py)
+    except ToolError as e:
+        return e.code
+    finally:
+        await backend.close()
+    return "ok"
+
+
+@pytest.mark.parametrize("who", ["cli", "sdk", "mcp"])
+async def test_an_honest_client_closed_mid_handshake_is_told_busy_not_impostor(
+    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch, who: str
+) -> None:
+    """Loopback TCP: a connection still in its TLS handshake has sent
+    nothing the server has read, so it gives way first. The server closes it
+    without writing (a plaintext 503 would read as a non-TLS server), and the
+    CLI, the SDK and MCP attach report the daemon unreachable, never a
+    different server on the port."""
+    monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 0)
+    server, connect, _host, _secure = await listener(cluster, sockdir, "tcp")
+    held: list[socket.socket] = []
+    # Hold every handshake, so the client is still in its own when the pool
+    # fills up behind it.
+    gate = asyncio.Event()
+    handshake = server._handshake
+
+    async def held_handshake(writer: asyncio.StreamWriter, tls: ssl.SSLContext) -> bool:
+        await gate.wait()
+        return await handshake(writer, tls)
+
+    monkeypatch.setattr(server, "_handshake", held_handshake)
+    try:
+        request = asyncio.create_task(_code_of(who, server.daemon.config, sockdir))
+        await until(lambda: len(server._pending) == 1)
+        for _ in range(MAX_PENDING):
+            held.append(connect())  # bare connects: the client is the oldest
+        assert await asyncio.wait_for(request, WAIT) == "not_running"
+    finally:
+        gate.set()
+        for s in held:
+            s.close()
+        await server.stop()
+
+
 @pytest.mark.parametrize("burst", [1, 2, 8])
 async def test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one(
-    cluster: Cluster, sockdir: Path, burst: int
+    cluster: Cluster, sockdir: Path, burst: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Loopback TCP with the pool at its hard limit, every connection having
     sent a byte and stalled. The human's whole request arrives with bare
     connects right behind it: each new connection closes the oldest
     stalled one, never the fresh request whose first byte isn't read yet."""
-    server, connect, host = await listener(cluster, sockdir, "tcp")
+    # 128 TLS handshakes take longer than the header timeout and than
+    # EVICT_AFTER; this is about which connection gives way at the hard
+    # limit, so neither may close one first.
+    monkeypatch.setattr("agentconnect.runtime.api.HEADER_TIMEOUT", 60.0)
+    monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 3600.0)
+    server, connect, host, secure = await listener(cluster, sockdir, "tcp")
     held: list[socket.socket] = []
     try:
         for i in range(MAX_PENDING_HARD):
-            s = connect()
+            s = await secure()
             s.sendall(b"G")
             held.append(s)
             if i % 32 == 31:
@@ -715,12 +890,16 @@ async def test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one(
                 len(server._pending) == MAX_PENDING_HARD and all(p.started for p in server._pending)
             )
         )
-        human = connect()
+        human = await secure()
         human.sendall(whole_request(host, api_token(server, "human")))
         for _ in range(burst):  # the kernel completes them before the loop runs
             held.append(connect())
         assert await status_of(human) == b"200"
-        for s in held[: burst + 1]:  # the oldest stalled ones gave way
+        # The oldest stalled ones gave way: one for the human and one for
+        # each bare connect, or (the human's request read and answered
+        # before the first bare connect arrived, which TLS makes possible)
+        # one fewer.
+        for s in held[:burst]:
             assert await status_of(s) == b"503"
     finally:
         for s in held:
@@ -733,7 +912,7 @@ async def test_a_refused_requests_body_is_read_before_the_answer(
 ) -> None:
     """A request refused at its headers (here: a wrong token) still has its
     body read, so the answer reaches the client instead of a reset."""
-    server, connect, host = await listener(cluster, sockdir, "unix")
+    server, connect, host, _secure = await listener(cluster, sockdir, "unix")
     body = b"{" + b" " * 300_000 + b"}"
     s = connect()
     try:

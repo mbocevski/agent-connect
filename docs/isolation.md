@@ -62,7 +62,8 @@ is no user boundary to put between them.
   code 2, `refusing to start: ...`) when:
   - it runs as root;
   - the API is on TCP (`api.tcp_port`), where the peer's user can't be
-    checked;
+    checked (TLS there authenticates the daemon to its clients, not the
+    clients' users);
   - a webhook or local A2A agent is set without its socket
     (`webhook.callback_url` without `webhook.callback_socket`,
     `a2a.local_agent_url` without `a2a.local_agent_socket`);

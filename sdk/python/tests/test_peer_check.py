@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import ssl
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -16,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from agentconnect.api_tls import CERT_FILE, KEY_FILE, ensure_certificate
+from agentconnect.clock import SystemClock
 from agentconnect.isolation import PeerCred
 from agentconnect_sdk import AgentConnect, AgentConnectError
 
@@ -75,3 +78,40 @@ async def test_attach_refuses_another_users_socket(
             await ac.stream()
         assert e.value.code == "peer_mismatch"
     assert server.done() == [b"", b""]
+
+
+async def test_attach_over_tcp_refuses_a_server_without_the_pinned_certificate(
+    isolated_env: None, data_dir: Path, short_dir: Path
+) -> None:
+    # The daemon's certificate is pinned in the data directory; a squatter
+    # on the port presents another one and gets nothing.
+    ensure_certificate(data_dir, SystemClock().now())
+    ensure_certificate(short_dir, SystemClock().now())
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    got: list[bytes] = []
+
+    def serve() -> None:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(short_dir / CERT_FILE, short_dir / KEY_FILE)
+        for _ in range(2):
+            raw, _ = listener.accept()
+            try:
+                with ctx.wrap_socket(raw, server_side=True) as conn:
+                    got.append(conn.recv(65536))
+            except (ssl.SSLError, OSError):
+                got.append(b"")
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    async with AgentConnect(data_dir=data_dir, tcp_port=port) as ac:
+        with pytest.raises(AgentConnectError) as e:
+            await ac.status()
+        assert e.value.code == "peer_mismatch"
+        with pytest.raises(AgentConnectError) as e:
+            await ac.stream()
+        assert e.value.code == "peer_mismatch"
+    thread.join(timeout=5)
+    listener.close()
+    assert got == [b"", b""]
