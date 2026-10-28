@@ -15,6 +15,12 @@ updates:
       prefix: build
       include: scope
     labels: [dependencies, skip-changelog]
+    # The one-line text rule depends on the Unicode version of these tables,
+    # so a Unicode bump is a deliberate change that moves both exactly
+    # pinned crates together (see the workspace Cargo.toml).
+    ignore:
+      - dependency-name: unicode-normalization
+      - dependency-name: unicode-properties
     groups:
       cargo-minor-patch:
         update-types: [minor, patch]

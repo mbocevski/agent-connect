@@ -20,6 +20,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Drop `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387) by removing the
   `spikes/mls-xwing` crate, the only path that pulled it in through the
   P-256 and P-384 crates of `openmls_basic_credential`.
+- Update `openmls` to 0.9.2 (GHSA-p276-g3f3-wwgh, GHSA-94v4-rg25-x625): a
+  rejected private message can no longer advance the sender ratchet, and
+  an external commit that truncates and regrows the ratchet tree no longer
+  brings removed leaves back.
 
 ## [0.1.0a1] - 2026-10-20
 
