@@ -43,7 +43,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agentconnect import log
 from agentconnect.api_tls import ensure_certificate, server_context
@@ -1867,12 +1867,21 @@ class ApiServer:
     async def _handshake(writer: asyncio.StreamWriter, tls: ssl.SSLContext) -> bool:
         """TLS on loopback TCP, within the header timeout; ``False`` when
         the client didn't complete it (nothing is answered then)."""
+        raw = writer.transport
         try:
             async with asyncio.timeout(HEADER_TIMEOUT):
                 await writer.start_tls(tls)
         except (TimeoutError, OSError):  # ssl.SSLError is an OSError
             return False
-        return True
+        finally:
+            # Closed during the handshake (evicted, or the server stopping),
+            # asyncio can hand back no TLS transport and leave the writer
+            # without one: give it back the closed one, so closing the
+            # writer and its finaliser still work.
+            # Typed as never None; it is None after such a handshake.
+            if cast("asyncio.BaseTransport | None", writer.transport) is None:
+                setattr(writer, "_transport", raw)  # noqa: B010 - private, not in the stubs
+        return writer.get_extra_info("ssl_object") is not None
 
     def _admit(self, writer: asyncio.StreamWriter) -> Pending:
         """Count a new connection as pending until its request line and

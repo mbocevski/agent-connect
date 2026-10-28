@@ -51,6 +51,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 
+import anyio
 import httpcore
 import httpx
 
@@ -376,24 +377,59 @@ class _Pinning:
         certificate arrives is unreachable (a busy daemon closes connections
         still in their handshake, and so does a silent squatter): not proof
         of another server. A certificate that fails verification, or an
-        answer that isn't TLS, is."""
-        cause = e.__cause__ or e
-        if isinstance(cause, ssl.SSLCertVerificationError):
-            return self.refused(cause.verify_message or cause)
-        if isinstance(cause, ssl.SSLEOFError | ssl.SSLZeroReturnError) or (
-            isinstance(cause, OSError) and not isinstance(cause, ssl.SSLError)
-        ):
+        answer that isn't TLS, is. The whole cause chain is read: httpcore
+        and anyio wrap what the ssl module raised."""
+        chain = _causes(e)
+        verify = next((c for c in chain if isinstance(c, ssl.SSLCertVerificationError)), None)
+        if verify is not None:
+            return self.refused(verify.verify_message or _reason(verify))
+        not_tls = next(
+            (
+                c
+                for c in chain
+                if isinstance(c, ssl.SSLError)
+                and not isinstance(c, ssl.SSLEOFError | ssl.SSLZeroReturnError)
+            ),
+            None,
+        )
+        if not_tls is not None:
+            return self.refused(
+                f"{_reason(not_tls)}, not TLS with that certificate (a daemon started before "
+                "the upgrade to TLS answers like this: restart it)"
+            )
+        if any(isinstance(c, _HANG_UPS) for c in chain):
             msg = (
                 f"the server on {HOST}:{self.port} closed the connection during the TLS "
                 "handshake; the daemon may be busy or restarting; nothing was sent"
             )
             return httpcore.ConnectError(msg)
-        if isinstance(cause, ssl.SSLError):
-            return self.refused(
-                f"{cause}, not TLS with that certificate (a daemon started before the "
-                "upgrade to TLS answers like this: restart it)"
-            )
-        return self.refused(cause)
+        return self.refused(_reason(chain[-1]))
+
+
+# How a peer hanging up mid-handshake surfaces: the ssl module on the sync
+# path, anyio on the async one, or the socket itself (a reset).
+_HANG_UPS = (
+    ssl.SSLEOFError,
+    ssl.SSLZeroReturnError,
+    anyio.EndOfStream,
+    anyio.BrokenResourceError,
+    OSError,
+)
+
+
+def _causes(e: BaseException) -> list[BaseException]:
+    """``e`` and what it was raised from, outermost first."""
+    chain: list[BaseException] = []
+    cur: BaseException | None = e
+    while cur is not None and all(cur is not c for c in chain):
+        chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return chain
+
+
+def _reason(e: BaseException) -> str:
+    """A readable reason for ``e``, never empty."""
+    return str(e).strip() or type(e).__name__
 
 
 class _SyncPinnedStream(httpcore.NetworkStream):

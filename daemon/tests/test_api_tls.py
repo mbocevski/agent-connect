@@ -18,6 +18,7 @@ import random
 import shutil
 import socket
 import ssl
+import struct
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -161,8 +162,14 @@ class Server:
     answers 200; without, it records the raw bytes, sends ``answer`` and
     closes."""
 
-    def __init__(self, cert_dir: Path | None, connections: int = 1, answer: bytes = b"") -> None:
-        self.cert_dir, self.answer = cert_dir, answer
+    def __init__(
+        self,
+        cert_dir: Path | None,
+        connections: int = 1,
+        answer: bytes = b"",
+        reset: bool = False,
+    ) -> None:
+        self.cert_dir, self.answer, self.reset = cert_dir, answer, reset
         self.received: list[bytes] = []
         self._sock = socket.create_server(("127.0.0.1", 0))
         self.port = self._sock.getsockname()[1]
@@ -177,6 +184,8 @@ class Server:
                 with raw:
                     self.received.append(raw.recv(65536))
                     raw.sendall(self.answer)
+                    if self.reset:  # RST, not FIN
+                        raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
                 continue
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -267,18 +276,34 @@ def test_a_plain_squatter_gets_no_request(pinned: Path, rng: random.Random) -> N
     assert "restart" in str(e.value)
 
 
+@pytest.mark.parametrize("reset", [False, True], ids=["fin", "rst"])
 def test_a_server_that_hangs_up_mid_handshake_is_unreachable_not_an_impostor(
-    pinned: Path, rng: random.Random
+    pinned: Path, rng: random.Random, reset: bool
 ) -> None:
     # A busy daemon closing a connection still in its handshake, or a
     # squatter that answers nothing: neither is shown as a different server.
-    server, secret = Server(None), token(rng)
+    server, secret = Server(None, reset=reset), token(rng)
     with pytest.raises(httpx.ConnectError) as e:
         get(local_tcp_transport(server.port, pinned), server.port, secret)
     assert not isinstance(e.value, PeerMismatchError)
+    assert str(e.value).strip()
     (got,) = server.done()
     assert secret.encode() not in got
     assert b"HTTP/" not in got
+
+
+@pytest.mark.parametrize("reset", [False, True], ids=["fin", "rst"])
+async def test_a_server_that_hangs_up_mid_handshake_is_unreachable_async(
+    pinned: Path, rng: random.Random, reset: bool
+) -> None:
+    # The SDK and MCP attach: anyio reports the hang-up its own way.
+    server, secret = Server(None, reset=reset), token(rng)
+    with pytest.raises(httpx.ConnectError) as e:
+        await aget(local_async_tcp_transport(server.port, pinned), server.port, secret)
+    assert not isinstance(e.value, PeerMismatchError)
+    assert str(e.value).strip()
+    (got,) = server.done()
+    assert secret.encode() not in got
 
 
 async def test_a_plain_squatter_gets_no_request_async(pinned: Path, rng: random.Random) -> None:

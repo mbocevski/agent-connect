@@ -27,11 +27,13 @@ from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli import app
 from agentconnect.clock import FakeClock, SystemClock
 from agentconnect.config import Config
+from agentconnect.mcp.backend import AttachBackend, OwnerGoneError, ToolError
 from agentconnect.runtime.api import MAX_PENDING, MAX_PENDING_HARD, ApiServer
 from agentconnect.sockets import local_async_tcp_transport
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token
 from agentconnect_harness.relay import on_free_port
+from agentconnect_sdk import AgentConnect, AgentConnectError
 
 
 class Api:
@@ -792,14 +794,49 @@ async def test_a_connection_that_sent_nothing_gives_way_first(
         await server.stop()
 
 
+async def _code_of(who: str, config: Config, sockdir: Path) -> str:  # noqa: PLR0911
+    """The error code the CLI, the SDK or MCP attach reports for a status
+    request (``ok`` when it succeeds)."""
+    if who == "cli":
+        try:
+            await asyncio.to_thread(ApiClient(config, human=True).request, "GET", "/v0/status")
+        except ApiClientError as e:
+            return e.code
+        return "ok"
+    if who == "sdk":
+        sdk = AgentConnect(
+            data_dir=config.data_dir,
+            tcp_port=config.api_tcp_port,
+            config_path=sockdir / "none.toml",
+        )
+        try:
+            await sdk.status()
+        except AgentConnectError as e:
+            return e.code
+        finally:
+            await sdk.aclose()
+        return "ok"
+    backend = AttachBackend(config, "daemon")
+    try:
+        await backend.groups()
+    except OwnerGoneError:
+        return "not_running"  # the session reports it so (mcp/session.py)
+    except ToolError as e:
+        return e.code
+    finally:
+        await backend.close()
+    return "ok"
+
+
+@pytest.mark.parametrize("who", ["cli", "sdk", "mcp"])
 async def test_an_honest_client_closed_mid_handshake_is_told_busy_not_impostor(
-    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch
+    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch, who: str
 ) -> None:
     """Loopback TCP: a connection still in its TLS handshake has sent
     nothing the server has read, so it gives way first. The server closes it
     without writing (a plaintext 503 would read as a non-TLS server), and the
-    CLI reports the daemon unreachable, never a different server on the
-    port."""
+    CLI, the SDK and MCP attach report the daemon unreachable, never a
+    different server on the port."""
     monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 0)
     server, connect, _host, _secure = await listener(cluster, sockdir, "tcp")
     held: list[socket.socket] = []
@@ -813,15 +850,12 @@ async def test_an_honest_client_closed_mid_handshake_is_told_busy_not_impostor(
         return await handshake(writer, tls)
 
     monkeypatch.setattr(server, "_handshake", held_handshake)
-    client = ApiClient(server.daemon.config, human=True)
     try:
-        request = asyncio.create_task(asyncio.to_thread(client.request, "GET", "/v0/status"))
+        request = asyncio.create_task(_code_of(who, server.daemon.config, sockdir))
         await until(lambda: len(server._pending) == 1)
         for _ in range(MAX_PENDING):
             held.append(connect())  # bare connects: the client is the oldest
-        with pytest.raises(ApiClientError) as e:
-            await asyncio.wait_for(request, WAIT)
-        assert e.value.code == "not_running"
+        assert await asyncio.wait_for(request, WAIT) == "not_running"
     finally:
         gate.set()
         for s in held:
