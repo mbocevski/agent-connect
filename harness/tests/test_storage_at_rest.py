@@ -45,6 +45,10 @@ async def test_the_data_directory_holds_no_plaintext(cluster: Cluster, tmp_path:
     await a.wait(lambda: MARKERS[3] in str(a.daemon.store.cards(gid)))
     await a.idle()
     await b.idle()
+    # idle() waits for the outbox only: an inbox row (B's card message to
+    # everyone, say) stays pending until its adapter has taken it.
+    for node in (a, b):
+        await node.wait(lambda node=node: not node.daemon.store.pending_deliveries())
     # Plaintext retention: answered outbox rows and delivered inbox rows
     # keep only their ids.
     for node in (a, b):
