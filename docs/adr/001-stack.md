@@ -50,7 +50,7 @@ upstream docs.
 
 ### 2. Crypto: MLS from day one, one post-quantum hybrid ciphersuite
 
-- **OpenMLS 0.9.1** (MIT) with the **openmls_libcrux_crypto 0.4.0** provider
+- **OpenMLS 0.9.2** (MIT) with the **openmls_libcrux_crypto 0.4.0** provider
   (formally verified primitives from libcrux).
 - Supporting crates:
   - `openmls_basic_credential` 0.6.0
@@ -126,7 +126,7 @@ decision of 2026-10-17; the last one is the current state.
   upstream OpenMLS commit `be2368a21ec5e0380abd568821addc57b79013ea`, which
   depends on `libcrux-kem` 0.0.10, `libcrux-hmac-drbg` 0.0.2 and `hpke-rs`
   0.8. The three ignores are gone and the blocker is lifted.
-  - The patch is mixed: `openmls` 0.9.1, `openmls_basic_credential` 0.6.0
+  - The patch is mixed: `openmls` 0.9.2, `openmls_basic_credential` 0.6.0
     and `openmls_sqlite_storage` 0.3.0 stay on crates.io, because main's
     `openmls` pulls rusqlite 0.40, whose libsqlite3-sys 0.38 can't share a
     build with sqlx 0.9. `deny.toml` allows only this git source and
