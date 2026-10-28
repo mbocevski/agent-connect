@@ -34,7 +34,12 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, override
 import httpx
 
 from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads
-from agentconnect.sockets import PeerMismatchError, local_async_transport
+from agentconnect.sockets import (
+    PeerMismatchError,
+    local_async_tcp_transport,
+    local_async_transport,
+    tcp_base_url,
+)
 from agentconnect_sdk import _log
 from agentconnect_sdk.dedupe import Deduper
 from agentconnect_sdk.errors import AgentConnectError, PayloadError
@@ -349,11 +354,13 @@ class AgentConnect:
         self._token = token or read_secret(self._settings.data_dir / API_TOKEN_FILE, "api-token")
         self._secret = webhook_secret
         port = tcp_port if tcp_port is not None else self._settings.tcp_port
-        if transport is None and port == 0:
-            transport = local_async_transport(
-                socket or self._settings.socket, self._settings.data_dir
+        if transport is None:
+            transport = (
+                local_async_tcp_transport(port, self._settings.data_dir)
+                if port
+                else local_async_transport(socket or self._settings.socket, self._settings.data_dir)
             )
-        self._base = f"http://127.0.0.1:{port}" if port else "http://agentconnectd"
+        self._base = tcp_base_url(port) if port else "http://agentconnectd"
         self._http: httpx.AsyncClient | None = httpx.AsyncClient(
             transport=transport, base_url=self._base, timeout=30, trust_env=False
         )

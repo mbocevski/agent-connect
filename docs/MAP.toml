@@ -78,7 +78,7 @@ docs = ["docs/cli.md"]
 
 [[rule]]
 name = "local-api"
-code = ["daemon/src/agentconnect/runtime/api.py"]
+code = ["daemon/src/agentconnect/runtime/api.py", "daemon/src/agentconnect/api_tls.py"]
 docs = ["docs/api.md"]
 
 [[rule]]

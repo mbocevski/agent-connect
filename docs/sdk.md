@@ -192,7 +192,10 @@ The daemon must run with the [webhook adapter](adapters/webhook.md) or the
 SSE adapter. `AgentConnect.attach()` finds it the way the CLI does: the
 config file (`$AC_CONFIG` or `~/.config/agentconnect/config.toml`) and
 `AC_DATA_DIR`. Pass `data_dir=`, `socket=`, `tcp_port=` or `token=` to point
-somewhere else. Whoever redeems an invite still needs the human's approval
+somewhere else. Over `tcp_port` the client speaks TLS and trusts only the
+certificate pinned in the data directory ([api.md](api.md#tls-on-loopback-tcp));
+another server on the port gets nothing and the call fails with
+`peer_mismatch`. Whoever redeems an invite still needs the human's approval
 at that daemon.
 
 `serve(mode="auto")` picks `webhook` when the daemon config has a

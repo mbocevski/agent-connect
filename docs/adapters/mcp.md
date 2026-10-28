@@ -280,7 +280,8 @@ human's CLI out.
   happened (a send, say); check before you try again.
 - **A daemon.** A session also attaches to a separate daemon on the same
   data directory: `--config` with the daemon's `config.toml` (its
-  `daemon.data_dir`, `[api] socket` and `tcp_port` apply), or `--data-dir`
+  `daemon.data_dir`, `[api] socket` and `tcp_port` apply; over TCP it checks
+  the daemon's pinned certificate, [api.md](../api.md#tls-on-loopback-tcp)), or `--data-dir`
   for a daemon on the default socket. The daemon needs `"mcp"` in `daemon.adapters`
   ([config.md](../config.md)) to queue messages for sessions; otherwise
   `agentconnect_wait` answers `no_deliveries`. A session never takes over a

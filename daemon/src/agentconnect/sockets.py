@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import ssl
 import stat
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -52,6 +53,8 @@ from typing import TYPE_CHECKING, Any, cast, override
 
 import httpcore
 import httpx
+
+from agentconnect.api_tls import CERT_FILE, HOST, Pin, PinError, check_peer, read_pin
 
 if TYPE_CHECKING:
     from agentconnect.isolation import PeerCred
@@ -326,5 +329,247 @@ def receiver_async_transport(
         keepalive_expiry=_LIMITS.keepalive_expiry,
         uds=path,
         network_backend=_AsyncBackend(_Check(uids, "a user this daemon delivers to", credentials)),
+    )
+    return transport
+
+
+# -- loopback TCP: TLS with the pinned certificate (api_tls) -------------------
+
+# A server on the port that accepts but never answers the handshake.
+_HANDSHAKE_SECS = 5.0
+_PLAIN_REFUSED = "the local API on TCP is reached over TLS only (https://)"
+
+
+def _handshake_timeout(timeout: float | None) -> float:
+    return _HANDSHAKE_SECS if timeout is None else min(timeout, _HANDSHAKE_SECS)
+
+
+class _Pinning:
+    """What a TCP connection to the daemon must prove before a byte of the
+    request is written: TLS with the certificate pinned in ``token_dir``."""
+
+    def __init__(self, port: int, token_dir: Path) -> None:
+        self.port, self.token_dir = port, token_dir
+
+    def dial(self, host: str, port: int) -> None:
+        if host != HOST or port != self.port:
+            msg = f"only {HOST}:{self.port} is dialled"
+            raise httpcore.ConnectError(msg)
+
+    def pin(self) -> Pin:
+        try:
+            return read_pin(self.token_dir)
+        except FileNotFoundError:
+            msg = f"no {CERT_FILE} in {self.token_dir}: is the daemon running with api.tcp_port?"
+            raise httpcore.ConnectError(msg) from None
+        except PinError as e:
+            raise PeerMismatchError(f"{e}; nothing was sent") from None
+
+    def refused(self, why: object) -> PeerMismatchError:
+        return PeerMismatchError(
+            f"the server on {HOST}:{self.port} did not prove it is the daemon (TLS with the "
+            f"certificate pinned in {self.token_dir}): {why}; nothing was sent"
+        )
+
+
+class _SyncPinnedStream(httpcore.NetworkStream):
+    """A TCP stream that carries nothing until :meth:`start_tls` has
+    verified the pinned certificate; that returns the TLS stream."""
+
+    def __init__(self, inner: httpcore.NetworkStream, pinning: _Pinning) -> None:
+        self._inner, self._pinning = inner, pinning
+
+    @override
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        raise httpcore.ConnectError(_PLAIN_REFUSED)
+
+    @override
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        raise httpcore.ConnectError(_PLAIN_REFUSED)
+
+    @override
+    def close(self) -> None:
+        self._inner.close()
+
+    @override
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,  # replaced by the pinned one
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        try:
+            pin = self._pinning.pin()
+        except BaseException:
+            self._inner.close()
+            raise
+        try:
+            tls = self._inner.start_tls(pin.context, HOST, _handshake_timeout(timeout))
+        except httpcore.ConnectTimeout:
+            raise
+        except httpcore.ConnectError as e:
+            raise self._pinning.refused(e.__cause__ or e) from None
+        try:
+            check_peer(tls.get_extra_info("ssl_object"), pin)
+        except PinError as e:
+            tls.close()
+            raise self._pinning.refused(e) from None
+        return tls
+
+    @override
+    def get_extra_info(self, info: str) -> Any:
+        return self._inner.get_extra_info(info)
+
+
+class _AsyncPinnedStream(httpcore.AsyncNetworkStream):
+    """:class:`_SyncPinnedStream` for asyncio."""
+
+    def __init__(self, inner: httpcore.AsyncNetworkStream, pinning: _Pinning) -> None:
+        self._inner, self._pinning = inner, pinning
+
+    @override
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        raise httpcore.ConnectError(_PLAIN_REFUSED)
+
+    @override
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        raise httpcore.ConnectError(_PLAIN_REFUSED)
+
+    @override
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+    @override
+    async def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            pin = self._pinning.pin()
+        except BaseException:
+            await self._inner.aclose()
+            raise
+        try:
+            tls = await self._inner.start_tls(pin.context, HOST, _handshake_timeout(timeout))
+        except httpcore.ConnectTimeout:
+            raise
+        except httpcore.ConnectError as e:
+            raise self._pinning.refused(e.__cause__ or e) from None
+        try:
+            check_peer(tls.get_extra_info("ssl_object"), pin)
+        except PinError as e:
+            await tls.aclose()
+            raise self._pinning.refused(e) from None
+        return tls
+
+    @override
+    def get_extra_info(self, info: str) -> Any:
+        return self._inner.get_extra_info(info)
+
+
+class _SyncTlsBackend(httpcore.NetworkBackend):
+    def __init__(self, pinning: _Pinning) -> None:
+        self._inner = httpcore.SyncBackend()
+        self._pinning = pinning
+
+    @override
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        self._pinning.dial(host, port)
+        stream = self._inner.connect_tcp(host, port, timeout, local_address, socket_options)
+        return _SyncPinnedStream(stream, self._pinning)
+
+    @override
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        raise httpcore.ConnectError(f"only {HOST}:{self._pinning.port} is dialled")
+
+    @override
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
+class _AsyncTlsBackend(httpcore.AsyncNetworkBackend):
+    def __init__(self, pinning: _Pinning) -> None:
+        self._inner = cast("httpcore.AsyncNetworkBackend", httpcore.AnyIOBackend())
+        self._pinning = pinning
+
+    @override
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        self._pinning.dial(host, port)
+        stream = await self._inner.connect_tcp(host, port, timeout, local_address, socket_options)
+        return _AsyncPinnedStream(stream, self._pinning)
+
+    @override
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        raise httpcore.ConnectError(f"only {HOST}:{self._pinning.port} is dialled")
+
+    @override
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+def _unused_context() -> ssl.SSLContext:
+    # httpx and httpcore want a context; every connection uses the pinned
+    # one instead. This one trusts nothing, so it could never connect.
+    return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+
+def tcp_base_url(port: int) -> str:
+    return f"https://{HOST}:{port}"
+
+
+def local_tcp_transport(port: int, token_dir: Path) -> httpx.BaseTransport:
+    """The CLI's transport to the daemon on ``127.0.0.1:port``. Each
+    connection is TLS, verified against the certificate pinned in
+    ``token_dir`` (:mod:`agentconnect.api_tls`), read afresh, before a byte
+    of the request is written; any other server is
+    :class:`PeerMismatchError`. Use it with :func:`tcp_base_url`."""
+    unused = _unused_context()
+    transport = httpx.HTTPTransport(verify=unused, trust_env=False)
+    transport._pool = httpcore.ConnectionPool(
+        ssl_context=unused,
+        max_connections=_LIMITS.max_connections,
+        max_keepalive_connections=_LIMITS.max_keepalive_connections,
+        keepalive_expiry=_LIMITS.keepalive_expiry,
+        network_backend=_SyncTlsBackend(_Pinning(port, token_dir)),
+    )
+    return transport
+
+
+def local_async_tcp_transport(port: int, token_dir: Path) -> httpx.AsyncBaseTransport:
+    """:func:`local_tcp_transport` for asyncio: the SDK and MCP attach."""
+    unused = _unused_context()
+    transport = httpx.AsyncHTTPTransport(verify=unused, trust_env=False)
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=unused,
+        max_connections=_LIMITS.max_connections,
+        max_keepalive_connections=_LIMITS.max_keepalive_connections,
+        keepalive_expiry=_LIMITS.keepalive_expiry,
+        network_backend=_AsyncTlsBackend(_Pinning(port, token_dir)),
     )
     return transport

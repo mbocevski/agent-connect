@@ -52,7 +52,7 @@ from agentconnect.tasks import cancel_and_wait
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 from agentconnect_harness.mcp import McpInstance
 from agentconnect_harness.proxy import RelayProxy
-from agentconnect_harness.relay import RelayProcess
+from agentconnect_harness.relay import RelayProcess, on_free_port
 from agentconnect_sdk import AgentConnect, Group, Message
 from agentconnect_sdk import Event as SdkEvent
 from agentconnect_sdk.embedded import EmbeddedHost
@@ -352,6 +352,20 @@ async def serve_api(node: Node, sockdir: Path) -> ApiServer:
     server = ApiServer(node.daemon)
     await server.start()
     return server
+
+
+async def serve_api_tcp(node: Node) -> ApiServer:
+    """Serve ``node``'s runtime on a free loopback port, over TLS with the
+    certificate it pins in ``node.config.data_dir`` (``server.port``)."""
+
+    async def start(port: int) -> ApiServer:
+        node.config = node.config.with_overrides(api_tcp_port=port)
+        node.daemon.config = node.config
+        server = ApiServer(node.daemon)
+        await server.start()
+        return server
+
+    return await on_free_port(start)
 
 
 def api_token(server: ApiServer, scope: str) -> str:

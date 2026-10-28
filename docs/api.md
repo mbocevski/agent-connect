@@ -13,9 +13,10 @@ route list and the error table are generated from the code (see
 HTTP/1.1 with JSON bodies, one request per connection, `Content-Length`
 bodies only, at most 1 MiB. By default the daemon listens on a Unix socket in
 its data directory (`agentconnectd.sock`, mode 0600). With `api.tcp_port` set
-(see [config.md](config.md)) it listens on `127.0.0.1:<port>` instead, and
-then refuses requests that carry an `Origin` header or a `Host` other than
-`127.0.0.1:<port>` or `localhost:<port>`.
+(see [config.md](config.md)) it listens on `https://127.0.0.1:<port>` instead,
+over TLS only ([below](#tls-on-loopback-tcp)), and then refuses requests that
+carry an `Origin` header or a `Host` other than `127.0.0.1:<port>` or
+`localhost:<port>`.
 
 On the Unix socket, the clients check the server before they send a byte.
 The CLI, the Python SDK and `agentconnect mcp` attached to a runtime ask the
@@ -62,6 +63,51 @@ may use it), so only they can use up its 16: for example, 16 event streams
 opened with the human token (a dashboard on `GET /v0/events` with
 `Accept: text/event-stream`) leave the human's approvals `503 busy`. In the
 separate-OS-user mode one OS user may hold at most 16 event streams.
+
+### TLS on loopback TCP
+
+Any local user can listen on a loopback port while the daemon is down, so
+on TCP the clients authenticate the daemon with TLS before they send
+anything. On the first start with `api.tcp_port` set, the daemon writes
+three files to its data directory, each 0600:
+
+| File | What |
+|---|---|
+| `api-tls.crt` | A self-signed ECDSA P-256 certificate for `127.0.0.1` and `localhost`, PEM. |
+| `api-tls.key` | Its private key, PKCS#8 PEM. |
+| `api-tls.sha256` | The certificate's SHA-256 (of the DER form), in hex. |
+
+The certificate is valid for 90 days. The daemon replaces it 30 days before
+it expires, when it starts and while it runs, and new connections get the
+new one. It also replaces it at start when a file is missing or damaged, or
+when the key, the certificate and the fingerprint don't belong together. To
+rotate it on demand, delete the three files and restart the daemon. A file
+that others can read, or that another user owns, stops the start, as a loose
+token file does.
+
+The CLI, the Python SDK and `agentconnect mcp` attached to a runtime read
+the certificate and its fingerprint from the directory they read the token
+from, on every connection, so a rotated certificate needs no restart of the
+client. They trust only that certificate: OpenSSL checks it, its dates and
+`127.0.0.1`, and the client then compares the presented certificate's
+SHA-256 with the fingerprint. Any other server on the port (plain HTTP,
+another certificate, an expired one) gets the TLS handshake and nothing
+else, and the client fails with `peer_mismatch`. With no certificate in the
+directory, the client reports that the daemon isn't running. Plain HTTP on
+the port is never answered.
+
+Other clients trust the certificate file the same way, for example:
+
+```sh
+curl --cacert ~/.local/share/agentconnect/api-tls.crt -H @auth-header \
+  https://127.0.0.1:<port>/v0/status
+```
+
+Here `auth-header` is a 0600 file holding the `Authorization: Bearer ...`
+line, so the token isn't on the command line.
+
+The handshake counts against the connection limits above, as an
+unfinished connection, and must finish within 2 seconds.
 
 ## Authentication
 

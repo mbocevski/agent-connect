@@ -30,7 +30,7 @@ Example file::
 
     [api]
     socket = "~/.local/share/agentconnect/agentconnectd.sock"
-    tcp_port = 0                    # > 0 serves on 127.0.0.1:<port> instead
+    tcp_port = 0                    # > 0 serves https://127.0.0.1:<port> instead
 
     [sse]
     retention_secs = 3600           # how long the SSE feed keeps items for resume
@@ -471,8 +471,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "api.tcp_port",
         "api_tcp_port",
         "`0`",
-        "When greater than 0, serve the local API on `127.0.0.1:<port>` instead of "
-        "the socket (0 to 65535).",
+        "When greater than 0, serve the local API on `https://127.0.0.1:<port>` instead "
+        "of the socket (0 to 65535): TLS with a certificate in the data directory that "
+        "clients pin ([api.md](api.md#tls-on-loopback-tcp)).",
     ),
     ConfigKey(
         "webhook.callback_url",

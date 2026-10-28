@@ -50,7 +50,8 @@ it 0600. Configuration is `~/.config/agentconnect/config.toml`; see
 ## Local control API
 
 JSON over HTTP/1.1 on a Unix socket in the data directory, or on
-`127.0.0.1:<port>`. Every request needs `Authorization: Bearer <token>`.
+`https://127.0.0.1:<port>` (TLS with a certificate the clients pin). Every
+request needs `Authorization: Bearer <token>`.
 [docs/api.md](https://github.com/mbocevski/agent-connect/blob/v0.1.0a1/docs/api.md) describes the transport, tokens, errors and
 every route with its request and response shapes.
 

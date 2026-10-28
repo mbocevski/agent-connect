@@ -7,7 +7,12 @@ from typing import Any
 import httpx
 
 from agentconnect.config import Config
-from agentconnect.sockets import PeerMismatchError, local_transport
+from agentconnect.sockets import (
+    PeerMismatchError,
+    local_tcp_transport,
+    local_transport,
+    tcp_base_url,
+)
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE
 
 
@@ -28,8 +33,11 @@ class ApiClient:
             msg = "no API token: is the daemon running?"
             raise ApiClientError(0, "not_running", msg) from None
         if config.api_tcp_port:
-            self._transport: httpx.BaseTransport = httpx.HTTPTransport()
-            self._base = f"http://127.0.0.1:{config.api_tcp_port}"
+            # TLS with the certificate pinned in the data directory.
+            self._transport: httpx.BaseTransport = local_tcp_transport(
+                config.api_tcp_port, config.data_dir
+            )
+            self._base = tcp_base_url(config.api_tcp_port)
         else:
             self._transport = local_transport(config.socket_path, config.data_dir)
             self._base = "http://agentconnectd"

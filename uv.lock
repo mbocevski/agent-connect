@@ -62,6 +62,7 @@ source = { editable = "daemon" }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server", "signing"] },
     { name = "agentconnect-core" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "keyring" },
     { name = "mcp" },
@@ -76,6 +77,7 @@ dependencies = [
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server", "signing"], specifier = ">=1.2.3" },
     { name = "agentconnect-core", editable = "core-py" },
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "keyring", specifier = ">=25.7.0" },
     { name = "mcp", specifier = ">=2.3.0" },

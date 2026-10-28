@@ -201,8 +201,11 @@ async def test_events_reach_the_sdk_once_with_their_ids(cluster: Cluster, sockdi
     await bob.close()
 
 
-async def test_sse_streams_resume_after_a_disconnect(cluster: Cluster, sockdir: Path) -> None:
-    alice, bob, gid = await pair(cluster, sockdir, mode="sse")
+@pytest.mark.parametrize("over", ["unix", "tcp"])
+async def test_sse_streams_resume_after_a_disconnect(
+    cluster: Cluster, sockdir: Path, over: str
+) -> None:
+    alice, bob, gid = await pair(cluster, sockdir, mode="sse", tcp=over == "tcp")
     handled: list[str] = []
     changed = asyncio.Event()
 
@@ -246,7 +249,8 @@ async def test_sse_streams_resume_after_a_disconnect(cluster: Cluster, sockdir: 
     ids = [str(seq) for seq, _gid, payload in feed if "msg_id" in payload]
     other = AgentConnect(
         data_dir=bob.node.config.data_dir,
-        socket=Path(str(bob.server.address)),
+        socket=None if over == "tcp" else Path(str(bob.server.address)),
+        tcp_port=bob.node.config.api_tcp_port if over == "tcp" else None,
     )
     replayed: list[str] = []
     again = asyncio.Event()

@@ -508,7 +508,7 @@ agentconnect daemon run [OPTIONS]
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `--config` | path | none | Path of config.toml. |
-| `--tcp-port` | integer | `0` | Serve the API on 127.0.0.1:<port> instead. |
+| `--tcp-port` | integer | `0` | Serve the API over TLS on 127.0.0.1:<port> instead. |
 
 ### `agentconnect identity export`
 
