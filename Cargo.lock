@@ -125,21 +125,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agentconnect-spike-mls-xwing"
-version = "0.1.0-alpha.1"
-dependencies = [
- "hkdf 0.13.0",
- "openmls",
- "openmls_basic_credential",
- "openmls_libcrux_crypto",
- "openmls_sqlite_storage",
- "openmls_traits",
- "serde",
- "serde_json",
- "sha2 0.11.1",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

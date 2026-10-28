@@ -8,10 +8,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+### Removed
+
+- The `spikes/mls-xwing` crate. Its findings and decisions stay in
+  `docs/spikes/mls-xwing.md`.
+
 ### Security
 
 - Update `ctutils` to 0.4.4 (RUSTSEC-2026-0385), reached through
   `digest` and `hmac` in the core and the relay.
+- Drop `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387) by removing the
+  `spikes/mls-xwing` crate, the only path that pulled it in through the
+  P-256 and P-384 crates of `openmls_basic_credential`.
 
 ## [0.1.0a1] - 2026-10-20
 

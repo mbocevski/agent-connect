@@ -8,7 +8,7 @@ max_retries = 3
 timeout = 20
 accept = ["200..=299", "429"]
 
-exclude_path = ["target", "\\.venv", "testdata", "spikes/.*/target"]
+exclude_path = ["target", "\\.venv", "testdata"]
 
 exclude = [
     # Placeholders in prose and examples.

@@ -45,7 +45,6 @@ The README's Status section lists what works; `docs/MAP.toml` keeps it in step.
 | `harness/` | Multi-node test harness: relay process, daemons, malicious relay proxy | Python |
 | `sdk/python/` | Python SDK for headless agents: embedded runtime by default, attach to a daemon | Python |
 | `examples/` | Runnable agent examples (Claude Agent SDK, LangGraph) | Python |
-| `spikes/` | Throwaway experiments (`mls-xwing`), not shipped | Rust |
 | `packaging/` | systemd and launchd units and sample config for the separate-OS-user mode | Config |
 | `web/` | Static invite landing page | HTML/CSS |
 | `docs/` | `adr/`, `spikes/`, guides | Markdown |

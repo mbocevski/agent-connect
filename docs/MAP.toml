@@ -332,9 +332,3 @@ name = "harness"
 paths = ["harness/**"]
 doc = "TESTING.md"
 readme = false
-
-[[component]]
-name = "spikes"
-paths = ["spikes/**"]
-doc = "docs/spikes/mls-xwing.md"
-readme = false
