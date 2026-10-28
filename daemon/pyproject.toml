@@ -6,7 +6,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
-    "a2a-sdk[http-server,signing]>=1.2.2",
+    "a2a-sdk[http-server,signing]>=1.2.3",
     "agentconnect-core==0.1.0a1",
     "httpx>=0.28.1",
     "keyring>=25.7.0",
@@ -15,7 +15,7 @@ dependencies = [
     "structlog>=26.1.0",
     "typer>=0.27.3",
     "uvicorn>=0.54.0",
-    "websockets>=17.2",
+    "websockets>=17.3",
 ]
 
 [project.scripts]
@@ -29,5 +29,5 @@ agentconnect-core = { workspace = true }
 module-name = "agentconnect"
 
 [build-system]
-requires = ["uv_build>=0.13.1,<0.14"]
+requires = ["uv_build>=0.13.5,<0.14"]
 build-backend = "uv_build"
