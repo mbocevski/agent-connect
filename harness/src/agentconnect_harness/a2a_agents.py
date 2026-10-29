@@ -299,17 +299,21 @@ async def a2a_node(
     agent: AgentServer | None = None,
     *,
     facade: bool = False,
+    facade_socket: Path | None = None,
     **kw: Any,
 ) -> Node:
     """A daemon whose groups deliver to an A2A adapter: bridged to ``agent``,
-    with a facade on a free loopback port when ``facade`` is set."""
+    with a facade on a free loopback port when ``facade`` is set, or on
+    the Unix socket ``facade_socket``, open to this user."""
 
     def make(config: Any, _clock: Any) -> list[Any]:
         options = A2AOptions(
             local_agent_url=None if agent is None else agent.url,
             local_agent_socket=None if agent is None else agent.uds,
             receiver_uids=frozenset({os.geteuid()}),
-            facade_port=0 if facade else None,
+            facade_port=0 if facade and facade_socket is None else None,
+            facade_socket=facade_socket,
+            facade_uids=frozenset({os.geteuid()}),
             data_dir=config.data_dir,
         )
         return [A2AAdapter(options)]

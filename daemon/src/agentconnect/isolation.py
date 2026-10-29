@@ -192,6 +192,15 @@ def receiver_uids(cfg: Config) -> frozenset[int]:
     return frozenset(resolve_uid(u) for u in cfg.isolation_agent_users)
 
 
+def facade_uids(cfg: Config) -> frozenset[int]:
+    """Who may connect to the A2A facade's Unix socket: the daemon's own
+    user, and in the separate-OS-user mode the agent users too."""
+    uids = {os.geteuid()}
+    if cfg.isolation:
+        uids |= receiver_uids(cfg)
+    return frozenset(uids)
+
+
 def check_config(cfg: Config, euid: int, agent_uids: set[int], human_uids: set[int]) -> None:
     """The parts of the setup that don't need the filesystem."""
     if euid == 0:
@@ -207,6 +216,10 @@ def check_config(cfg: Config, euid: int, agent_uids: set[int], human_uids: set[i
         raise IsolationError(msg)
     if cfg.a2a_local_agent_url is not None and cfg.a2a_local_agent_socket is None:
         msg = "isolation needs a2a.local_agent_socket: a TCP agent's user can't be checked"
+        raise IsolationError(msg)
+    if cfg.a2a_facade_port:
+        # Any local user could hold the port and take the clients' token.
+        msg = "isolation needs a2a.facade_socket: a TCP client's user can't be checked"
         raise IsolationError(msg)
     if (cfg.webhook_socket or cfg.a2a_local_agent_socket) is not None and not agent_uids:
         # Only an agent user may serve a receiver: with none, every

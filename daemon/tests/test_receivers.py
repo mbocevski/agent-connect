@@ -26,7 +26,13 @@ from agentconnect.adapter import Delivery, DeliveryResult, GroupView, Sender
 from agentconnect.adapters import build_adapters
 from agentconnect.clock import FakeClock
 from agentconnect.config import Config, ConfigError, load_config
-from agentconnect.isolation import IsolationError, PeerCred, check_config, receiver_uids
+from agentconnect.isolation import (
+    IsolationError,
+    PeerCred,
+    check_config,
+    facade_uids,
+    receiver_uids,
+)
 from agentconnect.sockets import receiver_async_transport
 from agentconnect.webhook import SIGNATURE_HEADER, WebhookAdapter
 
@@ -324,3 +330,38 @@ def test_isolation_accepts_socket_receivers(short_dir: Path) -> None:
         a2a_local_agent_socket=short_dir / "a2a.sock",
     )
     check_config(cfg, EUID + 2, {EUID + 1}, set())
+
+
+# -- the A2A facade on a socket ---------------------------------------------------
+
+
+def test_the_facade_socket_is_configured(tmp_path: Path) -> None:
+    cfg = load(tmp_path, '[a2a]\nfacade_socket = "/run/agentconnect/facade.sock"\n')
+    assert cfg.a2a_facade_socket == Path("/run/agentconnect/facade.sock")
+    assert cfg.a2a_facade_port == 0
+    assert cfg.a2a_enabled
+
+
+def test_the_facade_is_on_a_port_or_a_socket_not_both(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="facade_socket"):
+        load(tmp_path, '[a2a]\nfacade_port = 8765\nfacade_socket = "/run/f.sock"\n')
+
+
+def test_isolation_refuses_a_facade_on_a_port(short_dir: Path) -> None:
+    with pytest.raises(IsolationError, match=r"a2a\.facade_socket"):
+        check_config(_isolated(short_dir, a2a_facade_port=8765), EUID + 2, {EUID + 1}, set())
+    check_config(
+        _isolated(short_dir, a2a_facade_socket=short_dir / "agents" / "facade.sock"),
+        EUID + 2,
+        {EUID + 1},
+        set(),
+    )
+
+
+def test_the_facade_admits_the_daemons_user_and_the_agent_users(
+    short_dir: Path, rng: random.Random
+) -> None:
+    a, b = _uid(rng), _uid(rng)
+    assert facade_uids(_config(short_dir)) == frozenset({EUID})
+    cfg = _config(short_dir, isolation=True, isolation_agent_users=(str(a), str(b)))
+    assert facade_uids(cfg) == frozenset({EUID, a, b})

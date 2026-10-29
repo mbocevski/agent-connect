@@ -11,7 +11,10 @@ Each path serves the JSON-RPC binding at its root and its card at
 ``.well-known/agent-card.json``. Every request needs
 ``Authorization: Bearer <a2a-facade-token>``, a loopback client, a ``Host``
 of ``127.0.0.1:<port>`` or ``localhost:<port>``, and no ``Origin`` (a
-browser page can't reach it).
+browser page can't reach it). On a Unix socket (``a2a.facade_socket``)
+instead, a connection is accepted only from an admitted user, checked by
+the kernel's account of its peer before anything is read; the token and
+``Origin`` rules still apply.
 
 Tasks are namespaced by group: each group has its own task store, and a
 message's ``contextId`` must be the group (or empty). The facade's task ids
@@ -27,10 +30,12 @@ import asyncio
 import contextlib
 import hmac
 import re
+import socket
 import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, override
 from urllib.parse import unquote
 
@@ -65,9 +70,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from agentconnect import log
+from agentconnect import isolation, log
 from agentconnect.a2a_adapter import cards, convert
-from agentconnect.a2a_adapter.serve import LoopbackServer
+from agentconnect.a2a_adapter.serve import LoopbackServer, UnixServer
 from agentconnect.adapter import SendReceipt
 
 if TYPE_CHECKING:
@@ -349,10 +354,23 @@ class _GroupApps:
 
 
 class Facade:
-    def __init__(self, adapter: A2AAdapter, token: str, port: int) -> None:
+    def __init__(  # noqa: PLR0913
+        self,
+        adapter: A2AAdapter,
+        token: str,
+        port: int = 0,
+        *,
+        path: Path | None = None,
+        uids: frozenset[int] = frozenset(),
+        gid: int | None = None,
+    ) -> None:
         self.adapter = adapter
         self._token = token
-        self._server = LoopbackServer(self, port)
+        self.path = path
+        self._uids = uids
+        self._server: LoopbackServer = (
+            LoopbackServer(self, port) if path is None else UnixServer(self, path, self._admit, gid)
+        )
         self._groups: dict[str, _GroupApps] = {}
         # Push notifications go to the push URL itself: never through an
         # environment proxy, never on to where a redirect points (SR-30).
@@ -379,7 +397,9 @@ class Facade:
         return self._server.addresses()
 
     def url(self, group_id: str, member: str | None = None) -> str:
-        base = f"http://127.0.0.1:{self.port}/g/{group_id}/"
+        # On the socket every request goes there; the URL gives the path.
+        origin = "http://localhost" if self.path is not None else f"http://127.0.0.1:{self.port}"
+        base = f"{origin}/g/{group_id}/"
         return base if member is None else f"{base}m/{member}/"
 
     async def start(self) -> None:
@@ -514,15 +534,30 @@ class Facade:
         group.apps[member] = app
         return app
 
+    def _admit(self, conn: socket.socket) -> bool:
+        """Unix socket: whether the connection's user may use the facade,
+        from the kernel (SO_PEERCRED or getpeereid)."""
+        try:
+            uid = isolation.peer_credentials(conn).uid
+        except OSError:
+            LOG.warning("a2a_facade_peer_unknown")
+            return False
+        if uid not in self._uids:
+            LOG.warning("a2a_facade_peer_refused", uid=uid)
+            return False
+        return True
+
     def _refuse(self, scope: dict[str, Any]) -> tuple[int, str] | None:
-        client = scope.get("client")
-        if not client or client[0] not in ("127.0.0.1", "::1"):
-            return 403, "loopback only"
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         if "origin" in headers:
             return 403, "browser requests are refused"
-        if headers.get("host") not in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
-            return 403, "bad host"
+        if self.path is None:
+            # On a port: loopback clients, and no DNS rebinding.
+            client = scope.get("client")
+            if not client or client[0] not in ("127.0.0.1", "::1"):
+                return 403, "loopback only"
+            if headers.get("host") not in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+                return 403, "bad host"
         scheme, _, token = headers.get("authorization", "").partition(" ")
         if scheme.lower() != "bearer" or not hmac.compare_digest(
             token.encode(), self._token.encode()

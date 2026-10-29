@@ -603,6 +603,7 @@ store written the old way.
 | SR-35 | daemon | In `free` mode a replica is triggered by its sibling's messages, although SPEC §9.3 triggers "all members except the sender" and a member is an identity. | `engine.py:414-415`. Confirmed. | Open (T-35) |
 | SR-36 | daemon | The reconnect-drain exemption from the rates resets on every connection, and the relay decides when the drain ends, so a relay colluding with a member bypasses the §10.2 rates. | `relay.py:114-115`, `relay.py:190-199`, `engine.py:763-773`. By reading. | Open (T-36) |
 | SR-37 | daemon | The A2A facade takes the first reply from any member, even for a request addressed to one member (`/g/<gid>/m/<X>`). | `facade.py:441-451`, `facade.py:182-200`. By reading. | Open (T-37) |
+| SR-62 | daemon | Any local user who listens on `a2a.facade_port` while the daemon is down gets the facade token from a client's first request (the card fetch), and can then send to the groups as the agent through the real facade. Found after this review, with SR-08 to SR-10. | `a2a_adapter/facade.py` (`Facade`, `LoopbackServer`). Confirmed with a probe on main (c0d0c12). | Fixed: `a2a.facade_socket` with a peer-UID check, required in separate-OS-user mode; the TCP facade keeps the documented risk outside it |
 | SR-38 | daemon | Webhook, SSE and SDK agents receive `a2a.task_cancel` from any member, with no requester check and no guidance in the docs; SPEC §7.2 says the member running the task MUST ignore it. Only the A2A adapter checks. | `adapter.py:438-457`, `docs/adapters/webhook.md:93-105`. By reading. | Open (T-38) |
 | SR-39 | build | Signed releases are never verified by a test, `just release-verify` checks the GitHub attestations but not the cosign bundles, and `release.yml` doesn't require the reproducibility check for the tagged commit. | `.github/workflows/release.yml`, `.github/workflows/repro.yml`, `justfile` (`release-verify`). By reading. | Open (T-39) |
 | SR-40 | tooling | No workflow runs the fuzz targets, nightly included. | `.github/workflows/nightly.yml`. By reading. | Open (T-40) |
@@ -959,7 +960,8 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   is sent (SR-10, fixed in #108); a TCP receiver, outside separate-OS-user mode,
   isn't.
 - **A2A facade, MCP and SSE:** the facade binds loopback and checks `Host`,
-  `Origin` and the client address; MCP tool descriptions and instructions
+  `Origin` and the client address, or listens on a Unix socket and admits
+  only listed users (SR-62); MCP tool descriptions and instructions
   are constants and ids are checked before they go into a path; SSE takes
   a bearer token only, sends no CORS headers and filters human-only events.
   SR-31 and SR-37 are the gaps; SR-30 is fixed for both clients.
@@ -1162,6 +1164,8 @@ One line per open item, ready to file.
   across connections and in time.
 - **T-37 (Low, SR-37):** Daemon: a member-addressed facade request accepts
   replies only from that member.
+- **T-62 (Low, SR-62, fixed):** Daemon: an optional facade on a Unix
+  socket with a peer-UID check, required in separate-OS-user mode.
 - **T-38 (Low, SR-38):** Daemon: deliver a non-requester's
   `a2a.task_cancel` to headless agents as context, and document the rule.
 - **T-39 (Low, SR-39):** Release: verify cosign bundles in

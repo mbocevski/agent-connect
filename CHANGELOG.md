@@ -28,6 +28,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Added
 
+- The A2A facade on a Unix socket: `a2a.facade_socket`. The daemon closes
+  a connection to it unless its user is the daemon's own (or one of
+  `isolation.agent_users` in the separate-OS-user mode), before anything is
+  read.
 - Receivers on Unix sockets: `webhook.callback_socket` and
   `a2a.local_agent_socket`. The daemon delivers to the socket only after
   checking that its server runs as the daemon's user, or as one of
@@ -37,6 +41,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Changed
 
+- The separate-OS-user mode refuses the A2A facade on a port
+  (`a2a.facade_port`): set `a2a.facade_socket`.
 - `a2a.local_agent_url` must be a loopback `http://` or `https://` URL
   without credentials and with a valid port, and `http://` with
   `a2a.local_agent_socket`; anything else stops the daemon at start.
@@ -66,6 +72,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ### Security
 
+- Another local user can no longer take the A2A facade's token by
+  listening on its port while the daemon is down, where the facade is on
+  `a2a.facade_socket`: a connection from a user who isn't listed is closed
+  before it is read. The facade on a port keeps that risk outside the
+  separate-OS-user mode (SR-62).
 - Another local user can no longer read or ack away deliveries by listening
   where a receiver should be (SR-10). On a receiver socket, the daemon
   checks the server's user before writing; any other user's socket gets

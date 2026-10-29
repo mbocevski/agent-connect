@@ -5,8 +5,15 @@ to the adapter as deliveries that name the facade's message in
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import os
 import random
-from collections.abc import AsyncIterator
+import shutil
+import socket
+import stat
+import tempfile
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +40,7 @@ from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, convert
 from agentconnect.a2a_adapter import facade as facade_module
 from agentconnect.a2a_adapter.serve import LoopbackServer
 from agentconnect.adapter import Delivery, Event, GroupView, Sender
+from agentconnect.isolation import PeerCred
 from agentconnect.runtime.engine import DaemonError
 
 GID = "Z3JvdXA"
@@ -438,3 +446,90 @@ async def test_the_push_client_ignores_proxies_and_redirects(
     assert len(hook.close()) == 1
     assert elsewhere.close() == []
     assert proxy.close() == []
+
+
+# -- the facade on a Unix socket, checked by its client's user (SR-10 class) --
+
+
+@pytest.fixture
+def sockdir() -> Iterator[Path]:
+    # /tmp, not $TMPDIR: socket paths are limited to about 100 bytes.
+    d = Path(tempfile.mkdtemp(prefix="ac-facade-", dir="/tmp"))
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+async def socket_facade(sockdir: Path, tmp_path: Path) -> A2AAdapter:
+    adapter = A2AAdapter(
+        A2AOptions(
+            facade_socket=sockdir / "facade.sock",
+            facade_uids=frozenset({os.geteuid()}),
+            data_dir=tmp_path,
+        )
+    )
+    await adapter.on_outbound(Group())
+    return adapter
+
+
+async def test_the_facade_on_a_socket_serves_its_own_user(sockdir: Path, tmp_path: Path) -> None:
+    adapter = await socket_facade(sockdir, tmp_path)
+    try:
+        assert adapter.facade is not None
+        path = sockdir / "facade.sock"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        url = adapter.facade.url(GID)
+        assert url.startswith("http://localhost/")
+        transport = httpx.AsyncHTTPTransport(uds=str(path))
+        auth = {"Authorization": f"Bearer {adapter.facade_token}"}
+        async with httpx.AsyncClient(transport=transport, headers=auth) as http:
+            card = await http.get(f"{url}.well-known/agent-card.json")
+            assert card.status_code == 200, card.text
+            assert card.json()["supportedInterfaces"][0]["url"] == url
+        async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(path))) as http:
+            assert (await http.get(f"{url}.well-known/agent-card.json")).status_code == 401
+    finally:
+        await adapter.aclose()
+    assert not (sockdir / "facade.sock").exists()
+
+
+async def test_another_users_connection_is_closed_before_it_is_read(
+    sockdir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    other = os.geteuid() + 1
+    monkeypatch.setattr(
+        "agentconnect.isolation.peer_credentials", lambda _s: PeerCred(uid=other, gid=other)
+    )
+    adapter = await socket_facade(sockdir, tmp_path)
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(sockdir / "facade.sock"))
+        answer = b"(reset)"
+        with contextlib.suppress(ConnectionError):
+            writer.write(f"GET /g/{GID}/.well-known/agent-card.json HTTP/1.1\r\n".encode())
+            writer.write(b"host: localhost\r\nauthorization: Bearer x\r\n\r\n")
+            await writer.drain()
+            answer = await asyncio.wait_for(reader.read(), 5)
+        assert answer in (b"", b"(reset)")  # closed at accept: no answer, nothing read
+        writer.close()
+    finally:
+        await adapter.aclose()
+    events = [
+        json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")
+    ]
+    (refused,) = [e for e in events if e["event"] == "a2a_facade_peer_refused"]
+    assert refused["uid"] == other
+
+
+async def test_the_facade_socket_replaces_a_stale_one_only(sockdir: Path, tmp_path: Path) -> None:
+    path = sockdir / "facade.sock"
+    path.write_text("not a socket")
+    with pytest.raises(FileExistsError, match="not a socket"):
+        await socket_facade(sockdir, tmp_path)
+    path.unlink()
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(path))
+    stale.close()  # left behind by an earlier run
+    adapter = await socket_facade(sockdir, tmp_path)
+    await adapter.aclose()
