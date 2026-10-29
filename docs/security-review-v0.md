@@ -68,7 +68,7 @@ the protocol changes. Everything else is measured against
 |---|---|---|
 | High | 1 | Fixed in #67 |
 | Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); SR-11 fixed in #87; SR-12 fixed in #89; SR-09 fixed in #103; SR-08 fixed in #107; SR-10 fixed in #108 |
-| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; SR-28 fixed in #61; SR-30 fixed in #108 and #113; the rest open, follow-up task |
+| Low | 29 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; SR-28 fixed in #61; SR-30 fixed in #108 and #113; SR-62 fixed in #115; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted; SR-54 fixed in #87 |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
