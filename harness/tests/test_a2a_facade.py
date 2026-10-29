@@ -212,8 +212,14 @@ async def _until(predicate: Any, executor: ScriptedExecutor) -> None:
         await executor.changed.wait()
 
 
-async def test_facade_push_notifications(cluster: Cluster, scripted: AgentServer) -> None:
-    a, _b, gid = await pair(cluster, scripted)
+@pytest.mark.parametrize("over", ["tcp", "socket"])
+async def test_facade_push_notifications(
+    cluster: Cluster, scripted: AgentServer, sockdir: Path, over: str
+) -> None:
+    # On the socket too, notifications go out over TCP to the loopback URL.
+    a, _b, gid = await pair(
+        cluster, scripted, sockdir / "facade.sock" if over == "socket" else None
+    )
     f = await open_facade(a, gid)
     got: list[dict[str, Any]] = []
     changed = asyncio.Event()
@@ -230,6 +236,9 @@ async def test_facade_push_notifications(cluster: Cluster, scripted: AgentServer
         task_id = (await anext(stream)).task.id
         async for _ in stream:
             pass
+        off_host = TaskPushNotificationConfig(task_id=task_id, id="off", url="http://10.9.9.9/hook")
+        with pytest.raises(A2AError):
+            await f.client.create_task_push_notification_config(off_host)
         config = TaskPushNotificationConfig(
             task_id=task_id,
             id="cfg",
