@@ -595,7 +595,7 @@ store written the old way.
 | SR-27 | daemon | The A2A adapter's `a2a-seen.db` is a plain SQLite file (0600) in the data directory, against "there is no unencrypted on-disk mode" (SPEC §12). It holds SHA-256 hashes of `msg_id`s, which the relay also sees. | `a2a_adapter/seen.py:22-30`. By reading. | Open (T-27) |
 | SR-28 | daemon | Unauthenticated connections fill the local API's 64 slots and lock the human out (503) for 10 s at a time. In separate-OS-user mode any listed agent user can do it without a token. | `runtime/api.py:63-70`, `api.py:1552-1558`. Probe: human request 503 while 64 idle connections were held. Confirmed. | Open (T-28) |
 | SR-29 | daemon | `check_agent_dir` accepts a group-writable agent directory (0770, 0730) and doesn't check its parents, so an agent user may be able to replace the socket and show the human forged approvals or a forged code. | `isolation.py:158-180`. Probe: 770 and 730 accepted. Confirmed. | Open (T-29) |
-| SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Open (T-30): fixed for the adapter's client in #108 (`trust_env=False`, no redirects); the facade's push client remains |
+| SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Fixed: the adapter's client in #108, the facade's push client too (`trust_env=False`, no redirects) |
 | SR-31 | daemon | Facade push-notification URLs are not screened, so the facade token holder can make the daemon POST task updates to any address. | `a2a_adapter/facade.py:346`. By reading. | Open (T-31) |
 | SR-32 | daemon | `GET /v0/status` with the agent token counts a group hidden from the agent (an approved knock before the knocker joins) and lists its id in `out_of_sync`. | `engine.py:3616-3628`, `runtime/agent.py:58-63`, `api.py:1426-1427`. Confirmed. | Open (T-32) |
 | SR-33 | daemon | The agent's `reply_to` choice resets the loop-guard hop: two agents that keep naming the human's first message never reach `max_agent_turns`. | `engine.py:1672-1691`, `engine.py:1518-1524`, `mcp/tools.py:283-288`. Probe: eight replies at hop 1, no pause. Confirmed. | Open (T-33) |
@@ -961,8 +961,7 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   `Origin` and the client address; MCP tool descriptions and instructions
   are constants and ids are checked before they go into a path; SSE takes
   a bearer token only, sends no CORS headers and filters human-only events.
-  SR-30 (the facade's push client; the adapter's client is fixed), SR-31
-  and SR-37 are the gaps.
+  SR-31 and SR-37 are the gaps; SR-30 is fixed for both clients.
 
 ## Policy layer
 
@@ -1146,7 +1145,7 @@ One line per open item, ready to file.
   for the human UID on the local API.
 - **T-29 (Low, SR-29):** Daemon: refuse a group-writable agent directory
   and check its parents.
-- **T-30 (Low, SR-30):** Daemon: `trust_env=False` and no redirects in the
+- **T-30 (Low, SR-30, fixed):** Daemon: `trust_env=False` and no redirects in the
   A2A adapter and facade HTTP clients.
 - **T-31 (Low, SR-31):** Daemon: screen facade push URLs, or turn push
   configs off.

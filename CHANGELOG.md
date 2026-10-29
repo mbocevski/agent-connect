@@ -58,9 +58,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - The A2A adapter sends messages and `local_agent_token` only to
   `local_agent_url` (or its socket): on a port, a card naming another
   endpoint is refused and logged as `a2a_card_endpoint_mismatch`, and the
-  adapter's client ignores environment proxies and redirects (SR-30, fixed
-  for the A2A adapter only; the facade's push client still uses the
-  environment).
+  adapter's client ignores environment proxies and redirects (SR-30).
+- The A2A facade's push notifications go to the push URL itself: its
+  client ignores environment proxies and doesn't follow redirects, so task
+  updates can't leave through a proxy or be redirected (SR-30, now fixed
+  for the facade as well as the adapter).
 - Update `ctutils` to 0.4.4 (RUSTSEC-2026-0385), reached through
   `digest` and `hmac` in the core and the relay.
 - Drop `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387) by removing the

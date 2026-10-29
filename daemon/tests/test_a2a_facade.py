@@ -375,3 +375,66 @@ async def test_the_early_decision_buffer_keeps_only_own_holds_for_a_while(setup:
     now[0] += 3601
     facade.decided("late-too", "approved")  # sweeps
     assert facade.early() == 0, "expired"
+
+
+# -- the push client goes straight to the push URL (SR-30) ---------------------
+
+
+class _Recorder:
+    """A loopback server on a thread: records every connection's first bytes
+    and answers with ``answer``."""
+
+    def __init__(self, answer: bytes) -> None:
+        import socket  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+
+        self._sock = socket.create_server(("127.0.0.1", 0))
+        self._sock.settimeout(0.05)
+        self.url = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+        self.received: list[bytes] = []
+        self._answer, self._open = answer, True
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while self._open:
+            try:
+                conn, _ = self._sock.accept()
+            except TimeoutError:
+                continue
+            with conn:
+                self.received.append(conn.recv(65536))
+                conn.sendall(self._answer)
+
+    def close(self) -> list[bytes]:
+        self._open = False
+        self._thread.join(timeout=5)
+        self._sock.close()
+        return self.received
+
+
+async def test_the_push_client_ignores_proxies_and_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = _Recorder(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n")
+    elsewhere = _Recorder(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+    hook = _Recorder(
+        b"HTTP/1.1 307 Temporary Redirect\r\n"
+        + f"location: {elsewhere.url}/stolen\r\n".encode()
+        + b"content-length: 0\r\n\r\n"
+    )
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(var, proxy.url)
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    # The client the facade's push sender uses (_GroupApps), built as the
+    # adapter builds it, with the environment above.
+    facade = facade_module.Facade(A2AAdapter(A2AOptions()), "t", 0)
+    try:
+        resp = await facade._http.post(f"{hook.url}/hook", json={"task": "update"})
+        assert resp.status_code == 307  # not followed
+    finally:
+        await facade._http.aclose()
+    assert len(hook.close()) == 1
+    assert elsewhere.close() == []
+    assert proxy.close() == []
