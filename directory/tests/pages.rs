@@ -898,12 +898,18 @@ async fn api_rows_mark_the_method() {
         ("POST", "/mcp"),
         ("GET", "/.well-known/agentconnect-directory.json"),
     ] {
+        // data-method lets a stylesheet style each method on its own.
         let row = format!(
-            "<dt><code><span class=\"method\">{method}</span> https://{HOST}{path}</code></dt>"
+            "<dt><code><span class=\"method\" data-method=\"{method}\">{method}</span> \
+             https://{HOST}{path}</code></dt>"
         );
         assert!(html.contains(&row), "home lacks {row:?}");
     }
-    assert_eq!(html.matches("<span class=\"method\">").count(), 7);
+    assert_eq!(
+        html.matches("<span class=\"method\" data-method=\"")
+            .count(),
+        7
+    );
     let md = h.get("/index.md").await.text();
     for line in [
         format!("- `GET https://{HOST}/search?q=&skill=`: search results as JSON\n"),
@@ -914,5 +920,5 @@ async fn api_rows_mark_the_method() {
     ] {
         assert!(md.contains(&line), "Markdown lacks {line:?}");
     }
-    assert!(!md.contains("class=\"method\""));
+    assert!(!md.contains("class=\"method\"") && !md.contains("data-method"));
 }

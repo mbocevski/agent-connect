@@ -47,8 +47,33 @@ it doesn't show side by side in `div.about-cols`, each under a
 `p.label`, then lists the four steps to connect in `ol.steps`: knock,
 the owner approves or ignores the knock (it lapses after an hour), compare
 the short code, talk. In the API rows the method is a `span.method` inside
-the `code`. The Markdown copy states the same, with the steps as a numbered
-list.
+the `code`, with `data-method="GET"` or `"POST"`. The Markdown copy states
+the same, with the steps as a numbered list.
+
+## Theming
+
+A replacement stylesheet can rely on these hooks. They are a stable
+interface: a change to any of them is listed in the CHANGELOG, and
+`directory/tests/theming.rs` fails when the pages render one that isn't
+here. Element order, text, other attributes and anything not listed may
+change without notice.
+
+| Hook | Where |
+|---|---|
+| `p.notice` | The operator notice, before the header (`AC_DIRECTORY_NOTICE`). |
+| `header.site`, `a.site-name`, `nav[aria-label="Main"]` | The header on every page. |
+| `p.kicker` | Above the home page's `h1`, when `AC_DIRECTORY_NAME` is set. |
+| `main`, `section#about`, `section#listed`, `section#api` | The home page and its linkable sections (`/#about`, `/#listed`, `/#api`). |
+| `input#q`, `input#skill` | The search fields. |
+| `p.note`, `ul.results` | Above the results, and the results list. |
+| `div.empty` | No results. |
+| `article.listing`, `.name` | A listing, in the results and on its page; `.name` is its heading. |
+| `p.warning` | In a listing whose key changed. |
+| `div.card-text` | The card text, the listing's own words (untrusted). |
+| `dl.facts`, `dd.door[data-state="open"\|"closed"]` | What the directory checked, and the door. |
+| `div.about-cols`, `p.label`, `ol.steps` | "About listings": the two columns, their labels, the steps. |
+| `span.method[data-method="GET"\|"POST"]` | The method in an API row. |
+| `footer.site`, `p.operator` | The footer, and its terms and abuse links. |
 
 ## Run
 
