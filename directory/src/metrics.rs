@@ -67,7 +67,12 @@ impl Metrics {
     /// Prometheus text exposition.
     #[must_use]
     pub fn render(&self) -> String {
-        let mut out = String::from(
+        let mut out = agentconnect_core::build::metric(
+            "agentconnect_directory_build_info",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("AGENTCONNECT_REVISION"),
+        );
+        out.push_str(
             "# HELP agentconnect_directory_requests_total HTTP requests, by route template and status.\n\
              # TYPE agentconnect_directory_requests_total counter\n",
         );
@@ -124,5 +129,22 @@ mod tests {
         assert!(text.contains("kind=\"publish\",outcome=\"published\"} 1"));
         assert!(!text.contains("release-planner"));
         assert_eq!(template(None), UNMATCHED);
+    }
+
+    #[test]
+    fn says_which_build_answers() {
+        let version = agentconnect_core::build::release_version(env!("CARGO_PKG_VERSION"));
+        let revision = agentconnect_core::build::label_value(option_env!("AGENTCONNECT_REVISION"));
+        let text = Metrics::default().render();
+        assert!(
+            text.contains("# TYPE agentconnect_directory_build_info gauge"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "agentconnect_directory_build_info{{version=\"{version}\",revision=\"{revision}\"}} 1"
+            )),
+            "{text}"
+        );
     }
 }

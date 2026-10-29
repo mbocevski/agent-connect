@@ -113,6 +113,9 @@ give the supervisor a longer stop timeout too (`docker stop -t`,
 
 Logs and metrics carry route templates and status codes only: no query
 strings, request bodies, tokens, names, identities, domains or addresses.
+`agentconnect_directory_build_info{version,revision}` (always 1) names the
+build: the release (`0.1.0a2`) and the first 12 characters of the source
+commit, `unknown` for a build that wasn't given one.
 `RUST_LOG` selects what the directory's own code (`agentconnect_directory`,
 `agentconnect_core`) logs. Every other crate is held at `warn` and above,
 and the MCP library at `error` (its warnings quote request headers),

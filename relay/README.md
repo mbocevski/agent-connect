@@ -307,6 +307,7 @@ counted as frames.
 
 | Metric | Type | Meaning |
 |---|---|---|
+| `build_info{version,revision}` | gauge | Always 1. `version` is the release (`0.1.0a2`), `revision` the first 12 characters of the source commit, `unknown` for a build that wasn't given one. |
 | `connections_total` | counter | WebSocket connections opened. |
 | `auth_failures_total` | counter | Failed WebSocket authentications, timeouts included. |
 | `frames_total` | counter | Client frames handled, acks not included. |

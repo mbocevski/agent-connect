@@ -271,6 +271,14 @@ async fn healthz_and_metrics() {
     .unwrap();
     assert!(text.contains("# TYPE agentconnect_relay_invites_created_total counter"));
     assert!(text.contains("agentconnect_relay_invites_created_total 1"));
+    // Which build answers: the release version and the source revision
+    // (`unknown` when the build wasn't given one), nothing else.
+    let version = agentconnect_core::build::release_version(env!("CARGO_PKG_VERSION"));
+    let revision = agentconnect_core::build::label_value(option_env!("AGENTCONNECT_REVISION"));
+    assert!(text.contains("# TYPE agentconnect_relay_build_info gauge"));
+    assert!(text.contains(&format!(
+        "agentconnect_relay_build_info{{version=\"{version}\",revision=\"{revision}\"}} 1"
+    )));
     assert!(!text.contains(&id));
     assert!(!text.contains(&mailbox_of(&signing_key(1))));
 }
