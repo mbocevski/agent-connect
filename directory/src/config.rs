@@ -16,6 +16,29 @@ pub const MEMORY_DB: &str = "memory:";
 pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
 /// The longest shutdown grace accepted, in seconds.
 pub const MAX_SHUTDOWN_GRACE_SECS: u64 = 3600;
+/// Default `AC_DIRECTORY_HEADER_TIMEOUT_SECS`: how long a connection may
+/// take to send a request head. The relay's default.
+pub const DEFAULT_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default `AC_DIRECTORY_IDLE_TIMEOUT_SECS`: how long a connection may stay
+/// open between requests. Above the usual reverse-proxy defaults (nginx
+/// keeps an upstream connection for 60 s), so a proxy never reuses a
+/// connection the directory is closing.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
+/// Default `AC_DIRECTORY_REQUEST_TIMEOUT_SECS`: how long a request may take
+/// from its head to its response, the body read included. The relay's
+/// default.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default `AC_DIRECTORY_WRITE_TIMEOUT_SECS`: how long a response may sit
+/// unread. The relay's default.
+pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest header, idle, request or write timeout accepted, in seconds.
+pub const MAX_TIMEOUT_SECS: u64 = 3600;
+/// Default `AC_DIRECTORY_MAX_CONNECTIONS`. The relay's default.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
+/// Default `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`. The relay's default.
+pub const DEFAULT_MAX_CONNECTIONS_PER_SOURCE: usize = 8;
+/// The most connections a limit may allow.
+pub const MAX_CONNECTION_LIMIT: usize = 1_000_000;
 
 /// An address block, `addr/prefix` (or a single address).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +208,96 @@ pub struct Config {
     /// `AC_DIRECTORY_SHUTDOWN_GRACE_SECS`: how long connections still open
     /// after SIGTERM or SIGINT may hold the exit up.
     pub shutdown_grace: Duration,
+    /// The header timeout and the connection limits.
+    pub connections: ConnectionConfig,
+}
+
+/// The public listener's limits on slow and many connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionConfig {
+    /// `AC_DIRECTORY_HEADER_TIMEOUT_SECS`: how long a request head may
+    /// take, from its first byte (from the connection's start, for the
+    /// first request); a slower one is closed.
+    pub header_timeout: Duration,
+    /// `AC_DIRECTORY_IDLE_TIMEOUT_SECS`: how long a connection may stay
+    /// open between a response and the next request.
+    pub idle_timeout: Duration,
+    /// `AC_DIRECTORY_REQUEST_TIMEOUT_SECS`: how long a request may take
+    /// from its head to its response, the body read included; a slower
+    /// one is answered 408.
+    pub request_timeout: Duration,
+    /// `AC_DIRECTORY_WRITE_TIMEOUT_SECS`: how long a response may sit
+    /// unread: a write that makes no progress for this long closes the
+    /// connection.
+    pub write_timeout: Duration,
+    /// `AC_DIRECTORY_MAX_CONNECTIONS`: connections open at once. At the
+    /// limit a new connection closes the oldest one of the source holding
+    /// the most.
+    pub max_connections: usize,
+    /// `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`: connections open at once
+    /// from one source (an IPv4 address or an IPv6 /64). Not applied to a
+    /// connection from a trusted proxy, which only the total limits.
+    pub max_per_source: usize,
+}
+
+impl ConnectionConfig {
+    fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        Ok(Self {
+            header_timeout: timeout_secs(
+                "AC_DIRECTORY_HEADER_TIMEOUT_SECS",
+                get("AC_DIRECTORY_HEADER_TIMEOUT_SECS"),
+                DEFAULT_HEADER_TIMEOUT,
+            )?,
+            idle_timeout: timeout_secs(
+                "AC_DIRECTORY_IDLE_TIMEOUT_SECS",
+                get("AC_DIRECTORY_IDLE_TIMEOUT_SECS"),
+                DEFAULT_IDLE_TIMEOUT,
+            )?,
+            request_timeout: timeout_secs(
+                "AC_DIRECTORY_REQUEST_TIMEOUT_SECS",
+                get("AC_DIRECTORY_REQUEST_TIMEOUT_SECS"),
+                DEFAULT_REQUEST_TIMEOUT,
+            )?,
+            write_timeout: timeout_secs(
+                "AC_DIRECTORY_WRITE_TIMEOUT_SECS",
+                get("AC_DIRECTORY_WRITE_TIMEOUT_SECS"),
+                DEFAULT_WRITE_TIMEOUT,
+            )?,
+            max_connections: connection_limit(
+                "AC_DIRECTORY_MAX_CONNECTIONS",
+                get("AC_DIRECTORY_MAX_CONNECTIONS"),
+                DEFAULT_MAX_CONNECTIONS,
+            )?,
+            max_per_source: connection_limit(
+                "AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE",
+                get("AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE"),
+                DEFAULT_MAX_CONNECTIONS_PER_SOURCE,
+            )?,
+        })
+    }
+}
+
+/// A timeout in whole seconds, 1 to [`MAX_TIMEOUT_SECS`].
+fn timeout_secs(name: &str, v: Option<String>, default: Duration) -> Result<Duration, String> {
+    let Some(v) = v else {
+        return Ok(default);
+    };
+    v.parse::<u64>()
+        .ok()
+        .filter(|s| (1..=MAX_TIMEOUT_SECS).contains(s))
+        .map(Duration::from_secs)
+        .ok_or_else(|| format!("{name} must be 1 to {MAX_TIMEOUT_SECS} seconds: {v}"))
+}
+
+/// A connection limit: a whole number, 1 to [`MAX_CONNECTION_LIMIT`].
+fn connection_limit(name: &str, v: Option<String>, default: usize) -> Result<usize, String> {
+    let Some(v) = v else {
+        return Ok(default);
+    };
+    v.parse::<usize>()
+        .ok()
+        .filter(|n| (1..=MAX_CONNECTION_LIMIT).contains(n))
+        .ok_or_else(|| format!("{name} must be 1 to {MAX_CONNECTION_LIMIT}: {v}"))
 }
 
 /// `AC_DIRECTORY_SHUTDOWN_GRACE_SECS`: whole seconds, 1 to
@@ -318,6 +431,7 @@ impl Config {
             notice,
             links,
             shutdown_grace,
+            connections: ConnectionConfig::from_lookup(&get)?,
         })
     }
 
@@ -502,6 +616,50 @@ mod tests {
                 err.contains("AC_DIRECTORY_SHUTDOWN_GRACE_SECS"),
                 "{bad}: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn the_connection_limits_default_to_the_relays() {
+        let c = with(&[]).unwrap();
+        let d = c.connections;
+        assert_eq!(d.header_timeout, Duration::from_secs(10));
+        assert_eq!(d.idle_timeout, Duration::from_secs(75));
+        assert_eq!(d.request_timeout, Duration::from_secs(30));
+        assert_eq!(d.write_timeout, Duration::from_secs(30));
+        assert_eq!((d.max_connections, d.max_per_source), (512, 8));
+        let c = with(&[
+            ("AC_DIRECTORY_HEADER_TIMEOUT_SECS", "3"),
+            ("AC_DIRECTORY_IDLE_TIMEOUT_SECS", "90"),
+            ("AC_DIRECTORY_REQUEST_TIMEOUT_SECS", "12"),
+            ("AC_DIRECTORY_WRITE_TIMEOUT_SECS", "20"),
+            ("AC_DIRECTORY_MAX_CONNECTIONS", "64"),
+            ("AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE", "2"),
+        ])
+        .unwrap();
+        let c = c.connections;
+        assert_eq!(c.header_timeout, Duration::from_secs(3));
+        assert_eq!(c.idle_timeout, Duration::from_secs(90));
+        assert_eq!(c.request_timeout, Duration::from_secs(12));
+        assert_eq!(c.write_timeout, Duration::from_secs(20));
+        assert_eq!((c.max_connections, c.max_per_source), (64, 2));
+    }
+
+    #[test]
+    fn bad_connection_limits_name_the_variable() {
+        for name in [
+            "AC_DIRECTORY_HEADER_TIMEOUT_SECS",
+            "AC_DIRECTORY_IDLE_TIMEOUT_SECS",
+            "AC_DIRECTORY_REQUEST_TIMEOUT_SECS",
+            "AC_DIRECTORY_WRITE_TIMEOUT_SECS",
+            "AC_DIRECTORY_MAX_CONNECTIONS",
+            "AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE",
+        ] {
+            for bad in ["0", "-1", "x", "", "1.5", "99999999999"] {
+                let vars = [(name, bad)];
+                let err = with(&vars).unwrap_err();
+                assert!(err.contains(name), "{name}={bad}: {err}");
+            }
         }
     }
 

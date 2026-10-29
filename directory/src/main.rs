@@ -1,11 +1,12 @@
 //! `agentconnect-directory` binary.
 
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agentconnect_core::clock::SystemClock;
 use agentconnect_directory::config::{Config, MEMORY_DB};
+use agentconnect_directory::conn::{self, Events, Limits};
 use agentconnect_directory::http::metrics_app;
 use agentconnect_directory::owner::HttpsFetcher;
 use agentconnect_directory::postgres::connect_options;
@@ -139,30 +140,37 @@ async fn serve<S: Store>(
     // On the signal the listener closes and connections drain, for at most
     // the grace: an unfinished request mustn't hold the exit up until the
     // supervisor kills the process.
-    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = axum::serve(
+    let limits = Limits {
+        header_timeout: config.connections.header_timeout,
+        idle_timeout: config.connections.idle_timeout,
+        request_timeout: config.connections.request_timeout,
+        write_timeout: config.connections.write_timeout,
+        max_connections: config.connections.max_connections,
+        max_per_source: config.connections.max_per_source,
+        shutdown_grace: config.shutdown_grace,
+    };
+    // Before its headers a connection from a trusted proxy can't be told
+    // from the proxy's other clients: only the total limits it.
+    let proxies = config.trusted_proxies.clone();
+    let behind_proxy = config.client_ip_header.is_some();
+    let trusted = move |ip: IpAddr| behind_proxy && proxies.iter().any(|c| c.contains(ip));
+    let counted = Arc::clone(&dir);
+    let events: Events = Arc::new(move |what, outcome| counted.metrics().event(what, outcome));
+    // On the signal the listener closes and connections drain, for at most
+    // the grace: an unfinished request mustn't hold the exit up until the
+    // supervisor kills the process.
+    conn::serve(
         listener,
-        app(dir, http).into_make_service_with_connect_info::<SocketAddr>(),
+        app(dir, http),
+        limits,
+        trusted,
+        events,
+        async move {
+            stop.await;
+            tracing::info!("shutting down");
+        },
     )
-    .with_graceful_shutdown(async move {
-        stop.await;
-        tracing::info!("shutting down");
-        let _ = stopping.send(());
-    });
-    let grace = config.shutdown_grace;
-    tokio::select! {
-        result = server => result,
-        () = async {
-            if stopped.await.is_ok() {
-                tokio::time::sleep(grace).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        } => {
-            tracing::warn!(grace_secs = grace.as_secs(), "connections still open after the shutdown grace");
-            Ok(())
-        }
-    }
+    .await
 }
 
 #[tokio::main]
@@ -180,12 +188,19 @@ async fn main() -> std::io::Result<()> {
     if config.client_ip_header.is_none() {
         if config.addr.ip().is_loopback() {
             tracing::warn!(
+                max_connections_per_source = config.connections.max_per_source,
                 "no trusted proxy configured: if a reverse proxy forwards to this loopback \
-                 address, every client shares the proxy's rate-limit bucket"
+                 address, every client shares the proxy's rate-limit bucket and at most \
+                 max_connections_per_source connections to the directory; set \
+                 AC_DIRECTORY_CLIENT_IP_HEADER and AC_DIRECTORY_TRUSTED_PROXIES"
             );
         } else {
             tracing::warn!(
-                "listening on a public address with no trusted proxy: rate limits are per TCP peer"
+                max_connections_per_source = config.connections.max_per_source,
+                "listening on a public address with no trusted proxy: rate limits and the \
+                 per-source connection cap are per TCP peer, so a reverse proxy in front \
+                 would be one client with at most max_connections_per_source connections; \
+                 set AC_DIRECTORY_CLIENT_IP_HEADER and AC_DIRECTORY_TRUSTED_PROXIES"
             );
         }
     }
