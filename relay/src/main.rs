@@ -10,22 +10,48 @@ use tokio::sync::watch;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// SIGINT (Ctrl-C) or SIGTERM (what docker, systemd and Kubernetes send).
-async fn stop_signal() {
+/// The handlers are installed by the call, not on the first poll, so a
+/// signal that arrives after the "listening" line still stops the relay
+/// gracefully and writes the clean-shutdown marker. As PID 1 in a container,
+/// a process without a SIGTERM handler ignores SIGTERM until it is killed.
+/// A signal whose handler can't be installed is logged and never fires.
+fn stop_signal() -> impl Future<Output = ()> {
     #[cfg(unix)]
-    {
+    let (int, term) = {
         use tokio::signal::unix::{SignalKind, signal};
-        let Ok(mut term) = signal(SignalKind::terminate()) else {
-            let _ = tokio::signal::ctrl_c().await;
-            return;
+        let install = |kind: SignalKind, name: &'static str| {
+            signal(kind)
+                .inspect_err(|e| {
+                    tracing::warn!(signal = name, error = %e, "cannot install a signal handler");
+                })
+                .ok()
         };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        (
+            install(SignalKind::interrupt(), "SIGINT"),
+            install(SignalKind::terminate(), "SIGTERM"),
+        )
+    };
+    async move {
+        #[cfg(unix)]
+        {
+            async fn fired(sig: Option<tokio::signal::unix::Signal>) {
+                match sig {
+                    Some(mut s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            }
+            tokio::select! {
+                () = fired(int) => {}
+                () = fired(term) => {}
+            }
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+        #[cfg(not(unix))]
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(signal = "Ctrl-C", error = %e, "cannot install a signal handler");
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -84,6 +110,9 @@ async fn main() -> std::io::Result<()> {
     let metrics = tokio::spawn(metrics);
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
+    // Before the readiness line: a signal right after it must not find the
+    // default action.
+    let stop = stop_signal();
     tracing::info!(addr = %listener.local_addr()?, "relay listening");
     // The peer address (or the client address a trusted proxy reports)
     // feeds the per-source and per-address limits; it is never logged.
@@ -94,7 +123,7 @@ async fn main() -> std::io::Result<()> {
     );
     let signal_relay = Arc::clone(&relay);
     tokio::spawn(async move {
-        stop_signal().await;
+        stop.await;
         tracing::info!("stopping");
         // WebSocket sessions close with 1001, the knock worker writes what
         // it holds, and the listeners stop accepting.

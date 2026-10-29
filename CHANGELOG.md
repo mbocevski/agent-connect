@@ -8,6 +8,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+### Fixed
+
+- A SIGTERM or SIGINT that reaches the relay right after it logs "relay
+  listening" now stops it gracefully and writes the clean-shutdown marker.
+  The handlers were installed only when a spawned task was first polled, so
+  a signal in that gap killed the relay without the marker (the next start
+  then applied the crash replay floor), or was ignored as PID 1 in a
+  container.
+
 ### Security
 
 - The A2A facade's push notifications go to the push URL itself: its
