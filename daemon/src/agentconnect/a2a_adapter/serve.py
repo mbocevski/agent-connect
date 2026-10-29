@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import os
 import socket
 import stat
@@ -125,13 +126,13 @@ def _private_parent(path: Path) -> None:
 
 
 def _in_use(path: Path) -> bool:
-    """Whether a server is listening on the socket at ``path``."""
+    """Whether a server is listening on the socket at ``path``. The probe
+    never blocks: a listener whose queue is full is in use, and only a
+    refused connection (or no socket) is stale."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-        try:
-            probe.connect(str(path))
-        except OSError:
-            return False
-    return True
+        probe.setblocking(False)
+        code = probe.connect_ex(str(path))
+    return code not in (errno.ECONNREFUSED, errno.ENOENT)
 
 
 class UnixServer(LoopbackServer):
@@ -162,18 +163,23 @@ class UnixServer(LoopbackServer):
                 raise FileExistsError(msg)
             self.path.unlink()  # left behind by an earlier run
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        # The mode comes from the umask at bind: nothing is changed through
-        # the path afterwards except its group, without following a link.
-        old = os.umask(0o117 if self._gid is not None else 0o177)
+        # The umask is process-wide, so it is left alone: the mode is set
+        # right after bind, in a directory only this user can write to (so
+        # the path is still the socket). Until then, as after, the peer check
+        # decides who is served.
         try:
             sock.bind(str(self.path))
+            if not stat.S_ISSOCK(self.path.lstat().st_mode):
+                msg = f"{self.path} was replaced while it was bound; refusing to use it"
+                raise FileExistsError(msg)
         except OSError:
             sock.close()
             raise
-        finally:
-            os.umask(old)
         if self._gid is not None:
             os.chown(self.path, -1, self._gid, follow_symlinks=False)
+            self.path.chmod(0o660)
+        else:
+            self.path.chmod(0o600)
         await self._serve_on(sock, self._admit)
         return 0
 

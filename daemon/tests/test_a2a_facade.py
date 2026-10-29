@@ -647,7 +647,65 @@ async def test_the_mode_is_set_at_bind_and_no_link_is_followed(
     )
     monkeypatch.setattr(serve_module, "socket", fake)
     racing = serve_module.UnixServer(_reached_app, path, lambda _s: True, gid)
-    await racing.start()
-    await racing.stop()
+    with pytest.raises(FileExistsError, match="replaced"):
+        await racing.start()
     assert stat.S_IMODE(victim.stat().st_mode) == 0o600
     assert victim.read_text() == "secret"
+
+
+async def test_a_listener_with_a_full_backlog_counts_as_in_use(sockdir: Path) -> None:
+    # The probe for a live server mustn't block the event loop: a listener
+    # that accepts nothing, its queue full, is in use, not stale.
+    path = sockdir / "f.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(0)
+    queued: list[socket.socket] = []
+    try:
+        while True:  # fill the queue until a connect would block
+            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            c.setblocking(False)
+            try:
+                c.connect(str(path))
+            except BlockingIOError:
+                c.close()
+                break
+            queued.append(c)
+        server = serve_module.UnixServer(_reached_app, path, lambda _s: True)
+        with pytest.raises(FileExistsError, match="in use"):
+            await server.start()
+    finally:
+        for c in queued:
+            c.close()
+        listener.close()
+
+
+async def test_binding_the_socket_leaves_the_process_umask_alone(
+    sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The umask is process-wide: a file another thread creates while the
+    # socket is bound must get the process's usual mode.
+    seen: list[int] = []
+    usual = os.umask(0o022)
+    os.umask(usual)
+
+    class Watching(socket.socket):
+        @override
+        def bind(self, address: Any) -> None:
+            super().bind(address)
+            if self.family == socket.AF_UNIX:
+                other = sockdir / "other-thread-file"
+                other.write_text("x")
+                seen.append(stat.S_IMODE(other.stat().st_mode))
+
+    fake = types.SimpleNamespace(
+        socket=Watching, AF_UNIX=socket.AF_UNIX, SOCK_STREAM=socket.SOCK_STREAM
+    )
+    monkeypatch.setattr(serve_module, "socket", fake)
+    server = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True, os.getgid())
+    await server.start()
+    try:
+        assert stat.S_IMODE((sockdir / "f.sock").lstat().st_mode) == 0o660
+    finally:
+        await server.stop()
+    assert seen == [0o666 & ~usual]
