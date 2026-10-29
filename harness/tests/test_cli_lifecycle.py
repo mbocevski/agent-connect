@@ -14,19 +14,17 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from typer.testing import CliRunner
 
 from agentconnect import cli_support
 from agentconnect.api_tls import CERT_FILE
-from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.sas import label
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import Cluster, Node, compare, status
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_harness.relay import on_free_port
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
-runner = CliRunner()
 
 
 @dataclass
@@ -46,9 +44,7 @@ class Cli:
         # as ids wherever they are (cli_support.IdArgsCommand), like a user
         # typing them would.
         argv = [*args, "--config", self.config]
-        result = runner.invoke(app, argv, input=input)
-        if result.exception and not isinstance(result.exception, SystemExit):
-            raise result.exception
+        result = run_cli(argv, input=input)
         return result.exit_code, result.stdout if stdout_only else result.output
 
     async def run(self, *args: str, input: str | None = None) -> tuple[int, str]:

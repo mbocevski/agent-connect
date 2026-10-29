@@ -19,16 +19,15 @@ from typing import Any, override
 
 import httpx
 import pytest
-from typer.testing import CliRunner
 
 from agentconnect import daemon as daemon_host
 from agentconnect.adapter import OutboundSend, RecordingAdapter
-from agentconnect.cli import app
 from agentconnect.failpoints import SimulatedCrash
 from agentconnect.keystore import DataDirLock
 from agentconnect.keystore import DataDirLockedError as RuntimeLockedError
 from agentconnect.runtime import AgentApi, ApiError, Runtime
 from agentconnect.tokens import API_TOKEN_FILE, HUMAN_TOKEN_FILE, TokenDigest
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 from agentconnect_harness.proxy import RelayProxy
 from agentconnect_sdk import (
@@ -43,7 +42,6 @@ from agentconnect_sdk.embedded import EmbeddedHost
 
 pytestmark = pytest.mark.hosts("daemon")  # the peers; the agent here is always embedded
 
-runner = CliRunner()
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
 # Substrings no agent-facing name may contain (SPEC 6.2, 10.4, 11).
 HUMAN_ONLY = ("approve", "reject", "verif", "mismatch", "remove", "audit", "transcript", "human")
@@ -64,9 +62,7 @@ HUMAN_ROUTES = (
 def cli(data_dir: Path, *args: str, input: str | None = None) -> tuple[int, str]:
     """``AC_DATA_DIR=<data_dir> agentconnect ...``, as the docs tell the human."""
     env = {"AC_DATA_DIR": str(data_dir), "AC_CONFIG": str(data_dir / "no-config.toml")}
-    result = runner.invoke(app, list(args), input=input, env=env)
-    if result.exception and not isinstance(result.exception, SystemExit):
-        raise result.exception
+    result = run_cli(list(args), input=input, env=env)
     return result.exit_code, result.stdout
 
 

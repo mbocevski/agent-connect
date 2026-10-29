@@ -14,19 +14,16 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
 
-from agentconnect.cli import app
 from agentconnect.keystore import DataDirLock
 from agentconnect.runtime import STOP_FLUSH_SECS
 from agentconnect.sockets import MAX_SOCKET_PATH
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import WAIT, Cluster, Node
 from agentconnect_sdk import AgentConnect, Group, Message
 from agentconnect_sdk.embedded import EmbeddedHost
 
 pytestmark = pytest.mark.hosts("daemon")  # the peers; the agent here is always embedded
-
-runner = CliRunner()
 
 
 async def pair(cluster: Cluster) -> tuple[Node, Node, str]:
@@ -212,7 +209,7 @@ async def test_a_data_dir_too_long_for_a_socket_path(cluster: Cluster) -> None:
         assert (bound.parent.stat().st_mode & 0o777) == 0o700
         # The CLI finds the socket from the data directory alone.
         env = {"AC_DATA_DIR": str(deep), "AC_CONFIG": "/dev/null"}
-        result = await asyncio.to_thread(runner.invoke, app, ["status", "--json"], env=env)
+        result = await asyncio.to_thread(run_cli, ["status", "--json"], env=env)
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout)["identity"] == runtime.status()["identity"]
     finally:
@@ -229,11 +226,11 @@ async def test_the_cli_ignores_the_daemons_config_with_ac_config_dev_null(
     (home / "agentconnect" / "config.toml").write_text("[api]\ntcp_port = 1\n", encoding="utf-8")
     base = {"AC_DATA_DIR": str(agent.config.data_dir), "XDG_CONFIG_HOME": str(home)}
     # The daemon's config points the CLI at its TCP port...
-    wrong = await asyncio.to_thread(runner.invoke, app, ["status", "--json"], env=base)
+    wrong = await asyncio.to_thread(run_cli, ["status", "--json"], env=base)
     assert wrong.exit_code != 0
     # ...and AC_CONFIG=/dev/null, as docs/sdk.md says, reaches the embedded agent.
     env = {**base, "AC_CONFIG": "/dev/null"}
-    right = await asyncio.to_thread(runner.invoke, app, ["status", "--json"], env=env)
+    right = await asyncio.to_thread(run_cli, ["status", "--json"], env=env)
     assert right.exit_code == 0, right.output
 
 
