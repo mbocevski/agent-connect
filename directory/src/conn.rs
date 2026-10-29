@@ -553,6 +553,17 @@ async fn deadline(State(d): State<Deadline>, req: Request, next: Next) -> Respon
         .into_response()
 }
 
+/// `router` with the request deadline.
+fn with_deadline(router: Router, limits: &Limits, events: Events) -> Router {
+    router.layer(middleware::from_fn_with_state(
+        Deadline {
+            limit: limits.request_timeout,
+            events,
+        },
+        deadline,
+    ))
+}
+
 /// Serve `router` on `listener` under `limits` until `shutdown` completes,
 /// then let the open connections finish their requests for at most the
 /// shutdown grace. `trusted` says whether a peer address is a trusted
@@ -570,13 +581,7 @@ pub async fn serve(
     events: Events,
     shutdown: impl Future<Output = ()> + Send,
 ) -> std::io::Result<()> {
-    let router = router.layer(middleware::from_fn_with_state(
-        Deadline {
-            limit: limits.request_timeout,
-            events: Arc::clone(&events),
-        },
-        deadline,
-    ));
+    let router = with_deadline(router, &limits, Arc::clone(&events));
     let fair = Fair::new();
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut shutdown = std::pin::pin!(shutdown);
@@ -638,15 +643,17 @@ pub async fn serve(
 
 /// One connection: its requests, until it ends, is evicted, runs out of
 /// time, or the shutdown signal asks it to finish its request and close.
-async fn connection(
-    tcp: tokio::net::TcpStream,
+async fn connection<I>(
+    stream: I,
     peer: SocketAddr,
     (slot, state): (Slot, Arc<ConnState>),
     router: Router,
     limits: Limits,
     mut stop: watch::Receiver<bool>,
     events: Events,
-) {
+) where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let started = Arc::clone(&state);
     let finished = Arc::clone(&state);
     // The peer address for the per-address limits, resolved against a
@@ -678,7 +685,7 @@ async fn connection(
             })
         });
     let io = TokioIo::new(Tracked {
-        inner: tcp,
+        inner: stream,
         state: Arc::clone(&state),
     });
     let conn = http1::Builder::new().serve_connection(io, TowerToHyperService::new(service));
@@ -977,5 +984,318 @@ mod tests {
         drop(slot);
         waiting.await.unwrap();
         assert_eq!(fair.held(), 0);
+    }
+
+    // -- the connection, over an in-memory stream and a paused clock --------
+
+    use axum::body::Bytes;
+    use axum::routing::{get, post};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
+
+    fn limits() -> Limits {
+        Limits {
+            header_timeout: Duration::from_secs(10),
+            idle_timeout: Duration::from_secs(75),
+            request_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(20),
+            max_connections: 8,
+            max_per_source: 8,
+            shutdown_grace: Duration::from_secs(1),
+        }
+    }
+
+    fn test_router() -> Router {
+        Router::new()
+            .route("/fast", get(|| async { "ok" }))
+            .route("/big", get(|| async { vec![0_u8; 1 << 20] }))
+            // Takes its time once the body is in.
+            .route(
+                "/echo",
+                post(|body: Bytes| async move {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    body.len().to_string()
+                }),
+            )
+            // Answers when the body is in.
+            .route(
+                "/hang",
+                post(|body: Bytes| async move { body.len().to_string() }),
+            )
+    }
+
+    struct Harness {
+        client: DuplexStream,
+        task: tokio::task::JoinHandle<()>,
+        state: Arc<ConnState>,
+        kick: Arc<Notify>,
+        stop: watch::Sender<bool>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    fn harness(limits: Limits, buffer: usize) -> Harness {
+        let (client, server) = tokio::io::duplex(buffer);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        let events: Events = Arc::new(move |_, outcome| lock(&seen).push(outcome));
+        let state = ConnState::new();
+        let slot = Fair::new().admit(ip("192.0.2.1"), 8, 8, &state).unwrap();
+        let kick = Arc::clone(&slot.kick);
+        let (stop, stop_rx) = watch::channel(false);
+        let router = with_deadline(test_router(), &limits, Arc::clone(&events));
+        let task = tokio::spawn(connection(
+            server,
+            "192.0.2.1:4000".parse().unwrap(),
+            (slot, Arc::clone(&state)),
+            router,
+            limits,
+            stop_rx,
+            events,
+        ));
+        Harness {
+            client,
+            task,
+            state,
+            kick,
+            stop,
+            events: log,
+        }
+    }
+
+    impl Harness {
+        fn events(&self) -> Vec<&'static str> {
+            lock(&self.events).clone()
+        }
+    }
+
+    /// One response off `client`: its head and its `content-length` body.
+    async fn response(client: &mut DuplexStream) -> String {
+        let mut got = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let n = client.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&got).into_owned();
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let wanted = head
+                    .to_ascii_lowercase()
+                    .split("content-length: ")
+                    .nth(1)
+                    .and_then(|v| v.split("\r\n").next().and_then(|v| v.parse::<usize>().ok()))
+                    .unwrap_or(0);
+                if body.len() >= wanted {
+                    return text;
+                }
+            }
+        }
+        String::from_utf8_lossy(&got).into_owned()
+    }
+
+    const GET_FAST: &[u8] = b"GET /fast HTTP/1.1\r\nHost: x\r\n\r\n";
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_that_stalls_is_closed_at_the_header_timeout() {
+        let mut h = harness(limits(), 4096);
+        h.client
+            .write_all(b"GET /fast HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        let started = Instant::now();
+        (&mut h.task).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(11));
+        assert_eq!(lock(&h.events).as_slice(), ["header_timeout"]);
+        assert_eq!(h.client.read(&mut [0_u8; 8]).await.unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silence_from_a_new_connection_is_closed_at_the_header_timeout() {
+        let mut h = harness(limits(), 4096);
+        (&mut h.task).await.unwrap();
+        assert_eq!(h.events(), ["header_timeout"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_connection_outlives_the_header_timeout_and_closes_at_the_idle_timeout() {
+        let mut h = harness(limits(), 4096);
+        h.client.write_all(GET_FAST).await.unwrap();
+        assert!(response(&mut h.client).await.starts_with("HTTP/1.1 200"));
+        assert!(h.state.served() && !h.state.protected());
+        // Well past the header timeout: still open.
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        assert!(!h.task.is_finished());
+        // A second request on the connection is served as before.
+        h.client.write_all(GET_FAST).await.unwrap();
+        assert!(response(&mut h.client).await.starts_with("HTTP/1.1 200"));
+        let idle_since = Instant::now();
+        (&mut h.task).await.unwrap();
+        assert!(idle_since.elapsed() >= Duration::from_secs(75));
+        assert_eq!(h.events(), ["idle_timeout"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_head_dripped_after_a_response_has_the_header_timeout_again() {
+        let mut h = harness(limits(), 4096);
+        h.client.write_all(GET_FAST).await.unwrap();
+        let _ = response(&mut h.client).await;
+        // The first byte of the next head starts the 10 s clock, not the 75 s one.
+        h.client.write_all(b"G").await.unwrap();
+        let started = Instant::now();
+        (&mut h.task).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(12));
+        assert_eq!(h.events(), ["header_timeout"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_whose_body_never_arrives_is_answered_408() {
+        let mut h = harness(limits(), 4096);
+        h.client
+            .write_all(b"POST /hang HTTP/1.1\r\nHost: x\r\ncontent-length: 10\r\n\r\n12")
+            .await
+            .unwrap();
+        let started = Instant::now();
+        let answer = response(&mut h.client).await;
+        assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+        assert!(started.elapsed() >= Duration::from_secs(30));
+        (&mut h.task).await.unwrap();
+        assert_eq!(h.events(), ["request_timeout"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_is_protected_only_once_its_body_is_in() {
+        let mut h = harness(limits(), 4096);
+        h.client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\ncontent-length: 5\r\n\r\n12")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!h.state.protected(), "the body is still arriving");
+        h.client.write_all(b"345").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(h.state.protected(), "body in, handler working");
+        let answer = response(&mut h.client).await;
+        assert!(
+            answer.starts_with("HTTP/1.1 200") && answer.ends_with('5'),
+            "{answer}"
+        );
+        assert!(!h.state.protected() && h.state.served());
+        // A request without a body is protected from the start.
+        h.client.write_all(GET_FAST).await.unwrap();
+        let _ = response(&mut h.client).await;
+        h.stop.send(true).unwrap();
+        (&mut h.task).await.unwrap();
+        assert_eq!(h.events(), Vec::<&str>::new());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_never_reads_is_cut_off_at_the_write_timeout() {
+        // A response far larger than the stream's buffer: the write blocks.
+        let mut h = harness(limits(), 1024);
+        h.client
+            .write_all(b"GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let started = Instant::now();
+        (&mut h.task).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(20));
+        assert!(started.elapsed() < Duration::from_secs(22));
+        assert_eq!(h.events(), ["write_timeout"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_pushed_out_goes_without_an_event() {
+        let mut h = harness(limits(), 4096);
+        h.kick.notify_one();
+        (&mut h.task).await.unwrap();
+        assert_eq!(h.events(), Vec::<&str>::new());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_shutdown_signal_closes_an_idle_connection_and_finishes_a_request() {
+        let mut h = harness(limits(), 4096);
+        h.client.write_all(GET_FAST).await.unwrap();
+        let _ = response(&mut h.client).await;
+        h.stop.send(true).unwrap();
+        (&mut h.task).await.unwrap();
+        assert_eq!(h.events(), Vec::<&str>::new());
+        // A request in flight when the signal comes is answered first.
+        let mut h = harness(limits(), 4096);
+        h.client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\ncontent-length: 2\r\n\r\n12")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        h.stop.send(true).unwrap();
+        let answer = response(&mut h.client).await;
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        (&mut h.task).await.unwrap();
+    }
+
+    // -- the listener, on loopback ---------------------------------------
+
+    /// `serve` on a loopback port with `limits`; its address, the counted
+    /// events, and the way to stop it.
+    async fn listening(
+        limits: Limits,
+    ) -> (
+        SocketAddr,
+        Arc<Mutex<Vec<&'static str>>>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        let events: Events = Arc::new(move |_, outcome| lock(&seen).push(outcome));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve(
+            listener,
+            test_router(),
+            limits,
+            |_| false,
+            events,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
+        (addr, log, stop, task)
+    }
+
+    async fn get_fast(addr: SocketAddr) -> tokio::net::TcpStream {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(GET_FAST).await.unwrap();
+        let mut buf = [0_u8; 256];
+        let n = s.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("HTTP/1.1 200"));
+        s
+    }
+
+    #[tokio::test]
+    async fn serve_closes_a_source_past_its_cap_and_stops_on_the_signal() {
+        let mut l = limits();
+        l.max_per_source = 1;
+        let (addr, log, stop, task) = listening(l).await;
+        let _first = get_fast(addr).await;
+        let mut second = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(second.read(&mut [0_u8; 8]).await.unwrap(), 0);
+        assert_eq!(lock(&log).as_slice(), ["refused"]);
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn serve_pushes_out_an_idle_connection_at_the_total() {
+        let mut l = limits();
+        l.max_connections = 1;
+        let (addr, log, stop, task) = listening(l).await;
+        let mut first = get_fast(addr).await;
+        let _second = get_fast(addr).await;
+        assert_eq!(first.read(&mut [0_u8; 8]).await.unwrap(), 0);
+        assert_eq!(lock(&log).as_slice(), ["evicted"]);
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
     }
 }
