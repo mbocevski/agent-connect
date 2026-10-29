@@ -56,6 +56,53 @@ async fn an_existing_target_is_left_alone() {
     assert_eq!(leftovers(dir.path()), Vec::<String>::new());
 }
 
+#[tokio::test]
+async fn only_a_directory_its_owner_alone_can_change_takes_a_backup() {
+    // Anyone else who could rename entries there could swap the private
+    // directory for theirs before the copy is written.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("relay.db");
+    let db = db.to_str().unwrap();
+    let _store = SqliteStore::open(db).await.unwrap();
+    for (mode, refused) in [
+        (0o775, true),
+        (0o757, true),
+        (0o1770, false),
+        (0o755, false),
+    ] {
+        let out = dir.path().join(format!("out-{mode:o}"));
+        std::fs::create_dir(&out).unwrap();
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode)).unwrap();
+        let copy = out.join("backup.db");
+        let done = backup(db, &copy).await;
+        if refused {
+            let err = done.unwrap_err();
+            assert!(
+                err.contains("writable by its group or others"),
+                "{mode:o}: {err}"
+            );
+            assert!(
+                err.contains(out.to_str().unwrap()),
+                "names the directory: {err}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&out).unwrap().count(),
+                0,
+                "nothing created"
+            );
+        } else {
+            done.unwrap();
+            assert!(copy.is_file(), "{mode:o}");
+            assert_eq!(leftovers(&out), Vec::<String>::new());
+        }
+    }
+    // A symlink to a fine directory is refused as the parent too.
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(dir.path().join("out-755"), &link).unwrap();
+    let err = backup(db, &link.join("b2.db")).await.unwrap_err();
+    assert!(err.contains("not a directory"), "{err}");
+}
+
 /// The private directories a backup left in `dir`: none, whatever happened.
 fn leftovers(dir: &std::path::Path) -> Vec<String> {
     std::fs::read_dir(dir)

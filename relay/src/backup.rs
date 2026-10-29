@@ -40,37 +40,120 @@ pub async fn backup(db: &str, target: &Path) -> Result<u64, String> {
     if target.symlink_metadata().is_ok() {
         return Err(exists(target));
     }
-    let private = private_dir(target)?;
-    let copied = copy_and_place(&source, &private, target).await;
-    let _ = std::fs::remove_dir_all(&private);
-    copied
-}
-
-async fn copy_and_place(source: &Path, private: &Path, target: &Path) -> Result<u64, String> {
+    let parent = parent_of(target);
+    let parent_meta = closed_parent(parent)?;
+    let private = private_dir(parent)?;
     let copy = private.join("backup.db");
     let mut create = OpenOptions::new();
     create.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut create, 0o600);
-    create
-        .open(&copy)
-        .map_err(|e| format!("cannot create {}: {e}", copy.display()))?;
+    let file = match create.open(&copy) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = std::fs::remove_dir(&private);
+            return Err(format!("cannot create {}: {e}", copy.display()));
+        }
+    };
+    // This process created the file: its owner is our user, from our own
+    // handle. With the parent ours (or root's), nobody else can rename the
+    // private directory away from now on.
+    if let Err(e) = owned_by_us_or_root(parent, &parent_meta, &file) {
+        // Remove only what we made: the directory may not be ours any more.
+        let _ = std::fs::remove_file(&copy);
+        let _ = std::fs::remove_dir(&private);
+        return Err(e);
+    }
+    drop(file);
+    let copied = copy_and_place(&source, &copy, target).await;
+    let _ = std::fs::remove_dir_all(&private);
+    copied
+}
+
+/// The directory `target` goes in.
+fn parent_of(target: &Path) -> &Path {
+    match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+/// The parent must be a real directory that only its owner can change
+/// entries in: no group or other write, unless it is sticky. Otherwise
+/// another user could rename the private directory away and plant theirs
+/// before the copy is written (the rule `a2a.facade_socket` uses too).
+fn closed_parent(parent: &Path) -> Result<std::fs::Metadata, String> {
+    let meta = parent
+        .symlink_metadata()
+        .map_err(|e| format!("cannot use {}: {e}", parent.display()))?;
+    if !meta.file_type().is_dir() {
+        return Err(format!(
+            "{} is not a directory (a symlink is refused)",
+            parent.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+            return Err(format!(
+                "{} is writable by its group or others: back up into a directory \
+                 only its owner can write (or a sticky one)",
+                parent.display()
+            ));
+        }
+    }
+    Ok(meta)
+}
+
+/// The parent belongs to this process's user (the owner of `ours`, a file
+/// it just created) or to root.
+#[cfg(unix)]
+fn owned_by_us_or_root(
+    parent: &Path,
+    parent_meta: &std::fs::Metadata,
+    ours: &std::fs::File,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let me = ours
+        .metadata()
+        .map_err(|e| format!("cannot read the backup file: {e}"))?
+        .uid();
+    let owner = parent_meta.uid();
+    if owner == me || owner == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} belongs to user {owner}, not this one ({me}) or root: back up into \
+             a directory this user owns",
+            parent.display()
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn owned_by_us_or_root(
+    _parent: &Path,
+    _parent_meta: &std::fs::Metadata,
+    _ours: &std::fs::File,
+) -> Result<(), String> {
+    Ok(())
+}
+
+async fn copy_and_place(source: &Path, copy: &Path, target: &Path) -> Result<u64, String> {
     let copy_text = copy
         .to_str()
         .ok_or_else(|| "the backup path must be valid UTF-8".to_owned())?;
     vacuum_into(source, copy_text).await?;
-    place(&copy, target)?;
+    place(copy, target)?;
     std::fs::metadata(target)
         .map(|m| m.len())
         .map_err(|e| format!("cannot read {}: {e}", target.display()))
 }
 
-/// A new 0700 directory next to `target`, on the same file system.
-fn private_dir(target: &Path) -> Result<PathBuf, String> {
-    let parent = match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+/// A new 0700 directory in `parent`, on the target's file system.
+fn private_dir(parent: &Path) -> Result<PathBuf, String> {
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
