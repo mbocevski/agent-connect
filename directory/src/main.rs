@@ -142,6 +142,8 @@ async fn serve<S: Store>(
     // supervisor kills the process.
     let limits = Limits {
         header_timeout: config.connections.header_timeout,
+        idle_timeout: config.connections.idle_timeout,
+        request_timeout: config.connections.request_timeout,
         max_connections: config.connections.max_connections,
         max_per_source: config.connections.max_per_source,
         shutdown_grace: config.shutdown_grace,
@@ -185,12 +187,19 @@ async fn main() -> std::io::Result<()> {
     if config.client_ip_header.is_none() {
         if config.addr.ip().is_loopback() {
             tracing::warn!(
+                max_connections_per_source = config.connections.max_per_source,
                 "no trusted proxy configured: if a reverse proxy forwards to this loopback \
-                 address, every client shares the proxy's rate-limit bucket"
+                 address, every client shares the proxy's rate-limit bucket and at most \
+                 max_connections_per_source connections to the directory; set \
+                 AC_DIRECTORY_CLIENT_IP_HEADER and AC_DIRECTORY_TRUSTED_PROXIES"
             );
         } else {
             tracing::warn!(
-                "listening on a public address with no trusted proxy: rate limits are per TCP peer"
+                max_connections_per_source = config.connections.max_per_source,
+                "listening on a public address with no trusted proxy: rate limits and the \
+                 per-source connection cap are per TCP peer, so a reverse proxy in front \
+                 would be one client with at most max_connections_per_source connections; \
+                 set AC_DIRECTORY_CLIENT_IP_HEADER and AC_DIRECTORY_TRUSTED_PROXIES"
             );
         }
     }

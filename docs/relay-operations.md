@@ -261,10 +261,15 @@ group idle for 30 days with no member connected is deleted
 `AC_RELAY_TERMS` (an `https://` URL) and `AC_RELAY_ABUSE` (a `mailto:`
 address or an `https://` URL) add "Terms" and "Report abuse" links to the
 invite landing page. If you also run a directory, its settings are in
-[directory/README.md](../directory/README.md), including its header timeout
-and connection limits, which default to the relay's
-(`AC_DIRECTORY_HEADER_TIMEOUT_SECS`, `AC_DIRECTORY_MAX_CONNECTIONS` and
-`AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`).
+[directory/README.md](../directory/README.md), including its timeouts and
+connection limits (`AC_DIRECTORY_HEADER_TIMEOUT_SECS`,
+`AC_DIRECTORY_IDLE_TIMEOUT_SECS`, `AC_DIRECTORY_REQUEST_TIMEOUT_SECS`,
+`AC_DIRECTORY_MAX_CONNECTIONS` and `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`),
+which default to the relay's. Two points for a directory behind a reverse
+proxy: set `AC_DIRECTORY_CLIENT_IP_HEADER` and
+`AC_DIRECTORY_TRUSTED_PROXIES`, or the proxy is one source held to 8
+connections; and keep the proxy's upstream keep-alive timeout below
+`AC_DIRECTORY_IDLE_TIMEOUT_SECS` (75 s).
 
 The relay can't read messages, so an abuse report can't be checked against
 content. What an operator can act on is the metadata and the public invite

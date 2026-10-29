@@ -84,8 +84,10 @@ give the supervisor a longer stop timeout too (`docker stop -t`,
 | `AC_DIRECTORY_TRUST_ANY_PROXY` | unset | `1` allows the broad blocks above. |
 | `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
 | `AC_DIRECTORY_SHUTDOWN_GRACE_SECS` | `8` | After SIGTERM or SIGINT, how long open connections may hold the exit up (1 to 3600 seconds). |
-| `AC_DIRECTORY_HEADER_TIMEOUT_SECS` | `10` | How long a connection may take to send a request head, on a new connection and between requests; a slower one is closed (1 to 3600 seconds). |
-| `AC_DIRECTORY_MAX_CONNECTIONS` | `512` | Connections open at once. At the limit a new connection closes the oldest one of the source holding the most. |
+| `AC_DIRECTORY_HEADER_TIMEOUT_SECS` | `10` | How long a request head may take, from its first byte (from the connection's start, for the first request); a slower one is closed (1 to 3600 seconds). |
+| `AC_DIRECTORY_IDLE_TIMEOUT_SECS` | `75` | How long a connection may stay open between a response and the next request (1 to 3600 seconds). Keep it above the keep-alive of the reverse proxy in front. |
+| `AC_DIRECTORY_REQUEST_TIMEOUT_SECS` | `30` | How long a request may take from its head to its response, the body read included; a slower one is answered `408` and the connection closed (1 to 3600 seconds). |
+| `AC_DIRECTORY_MAX_CONNECTIONS` | `512` | Connections open at once. At the limit a new connection closes one that is not serving a request, of the source holding the most. |
 | `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` | `8` | Connections open at once from one source (an IPv4 address or an IPv6 /64); the next one is closed at once. A connection from a trusted proxy is not held to it. |
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `AC_DIRECTORY_FONT_DIR` | none | A directory of font files (`.woff2`, `.woff`, `.ttf`, `.otf`) served at `/static/fonts/<file>`, for a replacement stylesheet to load with `@font-face`. Setting it adds `font-src 'self'` to the Content-Security-Policy; without it the policy has no `font-src`. Only regular files directly in the directory are served: no symlinks or subdirectories. |
@@ -107,25 +109,40 @@ windows live in memory, are never logged, and are capped in number.
 
 ### Connection limits
 
-A client that sends part of a request head and stops, or opens many
-connections, would otherwise hold the directory's descriptors and memory
-for as long as it likes. The head has to arrive within
-`AC_DIRECTORY_HEADER_TIMEOUT_SECS`, and a source may hold
-`AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` connections: the next one from it
-is closed at once, and another source is not affected. At
-`AC_DIRECTORY_MAX_CONNECTIONS` a new connection closes the oldest one of
-the source holding the most, so one source can't fill the directory against
-everybody else. The defaults are the relay's. `/metrics` counts
-`connection` events with the outcomes `refused`, `evicted` and
-`header_timeout`; the counts carry no address.
+A client that sends part of a request head and stops, drips a request body,
+or opens many connections would otherwise hold the directory's descriptors
+and memory for as long as it likes. Three timeouts bound that:
 
-Behind a reverse proxy, set `AC_DIRECTORY_TRUSTED_PROXIES` (below): without
-it every client is the proxy, which then holds at most
-`AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` connections to the directory.
-A connection from a trusted proxy is held to the total only, since before its
-headers it can't be told from the proxy's other clients. If the proxy keeps
-upstream connections alive, keep its idle timeout below the header timeout,
-or it may reuse a connection the directory is closing.
+- the request head has to arrive within `AC_DIRECTORY_HEADER_TIMEOUT_SECS`
+  of its first byte (of the connection's start, for the first request);
+- an idle connection, between a response and the next request, is closed
+  after `AC_DIRECTORY_IDLE_TIMEOUT_SECS`;
+- a request, from its head to its response with the body read, has to finish
+  within `AC_DIRECTORY_REQUEST_TIMEOUT_SECS`, or it is answered `408`.
+
+The header timeout does not apply to an idle connection, so a reverse proxy
+that keeps upstream connections alive is not cut off: keep the proxy's
+upstream keep-alive timeout below the idle timeout (nginx's is 60 s, under
+the default 75 s), or it may reuse a connection the directory is closing.
+
+A source may hold `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` connections: the
+next one from it is closed at once, and another source is not affected. At
+`AC_DIRECTORY_MAX_CONNECTIONS` a new connection closes one that is not
+serving a request, of the source holding the most of them: a connection
+that has not completed a request goes before one that has, then the oldest.
+A request in flight is never pushed out; when every connection is serving a
+request, the new connection is closed instead. The defaults are the
+relay's. `/metrics` counts `connection` events with the outcomes `refused`,
+`evicted`, `header_timeout`, `idle_timeout` and `request_timeout`; the
+counts carry no address.
+
+**Behind a reverse proxy, set `AC_DIRECTORY_CLIENT_IP_HEADER` and
+`AC_DIRECTORY_TRUSTED_PROXIES` (below).** Without them every client is the
+proxy's one source, which then holds at most
+`AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` (8) connections to the directory,
+and the directory warns at start. A connection from a trusted proxy is held
+to the total only, since before its headers it can't be told from the
+proxy's other clients.
 
 ### Behind a reverse proxy
 

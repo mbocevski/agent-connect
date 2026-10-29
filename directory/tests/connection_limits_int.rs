@@ -137,6 +137,130 @@ fn a_partial_request_head_is_cut_off_after_the_header_timeout() {
     assert!(answers(&dir, A));
 }
 
+/// The 502s of a proxy that keeps upstream connections alive for longer than
+/// the header timeout: an idle connection after a whole request is held to
+/// the idle timeout, not the header timeout, which covers a request head only.
+#[test]
+#[ignore = "integration tier (just test-int): real process and time"]
+fn an_idle_keep_alive_connection_outlives_the_header_timeout() {
+    let dir = start(&[
+        ("AC_DIRECTORY_HEADER_TIMEOUT_SECS", "1"),
+        ("AC_DIRECTORY_IDLE_TIMEOUT_SECS", "4"),
+    ]);
+    let mut s = connect(&dir, A);
+    s.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut answer = String::new();
+    BufReader::new(&s).read_line(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    // Open after twice the header timeout, closed after the idle timeout.
+    assert!(!closed_within(&mut s, Duration::from_millis(2200)));
+    assert!(closed_within(&mut s, Duration::from_secs(5)));
+}
+
+#[test]
+#[ignore = "integration tier (just test-int): real process and time"]
+fn a_head_dripped_a_byte_at_a_time_is_cut_off_at_the_header_timeout() {
+    let dir = start(&[("AC_DIRECTORY_HEADER_TIMEOUT_SECS", "2")]);
+    let mut s = connect(&dir, A);
+    let head = b"GET /healthz HTTP/1.1\r\nHost: x\r\nX-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n";
+    let started = std::time::Instant::now();
+    let mut cut_off = false;
+    for b in head {
+        if s.write_all(&[*b]).is_err() {
+            cut_off = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        if started.elapsed() > Duration::from_secs(8) {
+            break;
+        }
+    }
+    assert!(cut_off || closed_within(&mut s, Duration::from_millis(500)));
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// A whole head, then a body that never finishes: the request deadline
+/// answers 408 and closes.
+#[test]
+#[ignore = "integration tier (just test-int): real process and time"]
+fn a_body_dripped_past_the_request_timeout_is_answered_408() {
+    let dir = start(&[
+        ("AC_DIRECTORY_HEADER_TIMEOUT_SECS", "1"),
+        ("AC_DIRECTORY_REQUEST_TIMEOUT_SECS", "2"),
+    ]);
+    let mut s = connect(&dir, A);
+    s.write_all(
+        b"POST /v0/listings HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\ncontent-length: 400\r\n\r\n",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    s.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0_u8; 1024];
+    while started.elapsed() < Duration::from_secs(8) {
+        let _ = s.write_all(b" ");
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(_) => break,
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let text = String::from_utf8_lossy(&got);
+    assert!(text.starts_with("HTTP/1.1 408"), "{text}");
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// An honest request in progress is never the one a newcomer pushes out:
+/// 16 sources with one connection each fill a directory of 16.
+#[test]
+#[ignore = "integration tier (just test-int): real process and time"]
+fn an_in_flight_request_survives_many_one_connection_sources() {
+    let dir = start(&[
+        ("AC_DIRECTORY_MAX_CONNECTIONS", "16"),
+        ("AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE", "8"),
+        ("AC_DIRECTORY_HEADER_TIMEOUT_SECS", "30"),
+        ("AC_DIRECTORY_REQUEST_TIMEOUT_SECS", "30"),
+    ]);
+    // The honest client: a whole head and part of the body, so the request
+    // is in flight.
+    let mut honest = connect(&dir, A);
+    honest
+        .write_all(
+            b"POST /v0/listings HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\ncontent-length: 400\r\n\r\n{\"card\":",
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    // Sixteen more sources, one silent connection each (127.0.1.1 to .16).
+    let attackers: Vec<TcpStream> = (1..=16_u8)
+        .map(|i| {
+            let s = connect(&dir, Ipv4Addr::new(127, 0, 1, i));
+            std::thread::sleep(Duration::from_millis(20));
+            s
+        })
+        .collect();
+    assert!(!closed_within(&mut honest, Duration::from_secs(2)));
+    // The newcomers made room by closing the attackers' own connections.
+    let mut attackers = attackers;
+    let closed = attackers
+        .iter_mut()
+        .filter_map(|s| closed_within(s, Duration::from_millis(100)).then_some(()))
+        .count();
+    assert!(closed >= 1, "nothing was pushed out");
+}
+
 #[test]
 #[ignore = "integration tier (just test-int): real process and time"]
 fn a_source_past_its_cap_is_refused_while_another_source_still_connects() {
