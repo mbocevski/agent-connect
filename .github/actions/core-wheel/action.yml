@@ -36,7 +36,23 @@ runs:
         # manylinux_2_28 does not ship. They only run the build; nothing of
         # them is in the wheel. Both come from AppStream; EPEL is disabled so
         # its mirrors can't fail the build.
-        before-script-linux: dnf install -y --disablerepo=epel perl-IPC-Cmd perl-Time-Piece
+        #
+        # A mirror sometimes serves an empty repomd.xml ("Failed to download
+        # metadata for repo 'baseos'"). The install is retried up to four
+        # times with a growing pause and a metadata cache clean in between;
+        # a failure that repeats still fails the step with dnf's output.
+        before-script-linux: |
+          attempt=1
+          until dnf install -y --disablerepo=epel perl-IPC-Cmd perl-Time-Piece; do
+            if [ "$attempt" -ge 4 ]; then
+              echo "dnf install failed after $attempt attempts" >&2
+              exit 1
+            fi
+            echo "dnf install failed (attempt $attempt); retrying" >&2
+            dnf clean metadata || true
+            sleep $((attempt * 15))
+            attempt=$((attempt + 1))
+          done
         docker-options: >-
           -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
           -e HOME=${{ github.workspace }}/.container-home
