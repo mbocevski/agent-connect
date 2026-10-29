@@ -67,8 +67,8 @@ the protocol changes. Everything else is measured against
 | Severity | Count | Status |
 |---|---|---|
 | High | 1 | Fixed in #67 |
-| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); SR-11 fixed in #87; SR-12 fixed in #89; the rest open, follow-up task |
-| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; the rest open, follow-up task |
+| Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); SR-11 fixed in #87; SR-12 fixed in #89; SR-09 fixed in #103; SR-08 fixed in #107; SR-10 fixed in #108 |
+| Low | 28 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; SR-28 fixed in #61; SR-30 fixed in #108 and #113; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted; SR-54 fixed in #87 |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
@@ -593,7 +593,7 @@ store written the old way.
 | SR-25 | daemon | The knocker never checks token revocations, so against a malicious directory "rollback is bounded by token revocation" (SPEC §12) does not hold. `docs/discovery.md` already says so. | `runtime/knocks.py:773`. By reading. | Open (T-25) |
 | SR-26 | daemon | A JoinRequest with a failed MAC is not counted toward rate limiting (SPEC §6.2 step 2 MUST); only the relay's per-invite limit applies. | `engine.py:_on_join_request` (around line 1772). By reading. | Open (T-26) |
 | SR-27 | daemon | The A2A adapter's `a2a-seen.db` is a plain SQLite file (0600) in the data directory, against "there is no unencrypted on-disk mode" (SPEC §12). It holds SHA-256 hashes of `msg_id`s, which the relay also sees. | `a2a_adapter/seen.py:22-30`. By reading. | Open (T-27) |
-| SR-28 | daemon | Unauthenticated connections fill the local API's 64 slots and lock the human out (503) for 10 s at a time. In separate-OS-user mode any listed agent user can do it without a token. | `runtime/api.py:63-70`, `api.py:1552-1558`. Probe: human request 503 while 64 idle connections were held. Confirmed. | Open (T-28) |
+| SR-28 | daemon | Unauthenticated connections fill the local API's 64 slots and lock the human out (503) for 10 s at a time. In separate-OS-user mode any listed agent user can do it without a token. | `runtime/api.py:63-70`, `api.py:1552-1558`. Probe: human request 503 while 64 idle connections were held. Confirmed. | Fixed in #61: unfinished connections give way (32, hard 128; 8 and 64 per UID in separate-OS-user mode), quiet ones first after 0.5 s, and a connection whose headers arrived is never closed. Re-probed on c0d0c12: with 64 or 200 idle connections held, on the socket and on TCP, the human's requests are answered at once. Tests: `harness/tests/test_api.py` (`test_half_sent_connections_dont_keep_the_human_out`, `test_a_connection_that_sent_nothing_gives_way_first`, `test_connects_behind_a_whole_request_dont_close_it`, `test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one`) |
 | SR-29 | daemon | `check_agent_dir` accepts a group-writable agent directory (0770, 0730) and doesn't check its parents, so an agent user may be able to replace the socket and show the human forged approvals or a forged code. | `isolation.py:158-180`. Probe: 770 and 730 accepted. Confirmed. | Open (T-29) |
 | SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Fixed: the adapter's client in #108, the facade's push client in #113 (`trust_env=False`, no redirects) |
 | SR-31 | daemon | Facade push-notification URLs are not screened, so the facade token holder can make the daemon POST task updates to any address. | `a2a_adapter/facade.py:346`. By reading. | Open (T-31) |
@@ -942,7 +942,8 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   0600 (0660 for the group in separate-OS-user mode); TCP binds only
   `127.0.0.1` and refuses any `Origin` and a foreign `Host`; clients check
   the socket server's UID before sending (SR-09, fixed in #103); TCP is TLS
-  with a certificate the clients pin (SR-08, fixed in #107). SR-28 is the gap.
+  with a certificate the clients pin (SR-08, fixed in #107); unfinished
+  connections give way to whole requests (SR-28, fixed in #61).
 - **Separate-OS-user mode:** the peer's UID is checked with `SO_PEERCRED`
   or `getpeereid` before the request is read; the human token is accepted
   only from the daemon's UID or `human_users`; TCP and root are refused;
@@ -1141,7 +1142,7 @@ One line per open item, ready to file.
   and tell the human past a threshold (SPEC §6.2 step 2).
 - **T-27 (Low, SR-27):** Daemon: move the A2A seen set into the encrypted
   records database.
-- **T-28 (Low, SR-28):** Daemon: per-peer connection caps and a reserve
+- **T-28 (Low, SR-28, fixed in #61):** Daemon: per-peer connection caps and a reserve
   for the human UID on the local API.
 - **T-29 (Low, SR-29):** Daemon: refuse a group-writable agent directory
   and check its parents.
