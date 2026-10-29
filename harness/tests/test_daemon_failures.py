@@ -191,9 +191,10 @@ async def test_a_cadence_updates_refusals_count_toward_its_own_row(
 
 
 # A scaled-down relay (relay.rs: 50 sends a second per mailbox) and an agent
-# whose groups together want three times that.
-BUDGET = 5
-BUSY_GROUPS = 8
+# whose groups together want three times that. The numbers are small because
+# every send costs several transactions and the daemon syncs each one to disk.
+BUDGET = 2
+BUSY_GROUPS = 3
 STEP = 0.1  # the daemon clock moves in short steps, as a busy agent does
 SECONDS = 150  # past the 8 backoffs a row's own retries would take
 
@@ -237,6 +238,12 @@ async def test_busy_groups_share_the_relays_send_budget(
     fails, a quiet group's message goes out, and the outbox keeps sending
     at about the budget."""
     (a, b), quiet = await group(2)
+    # The run commits about 2,500 transactions, and the daemon's FULL
+    # synchronous mode (ADR-004) makes each one an fsync. At 5 ms an fsync,
+    # which a busy CI disk can reach, it took more than the 30 s test
+    # timeout with the 8 busy groups and a budget of 5 it used to have.
+    # Nothing here depends on surviving a power loss.
+    a.daemon.store._db.executescript("PRAGMA synchronous=OFF;")
     busy = []
     for i in range(BUSY_GROUPS):
         gid = a.daemon.create_group(f"Busy {i}", "x")
