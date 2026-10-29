@@ -59,7 +59,7 @@ print(data.split(b"\r\n", 1)[0].decode() if data else "closed", flush=True)
 @pytest.fixture
 def shared() -> Iterator[Path]:
     d = Path(tempfile.mkdtemp(prefix="ac-mu-"))
-    d.chmod(0o755)
+    d.chmod(0o711)  # others may only pass through, to reach the socket
     yield d
     shutil.rmtree(d, ignore_errors=True)
 

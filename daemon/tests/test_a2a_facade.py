@@ -599,9 +599,32 @@ def test_the_peer_check_holds_on_every_event_loop(sockdir: Path, loop_factory: A
     assert len(seen) == 1
 
 
-async def test_the_socket_directory_must_be_private(sockdir: Path) -> None:
-    os.chmod(sockdir, 0o775)  # noqa: S103 - group-writable on purpose: the case refused
+async def test_the_socket_directory_must_be_private(
+    sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A directory others can write to: its lstat reports group write (no
+    # chmod, so the test never makes anything writable for real).
+    real_lstat = Path.lstat
+
+    def lstat(self: Path) -> os.stat_result:
+        st = real_lstat(self)
+        if self != sockdir:
+            return st
+        fields = list(st)
+        fields[0] = stat.S_IFDIR | 0o770
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
     server = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True)
+    with pytest.raises(PermissionError, match="only it can write"):
+        await server.start()
+
+
+async def test_a_symlinked_socket_directory_is_refused(sockdir: Path) -> None:
+    real = sockdir / "real"
+    real.mkdir(mode=0o700)
+    (sockdir / "link").symlink_to(real)
+    server = serve_module.UnixServer(_reached_app, sockdir / "link" / "f.sock", lambda _s: True)
     with pytest.raises(PermissionError, match="only it can write"):
         await server.start()
 
