@@ -16,7 +16,9 @@ import httpx
 import pytest
 
 from agentconnect.adapter import Delivery
-from agentconnect_harness.cluster import WAIT, Cluster, Node, serve_api
+from agentconnect.adapter import Event as AdapterEvent
+from agentconnect.sse import SUBSCRIBER_QUEUE, SseAdapter
+from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token, serve_api
 from agentconnect_harness.headless import Headless, headless
 from agentconnect_sdk import AgentConnect, AgentConnectError, Event, Group, Message, TaskState
 
@@ -406,6 +408,36 @@ async def test_a_wrong_token_is_refused(cluster: Cluster, sockdir: Path) -> None
     assert resp.status_code == 401
     assert alice.me != ""
     await bob.close()
+
+
+async def test_a_stream_too_slow_to_keep_up_is_ended_for_a_resume(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    # A client that stops reading falls more than SUBSCRIBER_QUEUE events
+    # behind: the daemon drops it and ends the stream once what was queued
+    # is written, so the client reconnects with Last-Event-ID.
+    h = await headless(cluster, "slow", sockdir, mode="sse")
+    hub = h.node.daemon.adapters["sse"]
+    assert isinstance(hub, SseAdapter)
+    token = api_token(h.server, "agent")
+    reader, writer = await asyncio.open_unix_connection(str(h.server.address))
+    writer.write(
+        b"GET /v0/events HTTP/1.1\r\nhost: localhost\r\naccept: text/event-stream\r\n"
+        + f"authorization: Bearer {token}\r\n\r\n".encode()
+    )
+    await writer.drain()
+    head = await asyncio.wait_for(reader.readuntil(b": connected\n\n"), WAIT)
+    assert head.startswith(b"HTTP/1.1 200")
+    published = 4 * SUBSCRIBER_QUEUE
+    for i in range(published):
+        await hub.on_event(
+            None, AdapterEvent("epoch_changed", None, {"n": i, "pad": "x" * 512}, f"e{i}")
+        )
+    got = await asyncio.wait_for(reader.read(-1), WAIT)  # until the daemon closes it
+    writer.close()
+    frames = got.count(b"\nid: ") + got.startswith(b"id: ")
+    assert 0 < frames < published
+    await h.close()
 
 
 async def test_the_text_shorthand_is_an_a2a_message(cluster: Cluster, sockdir: Path) -> None:

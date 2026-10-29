@@ -297,6 +297,19 @@ async def test_a_lost_owner_is_reattached_or_reported(owned: Path) -> None:
     await s.close()
 
 
+async def test_nothing_to_ack_or_release_sends_nothing(owned: Path) -> None:
+    owner = Owner()
+    backend = AttachBackend(
+        Config(relay_url="", relay_host="", data_dir=owned),
+        "daemon",
+        httpx.MockTransport(owner.handle),
+    )
+    assert await backend.ack("lease-1", []) == []
+    await backend.release("lease-1", [])
+    assert owner.requests == []
+    await backend.close()
+
+
 async def test_odd_answers_are_errors(owned: Path) -> None:
     owner = Owner()
     backend = AttachBackend(
@@ -307,6 +320,15 @@ async def test_odd_answers_are_errors(owned: Path) -> None:
     with pytest.raises(ToolError) as e:
         await backend._request("GET", "/v0/broken")
     assert (e.value.code, e.value.status) == ("error", 500)
+    listed = AttachBackend(
+        Config(relay_url="", relay_host="", data_dir=owned),
+        "daemon",
+        httpx.MockTransport(lambda _r: httpx.Response(500, json=["not", "an", "object"])),
+    )
+    with pytest.raises(ToolError) as e:
+        await listed.groups()  # JSON, but not an object: no code to trust
+    assert (e.value.code, e.value.status) == ("error", 500)
+    await listed.close()
     owner.fail = [httpx.ReadError]
     with pytest.raises(OwnerGoneError) as gone:
         await backend.groups()

@@ -6,17 +6,19 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import stat
 import tempfile
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import pytest
 import pytest_asyncio
 
 from agentconnect_sdk import AgentConnect, AgentConnectError, Group, Message, sign
+from agentconnect_sdk import receiver as receiver_module
 from agentconnect_sdk.receiver import WebhookReceiver
 
 Payload = Callable[..., dict[str, Any]]
@@ -327,6 +329,62 @@ async def test_starting_on_a_socket_leaves_the_process_umask_alone(
         os.umask(usual)
     assert len(seen) > 1
     assert set(seen) == {0o644}
+
+
+async def test_a_socket_a_crashed_receiver_left_behind_is_replaced(
+    agent: AgentConnect, sockdir: Path
+) -> None:
+    path = sockdir / "h.sock"
+    left = socket.socket(socket.AF_UNIX)
+    left.bind(str(path))
+    left.close()  # never unlinked, as after a crash
+    server = agent.webhook_receiver(path=path)
+    await server.start()
+    try:
+        assert stat.S_ISSOCK(path.lstat().st_mode)
+        _, writer = await asyncio.open_unix_connection(str(path))
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await server.close()
+        await server.close()  # a second close is harmless
+    assert not path.exists()
+
+
+async def test_a_socket_replaced_while_it_is_bound_is_refused(
+    agent: AgentConnect, sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Someone swaps the bound socket for another file before its mode is
+    # set: the receiver refuses to serve or chmod it, and closes the socket.
+    path = sockdir / "h.sock"
+    victim = sockdir / "victim"
+    victim.write_text("secret")
+    os.chmod(victim, 0o600)
+    made: list[socket.socket] = []
+
+    class Racing(socket.socket):
+        @override
+        def bind(self, address: Any) -> None:
+            super().bind(address)
+            made.append(self)
+            os.unlink(address)
+            os.symlink(victim, address)
+
+    monkeypatch.setattr(receiver_module.socket, "socket", Racing)
+    server = agent.webhook_receiver(path=path)
+    with pytest.raises(AgentConnectError, match="replaced while it was bound"):
+        await server.start()
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+    assert [s.fileno() for s in made] == [-1]  # closed
+
+
+async def test_a_socket_in_a_missing_directory_fails_to_start(
+    agent: AgentConnect, sockdir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = agent.webhook_receiver(path=sockdir / "gone" / "h.sock")
+    with caplog.at_level("WARNING"), pytest.raises(FileNotFoundError):
+        await server.start()
+    assert not any("receiver_socket_private" in r.getMessage() for r in caplog.records)
 
 
 async def test_a_private_socket_in_a_group_directory_is_warned_about(

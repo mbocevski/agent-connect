@@ -69,6 +69,25 @@ async def test_the_owner_hands_over_then_deletes(group: GroupFixture) -> None:
     assert status(b, gid) == status(c, gid) == "active"
 
 
+async def test_the_owner_hands_over_to_an_admin_first(group: GroupFixture) -> None:
+    # b has the lower leaf, but c is an admin: an admin takes over first.
+    (a, b, c), gid = await group(3)
+    assert a.daemon.set_policy(gid, admins=[c.me]) == "committing"
+
+    def admins(n: Node) -> list[str]:
+        g = n.daemon.store.group(gid)
+        return [] if g is None else list(g.policy.get("admins", []))
+
+    for n in (a, b, c):
+        await n.wait(lambda n=n: c.me in admins(n))
+    assert await a.daemon.sas_mismatch(gid) == "left"
+    await a.wait(lambda: bool(a.adapter.of_type("sas_mismatch")))
+    (alert,) = a.adapter.of_type("sas_mismatch")
+    assert alert.data["transfer"] == {"new_owner": c.me, "confirmed": True}
+    for n in (b, c):
+        await n.wait(lambda n=n: owner(n, gid) == c.me)
+
+
 async def test_an_unconfirmed_transfer_still_deletes(
     group: GroupFixture, malicious_relay: Proxy, advance: Advance
 ) -> None:

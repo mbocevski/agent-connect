@@ -395,6 +395,24 @@ async def test_the_early_decision_buffer_keeps_only_own_holds_for_a_while(setup:
     assert facade.early() == 0, "expired"
 
 
+async def test_the_early_decision_buffer_is_bounded(
+    setup: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A flood of the facade's own held sends, decided before anyone waits,
+    # keeps only the newest MAX_EARLY: memory stays bounded.
+    adapter, _group, _client = setup
+    facade = adapter.facade
+    assert facade is not None
+    monkeypatch.setattr(facade_module, "MAX_EARLY", 3)
+    for i in range(5):
+        facade.track(f"h{i}")
+    for i in range(5):
+        facade.decided(f"h{i}", "approved")
+    assert facade.early() == 3
+    assert await asyncio.wait_for(facade.hold("h4"), 1) == "approved"
+    assert facade.early() == 2
+
+
 # -- the push client goes straight to the push URL (SR-30) ---------------------
 
 
@@ -530,6 +548,37 @@ async def test_another_users_connection_is_closed_before_it_is_read(
     ]
     (refused,) = [e for e in events if e["event"] == "a2a_facade_peer_refused"]
     assert refused["uid"] == other
+
+
+async def test_a_connection_whose_user_cant_be_read_is_closed_too(
+    sockdir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def unreadable(_sock: object) -> PeerCred:
+        raise OSError("no peer credentials")
+
+    monkeypatch.setattr("agentconnect.isolation.peer_credentials", unreadable)
+    adapter = await socket_facade(sockdir, tmp_path)
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(sockdir / "facade.sock"))
+        answer = b"(reset)"
+        with contextlib.suppress(ConnectionError):
+            writer.write(f"GET /g/{GID}/.well-known/agent-card.json HTTP/1.1\r\n".encode())
+            writer.write(b"host: localhost\r\n\r\n")
+            await writer.drain()
+            answer = await asyncio.wait_for(reader.read(), 5)
+        assert answer in (b"", b"(reset)")  # refused, not answered
+        writer.close()
+        with contextlib.suppress(ConnectionError):
+            await writer.wait_closed()
+    finally:
+        await adapter.aclose()
+    events = [
+        json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")
+    ]
+    assert [e for e in events if e["event"] == "a2a_facade_peer_unknown"]
 
 
 async def test_the_facade_socket_replaces_a_stale_one_only(sockdir: Path, tmp_path: Path) -> None:

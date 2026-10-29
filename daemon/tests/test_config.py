@@ -111,6 +111,13 @@ callback_url = "http://127.0.0.1:8808/"
         ('[a2a]\nlocal_agent_url = "ftp://agent"', "http:// or https://"),
         ('[a2a]\nlocal_agent_url = "http://[::1/"', "not a valid URL"),
         ("[a2a]\nfacade_port = 70000", "facade_port"),
+        ("[sdk]\nhandler_timeout_secs = 0", "handler_timeout_secs"),
+        ("[sdk]\nhandler_timeout_secs = 3601", "handler_timeout_secs"),
+        ("[sse]\nretention_secs = 59", "retention_secs"),
+        (
+            '[[directory]]\nhost = "directory.example.org"\nkeys = ["abcde"]',
+            "unpadded base64url",
+        ),
         ("[a2a]\ncontext_messages = 101", "context_messages"),
         ("[a2a]\nreply_timeout = 0", "reply_timeout"),
         ("[a2a]\nreply_timeout = true", "reply_timeout"),
