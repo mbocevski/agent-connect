@@ -771,9 +771,10 @@ async fn session<S: Store>(
     slots.unauth = None;
     // At the total cap a newcomer takes the place of the oldest connection
     // of the source holding the most, unless that is its own.
-    let admitted = relay
-        .ws_auth()
-        .admit(source, usize::MAX, conn.limits.max_connections, false);
+    let admitted =
+        relay
+            .ws_auth()
+            .admit(source, usize::MAX, conn.limits.max_connections, false, None);
     let Ok(auth) = admitted else {
         relay.metrics().refused(ConnRefusal::Total);
         let e = relay.error_frame(

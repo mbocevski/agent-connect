@@ -71,6 +71,19 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   long as it liked. Behind a reverse proxy without
   `AC_DIRECTORY_TRUSTED_PROXIES`, all clients count as the proxy's one
   source, held to 8 connections; the directory warns at start.
+- At its HTTP connection cap the relay no longer pushes out a request that
+  is being served. A request is protected once its body is in, until its
+  answer is done, and a source protects two at most (all of a trusted
+  proxy's, which is many clients behind one source); the others, a body
+  still arriving included, can be pushed out as before. When every
+  connection is a protected request, the new one is closed instead. Before,
+  the oldest connection of the busiest source went, and when many sources
+  held one connection each that could be an honest client's request in
+  progress.
+- A kept-alive HTTP connection of the relay is closed after
+  `AC_RELAY_HTTP_IDLE_TIMEOUT_SECS` (75 s) with no request, not at the
+  header timeout, which now covers a request head only, counted from its
+  first byte. A reverse proxy's upstream keep-alive can stay up to 75 s.
 
 ## [0.1.0a2] - 2026-10-29
 
