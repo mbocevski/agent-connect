@@ -65,8 +65,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` (8) per source; at the total a
   new connection closes one that is not being served, of the source holding
   the most. A request is protected once its body is in and its handler is
-  working, and a source protects two at most. A trusted proxy is held to
-  the total only. Before, a client that sent part
+  working, and a source protects two at most, a trusted proxy all of
+  them. A trusted proxy is held to the total only. Before, a client that sent part
   of a head, dripped a body or opened many connections held them for as
   long as it liked. Behind a reverse proxy without
   `AC_DIRECTORY_TRUSTED_PROXIES`, all clients count as the proxy's one

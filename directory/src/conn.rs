@@ -22,7 +22,8 @@
 //!   a request goes before one that has, then the oldest. A request is
 //!   protected only once its body is in and its handler is working (while
 //!   the body is still arriving it is the client's pace, as a head is), and
-//!   only two requests per source are: a source's others can be pushed out.
+//!   only two requests per source are (all of a trusted proxy's, which is
+//!   many clients behind one source): a source's others can be pushed out.
 //!   With nothing to push out the newcomer is closed, which takes
 //!   protected requests from many distinct sources;
 //! - before its headers a connection from a trusted proxy can't be told
@@ -119,12 +120,15 @@ struct Inner {
 pub struct ConnState {
     inner: Mutex<Inner>,
     wake: Notify,
+    trusted: bool,
 }
 
 impl ConnState {
-    /// A new connection, waiting for its first request.
+    /// A new connection, waiting for its first request. `trusted` marks a
+    /// connection from a trusted reverse proxy, which carries many clients'
+    /// requests: all of its requests being served are protected, not two.
     #[must_use]
-    pub fn new() -> Arc<Self> {
+    pub fn new(trusted: bool) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 phase: Phase::Idle,
@@ -135,7 +139,14 @@ impl ConnState {
                 write_blocked: None,
             }),
             wake: Notify::new(),
+            trusted,
         })
+    }
+
+    /// True for a connection from a trusted reverse proxy.
+    #[must_use]
+    pub fn trusted(&self) -> bool {
+        self.trusted
     }
 
     /// Bytes arrived from the client.
@@ -489,8 +500,9 @@ impl Fair {
     /// The connection to close for a newcomer: the best candidate of the
     /// source with the most candidates. A source's candidates are its
     /// connections that are not protected, and its protected ones beyond
-    /// the newest [`PROTECTED_PER_SOURCE`]. The best candidate is one that
-    /// has not completed a request, then the oldest.
+    /// the newest [`PROTECTED_PER_SOURCE`], and none of a trusted proxy's
+    /// protected ones. The best candidate is one that has not completed a
+    /// request, then the oldest.
     fn victim(state: &FairState) -> Option<(IpAddr, u64)> {
         state
             .by_source
@@ -502,6 +514,11 @@ impl Fair {
                 // Newest first, so the newest protected requests are the
                 // ones kept.
                 for e in q.iter().rev() {
+                    // A trusted proxy's requests being served are all kept: it
+                    // is many clients behind one source.
+                    if e.state.protected() && e.state.trusted() {
+                        continue;
+                    }
                     if e.state.protected() && shielded < PROTECTED_PER_SOURCE {
                         shielded += 1;
                         continue;
@@ -599,12 +616,13 @@ pub async fn serve(
             },
             () = &mut shutdown => break,
         };
-        let per_source = if trusted(peer.ip()) {
+        let from_proxy = trusted(peer.ip());
+        let per_source = if from_proxy {
             usize::MAX
         } else {
             limits.max_per_source
         };
-        let state = ConnState::new();
+        let state = ConnState::new(from_proxy);
         let Ok(slot) = fair.admit(
             bucket(peer.ip()),
             per_source,
@@ -735,8 +753,19 @@ mod tests {
         per_source: usize,
         total: usize,
     ) -> Result<(Slot, Arc<ConnState>), Refused> {
-        let conn = ConnState::new();
+        let conn = ConnState::new(false);
         fair.admit(ip(source), per_source, total, &conn)
+            .map(|slot| (slot, conn))
+    }
+
+    /// [`admit`], for a connection from a trusted reverse proxy.
+    fn admit_proxied(
+        fair: &Arc<Fair>,
+        source: &str,
+        total: usize,
+    ) -> Result<(Slot, Arc<ConnState>), Refused> {
+        let conn = ConnState::new(true);
+        fair.admit(ip(source), usize::MAX, total, &conn)
             .map(|slot| (slot, conn))
     }
 
@@ -864,6 +893,28 @@ mod tests {
     }
 
     #[test]
+    fn a_trusted_proxy_keeps_every_request_being_served() {
+        let fair = Fair::new();
+        // A proxy carries many clients: five requests being served from it
+        // fill a total of 5, and none of them is the one that makes room.
+        let held: Vec<_> = (0..5)
+            .map(|_| {
+                let (slot, conn) = admit_proxied(&fair, "192.0.2.1", 5).unwrap();
+                served_now(&conn);
+                (slot, conn)
+            })
+            .collect();
+        assert_eq!(admit(&fair, "192.0.2.2", 8, 5).unwrap_err(), Refused::Full);
+        assert!(held.iter().all(|(slot, _)| !slot.was_evicted()));
+        // Its connections that are not being served are candidates.
+        drop(held);
+        let (_slow, slow_conn) = admit_proxied(&fair, "192.0.2.1", 5).unwrap();
+        slow_conn.request_started(false);
+        let (newcomer, _c) = admit(&fair, "192.0.2.2", 8, 1).unwrap();
+        assert!(newcomer.evicted);
+    }
+
+    #[test]
     fn a_newcomer_is_refused_only_when_many_sources_hold_protected_requests() {
         let fair = Fair::new();
         // Four sources with two requests being served each: nothing to push
@@ -939,7 +990,7 @@ mod tests {
             max_per_source: 1,
             shutdown_grace: Duration::from_secs(8),
         };
-        let conn = ConnState::new();
+        let conn = ConnState::new(false);
         let why = |c: &ConnState| c.deadline(&limits).map(|(_, why)| why);
         // Before its first request: the header timeout.
         assert_eq!(why(&conn), Some("header_timeout"));
@@ -1037,7 +1088,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&log);
         let events: Events = Arc::new(move |_, outcome| lock(&seen).push(outcome));
-        let state = ConnState::new();
+        let state = ConnState::new(false);
         let slot = Fair::new().admit(ip("192.0.2.1"), 8, 8, &state).unwrap();
         let kick = Arc::clone(&slot.kick);
         let (stop, stop_rx) = watch::channel(false);
@@ -1068,7 +1119,7 @@ mod tests {
     }
 
     /// One response off `client`: its head and its `content-length` body.
-    async fn response(client: &mut DuplexStream) -> String {
+    async fn response<R: AsyncRead + Unpin>(client: &mut R) -> String {
         let mut got = Vec::new();
         let mut chunk = [0_u8; 1024];
         loop {
@@ -1262,6 +1313,68 @@ mod tests {
             },
         ));
         (addr, log, stop, task)
+    }
+
+    /// `serve` on a loopback port where a loopback peer is a trusted proxy
+    /// and `/gate` answers when the gate opens.
+    async fn listening_behind_a_proxy(
+        limits: Limits,
+        gate: Arc<Notify>,
+    ) -> (SocketAddr, Arc<Mutex<Vec<&'static str>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        let events: Events = Arc::new(move |_, outcome| lock(&seen).push(outcome));
+        let router = Router::new().route(
+            "/gate",
+            get(move || {
+                let gate = Arc::clone(&gate);
+                async move {
+                    gate.notified().await;
+                    "done"
+                }
+            }),
+        );
+        tokio::spawn(serve(
+            listener,
+            router,
+            limits,
+            |ip| ip.is_loopback(),
+            events,
+            std::future::pending(),
+        ));
+        (addr, log)
+    }
+
+    #[tokio::test]
+    async fn serve_keeps_every_request_of_a_trusted_proxy_and_refuses_the_newcomer() {
+        let gate = Arc::new(Notify::new());
+        let mut l = limits();
+        l.max_connections = 3;
+        l.max_per_source = 1;
+        let (addr, log) = listening_behind_a_proxy(l, Arc::clone(&gate)).await;
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(b"GET /gate HTTP/1.1\r\nHost: x\r\n\r\n")
+                .await
+                .unwrap();
+            held.push(s);
+        }
+        // Let the three requests reach their handlers, which wait on the gate.
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+        let mut newcomer = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // The proxy's source has no per-source cap, and nothing to push out:
+        // the newcomer is the one turned away.
+        assert_eq!(newcomer.read(&mut [0_u8; 8]).await.unwrap_or(0), 0);
+        assert_eq!(lock(&log).as_slice(), ["refused"]);
+        gate.notify_waiters();
+        for s in &mut held {
+            assert!(response(s).await.ends_with("done"));
+        }
     }
 
     async fn get_fast(addr: SocketAddr) -> tokio::net::TcpStream {
