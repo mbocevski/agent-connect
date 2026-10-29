@@ -61,7 +61,10 @@ scheme, host or port is refused: it isn't loaded, nothing is sent,
 deliveries wait and are retried, and `a2a_card_endpoint_mismatch` is
 logged with both endpoints (scheme, host and port only). So is a card with
 a URL that can't be parsed (a port out of range, for example), on a port or
-on a socket; the daemon keeps running. The adapter ignores `HTTP_PROXY`,
+on a socket; the daemon keeps running. A card with no JSON-RPC interface
+(none at all, or only HTTP+JSON or gRPC, which the adapter doesn't speak)
+is refused the same way and logged as `a2a_card_unusable` with the
+configured endpoint. The adapter ignores `HTTP_PROXY`,
 `HTTPS_PROXY` and `ALL_PROXY` and never follows a redirect, so neither the
 token nor a message leaves through a proxy or to another address.
 

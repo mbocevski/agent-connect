@@ -608,14 +608,26 @@ class A2AAdapter:
         if status == "invalid":
             LOG.warning("a2a_local_card_invalid")
             return False
+        try:
+            client = ClientFactory(ClientConfig(httpx_client=self._http, streaming=True)).create(
+                card
+            )
+            plain = ClientFactory(ClientConfig(httpx_client=self._http, streaming=False)).create(
+                card
+            )
+        except ValueError:
+            # No interface the client can speak (JSON-RPC): unusable, like
+            # any other bad card. Whoever answers local_agent_url chooses
+            # the card, so it mustn't stop the runtime.
+            LOG.warning(
+                "a2a_card_unusable",
+                reason="no JSON-RPC interface",
+                configured_endpoint=_origin(self.options.local_agent_url),
+            )
+            return False
         self._card = card
         self._card_json = convert.to_json(card)
-        self._client = ClientFactory(ClientConfig(httpx_client=self._http, streaming=True)).create(
-            card
-        )
-        self._plain = ClientFactory(ClientConfig(httpx_client=self._http, streaming=False)).create(
-            card
-        )
+        self._client, self._plain = client, plain
         LOG.info("a2a_card_loaded", signature=status, skills=len(card.skills))
         return True
 

@@ -219,7 +219,8 @@ class _UnixServer(LoopbackServer):
 class AgentServer:
     """An A2A agent on ``127.0.0.1``, or on a Unix socket at ``uds``
     (its card then names ``url``). ``card_url`` makes the card name
-    another endpoint than the one it is served from."""
+    another endpoint than the one it is served from; ``bindings`` are the
+    protocol bindings its card lists, one interface each."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -232,9 +233,11 @@ class AgentServer:
         uds: Path | None = None,
         url: str = "http://localhost/",
         card_url: str | None = None,
+        bindings: tuple[str, ...] = ("JSONRPC",),
     ) -> None:
         self.executor = executor
         self.uds, self._card_url = uds, card_url
+        self._bindings = bindings
         self._uds_url = url
         self.name = name
         self._skills = skills or ["chat"]
@@ -265,10 +268,9 @@ class AgentServer:
             version="1.0.0",
             supported_interfaces=[
                 AgentInterface(
-                    url=self._card_url or self.url,
-                    protocol_binding="JSONRPC",
-                    protocol_version="1.0",
+                    url=self._card_url or self.url, protocol_binding=b, protocol_version="1.0"
                 )
+                for b in self._bindings
             ],
             capabilities=AgentCapabilities(streaming=self._streaming),
             default_input_modes=["text/plain"],

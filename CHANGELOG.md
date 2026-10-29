@@ -28,6 +28,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   a signal in that gap killed the relay without the marker (the next start
   then applied the crash replay floor), or was ignored as PID 1 in a
   container.
+- An A2A agent card with no JSON-RPC interface (none, or only HTTP+JSON or
+  gRPC) no longer stops the daemon from starting: it is refused like any
+  other unusable card, logged as `a2a_card_unusable`, and deliveries are
+  retried. A malformed `a2a.local_agent_url` (`http://[::1/`) is a config
+  error instead of a crash.
 
 ### Security
 
