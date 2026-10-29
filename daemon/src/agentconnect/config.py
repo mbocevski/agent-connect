@@ -533,7 +533,8 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "none",
         "Base URL of the local A2A agent (loopback `http://` or `https://`) that the A2A "
         "adapter hands group messages to ([adapters/a2a.md](adapters/a2a.md)). Messages "
-        "go only there, whatever the agent's card names.",
+        "go only there, whatever the agent's card names. A URL that isn't loopback, carries "
+        "credentials, has an invalid port or can't be parsed stops the daemon at start.",
     ),
     ConfigKey(
         "a2a.local_agent_socket",
@@ -866,7 +867,11 @@ def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
     table = _section(data, "a2a")
     url = _typed(table, "local_agent_url", str, "") or None
     if url is not None:
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            msg = f"a2a.local_agent_url is not a valid URL: {url!r}"
+            raise ConfigError(msg) from None
         if parts.scheme not in ("http", "https") or parts.hostname is None or parts.hostname == "":
             msg = f"a2a.local_agent_url must be http:// or https://, got {url!r}"
             raise ConfigError(msg)

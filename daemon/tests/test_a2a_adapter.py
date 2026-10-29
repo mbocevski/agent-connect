@@ -821,6 +821,32 @@ async def test_a_card_with_a_broken_url_is_refused_and_the_adapter_keeps_running
     assert "a2a_card_endpoint_mismatch" in events
 
 
+@pytest.mark.parametrize("bindings", [(), ("HTTP+JSON",), ("GRPC",)], ids=["none", "rest", "grpc"])
+async def test_a_card_without_json_rpc_is_refused_and_the_adapter_keeps_running(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], bindings: tuple[str, ...]
+) -> None:
+    # The adapter speaks JSON-RPC only: a card offering nothing it can use
+    # is refused like any other unusable card, and the runtime still starts.
+    agent = AgentServer(HelloWorldExecutor(), "elsewhere", bindings=bindings)
+    await agent.start()
+    try:
+        adapter, sent = await started(A2AOptions(local_agent_url=agent.url, data_dir=tmp_path))
+        d = delivery("m1", text("anyone?"))
+        assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.RETRY
+        assert adapter.capabilities().agent_card is None
+        await adapter.aclose()
+    finally:
+        await agent.stop()
+    assert received(agent) == []
+    assert sent.calls == []
+    (unusable, *_) = [
+        e for e in log_events(capsys.readouterr().err) if e["event"] == "a2a_card_unusable"
+    ]
+    assert unusable["reason"] == "no JSON-RPC interface"
+    assert unusable["configured_endpoint"] == adapter_module._origin(agent.url)
+    assert "elsewhere" not in json.dumps(unusable)
+
+
 async def test_environment_proxies_are_ignored(
     hello: AgentServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -109,6 +109,7 @@ callback_url = "http://127.0.0.1:8808/"
         ('[relay]\nhost = "me@relay.test"', "not a valid host"),
         ('[relay]\nhost = "relay.test:0"', "not a valid host"),
         ('[a2a]\nlocal_agent_url = "ftp://agent"', "http:// or https://"),
+        ('[a2a]\nlocal_agent_url = "http://[::1/"', "not a valid URL"),
         ("[a2a]\nfacade_port = 70000", "facade_port"),
         ("[a2a]\ncontext_messages = 101", "context_messages"),
         ("[a2a]\nreply_timeout = 0", "reply_timeout"),
