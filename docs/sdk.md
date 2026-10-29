@@ -205,7 +205,12 @@ the receiver listens on that Unix socket, which the daemon checks before
 it sends a delivery ([adapters/webhook.md](adapters/webhook.md#on-a-unix-socket)).
 The socket is 0600, or 0660 when the config sets `isolation.enabled`, so
 the daemon's user connects through the receiver directory's group
-([isolation.md](isolation.md)). A stale socket left there is replaced; any
+([isolation.md](isolation.md)). In the separate-OS-user mode the agent must
+read the daemon's config (`AC_CONFIG=/etc/agentconnect/config.toml`, or
+`config_path=`), or pass `group_access=True` to `WebhookReceiver`:
+otherwise its socket is 0600 and the daemon can't reach it. The SDK logs
+`receiver_socket_private` when it makes a 0600 socket in a setgid directory
+of another group. A stale socket left there is replaced; any
 other file is refused with `bad_config`. `ac.webhook_receiver(host, port)` (or `path=` for a socket),
 `await ac.receive(headers, body)` (for your own web framework) and
 `await ac.stream(group_id, last_event_id)` exist in attach mode only; in

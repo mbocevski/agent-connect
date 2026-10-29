@@ -171,8 +171,12 @@ The files are in [`packaging/`](../packaging/).
    The directory is setgid `agentconnect-recv` (the sysusers file creates
    that group with the daemon's user as its only member; don't add agent
    users to it), so the agent's socket gets that group and only the daemon
-   can connect. The SDK's receiver makes the socket 0660; another server
-   must do the same (for example `chmod 0660` after `uvicorn --uds`).
+   can connect. The daemon gets the group when it starts: after adding it to
+   a running setup, restart the daemon
+   (`sudo systemctl restart agentconnectd`). The SDK's receiver makes the
+   socket 0660 when it reads `isolation.enabled` from the daemon's config
+   (`AC_CONFIG=/etc/agentconnect/config.toml`); another server must do the
+   same (for example `chmod 0660` after `uvicorn --uds`).
    Keep it out of `/tmp` and home directories: the unit gives the daemon a
    private `/tmp` and no homes.
 5. Let the human run the CLI as the daemon's user. Edit
@@ -227,7 +231,10 @@ The human runs `sudo -u _agentconnect agentconnect ... --config
 /usr/local/etc/agentconnect/config.toml`.
 
 For an agent that receives deliveries, create a receiver group whose only
-member is the daemon's user, once:
+member is the daemon's user, once. Pick another free ID below 500 (`451`
+here; `dscl . -list /Groups PrimaryGroupID` lists the ones in use), then
+restart the daemon so it gets the group
+(`sudo launchctl kickstart -k system/network.yggdrasill.agentconnectd`):
 
 ```sh
 sudo dscl . -create /Groups/_agentconnect-recv PrimaryGroupID 451

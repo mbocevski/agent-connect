@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import json
 import os
+import socket
 import stat
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -72,6 +73,7 @@ class WebhookReceiver:
         self._verifier = verifier
         self._host, self._port = host, port
         self.path = path
+        self._group_access = group_access
         self._mode = 0o660 if group_access else 0o600
         self._server: asyncio.Server | None = None
 
@@ -94,13 +96,41 @@ class WebhookReceiver:
                 msg = f"{self.path} exists and is not a socket; refusing to replace it"
                 raise AgentConnectError("bad_config", msg)
             self.path.unlink()  # left behind by an earlier run
-        # Never connectable by anyone the mode leaves out, not even briefly.
-        old = os.umask(0o777 & ~self._mode)
+        self._warn_if_unreachable()
+        # Bound but not listening until its mode is set: nobody the mode
+        # leaves out can connect, not even briefly. The process umask is
+        # left alone (it is process-wide, and starting yields to the loop).
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            self._server = await asyncio.start_unix_server(self._serve, self.path, limit=MAX_HEADER)
-        finally:
-            os.umask(old)
-        self.path.chmod(self._mode)
+            sock.bind(str(self.path))
+            if not stat.S_ISSOCK(self.path.lstat().st_mode):
+                msg = f"{self.path} was replaced while it was bound; refusing to use it"
+                raise AgentConnectError("bad_config", msg)
+            self.path.chmod(self._mode)
+            self._server = await asyncio.start_unix_server(self._serve, sock=sock, limit=MAX_HEADER)
+        except BaseException:
+            sock.close()
+            raise
+
+    def _warn_if_unreachable(self) -> None:
+        """A 0600 socket in a setgid directory of another group: the
+        separate-OS-user layout, where the daemon's user connects through
+        that group and can't reach this socket. The agent should read the
+        daemon's config (``isolation.enabled``)."""
+        if self.path is None or self._group_access:
+            return
+        try:
+            parent = self.path.parent.stat()
+        except OSError:
+            return
+        if parent.st_mode & stat.S_ISGID and parent.st_gid != os.getegid():
+            _log.LOG.warning(
+                "receiver_socket_private: %s is 0600 in a directory of group %d; "
+                "the daemon's user can't connect (read the daemon's config, or pass "
+                "group_access=True)",
+                self.path,
+                parent.st_gid,
+            )
 
     async def close(self) -> None:
         if self._server is not None:

@@ -26,8 +26,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `agentconnect-recv`, whose only member is the daemon's user
   (`agentconnect.sysusers.conf`, `agentconnect.tmpfiles.conf`). Existing
   setups: create the group, add only the daemon's user to it, and
-  `chgrp agentconnect-recv` each receiver directory, then restart the agents
-  so their sockets get the group. Agent users of one daemon can then no
+  `chgrp agentconnect-recv` each receiver directory, then restart the
+  daemon (it gets the new group only when it starts) and the agents (so
+  their sockets get the group). Agent users of one daemon can then no
   longer connect to each other's receiver sockets, where the shared
   `webhook-secret` let one post signed deliveries to another.
 
