@@ -326,7 +326,8 @@ const PROTECTED_PER_SOURCE: usize = 2;
 ///
 /// A connection that has a [`ConnState`] (an HTTP one) and is serving a
 /// request, its body in and its answer not done, is shielded from that, two
-/// per source at most: a connection that has not completed a request goes
+/// per source at most (all of them for a trusted reverse proxy, which is
+/// many clients behind one source): a connection that has not completed a request goes
 /// before one that has, then the oldest. With nothing to close, the newcomer
 /// is refused. A connection without a state (a WebSocket one) is always a
 /// candidate.
@@ -357,6 +358,10 @@ impl Entry {
 
     fn served(&self) -> bool {
         self.state.as_ref().is_some_and(|s| s.served())
+    }
+
+    fn trusted(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.trusted())
     }
 }
 
@@ -484,8 +489,9 @@ impl Fair {
     /// The connection to close for a newcomer: the best candidate of the
     /// source with the most candidates. A source's candidates are its
     /// connections that are not protected, and its protected ones beyond
-    /// the newest [`PROTECTED_PER_SOURCE`]. The best candidate is one that
-    /// has not completed a request, then the oldest.
+    /// the newest [`PROTECTED_PER_SOURCE`], and none of a trusted proxy's
+    /// protected ones. The best candidate is one that has not completed a
+    /// request, then the oldest.
     fn victim(state: &FairState) -> Option<(SourceKey, u64)> {
         state
             .by_source
@@ -497,6 +503,11 @@ impl Fair {
                 // Newest first, so the newest protected requests are the
                 // ones kept.
                 for e in q.iter().rev() {
+                    // A trusted proxy's requests being served are all kept: it
+                    // is many clients behind one source.
+                    if e.protected() && e.trusted() {
+                        continue;
+                    }
                     if e.protected() && shielded < PROTECTED_PER_SOURCE {
                         shielded += 1;
                         continue;
@@ -747,7 +758,12 @@ mod tests {
     }
 
     fn http(timer: &Timer) -> Arc<ConnState> {
-        ConnState::new(timer.clone())
+        ConnState::new(timer.clone(), false)
+    }
+
+    /// A connection from a trusted reverse proxy.
+    fn proxied(timer: &Timer) -> Arc<ConnState> {
+        ConnState::new(timer.clone(), true)
     }
 
     /// A connection whose request is being served: head and body are in.
@@ -814,6 +830,37 @@ mod tests {
         assert!(newcomer.evicted);
         assert!(held[0].0.was_evicted());
         assert!(held[1..].iter().all(|(slot, _)| !slot.was_evicted()));
+    }
+
+    #[test]
+    fn a_trusted_proxy_keeps_every_request_being_served() {
+        let fair = Fair::new();
+        let timer = Timer::default();
+        // A proxy carries many clients: five requests being served from it
+        // fill a total of 5, and none of them is the one that makes room.
+        let held: Vec<_> = (0..5)
+            .map(|_| {
+                let c = proxied(&timer);
+                serving(&c);
+                (
+                    fair.admit(key(1), usize::MAX, 5, true, Some(&c)).unwrap(),
+                    c,
+                )
+            })
+            .collect();
+        let c = http(&timer);
+        assert!(matches!(
+            fair.admit(key(2), 8, 5, true, Some(&c)),
+            Err(Refused::Full)
+        ));
+        assert!(held.iter().all(|(slot, _)| !slot.was_evicted()));
+        // Its other connections, a stalled head or an upload, are candidates.
+        let slow = proxied(&timer);
+        slow.request_started(false);
+        drop(held);
+        let _slot = fair
+            .admit(key(1), usize::MAX, 5, true, Some(&slow))
+            .unwrap();
     }
 
     #[test]

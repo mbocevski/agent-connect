@@ -119,8 +119,9 @@ proxy has no per-source share there, only the total.
   connections that stall in their headers or their body, or pipeline requests
   and never read the answers, can't keep everyone else out, from one source
   or from many. A request is protected from that once its body is in, until
-  its answer is done, and a source protects two at most; when every
-  connection is a protected request, the new one is closed instead. An idle
+  its answer is done, and a source protects two at most (a trusted proxy,
+  which is many clients behind one source, has all of its protected); when
+  every connection is a protected request, the new one is closed instead. An idle
   kept-alive connection is closed after `AC_RELAY_HTTP_IDLE_TIMEOUT_SECS`
   (75 s), not at the header timeout, which covers a request head only; a
   reverse proxy's upstream keep-alive should be shorter than that, or it may

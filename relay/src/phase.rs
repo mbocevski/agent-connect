@@ -52,12 +52,15 @@ pub struct ConnState {
     inner: Mutex<Inner>,
     wake: Notify,
     timer: Timer,
+    trusted: bool,
 }
 
 impl ConnState {
-    /// A new connection, waiting for its first request.
+    /// A new connection, waiting for its first request. `trusted` marks a
+    /// connection from a trusted reverse proxy, which carries many clients'
+    /// requests: all of its requests being served are protected, not two.
     #[must_use]
-    pub fn new(timer: Timer) -> Arc<Self> {
+    pub fn new(timer: Timer, trusted: bool) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 phase: Phase::Idle,
@@ -68,7 +71,14 @@ impl ConnState {
             }),
             wake: Notify::new(),
             timer,
+            trusted,
         })
+    }
+
+    /// True for a connection from a trusted reverse proxy.
+    #[must_use]
+    pub fn trusted(&self) -> bool {
+        self.trusted
     }
 
     /// Bytes arrived from the client.
@@ -259,7 +269,7 @@ mod tests {
 
     fn state() -> (Arc<ConnState>, Arc<ManualTimer>) {
         let timer = ManualTimer::new();
-        (ConnState::new(Timer::Manual(timer.clone())), timer)
+        (ConnState::new(Timer::Manual(timer.clone()), false), timer)
     }
 
     const HEADER: Duration = Duration::from_secs(10);

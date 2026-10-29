@@ -14,12 +14,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentconnect_relay::conn::SourceKey;
+use agentconnect_relay::quota::{Cidr, ClientIp};
 use agentconnect_relay::{Server, ServerLimits, SqliteStore};
 use axum::Router;
 use axum::body::Bytes;
+use axum::http::HeaderName;
 use axum::routing::{get, post};
-use common::Harness;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+use common::{Harness, roomy_quotas};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 const GUARD: Duration = Duration::from_secs(20);
@@ -152,7 +155,7 @@ const SLOW: &[u8] = b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n";
 const SLOW_POST: &[u8] = b"POST /slow-post HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello";
 
 /// The answer on `io`, which may stay open.
-async fn drained_until_answer(io: &mut DuplexStream) -> String {
+async fn drained_until_answer<R: AsyncRead + Unpin>(io: &mut R) -> String {
     let mut got = Vec::new();
     let mut chunk = [0_u8; 1024];
     loop {
@@ -182,12 +185,13 @@ async fn drained_until_answer(io: &mut DuplexStream) -> String {
 }
 
 /// What the relay sent on `io` until it closed it.
-async fn drained(io: &mut DuplexStream) -> Vec<u8> {
+async fn drained<R: AsyncRead + Unpin>(io: &mut R) -> Vec<u8> {
     let mut out = Vec::new();
-    tokio::time::timeout(GUARD, io.read_to_end(&mut out))
+    // A reset (the relay closed a socket with a request it never read) is
+    // as closed as an end of stream.
+    let _ = tokio::time::timeout(GUARD, io.read_to_end(&mut out))
         .await
-        .expect("the connection stayed open")
-        .unwrap();
+        .expect("the connection stayed open");
     out
 }
 
@@ -370,4 +374,70 @@ async fn the_header_timeout_starts_again_with_the_next_head() {
     settle(&h, OPEN, 0).await;
     assert_eq!(metric(&h, &format!("{TIMEOUTS}{{kind=\"header\"}}")), 1);
     assert_eq!(metric(&h, &format!("{TIMEOUTS}{{kind=\"http_idle\"}}")), 0);
+}
+
+/// A relay listening on loopback with `gated` handlers; its address.
+async fn listening(h: &Harness, limits: ServerLimits) -> (std::net::SocketAddr, Arc<Gate>) {
+    let (server, gate) = gated(h, limits);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(server.serve(listener, std::future::pending()));
+    (addr, gate)
+}
+
+/// A TCP connection (from loopback) with a request being served.
+async fn tcp_serving(addr: std::net::SocketAddr, gate: &Gate) -> TcpStream {
+    let started = gate.started.load(Ordering::SeqCst);
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(SLOW).await.unwrap();
+    gate.started(started + 1).await;
+    tcp
+}
+
+/// What a TCP newcomer that asks for `/fast` gets back.
+async fn tcp_newcomer(addr: std::net::SocketAddr) -> Vec<u8> {
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    let _ = tcp
+        .write_all(b"GET /fast HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await;
+    drained(&mut tcp).await
+}
+
+#[tokio::test]
+async fn a_trusted_proxy_keeps_every_request_being_served() {
+    // The proxy is many clients behind one source: all of its requests
+    // being served stay, and the newcomer is the one turned away.
+    let mut quotas = roomy_quotas();
+    quotas.client_ip = ClientIp {
+        header: Some(HeaderName::from_static("x-forwarded-for")),
+        trusted_proxies: vec![Cidr::parse("127.0.0.1/32").unwrap()],
+        hops: 1,
+    };
+    let h = Harness::with_quotas(quotas).await;
+    let (addr, gate) = listening(&h, limits(3, 1)).await;
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(tcp_serving(addr, &gate).await);
+    }
+    assert!(tcp_newcomer(addr).await.is_empty());
+    gate.release();
+    for tcp in &mut held {
+        assert!(drained_until_answer(tcp).await.ends_with("done"));
+    }
+}
+
+#[tokio::test]
+async fn without_a_trusted_proxy_the_same_source_protects_two() {
+    // The control: the same three requests from one ordinary source.
+    let h = Harness::with_quotas(roomy_quotas()).await;
+    let (addr, gate) = listening(&h, limits(3, 8)).await;
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        held.push(tcp_serving(addr, &gate).await);
+    }
+    assert!(tcp_newcomer(addr).await.starts_with(b"HTTP/1.1 200"));
+    assert!(drained(&mut held[0]).await.is_empty());
+    gate.release();
+    assert!(drained_until_answer(&mut held[1]).await.ends_with("done"));
+    assert!(drained_until_answer(&mut held[2]).await.ends_with("done"));
 }

@@ -214,7 +214,7 @@ impl<S: Store> Server<S> {
         } else {
             self.limits.max_http_per_source
         };
-        let state = ConnState::new(relay.timer().clone());
+        let state = ConnState::new(relay.timer().clone(), trusted);
         let slot = match self.phase.admit(
             source,
             per_source,

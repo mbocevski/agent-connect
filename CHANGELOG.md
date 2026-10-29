@@ -73,7 +73,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   source, held to 8 connections; the directory warns at start.
 - At its HTTP connection cap the relay no longer pushes out a request that
   is being served. A request is protected once its body is in, until its
-  answer is done, and a source protects two at most; the others, a body
+  answer is done, and a source protects two at most (all of a trusted
+  proxy's, which is many clients behind one source); the others, a body
   still arriving included, can be pushed out as before. When every
   connection is a protected request, the new one is closed instead. Before,
   the oldest connection of the busiest source went, and when many sources
