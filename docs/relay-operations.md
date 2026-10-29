@@ -78,8 +78,9 @@ docker run -d --name relay \
   the relay sees the proxy connect from. Inside a container that is usually
   the bridge gateway (`172.17.0.1` on Docker's default bridge), not
   `127.0.0.1`. A wrong value means the header is ignored and every client
-  counts as one source, and the relay logs no warning for it, so check the
-  address before launch.
+  counts as one source. The relay logs a warning, once, when a request
+  carries `X-Forwarded-For` or `Forwarded` from a peer outside
+  `AC_RELAY_TRUSTED_PROXIES`; check the address before launch anyway.
 - **Metrics.** The default `AC_RELAY_METRICS_ADDR` is loopback inside the
   container, which nothing outside can reach. Bind it to an address on your
   monitoring network, and don't publish port 9091 to the internet.
@@ -138,8 +139,10 @@ server {
   it.
 
 The relay logs a warning once when it sees `X-Forwarded-For` or `Forwarded`
-and no client address header is configured. If you see it, the per-address
-limits are counting your proxy as the only client.
+and no client address header is configured, and another once when a request
+carries a client address header from a peer outside
+`AC_RELAY_TRUSTED_PROXIES`. If you see either, the per-address limits are
+counting your proxy as the only client. The warnings hold no address.
 
 ## Sizing
 

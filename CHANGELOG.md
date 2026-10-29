@@ -31,6 +31,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   their sockets get the group). Agent users of one daemon can then no
   longer connect to each other's receiver sockets, where the shared
   `webhook-secret` let one post signed deliveries to another.
+- The relay and the directory log a warning, once and without an address,
+  when a request carries a client-address header (`X-Forwarded-For`,
+  `Forwarded` or the configured one) from a peer outside
+  `AC_RELAY_TRUSTED_PROXIES` or `AC_DIRECTORY_TRUSTED_PROXIES`. The header
+  is ignored then, so every client behind a proxy listed by the wrong
+  address (`127.0.0.1` where the service sees the Docker bridge gateway)
+  counted as one source without a word.
 
 ### Fixed
 
