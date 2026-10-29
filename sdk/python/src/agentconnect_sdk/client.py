@@ -639,7 +639,12 @@ class AgentConnect:
         if path is None and port is None:
             path = self._settings.callback_socket
         if path is not None:
-            return WebhookReceiver(self.dispatch, self._webhook_verifier(), path=path)
+            return WebhookReceiver(
+                self.dispatch,
+                self._webhook_verifier(),
+                path=path,
+                group_access=self._settings.isolated,
+            )
         chosen = port if port is not None else self._settings.callback_port
         if chosen is None:
             msg = "no port: pass port= or set webhook.callback_url in the daemon config"

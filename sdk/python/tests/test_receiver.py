@@ -251,8 +251,9 @@ async def test_the_receiver_serves_a_unix_socket(
     server = agent.webhook_receiver(path=path)
     await server.start()
     try:
-        # The daemon's user (the group, in the separate-OS-user mode) connects.
-        assert stat.S_IMODE(path.stat().st_mode) == 0o660
+        # Only this user connects: the daemon runs as it outside the
+        # separate-OS-user mode.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert server.path == path
         body = json.dumps(make_payload(msg_id="m1")).encode()
         assert await post_unix(path, body, signed(secret, body)) == (200, {"status": "handled"})
@@ -264,6 +265,25 @@ async def test_the_receiver_serves_a_unix_socket(
     await stale.start()
     await stale.close()
     assert not path.exists()
+
+
+async def test_in_the_separate_os_user_mode_the_socket_is_open_to_its_group(
+    isolated_env: None, data_dir: Path, sockdir: Path, tmp_path: Path
+) -> None:
+    # The daemon's user connects through the group of the setgid receiver
+    # directory (docs/isolation.md); nobody else is in that group.
+    path = sockdir / "hook.sock"
+    config = tmp_path / "daemon.toml"
+    config.write_text(
+        f'[isolation]\nenabled = true\n\n[webhook]\ncallback_socket = "{path}"\n',
+        encoding="utf-8",
+    )
+    server = AgentConnect(data_dir=data_dir, config_path=config).webhook_receiver()
+    await server.start()
+    try:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o660
+    finally:
+        await server.close()
 
 
 async def test_serve_listens_on_the_configured_socket(  # noqa: PLR0913, PLR0917

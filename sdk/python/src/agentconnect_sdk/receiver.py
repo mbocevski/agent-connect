@@ -50,13 +50,15 @@ class WebhookReceiver:
     the handler raised (the daemon redelivers), 401 for a request that is not
     authentic, 400 for a malformed body.
 
-    With ``path`` it listens on a Unix socket there instead (mode 0660, so
-    the daemon's user can connect through the group of a setgid directory in
-    the separate-OS-user mode). The daemon checks the user serving it before
-    it sends a delivery (``webhook.callback_socket``).
+    With ``path`` it listens on a Unix socket there instead, mode 0600: the
+    daemon runs as this user. With ``group_access`` (the separate-OS-user
+    mode) it is 0660, so the daemon's user connects through the group of the
+    setgid receiver directory, which no other agent user is in. The daemon
+    checks the user serving it before it sends a delivery
+    (``webhook.callback_socket``).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         dispatch: Dispatch,
         verifier: WebhookVerifier,
@@ -64,11 +66,13 @@ class WebhookReceiver:
         port: int = 0,
         *,
         path: Path | None = None,
+        group_access: bool = False,
     ) -> None:
         self._dispatch = dispatch
         self._verifier = verifier
         self._host, self._port = host, port
         self.path = path
+        self._mode = 0o660 if group_access else 0o600
         self._server: asyncio.Server | None = None
 
     @property
@@ -90,12 +94,13 @@ class WebhookReceiver:
                 msg = f"{self.path} exists and is not a socket; refusing to replace it"
                 raise AgentConnectError("bad_config", msg)
             self.path.unlink()  # left behind by an earlier run
-        old = os.umask(0o007)  # never connectable by others, not even briefly
+        # Never connectable by anyone the mode leaves out, not even briefly.
+        old = os.umask(0o777 & ~self._mode)
         try:
             self._server = await asyncio.start_unix_server(self._serve, self.path, limit=MAX_HEADER)
         finally:
             os.umask(old)
-        self.path.chmod(0o660)
+        self.path.chmod(self._mode)
 
     async def close(self) -> None:
         if self._server is not None:

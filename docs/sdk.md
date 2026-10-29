@@ -201,11 +201,12 @@ at that daemon.
 
 `serve(mode="auto")` picks `webhook` when the daemon config has a
 `callback_url` or a `callback_socket`, else `sse`. With `callback_socket`
-the receiver listens on that Unix socket (mode 0660), which the daemon
-checks before it sends a delivery
-([adapters/webhook.md](adapters/webhook.md#on-a-unix-socket)); a stale
-socket left there is replaced, any other file is refused with
-`bad_config`. `ac.webhook_receiver(host, port)` (or `path=` for a socket),
+the receiver listens on that Unix socket, which the daemon checks before
+it sends a delivery ([adapters/webhook.md](adapters/webhook.md#on-a-unix-socket)).
+The socket is 0600, or 0660 when the config sets `isolation.enabled`, so
+the daemon's user connects through the receiver directory's group
+([isolation.md](isolation.md)). A stale socket left there is replaced; any
+other file is refused with `bad_config`. `ac.webhook_receiver(host, port)` (or `path=` for a socket),
 `await ac.receive(headers, body)` (for your own web framework) and
 `await ac.stream(group_id, last_event_id)` exist in attach mode only; in
 embedded mode they raise `AgentConnectError` with code `embedded`.

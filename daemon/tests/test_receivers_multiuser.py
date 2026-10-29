@@ -126,3 +126,85 @@ async def test_only_the_agent_users_receiver_gets_the_delivery(
         assert (result, received > 0) == (DeliveryResult.ACK, True)
     else:
         assert (result, received) == (DeliveryResult.RETRY, 0)
+
+
+# -- the receiver directory's group (docs/isolation.md) ------------------------
+
+DAEMON_USER = 2345  # the daemon's user
+SHARED_GID = 4567  # agentconnect: the daemon's user and every agent user
+RECV_GID = 5678  # agentconnect-recv: the daemon's user alone
+
+# Listens as the agent's SDK receiver does in the separate-OS-user mode:
+# 0660, its group from the setgid directory.
+LISTENER = r"""
+import os, socket, sys
+os.umask(0o007)
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+os.chmod(sys.argv[1], 0o660)
+s.listen(8)
+print("ready", flush=True)
+sys.stdin.read()
+"""
+
+CONNECT = r"""
+import socket, sys
+c = socket.socket(socket.AF_UNIX)
+try:
+    c.connect(sys.argv[1])
+except OSError as e:
+    print(type(e).__name__)
+else:
+    print("connected")
+"""
+
+
+def connect_as(uid: int, groups: list[int], path: Path) -> str:
+    out = subprocess.run(
+        [OTHER_PYTHON, "-I", "-c", CONNECT, str(path)],
+        user=uid,
+        group=groups[0],
+        extra_groups=groups,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("dir_gid", "other_agent"),
+    [(RECV_GID, "PermissionError"), (SHARED_GID, "connected")],
+    ids=["own-group", "shared-group"],
+)
+def test_only_the_daemons_user_reaches_an_agents_receiver(dir_gid: int, other_agent: str) -> None:
+    base = Path(tempfile.mkdtemp(prefix="ac-mu-"))
+    try:
+        base.chmod(0o755)
+        recv = base / "agent"
+        recv.mkdir()
+        os.chown(recv, AGENT_USER, dir_gid)
+        recv.chmod(0o2750)
+        path = recv / "hook.sock"
+        listener = subprocess.Popen(
+            [OTHER_PYTHON, "-I", "-c", LISTENER, str(path)],
+            user=AGENT_USER,
+            group=AGENT_USER,
+            extra_groups=[SHARED_GID],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert listener.stdout is not None
+            assert listener.stdout.readline().strip() == "ready"
+            assert path.stat().st_gid == dir_gid  # from the setgid directory
+            assert connect_as(DAEMON_USER, [SHARED_GID, RECV_GID], path) == "connected"
+            # Another agent user of the same daemon: in agentconnect, not in
+            # agentconnect-recv.
+            assert connect_as(OTHER_USER, [SHARED_GID], path) == other_agent
+        finally:
+            listener.communicate("", timeout=5)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

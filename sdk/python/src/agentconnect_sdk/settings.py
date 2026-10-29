@@ -31,6 +31,8 @@ class Settings:
     tcp_port: int
     callback_url: str | None
     callback_socket: Path | None = None
+    # isolation.enabled: the daemon runs as its own user (docs/isolation.md).
+    isolated: bool = False
 
     @property
     def callback_port(self) -> int | None:
@@ -67,6 +69,7 @@ def load_settings(
         except tomllib.TOMLDecodeError as e:
             raise AgentConnectError("bad_config", f"{config_path}: {e}") from None
     daemon, api, webhook = _table(data, "daemon"), _table(data, "api"), _table(data, "webhook")
+    isolation = _table(data, "isolation")
     if data_dir is None:
         raw = environ.get("AC_DATA_DIR", "") or str(daemon.get("data_dir", ""))
         data_dir = Path(raw).expanduser() if raw else _xdg(environ, "XDG_DATA_HOME", ".local/share")
@@ -90,6 +93,7 @@ def load_settings(
             if isinstance(callback_socket, str) and callback_socket
             else None
         ),
+        isolated=isolation.get("enabled") is True,
     )
 
 

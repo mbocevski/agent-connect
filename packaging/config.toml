@@ -17,7 +17,8 @@ agent_users = []                # the agents' users, e.g. ["agent"]
 human_users = []                # add 0 to allow `sudo agentconnect ...` as root
 
 # Receivers are Unix sockets in this mode, in the agent's receiver directory
-# (agentconnect.tmpfiles.conf). Uncomment what the agent uses.
+# (agentconnect.tmpfiles.conf: setgid agentconnect-recv, so only the daemon's
+# user can reach the socket). Uncomment what the agent uses.
 # [webhook]
 # callback_socket = "/run/agentconnect-recv/agent/hook.sock"
 #
