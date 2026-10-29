@@ -356,9 +356,15 @@ and rate limits apply to them.
 - Tasks are namespaced by group: each group has its own task store, and a
   `contextId` other than the group id (or empty) is refused.
 - `GetTask`, `CancelTask`, `SubscribeToTask` and the
-  push-notification config methods work on the facade's tasks. Push
-  notifications go to the push URL itself: the facade ignores `HTTP_PROXY`,
-  `HTTPS_PROXY` and `ALL_PROXY` and doesn't follow redirects.
+  push-notification config methods work on the facade's tasks. A push URL
+  must be `http` or `https` to a literal loopback address (`127.0.0.0/8` or
+  `::1`, for example `http://127.0.0.1:8080/hook`), with no credentials; a
+  host name, `localhost` included, is refused, so nothing is looked up.
+  Setting another URL fails with an A2A error, and the URL is checked again
+  before each notification (`a2a_facade_push_url_refused`, with the reason
+  and never the URL).
+  Push notifications go to the push URL itself: the facade ignores
+  `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` and doesn't follow redirects.
   `CancelTask` also sends an `a2a.task_cancel` to the member running the
   peer task.
 - Facade tasks are kept in memory and are lost on restart.

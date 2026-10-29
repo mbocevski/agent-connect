@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import ipaddress
 import re
 import time
 from collections import OrderedDict
@@ -36,7 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, override
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from a2a.helpers.proto_helpers import new_task
@@ -347,9 +348,45 @@ class _GroupApps:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self.tasks = InMemoryTaskStore()
         self.push = InMemoryPushNotificationConfigStore()
-        self.sender = BasePushNotificationSender(http, self.push)
+        self.sender = BasePushNotificationSender(
+            http, self.push, push_url_validator=loopback_push_url
+        )
         self.apps: dict[str | None, Any] = {}
         self.handlers: list[DefaultRequestHandler] = []
+
+
+async def loopback_push_url(url: str) -> bool:
+    """Whether the facade may send push notifications to ``url``: ``http`` or
+    ``https`` to a literal loopback address (``127.0.0.0/8`` or ``::1``), with
+    no credentials (SR-31). A host name, ``localhost`` included, is refused,
+    so nothing is looked up and DNS rebinding has nothing to work with.
+    Checked when a config is set and again when a notification is sent. A
+    refusal is logged with its reason, never the URL."""
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except ValueError:
+        reason = "unparsable"
+    else:
+        reason = _push_url_problem(parts.scheme, parts.netloc, parts.hostname)
+    if reason is None:
+        return True
+    LOG.warning("a2a_facade_push_url_refused", reason=reason)
+    return False
+
+
+def _push_url_problem(scheme: str, netloc: str, host: str | None) -> str | None:
+    if scheme not in ("http", "https"):
+        return "scheme"
+    if "@" in netloc:
+        return "credentials"
+    try:
+        address = ipaddress.ip_address(host or "")
+    except ValueError:
+        return "not an IP address"
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return "mapped address"
+    return None if address.is_loopback else "not loopback"
 
 
 class Facade:
@@ -520,6 +557,7 @@ class Facade:
             agent_card=cards.facade_card(self.url(group_id, member), "", "", []),
             push_config_store=group.push,
             push_sender=group.sender,
+            push_url_validator=loopback_push_url,
             request_context_builder=_GroupContext(group_id),
         )
         group.handlers.append(handler)
