@@ -7,6 +7,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -64,8 +65,12 @@ async def open_facade(node: Node, group_id: str, member: str | None = None) -> F
     assert adapter.facade is not None
     assert adapter.facade_token is not None
     url = adapter.facade.url(group_id, member)
+    # A facade on a Unix socket: an httpx uds transport, as a2a-sdk clients use.
+    path = adapter.facade.path
     http = httpx.AsyncClient(
-        headers={"Authorization": f"Bearer {adapter.facade_token}"}, timeout=WAIT
+        headers={"Authorization": f"Bearer {adapter.facade_token}"},
+        timeout=WAIT,
+        transport=None if path is None else httpx.AsyncHTTPTransport(uds=str(path)),
     )
     card = await A2ACardResolver(http, url).get_agent_card()
     client = ClientFactory(ClientConfig(httpx_client=http)).create(card)
@@ -108,8 +113,10 @@ async def scripted() -> AsyncIterator[AgentServer]:
     await agent.stop()
 
 
-async def pair(cluster: Cluster, agent: AgentServer) -> tuple[Node, Node, str]:
-    a = await a2a_node(cluster, "a", facade=True)
+async def pair(
+    cluster: Cluster, agent: AgentServer, facade_socket: Path | None = None
+) -> tuple[Node, Node, str]:
+    a = await a2a_node(cluster, "a", facade=True, facade_socket=facade_socket)
     b = await a2a_node(cluster, "b", agent)
     gid = a.daemon.create_group("Pair", "Ask the other agent")
     await a.idle()
@@ -118,8 +125,11 @@ async def pair(cluster: Cluster, agent: AgentServer) -> tuple[Node, Node, str]:
     return a, b, gid
 
 
-async def test_one_to_one_facade(cluster: Cluster, scripted: AgentServer) -> None:
-    a, b, gid = await pair(cluster, scripted)
+@pytest.mark.parametrize("over", ["tcp", "socket"])
+async def test_one_to_one_facade(
+    cluster: Cluster, scripted: AgentServer, sockdir: Path, over: str
+) -> None:
+    a, b, gid = await pair(cluster, scripted, sockdir / "facade.sock" if over == "socket" else None)
     f = await open_facade(a, gid)
     try:
         # 1:1: the card mirrors the peer's, with the facade's interface and auth.

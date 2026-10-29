@@ -101,6 +101,7 @@ and both user IDs. An a2a-sdk agent on Starlette serves a socket with
 | `local_agent_token_file` | none | A file holding a bearer token the adapter sends to the local agent. |
 | `card_keys_file` | none | A JWKS file with the public keys you trust to sign Agent Cards. |
 | `facade_port` | `0` | The facade's port on `127.0.0.1`. `0` turns the facade off. |
+| `facade_socket` | none | Serve the facade on this Unix socket instead of a port ([below](#facade-on-a-unix-socket)). Required in the separate-OS-user mode. |
 | `context_messages` | `20` | How many messages that didn't trigger the agent are kept for its next call (0 to 100). |
 | `frame_text` | `true` | Put the SPEC §10.1 notice in front of the message as its first text part. The group's safety policy can also turn it off for one group (`frame_text` in [safety.md](../safety.md#settings)); the notice is added only when both are on. |
 | `reply_timeout` | `600` | Seconds a facade request waits for the first reply from the group. |
@@ -256,6 +257,53 @@ file `a2a-facade-token` in the daemon's data directory (created 0600 on
 first start). The facade also refuses requests from a non-loopback address,
 with an `Origin` header (browser pages), or with a `Host` other than
 `127.0.0.1:<port>` or `localhost:<port>`. It listens on `127.0.0.1` only.
+
+On a port the facade can't tell who connects, and any local user who
+listens on `facade_port` while the daemon is down gets the token from the
+first request a client sends. That user can then send to the groups as the
+agent through the real facade. Prefer the socket below on a machine with
+other users.
+
+### Facade on a Unix socket
+
+```toml
+[a2a]
+facade_socket = "/run/agentconnect/facade.sock"
+```
+
+The facade then listens on that socket instead of a port, created 0600 (0660
+with `isolation.group` in the separate-OS-user mode). When a client connects,
+the daemon asks the kernel which user it runs as (`SO_PEERCRED` on Linux,
+`getpeereid(2)` on macOS) and closes the connection unless it is the
+daemon's own user or, in the separate-OS-user mode, one of
+`isolation.agent_users`. Nothing the client sent is read, and
+`a2a_facade_peer_refused` is logged with its UID. The token is still
+required, and so is the absence of `Origin`; the client address and `Host`
+checks don't apply on the socket. The socket's directory must belong to the
+daemon's user, with no write access for anyone else, so nobody can replace
+the socket or swap it for a link; in the separate-OS-user mode it must be
+the agent directory. A stale socket left at the path is replaced; a socket
+another server is listening on, or any other file, stops the start. The cards name
+`http://localhost/g/<group_id>/`: the socket carries every request, and the
+URL gives only the path.
+
+A Python client built on the a2a-sdk client connects through an httpx
+transport for the socket:
+
+```python
+import httpx
+from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
+
+transport = httpx.AsyncHTTPTransport(uds="/run/agentconnect/facade.sock")
+headers = {"Authorization": f"Bearer {token}"}
+async with httpx.AsyncClient(transport=transport, headers=headers) as http:
+    url = "http://localhost/g/<group_id>/"
+    card = await A2ACardResolver(http, url).get_agent_card()
+    client = ClientFactory(ClientConfig(httpx_client=http)).create(card)
+```
+
+Other clients need a way to connect to a Unix socket: Node's undici takes
+`socketPath`, and Go's `http.Transport` a custom `DialContext`.
 
 ### Cards
 

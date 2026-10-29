@@ -188,6 +188,7 @@ class Config:
     a2a_local_agent_token_file: Path | None = None
     a2a_card_keys_file: Path | None = None
     a2a_facade_port: int = 0
+    a2a_facade_socket: Path | None = None
     a2a_context_messages: int = 20
     a2a_frame_text: bool = True
     a2a_reply_timeout: int = 600
@@ -230,7 +231,11 @@ class Config:
     @property
     def a2a_enabled(self) -> bool:
         """Whether the daemon runs the A2A adapter: a local agent, a facade or both."""
-        return self.a2a_local_agent_url is not None or self.a2a_facade_port > 0
+        return (
+            self.a2a_local_agent_url is not None
+            or self.a2a_facade_port > 0
+            or self.a2a_facade_socket is not None
+        )
 
     # [policy]: the safety policy's defaults (agentconnect.policy.KNOBS).
     policy_max_message_bytes: int = KNOB["max_message_bytes"].default
@@ -555,7 +560,20 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "a2a.facade_port",
         "a2a_facade_port",
         "`0`",
-        "The A2A facade's port on `127.0.0.1` (0 to 65535); `0` turns it off.",
+        "The A2A facade's port on `127.0.0.1` (0 to 65535); `0` turns it off. Any local "
+        "user who holds the port while the daemon is down gets the clients' token: "
+        "prefer `a2a.facade_socket`.",
+    ),
+    ConfigKey(
+        "a2a.facade_socket",
+        "a2a_facade_socket",
+        "none",
+        "Serve the A2A facade on this Unix socket instead of a port: a connection is "
+        "accepted only from the daemon's user (and `isolation.agent_users` in the "
+        "separate-OS-user mode), before anything is read "
+        "([adapters/a2a.md](adapters/a2a.md#facade-on-a-unix-socket)). Its directory must "
+        "be the daemon user's, writable by nobody else. Required in the separate-OS-user "
+        "mode, in `isolation.agent_dir`.",
     ),
     ConfigKey(
         "a2a.context_messages",
@@ -877,6 +895,10 @@ def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
     if not 0 <= port <= 65535:  # noqa: PLR2004
         msg = "a2a.facade_port must be 0..65535"
         raise ConfigError(msg)
+    facade_socket = _path(table, "facade_socket")
+    if facade_socket is not None and port:
+        msg = "set a2a.facade_port or a2a.facade_socket, not both"
+        raise ConfigError(msg)
     context = _typed(table, "context_messages", int, 20)
     if not 0 <= context <= MAX_CONTEXT_MESSAGES:
         msg = f"a2a.context_messages must be 0..{MAX_CONTEXT_MESSAGES}"
@@ -891,6 +913,7 @@ def _a2a(data: Mapping[str, Any]) -> dict[str, Any]:
         "a2a_local_agent_token_file": _path(table, "local_agent_token_file"),
         "a2a_card_keys_file": _path(table, "card_keys_file"),
         "a2a_facade_port": port,
+        "a2a_facade_socket": facade_socket,
         "a2a_context_messages": context,
         "a2a_frame_text": _typed(table, "frame_text", bool, True),
         "a2a_reply_timeout": timeout,
@@ -1239,7 +1262,7 @@ def load_config(
         msg = 'adapter "webhook" needs webhook.callback_url or webhook.callback_socket'
         raise ConfigError(msg)
     if not cfg.a2a_enabled and "a2a" in cfg.adapter_names:
-        msg = 'adapter "a2a" needs a2a.local_agent_url or a2a.facade_port'
+        msg = 'adapter "a2a" needs a2a.local_agent_url, a2a.facade_port or a2a.facade_socket'
         raise ConfigError(msg)
     for warning in config_warnings(cfg):
         LOG.warning("config_warning", warning=warning)

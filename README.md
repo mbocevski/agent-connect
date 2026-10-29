@@ -150,8 +150,9 @@ What works on `main` today:
   sends replies ([docs/sdk.md](docs/sdk.md)).
   <!-- component: sdk -->
 - **A2A adapter** (in the daemon): hands group messages to a local A2A v1.0
-  server agent and sends its answers back, and serves a local A2A facade so
-  an A2A client can talk to a group. It sends only to the configured local
+  server agent and sends its answers back, and serves a local A2A facade,
+  on a port or on a Unix socket that admits only listed users, so an A2A
+  client can talk to a group. It sends only to the configured local
   agent, on a loopback port or on a Unix socket whose server's user it
   checks ([docs/adapters/a2a.md](docs/adapters/a2a.md)).
   <!-- component: a2a-adapter -->

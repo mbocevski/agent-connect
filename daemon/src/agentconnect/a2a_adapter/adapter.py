@@ -74,7 +74,7 @@ from agentconnect.adapter import (
     Sender,
 )
 from agentconnect.clock import Clock, unix_seconds
-from agentconnect.isolation import receiver_uids
+from agentconnect.isolation import facade_uids, receiver_uids, resolve_gid
 from agentconnect.sockets import PeerMismatchError, receiver_async_transport
 from agentconnect.tasks import cancel_and_wait
 
@@ -103,6 +103,11 @@ class A2AOptions:
     local_agent_token: str | None = field(default=None, repr=False)
     card_keys: Mapping[str, PyJWK] = field(default_factory=dict, repr=False)
     facade_port: int | None = None  # None: no facade; 0: any free port
+    # The facade on a Unix socket instead, open to facade_uids only; created
+    # 0660 with the group facade_gid when set (separate-OS-user mode).
+    facade_socket: Path | None = None
+    facade_uids: frozenset[int] = frozenset()
+    facade_gid: int | None = None
     context_messages: int = 20
     frame_text: bool = True
     reply_timeout: float = 600.0
@@ -121,6 +126,9 @@ class A2AOptions:
             local_agent_token=token,
             card_keys=cards.load_jwks(config.a2a_card_keys_file),
             facade_port=config.a2a_facade_port if config.a2a_facade_port > 0 else None,
+            facade_socket=config.a2a_facade_socket,
+            facade_uids=facade_uids(config),
+            facade_gid=resolve_gid(config.isolation_group) if config.isolation else None,
             context_messages=config.a2a_context_messages,
             frame_text=config.a2a_frame_text,
             reply_timeout=float(config.a2a_reply_timeout),
@@ -310,12 +318,22 @@ class A2AAdapter:
                 follow_redirects=False,
             )
             await self._load_card()
-        if self.options.facade_port is not None and self.facade is None:
+        on_socket = self.options.facade_socket is not None
+        if (self.options.facade_port is not None or on_socket) and self.facade is None:
             self.facade_token = self._facade_token()
-            facade = Facade(self, self.facade_token, self.options.facade_port)
+            facade = Facade(
+                self,
+                self.facade_token,
+                self.options.facade_port or 0,
+                path=self.options.facade_socket,
+                uids=self.options.facade_uids,
+                gid=self.options.facade_gid,
+            )
             await facade.start()
             self.facade = facade
-            LOG.info("a2a_facade_started", port=facade.port)
+            LOG.info(
+                "a2a_facade_started", transport="unix" if on_socket else "tcp", port=facade.port
+            )
 
     async def close(self) -> None:
         """Called by ``Engine.stop``."""

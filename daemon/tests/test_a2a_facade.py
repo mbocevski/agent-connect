@@ -5,10 +5,19 @@ to the adapter as deliveries that name the facade's message in
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import importlib
+import json
+import os
 import random
-from collections.abc import AsyncIterator
+import shutil
+import socket
+import stat
+import tempfile
+import types
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import httpx
 import pytest
@@ -31,8 +40,10 @@ from a2a.types import (
 
 from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, convert
 from agentconnect.a2a_adapter import facade as facade_module
+from agentconnect.a2a_adapter import serve as serve_module
 from agentconnect.a2a_adapter.serve import LoopbackServer
 from agentconnect.adapter import Delivery, Event, GroupView, Sender
+from agentconnect.isolation import PeerCred
 from agentconnect.runtime.engine import DaemonError
 
 GID = "Z3JvdXA"
@@ -438,3 +449,292 @@ async def test_the_push_client_ignores_proxies_and_redirects(
     assert len(hook.close()) == 1
     assert elsewhere.close() == []
     assert proxy.close() == []
+
+
+# -- the facade on a Unix socket, checked by its client's user (SR-10 class) --
+
+
+@pytest.fixture
+def sockdir() -> Iterator[Path]:
+    # /tmp, not $TMPDIR: socket paths are limited to about 100 bytes.
+    d = Path(tempfile.mkdtemp(prefix="ac-facade-", dir="/tmp"))
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+async def socket_facade(sockdir: Path, tmp_path: Path) -> A2AAdapter:
+    adapter = A2AAdapter(
+        A2AOptions(
+            facade_socket=sockdir / "facade.sock",
+            facade_uids=frozenset({os.geteuid()}),
+            data_dir=tmp_path,
+        )
+    )
+    await adapter.on_outbound(Group())
+    return adapter
+
+
+async def test_the_facade_on_a_socket_serves_its_own_user(sockdir: Path, tmp_path: Path) -> None:
+    adapter = await socket_facade(sockdir, tmp_path)
+    try:
+        assert adapter.facade is not None
+        path = sockdir / "facade.sock"
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        url = adapter.facade.url(GID)
+        assert url.startswith("http://localhost/")
+        transport = httpx.AsyncHTTPTransport(uds=str(path))
+        auth = {"Authorization": f"Bearer {adapter.facade_token}"}
+        async with httpx.AsyncClient(transport=transport, headers=auth) as http:
+            card = await http.get(f"{url}.well-known/agent-card.json")
+            assert card.status_code == 200, card.text
+            assert card.json()["supportedInterfaces"][0]["url"] == url
+        async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(path))) as http:
+            assert (await http.get(f"{url}.well-known/agent-card.json")).status_code == 401
+    finally:
+        await adapter.aclose()
+    assert not (sockdir / "facade.sock").exists()
+
+
+async def test_another_users_connection_is_closed_before_it_is_read(
+    sockdir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    other = os.geteuid() + 1
+    monkeypatch.setattr(
+        "agentconnect.isolation.peer_credentials", lambda _s: PeerCred(uid=other, gid=other)
+    )
+    adapter = await socket_facade(sockdir, tmp_path)
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(sockdir / "facade.sock"))
+        answer = b"(reset)"
+        with contextlib.suppress(ConnectionError):
+            writer.write(f"GET /g/{GID}/.well-known/agent-card.json HTTP/1.1\r\n".encode())
+            writer.write(b"host: localhost\r\nauthorization: Bearer x\r\n\r\n")
+            await writer.drain()
+            answer = await asyncio.wait_for(reader.read(), 5)
+        assert answer in (b"", b"(reset)")  # closed at accept: no answer, nothing read
+        writer.close()
+    finally:
+        await adapter.aclose()
+    events = [
+        json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")
+    ]
+    (refused,) = [e for e in events if e["event"] == "a2a_facade_peer_refused"]
+    assert refused["uid"] == other
+
+
+async def test_the_facade_socket_replaces_a_stale_one_only(sockdir: Path, tmp_path: Path) -> None:
+    path = sockdir / "facade.sock"
+    path.write_text("not a socket")
+    with pytest.raises(FileExistsError, match="not a socket"):
+        await socket_facade(sockdir, tmp_path)
+    path.unlink()
+    stale = socket.socket(socket.AF_UNIX)
+    stale.bind(str(path))
+    stale.close()  # left behind by an earlier run
+    adapter = await socket_facade(sockdir, tmp_path)
+    await adapter.aclose()
+
+
+# -- the socket server itself (serve.UnixServer) ------------------------------
+
+
+async def _reached_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    if scope["type"] == "http":
+        REACHED.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+
+REACHED: list[str] = []
+
+
+def _ask(path: Path) -> bytes:
+    with socket.socket(socket.AF_UNIX) as c:
+        c.settimeout(5)
+        c.connect(str(path))
+        try:
+            c.sendall(b"GET /secret HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            return c.recv(4096)
+        except OSError:
+            return b""
+
+
+def _loops() -> list[Any]:
+    loops: list[Any] = [pytest.param(asyncio.new_event_loop, id="asyncio")]
+    try:
+        uvloop = importlib.import_module("uvloop")  # optional: not a dependency
+    except ImportError:
+        loops.append(pytest.param(None, id="uvloop", marks=pytest.mark.skip("no uvloop")))
+    else:
+        loops.append(pytest.param(uvloop.new_event_loop, id="uvloop"))
+    return loops
+
+
+@pytest.mark.parametrize("loop_factory", _loops())
+def test_the_peer_check_holds_on_every_event_loop(sockdir: Path, loop_factory: Any) -> None:
+    # The check is in the protocol, not in the listening socket's accept(),
+    # which uvloop doesn't call from Python.
+    seen: list[object] = []
+
+    def refuse(sock: object) -> bool:
+        seen.append(sock)
+        return False
+
+    async def run() -> bytes:
+        server = serve_module.UnixServer(_reached_app, sockdir / "f.sock", refuse)
+        await server.start()
+        try:
+            return await asyncio.to_thread(_ask, sockdir / "f.sock")
+        finally:
+            await server.stop()
+
+    REACHED.clear()
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        answer = runner.run(run())
+    assert answer == b""
+    assert REACHED == []
+    assert len(seen) == 1
+
+
+async def test_the_socket_directory_must_be_private(
+    sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A directory others can write to: its lstat reports group write (no
+    # chmod, so the test never makes anything writable for real).
+    real_lstat = Path.lstat
+
+    def lstat(self: Path) -> os.stat_result:
+        st = real_lstat(self)
+        if self != sockdir:
+            return st
+        fields = list(st)
+        fields[0] = stat.S_IFDIR | 0o770
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    server = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True)
+    with pytest.raises(PermissionError, match="only it can write"):
+        await server.start()
+
+
+async def test_a_symlinked_socket_directory_is_refused(sockdir: Path) -> None:
+    real = sockdir / "real"
+    real.mkdir(mode=0o700)
+    (sockdir / "link").symlink_to(real)
+    server = serve_module.UnixServer(_reached_app, sockdir / "link" / "f.sock", lambda _s: True)
+    with pytest.raises(PermissionError, match="only it can write"):
+        await server.start()
+
+
+async def test_a_running_server_at_the_path_is_not_replaced(sockdir: Path) -> None:
+    first = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True)
+    await first.start()
+    try:
+        second = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True)
+        with pytest.raises(FileExistsError, match="in use"):
+            await second.start()
+        assert (await asyncio.to_thread(_ask, sockdir / "f.sock")).startswith(b"HTTP/1.1 200")
+    finally:
+        await first.stop()
+
+
+@pytest.mark.parametrize(("gid", "mode"), [(None, 0o600), (os.getgid(), 0o660)])
+async def test_the_mode_is_set_at_bind_and_no_link_is_followed(
+    sockdir: Path, monkeypatch: pytest.MonkeyPatch, gid: int | None, mode: int
+) -> None:
+    path = sockdir / "f.sock"
+    server = serve_module.UnixServer(_reached_app, path, lambda _s: True, gid)
+    await server.start()
+    assert stat.S_IMODE(path.lstat().st_mode) == mode
+    await server.stop()
+    # Someone who could write to the directory swaps the socket for a link
+    # right after bind(): nothing done through the path afterwards reaches
+    # the link's target.
+    victim = sockdir / "victim"
+    victim.write_text("secret")
+    victim.chmod(0o600)
+
+    class Racing(socket.socket):
+        @override
+        def bind(self, address: Any) -> None:
+            super().bind(address)
+            if self.family == socket.AF_UNIX:
+                os.unlink(address)
+                os.symlink(victim, address)
+
+    fake = types.SimpleNamespace(
+        socket=Racing, AF_UNIX=socket.AF_UNIX, SOCK_STREAM=socket.SOCK_STREAM
+    )
+    monkeypatch.setattr(serve_module, "socket", fake)
+    racing = serve_module.UnixServer(_reached_app, path, lambda _s: True, gid)
+    with pytest.raises(FileExistsError, match="replaced"):
+        await racing.start()
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+    assert victim.read_text() == "secret"
+
+
+async def test_a_listener_with_a_full_backlog_counts_as_in_use(sockdir: Path) -> None:
+    # The probe for a live server mustn't block the event loop: a listener
+    # that accepts nothing, its queue full, is in use, not stale.
+    path = sockdir / "f.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(path))
+    listener.listen(0)
+    queued: list[socket.socket] = []
+    try:
+        while True:  # fill the queue until a connect would block
+            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            c.setblocking(False)
+            try:
+                c.connect(str(path))
+            except BlockingIOError:
+                c.close()
+                break
+            except ConnectionRefusedError:
+                # macOS refuses a full queue with ECONNREFUSED, the same
+                # answer as a stale socket: there the two can't be told
+                # apart by connecting (serve._in_use).
+                c.close()
+                pytest.skip("a full accept queue reads as refused on this platform")
+            queued.append(c)
+        server = serve_module.UnixServer(_reached_app, path, lambda _s: True)
+        with pytest.raises(FileExistsError, match="in use"):
+            await server.start()
+    finally:
+        for c in queued:
+            c.close()
+        listener.close()
+
+
+async def test_binding_the_socket_leaves_the_process_umask_alone(
+    sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The umask is process-wide: a file another thread creates while the
+    # socket is bound must get the process's usual mode.
+    seen: list[int] = []
+    usual = os.umask(0o022)
+    os.umask(usual)
+
+    class Watching(socket.socket):
+        @override
+        def bind(self, address: Any) -> None:
+            super().bind(address)
+            if self.family == socket.AF_UNIX:
+                other = sockdir / "other-thread-file"
+                other.write_text("x")
+                seen.append(stat.S_IMODE(other.stat().st_mode))
+
+    fake = types.SimpleNamespace(
+        socket=Watching, AF_UNIX=socket.AF_UNIX, SOCK_STREAM=socket.SOCK_STREAM
+    )
+    monkeypatch.setattr(serve_module, "socket", fake)
+    server = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True, os.getgid())
+    await server.start()
+    try:
+        assert stat.S_IMODE((sockdir / "f.sock").lstat().st_mode) == 0o660
+    finally:
+        await server.stop()
+    assert seen == [0o666 & ~usual]
