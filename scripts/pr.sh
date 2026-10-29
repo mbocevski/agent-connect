@@ -15,4 +15,6 @@ if [[ -n "$open_url" ]]; then
     echo "$open_url"
     exit 0
 fi
-gh pr create --fill --base main --head "$branch"
+# The title and body come from the first commit, so a branch with several
+# commits still gets a Conventional title (--fill would use the branch name).
+gh pr create --fill-first --base main --head "$branch"

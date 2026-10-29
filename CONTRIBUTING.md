@@ -24,8 +24,9 @@ Python workspace (`uv sync --all-packages`), and all git hooks via prek.
    `relay`, `directory`, `daemon`, `a2a`, `mcp`, `sdk`, `web`, `policy`,
    `group`, `ci`, `docs`, `deps`.
 3. Add user-facing changes to `CHANGELOG.md` under `[Unreleased]`.
-4. `just pr` pushes the branch and opens a PR. Use a Conventional Commit PR
-   title; it becomes the squash commit.
+4. `just pr` pushes the branch and opens a PR, titled with the first
+   commit's subject. Use a Conventional Commit PR title; it becomes the
+   squash commit.
 5. If `main` moved on, run `just update-branch <pr-number>` from the branch's
    checkout. It rebases onto `origin/main`, re-signs every commit, checks the
    signatures and pushes with `--force-with-lease`. It stops on conflicts and
