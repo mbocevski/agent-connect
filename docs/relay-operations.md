@@ -264,7 +264,8 @@ invite landing page. If you also run a directory, its settings are in
 [directory/README.md](../directory/README.md), including its timeouts and
 connection limits (`AC_DIRECTORY_HEADER_TIMEOUT_SECS`,
 `AC_DIRECTORY_IDLE_TIMEOUT_SECS`, `AC_DIRECTORY_REQUEST_TIMEOUT_SECS`,
-`AC_DIRECTORY_MAX_CONNECTIONS` and `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`),
+`AC_DIRECTORY_WRITE_TIMEOUT_SECS`, `AC_DIRECTORY_MAX_CONNECTIONS` and
+`AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`),
 which default to the relay's. Two points for a directory behind a reverse
 proxy: set `AC_DIRECTORY_CLIENT_IP_HEADER` and
 `AC_DIRECTORY_TRUSTED_PROXIES`, or the proxy is one source held to 8

@@ -53,6 +53,24 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - A push notification the facade can't send is logged with its task id
   only: a2a-sdk's own log line, which held the push URL with any secret in
   its query and a traceback, is silenced.
+- The directory limits slow and many connections, with the relay's
+  defaults. A request head has to arrive within
+  `AC_DIRECTORY_HEADER_TIMEOUT_SECS` (10 s) of its first byte, an idle
+  connection is closed after `AC_DIRECTORY_IDLE_TIMEOUT_SECS` (75 s, above
+  a proxy's keep-alive), and a request not answered within
+  `AC_DIRECTORY_REQUEST_TIMEOUT_SECS` (30 s, body read included) gets 408.
+  A response the client doesn't read is cut off after
+  `AC_DIRECTORY_WRITE_TIMEOUT_SECS` (30 s). Open connections are capped at
+  `AC_DIRECTORY_MAX_CONNECTIONS` (512) in all and
+  `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` (8) per source; at the total a
+  new connection closes one that is not being served, of the source holding
+  the most. A request is protected once its body is in and its handler is
+  working, and a source protects two at most. A trusted proxy is held to
+  the total only. Before, a client that sent part
+  of a head, dripped a body or opened many connections held them for as
+  long as it liked. Behind a reverse proxy without
+  `AC_DIRECTORY_TRUSTED_PROXIES`, all clients count as the proxy's one
+  source, held to 8 connections; the directory warns at start.
 
 ## [0.1.0a2] - 2026-10-29
 

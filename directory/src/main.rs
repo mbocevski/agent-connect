@@ -144,6 +144,7 @@ async fn serve<S: Store>(
         header_timeout: config.connections.header_timeout,
         idle_timeout: config.connections.idle_timeout,
         request_timeout: config.connections.request_timeout,
+        write_timeout: config.connections.write_timeout,
         max_connections: config.connections.max_connections,
         max_per_source: config.connections.max_per_source,
         shutdown_grace: config.shutdown_grace,

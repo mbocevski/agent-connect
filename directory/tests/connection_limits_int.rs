@@ -223,42 +223,37 @@ fn a_body_dripped_past_the_request_timeout_is_answered_408() {
     );
 }
 
-/// An honest request in progress is never the one a newcomer pushes out:
-/// 16 sources with one connection each fill a directory of 16.
+/// Slow uploads are client-paced, so they don't shield their connections
+/// from eviction: two sources holding eight each can't lock everybody else
+/// out of a directory of 16.
 #[test]
 #[ignore = "integration tier (just test-int): real process and time"]
-fn an_in_flight_request_survives_many_one_connection_sources() {
+fn slow_uploads_from_a_few_sources_do_not_lock_everyone_out() {
     let dir = start(&[
         ("AC_DIRECTORY_MAX_CONNECTIONS", "16"),
         ("AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE", "8"),
         ("AC_DIRECTORY_HEADER_TIMEOUT_SECS", "30"),
         ("AC_DIRECTORY_REQUEST_TIMEOUT_SECS", "30"),
     ]);
-    // The honest client: a whole head and part of the body, so the request
-    // is in flight.
-    let mut honest = connect(&dir, A);
-    honest
-        .write_all(
-            b"POST /v0/listings HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\ncontent-length: 400\r\n\r\n{\"card\":",
-        )
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    // Sixteen more sources, one silent connection each (127.0.1.1 to .16).
-    let attackers: Vec<TcpStream> = (1..=16_u8)
-        .map(|i| {
-            let s = connect(&dir, Ipv4Addr::new(127, 0, 1, i));
-            std::thread::sleep(Duration::from_millis(20));
-            s
-        })
-        .collect();
-    assert!(!closed_within(&mut honest, Duration::from_secs(2)));
-    // The newcomers made room by closing the attackers' own connections.
-    let mut attackers = attackers;
-    let closed = attackers
-        .iter_mut()
-        .filter_map(|s| closed_within(s, Duration::from_millis(100)).then_some(()))
-        .count();
-    assert!(closed >= 1, "nothing was pushed out");
+    let mut held = Vec::new();
+    for source in 1..=2_u8 {
+        for _ in 0..8 {
+            let mut s = connect(&dir, Ipv4Addr::new(127, 0, 1, source));
+            s.write_all(
+                b"POST /v0/listings HTTP/1.1\r\nHost: x\r\ncontent-type: application/json\r\ncontent-length: 400\r\n\r\n{",
+            )
+            .unwrap();
+            held.push(s);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    // Honest newcomers from five other sources are all answered.
+    for i in 1..=5_u8 {
+        assert!(
+            answers(&dir, Ipv4Addr::new(127, 0, 2, i)),
+            "newcomer {i} was not answered"
+        );
+    }
 }
 
 #[test]

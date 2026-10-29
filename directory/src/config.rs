@@ -28,7 +28,10 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 /// from its head to its response, the body read included. The relay's
 /// default.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The longest header, idle or request timeout accepted, in seconds.
+/// Default `AC_DIRECTORY_WRITE_TIMEOUT_SECS`: how long a response may sit
+/// unread. The relay's default.
+pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest header, idle, request or write timeout accepted, in seconds.
 pub const MAX_TIMEOUT_SECS: u64 = 3600;
 /// Default `AC_DIRECTORY_MAX_CONNECTIONS`. The relay's default.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
@@ -223,6 +226,10 @@ pub struct ConnectionConfig {
     /// from its head to its response, the body read included; a slower
     /// one is answered 408.
     pub request_timeout: Duration,
+    /// `AC_DIRECTORY_WRITE_TIMEOUT_SECS`: how long a response may sit
+    /// unread: a write that makes no progress for this long closes the
+    /// connection.
+    pub write_timeout: Duration,
     /// `AC_DIRECTORY_MAX_CONNECTIONS`: connections open at once. At the
     /// limit a new connection closes the oldest one of the source holding
     /// the most.
@@ -250,6 +257,11 @@ impl ConnectionConfig {
                 "AC_DIRECTORY_REQUEST_TIMEOUT_SECS",
                 get("AC_DIRECTORY_REQUEST_TIMEOUT_SECS"),
                 DEFAULT_REQUEST_TIMEOUT,
+            )?,
+            write_timeout: timeout_secs(
+                "AC_DIRECTORY_WRITE_TIMEOUT_SECS",
+                get("AC_DIRECTORY_WRITE_TIMEOUT_SECS"),
+                DEFAULT_WRITE_TIMEOUT,
             )?,
             max_connections: connection_limit(
                 "AC_DIRECTORY_MAX_CONNECTIONS",
@@ -614,11 +626,13 @@ mod tests {
         assert_eq!(d.header_timeout, Duration::from_secs(10));
         assert_eq!(d.idle_timeout, Duration::from_secs(75));
         assert_eq!(d.request_timeout, Duration::from_secs(30));
+        assert_eq!(d.write_timeout, Duration::from_secs(30));
         assert_eq!((d.max_connections, d.max_per_source), (512, 8));
         let c = with(&[
             ("AC_DIRECTORY_HEADER_TIMEOUT_SECS", "3"),
             ("AC_DIRECTORY_IDLE_TIMEOUT_SECS", "90"),
             ("AC_DIRECTORY_REQUEST_TIMEOUT_SECS", "12"),
+            ("AC_DIRECTORY_WRITE_TIMEOUT_SECS", "20"),
             ("AC_DIRECTORY_MAX_CONNECTIONS", "64"),
             ("AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE", "2"),
         ])
@@ -627,6 +641,7 @@ mod tests {
         assert_eq!(c.header_timeout, Duration::from_secs(3));
         assert_eq!(c.idle_timeout, Duration::from_secs(90));
         assert_eq!(c.request_timeout, Duration::from_secs(12));
+        assert_eq!(c.write_timeout, Duration::from_secs(20));
         assert_eq!((c.max_connections, c.max_per_source), (64, 2));
     }
 
@@ -636,6 +651,7 @@ mod tests {
             "AC_DIRECTORY_HEADER_TIMEOUT_SECS",
             "AC_DIRECTORY_IDLE_TIMEOUT_SECS",
             "AC_DIRECTORY_REQUEST_TIMEOUT_SECS",
+            "AC_DIRECTORY_WRITE_TIMEOUT_SECS",
             "AC_DIRECTORY_MAX_CONNECTIONS",
             "AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE",
         ] {
