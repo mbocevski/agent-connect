@@ -693,6 +693,12 @@ async def test_a_listener_with_a_full_backlog_counts_as_in_use(sockdir: Path) ->
             except BlockingIOError:
                 c.close()
                 break
+            except ConnectionRefusedError:
+                # macOS refuses a full queue with ECONNREFUSED, the same
+                # answer as a stale socket: there the two can't be told
+                # apart by connecting (serve._in_use).
+                c.close()
+                pytest.skip("a full accept queue reads as refused on this platform")
             queued.append(c)
         server = serve_module.UnixServer(_reached_app, path, lambda _s: True)
         with pytest.raises(FileExistsError, match="in use"):

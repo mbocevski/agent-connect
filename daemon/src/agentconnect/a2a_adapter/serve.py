@@ -128,7 +128,8 @@ def _private_parent(path: Path) -> None:
 def _in_use(path: Path) -> bool:
     """Whether a server is listening on the socket at ``path``. The probe
     never blocks: a listener whose queue is full is in use, and only a
-    refused connection (or no socket) is stale."""
+    refused connection (or no socket) is stale. macOS answers a full queue
+    with a refusal too, so there such a listener reads as stale."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
         probe.setblocking(False)
         code = probe.connect_ex(str(path))
