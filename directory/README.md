@@ -55,7 +55,14 @@ list.
 ```sh
 AC_DIRECTORY_HOST=directory.example.org AC_DIRECTORY_RELAYS=relay.example.org AC_DIRECTORY_TOKEN_KEYS=<DK.pub> just directory   # in-memory store, 127.0.0.1:8090
 docker build -f directory/Dockerfile -t agentconnect-directory .   # from the repo root
+agentconnect-directory healthcheck   # GET /healthz on AC_DIRECTORY_ADDR: exit 0, or 1 and why
 ```
+
+`healthcheck` is for container health checks, since the image has no shell
+or `curl` (in compose: `test: ["CMD", "/usr/local/bin/agentconnect-directory",
+"healthcheck"]`). It reads the same `AC_DIRECTORY_*` variables as the
+directory, and probes an unspecified address such as `0.0.0.0` on loopback.
+Any other argument is refused (exit 2).
 
 Releases publish the image for `linux/amd64` and `linux/arm64` as
 `ghcr.io/mbocevski/agentconnect-directory:<version>`, signed and with build

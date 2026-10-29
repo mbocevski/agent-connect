@@ -15,7 +15,13 @@ layers in front.
 ```sh
 just relay                      # cargo run -p agentconnect-relay
 docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
+agentconnect-relay healthcheck  # GET /healthz on AC_RELAY_METRICS_ADDR: exit 0, or 1 and why
 ```
+
+`healthcheck` is for container health checks: the image has no shell or
+`curl`. It reads the same `AC_RELAY_*` variables as the relay, and probes
+an unspecified address such as `0.0.0.0` on loopback. Any other argument is
+refused (exit 2).
 
 ## Configuration
 

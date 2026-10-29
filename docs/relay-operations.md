@@ -89,6 +89,33 @@ docker run -d --name relay \
   `AC_RELAY_SHUTDOWN_GRACE_SECS` (10 s) before a hard kill; Docker's default
   stop timeout is 10 s, so use `docker stop -t 20` or `stop_grace_period:
   20s` in compose.
+- **Health checks.** The image has no shell or `curl`, so the binary checks
+  itself: `agentconnect-relay healthcheck` asks the operator listener
+  (`AC_RELAY_METRICS_ADDR`) for `/healthz` and exits 0 when the relay
+  answers, 1 with the reason otherwise. It runs inside the container with
+  the relay's environment, so it finds the listener the relay was given; an
+  unspecified address such as `0.0.0.0` is probed on loopback.
+
+In compose:
+
+```yaml
+services:
+  relay:
+    image: ghcr.io/mbocevski/agentconnect-relay:<version>
+    volumes: ["relay-data:/data"]
+    environment:
+      AC_RELAY_HOST: relay.example.org
+      AC_RELAY_METRICS_ADDR: 0.0.0.0:9091
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/agentconnect-relay", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+```
+
+The directory has the same subcommand, `agentconnect-directory healthcheck`,
+which probes its own listener (`AC_DIRECTORY_ADDR`).
 
 To run the binary without a container, build it with
 `cargo build --release -p agentconnect-relay` and run it under a service
@@ -188,7 +215,7 @@ Alert on these:
 | Connections refused or evicted | rate of `connections_refused_total`, `connections_evicted_total` | Clients are hitting the connection caps. A spike from few sources is abuse; a steady rate may mean the caps are too low for your users. |
 | Connections shed for memory | rate of `connections_shed_total` | The read budget is being exceeded. |
 | Errors | rate of `errors_total` by `code` | `rate_limited`, `quota_exceeded`, `over_budget` and `storage_full` show which limit clients are meeting. |
-| Health | `/healthz` | The process is up and serving. |
+| Health | `/healthz`, or `agentconnect-relay healthcheck` in the container | The process is up and serving. |
 
 The storage gauges refresh with the purge, once a minute.
 

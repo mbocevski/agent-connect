@@ -38,6 +38,9 @@ internal = [
     # core: the operator links the relay and the directory show (their
     # READMEs document the settings).
     "core/src/operator.rs",
+    # core: the healthcheck probe the relay and the directory run (their
+    # READMEs and docs/relay-operations.md document the subcommand).
+    "core/src/healthcheck.rs",
     # core-py: bindings; the checks they call are in core.
     "core-py/src/**",
     # relay: process entry point, storage and the deadline clock.

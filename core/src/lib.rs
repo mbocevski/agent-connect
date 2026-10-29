@@ -26,6 +26,7 @@
 //!   verification (§13)
 //! - [`net`]: which addresses an outbound fetch may connect to (§13.2.4)
 //! - [`operator`]: the terms and abuse links the relay and the directory show
+//! - [`healthcheck`]: the relay's and the directory's `healthcheck` subcommand
 #![warn(clippy::pedantic, missing_docs)]
 
 pub mod clock;
@@ -36,6 +37,7 @@ pub mod export;
 #[doc(hidden)]
 pub mod failpoint;
 pub mod group;
+pub mod healthcheck;
 pub mod identity;
 pub mod invite;
 pub mod join;
