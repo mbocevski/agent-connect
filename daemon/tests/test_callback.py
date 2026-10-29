@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 import pytest
 
 from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sender
-from agentconnect.callback import CallbackAdapter
+from agentconnect.callback import GRACE_SECS, CallbackAdapter
 from agentconnect.clock import FakeClock
 from agentconnect.store import Store
 
@@ -167,6 +168,44 @@ async def test_events_are_queued_durably_and_retried_in_order(
     await a.close()  # idempotent
 
 
+async def test_an_event_worker_that_dies_is_logged_and_replaced(
+    fake_clock: FakeClock,
+    rng: random.Random,
+    store: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # Reading the queue fails once (the database, say): the group's worker
+    # ends, is logged, and the next one hands the event over.
+    rec = Recorder()
+    a = adapter(rec, fake_clock, rng)
+    a.bind_store(store)
+    real, failures = store.adapter_events, [OSError("disk I/O error")]
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        if failures:
+            raise failures.pop()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "adapter_events", flaky)
+    await a.on_outbound(lambda *_a, **_k: asyncio.sleep(0, "x"))
+    await a.on_event(GROUP, Event("member_joined", "g1", {"n": 1}, "e1"))
+    a.open()
+    await until(lambda: len(rec.events) == 1)
+    assert not failures
+    await a.close()
+    logs = capfd.readouterr().err
+    assert "event_worker_died" in logs
+    assert "OSError" in logs
+
+
+def test_outside_an_event_loop_nothing_is_a_handler(
+    fake_clock: FakeClock, rng: random.Random
+) -> None:
+    # The embedded host may ask from a thread with no running loop.
+    assert not adapter(Recorder(), fake_clock, rng).in_handler()
+
+
 def test_the_event_queue_is_bounded(store: Store) -> None:
     for n in range(5):
         assert store.adapter_event_add("sdk", f"e{n}", {"n": n}, keep=3)
@@ -208,6 +247,60 @@ async def test_a_handler_past_the_timeout_is_cancelled_and_retried(
     fake_clock.advance(2)
     assert await pending is DeliveryResult.RETRY
     assert cancelled == ["message"]
+
+
+async def test_a_handler_that_ignores_cancellation_is_left_running_once_per_group(
+    fake_clock: FakeClock, rng: random.Random, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # The first stubborn handler is abandoned (and the host told, so the
+    # redelivery isn't refused as in progress); a second one in the same
+    # group isn't abandoned too: the delivery waits for it.
+    release = asyncio.Event()
+    started: list[str] = []
+    abandoned: list[str] = []
+
+    async def stubborn(payload: dict[str, Any]) -> None:
+        started.append(payload["msg_id"])
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    a = CallbackAdapter(
+        stubborn,
+        stubborn,
+        fake_clock,
+        timeout=30,
+        rng=rng,
+        on_abandon=lambda p: abandoned.append(p["msg_id"]),
+    )
+    a.open()
+
+    async def past_timeout_and_grace(pending: asyncio.Future[DeliveryResult]) -> None:
+        for step in (31, GRACE_SECS + 1):
+            for _ in range(10):  # the timer starts in its own task
+                await asyncio.sleep(0)
+            fake_clock.advance(step)
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    first = asyncio.ensure_future(a.deliver(GROUP, SENDER, ["*"], delivery("m1")))
+    await until(lambda: started == ["m1"])
+    await past_timeout_and_grace(first)
+    assert await first is DeliveryResult.RETRY
+    assert abandoned == ["m1"]
+    assert a.busy()  # still running, abandoned
+
+    second = asyncio.ensure_future(a.deliver(GROUP, SENDER, ["*"], delivery("m2")))
+    await until(lambda: started == ["m1", "m2"])
+    await past_timeout_and_grace(second)
+    assert not second.done()  # waits for its own handler: one abandoned per group
+    release.set()
+    assert await second is DeliveryResult.RETRY
+    assert abandoned == ["m1"]
+    await until(lambda: not a.busy())
+    logs = capfd.readouterr().err
+    assert "handler_ignored_cancel" in logs
+    assert "handler_ignores_cancel" in logs
 
 
 async def test_handler_tasks_are_known_while_they_run(

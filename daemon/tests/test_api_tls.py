@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 import pytest
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
@@ -38,7 +39,10 @@ from agentconnect.api_tls import (
     KEY_FILE,
     LIFETIME,
     RENEW_BEFORE,
+    PinError,
+    check_peer,
     ensure_certificate,
+    read_pin,
     server_context,
 )
 from agentconnect.apiclient import ApiClient, ApiClientError
@@ -124,7 +128,14 @@ def _other_key_pem() -> bytes:
 
 @pytest.mark.parametrize(
     "damage",
-    ["garbage certificate", "another key", "wrong fingerprint", "no key", "no fingerprint"],
+    [
+        "garbage certificate",
+        "another key",
+        "wrong fingerprint",
+        "no key",
+        "no fingerprint",
+        "forged signature",
+    ],
 )
 def test_a_damaged_or_mismatched_certificate_is_replaced(data_dir: Path, damage: str) -> None:
     first = ensure_certificate(data_dir, NOW)
@@ -136,6 +147,23 @@ def test_a_damaged_or_mismatched_certificate_is_replaced(data_dir: Path, damage:
         (data_dir / FINGERPRINT_FILE).write_text("00" * 32, encoding="ascii")
     elif damage == "no key":
         (data_dir / KEY_FILE).unlink()
+    elif damage == "forged signature":
+        # The daemon's own public key and pin, but signed by another key:
+        # the certificate isn't the self-signed one the daemon made.
+        cert = x509.load_pem_x509_certificate((data_dir / CERT_FILE).read_bytes())
+        forged = (
+            x509.CertificateBuilder()
+            .subject_name(cert.subject)
+            .issuer_name(cert.issuer)
+            .public_key(cert.public_key())
+            .serial_number(cert.serial_number)
+            .not_valid_before(cert.not_valid_before_utc)
+            .not_valid_after(cert.not_valid_after_utc)
+            .sign(ec.generate_private_key(ec.SECP256R1()), hashes.SHA256())
+        )
+        (data_dir / CERT_FILE).write_bytes(forged.public_bytes(Encoding.PEM))
+        pin = hashlib.sha256(forged.public_bytes(Encoding.DER)).hexdigest()
+        (data_dir / FINGERPRINT_FILE).write_text(pin, encoding="ascii")
     else:
         (data_dir / FINGERPRINT_FILE).unlink()
     again = ensure_certificate(data_dir, NOW)
@@ -219,8 +247,10 @@ def get(transport: httpx.BaseTransport, port: int, secret: str, scheme: str = "h
         return c.get("/v0/status", headers={"authorization": f"Bearer {secret}"}).status_code
 
 
-async def aget(transport: httpx.AsyncBaseTransport, port: int, secret: str) -> int:
-    async with httpx.AsyncClient(transport=transport, base_url=f"https://127.0.0.1:{port}") as c:
+async def aget(
+    transport: httpx.AsyncBaseTransport, port: int, secret: str, scheme: str = "https"
+) -> int:
+    async with httpx.AsyncClient(transport=transport, base_url=f"{scheme}://127.0.0.1:{port}") as c:
         resp = await c.get("/v0/status", headers={"authorization": f"Bearer {secret}"})
         return resp.status_code
 
@@ -252,6 +282,29 @@ async def test_the_pinned_certificate_is_accepted_async(pinned: Path, rng: rando
     server, secret = Server(pinned), token(rng)
     assert await aget(local_async_tcp_transport(server.port, pinned), server.port, secret) == 200
     assert secret.encode() in server.done()[0]
+
+
+class _Peer:
+    """The part of an SSL object check_peer reads."""
+
+    def __init__(self, der: bytes | None) -> None:
+        self._der = der
+
+    def getpeercert(self, binary_form: bool = False) -> bytes | None:
+        assert binary_form
+        return self._der
+
+
+def test_the_peer_check_takes_only_the_pinned_certificate(pinned: Path, stranger: Path) -> None:
+    # Behind the context's own chain check: the handshake's certificate must
+    # be the pinned one, byte for byte.
+    pin = read_pin(pinned)
+    ours = ssl.PEM_cert_to_DER_cert((pinned / CERT_FILE).read_text(encoding="ascii"))
+    theirs = ssl.PEM_cert_to_DER_cert((stranger / CERT_FILE).read_text(encoding="ascii"))
+    check_peer(_Peer(ours), pin)
+    for presented in (theirs, None):
+        with pytest.raises(PinError, match="not the pinned one"):
+            check_peer(_Peer(presented), pin)
 
 
 def test_the_server_context_serves_the_pinned_certificate(pinned: Path) -> None:
@@ -397,6 +450,49 @@ def test_only_the_configured_port_is_dialled(pinned: Path, rng: random.Random) -
     server = Server(None)
     with pytest.raises(httpx.ConnectError):
         get(local_tcp_transport(server.port + 1, pinned), server.port, token(rng))
+    with socket.create_connection(("127.0.0.1", server.port)):
+        pass
+    assert server.done() == [b""]
+
+
+# The SDK and MCP attach take the async transport: the same refusals there.
+
+
+@pytest.mark.parametrize("damage", ["fingerprint", "certificate"])
+async def test_a_pin_that_doesnt_match_its_certificate_sends_nothing_async(
+    pinned: Path, rng: random.Random, damage: str
+) -> None:
+    if damage == "fingerprint":
+        (pinned / FINGERPRINT_FILE).write_text("00" * 32, encoding="ascii")
+    else:
+        (pinned / CERT_FILE).write_text("not a certificate", encoding="ascii")
+    server = Server(None)
+    with pytest.raises(PeerMismatchError, match="nothing was sent"):
+        await aget(local_async_tcp_transport(server.port, pinned), server.port, token(rng))
+    with socket.create_connection(("127.0.0.1", server.port)):
+        pass  # unblock the server's accept
+    assert server.done() == [b""]
+
+
+async def test_no_certificate_is_a_plain_connect_error_async(
+    data_dir: Path, rng: random.Random
+) -> None:
+    server = Server(None)
+    with pytest.raises(httpx.ConnectError) as e:
+        await aget(local_async_tcp_transport(server.port, data_dir), server.port, token(rng))
+    assert not isinstance(e.value, PeerMismatchError)
+    assert CERT_FILE in str(e.value)
+    with socket.create_connection(("127.0.0.1", server.port)):
+        pass
+    assert server.done() == [b""]
+
+
+async def test_plain_http_is_never_sent_async(pinned: Path, rng: random.Random) -> None:
+    server, secret = Server(None), token(rng)
+    with pytest.raises(httpx.ConnectError):
+        await aget(
+            local_async_tcp_transport(server.port, pinned), server.port, secret, scheme="http"
+        )
     with socket.create_connection(("127.0.0.1", server.port)):
         pass
     assert server.done() == [b""]

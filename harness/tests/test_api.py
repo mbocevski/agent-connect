@@ -28,6 +28,7 @@ from agentconnect.cli import app
 from agentconnect.clock import FakeClock, SystemClock
 from agentconnect.config import Config
 from agentconnect.mcp.backend import AttachBackend, OwnerGoneError, ToolError
+from agentconnect.runtime import api as api_module
 from agentconnect.runtime.api import MAX_PENDING, MAX_PENDING_HARD, ApiServer
 from agentconnect.sockets import local_async_tcp_transport
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
@@ -84,6 +85,32 @@ async def serve(cluster: Cluster, name: str, sockdir: Path, auto_approve: bool) 
     server = ApiServer(node.daemon)
     await server.start()
     return Api(node, server)
+
+
+async def test_a_file_at_the_socket_path_is_not_replaced(cluster: Cluster, sockdir: Path) -> None:
+    # Only a stale socket is removed at start: any other file there stays,
+    # and the API doesn't start.
+    node = await cluster.node("f", auto_approve=False)
+    path = sockdir / "f.sock"
+    path.write_text("keep me", encoding="utf-8")
+    node.config = node.config.with_overrides(api_socket=path)
+    node.daemon.config = node.config
+    with pytest.raises(FileExistsError, match="not a socket"):
+        await ApiServer(node.daemon).start()
+    assert path.read_text(encoding="utf-8") == "keep me"
+    # A socket left behind by a daemon that crashed is replaced.
+    path.unlink()
+    left = socket.socket(socket.AF_UNIX)
+    left.bind(str(path))
+    left.close()
+    server = ApiServer(node.daemon)
+    await server.start()
+    try:
+        assert stat.S_ISSOCK(path.lstat().st_mode)
+        info = await asyncio.to_thread(ApiClient(node.daemon.config).request, "GET", "/v0/status")
+        assert info["identity"] == node.me
+    finally:
+        await server.stop()
 
 
 async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
@@ -277,6 +304,24 @@ async def test_api_drives_the_one_to_one_lifecycle(  # noqa: PLR0915
         ("PUT", "/v0/groups/x/adapters", {"adapters": None}, "human", 404, "not_found"),
         ("PUT", "/v0/groups/x/adapters", {"adapters": "recording"}, "human", 400, "bad_request"),
         ("PUT", "/v0/groups/x/adapters", {}, "human", 400, "bad_request"),
+        ("POST", "/v0/groups/x/members/y/sas", {"instance": 5}, "human", 400, "bad_request"),
+        (
+            "POST",
+            "/v0/groups/x/members/y/sas",
+            {"acknowledge": "yes"},
+            "human",
+            400,
+            "bad_request",
+        ),
+        (
+            "POST",
+            "/v0/groups/x/sas/runs/r/labels",
+            {"self": 1, "peer": "b"},
+            "human",
+            400,
+            "bad_request",
+        ),
+        ("POST", "/v0/listing/withdraw", {"force": "yes"}, "human", 400, "bad_request"),
     ],
 )
 async def test_api_errors(  # noqa: PLR0913, PLR0917
@@ -446,6 +491,42 @@ async def test_the_tcp_certificate_is_renewed_while_running(cluster: Cluster) ->
     await until(lambda: cert_clock.sleepers == 1)
     await server.stop()
     assert cert_clock.sleepers == 0
+
+
+async def test_a_failed_renewal_keeps_the_certificate_and_is_tried_again(
+    cluster: Cluster, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    node = await cluster.node("retry")
+    cert_clock = FakeClock(SystemClock().now())
+
+    async def start(port: int) -> ApiServer:
+        node.daemon.config = node.config.with_overrides(api_tcp_port=port)
+        server = ApiServer(node.daemon, cert_clock=cert_clock)
+        await server.start()
+        return server
+
+    server = await on_free_port(start)
+    port = node.daemon.config.api_tcp_port
+    pin_file = node.config.data_dir / FINGERPRINT_FILE
+    first = pin_file.read_text(encoding="ascii").strip()
+    await until(lambda: cert_clock.sleepers == 1)
+    real, failures = api_module.ensure_certificate, [OSError("disk full")]
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        if failures:
+            raise failures.pop()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api_module, "ensure_certificate", flaky)
+    cert_clock.advance(LIFETIME - RENEW_BEFORE)
+    await until(lambda: not failures and cert_clock.sleepers == 1)
+    # The renewal failed: still serving the old certificate, retried later.
+    assert pin_file.read_text(encoding="ascii").strip() == first
+    assert await asyncio.to_thread(_served_fingerprint, port) == first
+    assert "api_tls_renewal_failed" in capsys.readouterr().err
+    cert_clock.advance(api_module.RENEW_RETRY_SECS)
+    await until(lambda: pin_file.read_text(encoding="ascii").strip() != first)
+    await server.stop()
 
 
 async def test_cli_errors(tmp_path: Path) -> None:

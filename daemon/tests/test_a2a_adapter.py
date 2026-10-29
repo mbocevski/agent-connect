@@ -764,6 +764,50 @@ async def test_a_card_naming_another_endpoint_is_refused(
     assert mismatch["card_endpoint"] == elsewhere.url.rstrip("/")
 
 
+async def test_a_server_that_took_over_the_socket_gets_no_delivery(
+    sockdir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The card came from the agent's user; the agent then went down and
+    # another user's server took the path. Its connection is checked before
+    # the message is written: the delivery waits, nothing reaches it.
+    uds = sockdir / "a2a.sock"
+    agent = AgentServer(HelloWorldExecutor(), "uds", uds=uds)
+    await agent.start()
+    adapter, sent = await started(
+        A2AOptions(
+            local_agent_url="http://localhost/",
+            local_agent_socket=uds,
+            receiver_uids=frozenset({os.geteuid()}),
+            data_dir=tmp_path,
+        )
+    )
+    assert adapter.capabilities().agent_card is not None
+    await agent.stop()
+    other = os.geteuid() + 1
+    monkeypatch.setattr(
+        "agentconnect.isolation.peer_credentials", lambda _s: PeerCred(uid=other, gid=other)
+    )
+    uds.unlink(missing_ok=True)  # the stale socket, replaced
+    squatter = AgentServer(HelloWorldExecutor(), "squatter", uds=uds)
+    await squatter.start()
+    try:
+        d = delivery("m1", text("for the agent only"))
+        assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.RETRY
+        await adapter.aclose()
+    finally:
+        await squatter.stop()
+    assert received(squatter) == []
+    assert sent.calls == []
+    refused = [
+        e for e in log_events(capsys.readouterr().err) if e["event"] == "a2a_receiver_refused"
+    ]
+    assert refused
+    assert str(other) in refused[0]["reason"]
+
+
 @pytest.mark.parametrize("card_url", ["http://localhost:9999/", "http://agent.example.org/"])
 async def test_on_a_socket_the_cards_own_url_doesnt_matter(
     sockdir: Path, tmp_path: Path, card_url: str
