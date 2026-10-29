@@ -14,6 +14,7 @@ pub mod config;
 pub mod conn;
 pub mod landing;
 pub mod logging;
+pub mod phase;
 pub mod proto;
 pub mod quota;
 pub mod relay;

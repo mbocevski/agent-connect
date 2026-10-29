@@ -28,6 +28,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::conn::{ConnCtx, Fair, Io, Refused, SourceKey};
+use crate::phase::ConnState;
 use crate::proto::ErrorCode;
 use crate::relay::{ConnRefusal, Eviction, Relay, Timeout, until_true};
 use crate::store::Store;
@@ -35,9 +36,12 @@ use crate::store::Store;
 /// Limits on the HTTP phase of a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerLimits {
-    /// How long a client has to send a request's headers, also the next
-    /// request's on a kept-alive connection.
+    /// How long a client has to send a request's headers, from their first
+    /// byte (from the connection's start, for the first request).
     pub header_timeout: Duration,
+    /// How long a kept-alive connection may stay open between a response
+    /// and the next request.
+    pub idle_timeout: Duration,
     /// How long a request may take once its headers are in: reading its
     /// body and handling it. Past it the answer is 408 and the connection
     /// closes.
@@ -63,6 +67,7 @@ impl Default for ServerLimits {
     fn default() -> Self {
         Self {
             header_timeout: Duration::from_secs(10),
+            idle_timeout: Duration::from_secs(75),
             request_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(30),
             max_body_bytes: 64 << 10,
@@ -139,7 +144,10 @@ impl<S: Store> Server<S> {
         Self::with_router(relay, router, limits)
     }
 
-    fn with_router(relay: Arc<Relay<S>>, router: Router, limits: ServerLimits) -> Self {
+    /// A server for `router`, under the same request deadline and body
+    /// limit as the relay's own routes.
+    #[must_use]
+    pub fn with_router(relay: Arc<Relay<S>>, router: Router, limits: ServerLimits) -> Self {
         let state = Deadline {
             relay: Arc::clone(&relay),
             limit: limits.request_timeout,
@@ -206,17 +214,20 @@ impl<S: Store> Server<S> {
         } else {
             self.limits.max_http_per_source
         };
-        let slot =
-            match self
-                .phase
-                .admit(source, per_source, self.limits.max_http_connections, true)
-            {
-                Ok(slot) => slot,
-                Err(Refused::Source | Refused::Full) => {
-                    relay.metrics().refused(ConnRefusal::HttpSource);
-                    return None;
-                }
-            };
+        let state = ConnState::new(relay.timer().clone());
+        let slot = match self.phase.admit(
+            source,
+            per_source,
+            self.limits.max_http_connections,
+            true,
+            Some(&state),
+        ) {
+            Ok(slot) => slot,
+            Err(Refused::Source | Refused::Full) => {
+                relay.metrics().refused(ConnRefusal::HttpSource);
+                return None;
+            }
+        };
         if slot.evicted {
             relay.metrics().evicted(Eviction::Http);
         }
@@ -227,7 +238,8 @@ impl<S: Store> Server<S> {
             Arc::clone(&rx),
             relay.timer().clone(),
             self.limits.write_timeout,
-        );
+        )
+        .noting(Arc::clone(&state));
         let mut service = self
             .router
             .clone()
@@ -237,29 +249,53 @@ impl<S: Store> Server<S> {
             // resolved against a trusted proxy's header by the handlers.
             service = service.layer(axum::Extension(ConnectInfo(peer)));
         }
+        // The request's phase, from its head to the end of its answer, for
+        // the connection's deadlines and for eviction.
+        let inner = TowerToHyperService::new(service);
+        let begin = Arc::clone(&state);
+        let service =
+            hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let req = begin.begin(req);
+                let answer = hyper::service::Service::call(&inner, req);
+                let end = Arc::clone(&begin);
+                async move { answer.await.map(|resp| end.finish(resp)) }
+            });
         let conn = http1::Builder::new()
-            .timer(relay.timer().clone())
-            .header_read_timeout(self.limits.header_timeout)
-            .serve_connection(TokioIo::new(io), TowerToHyperService::new(service))
+            .serve_connection(TokioIo::new(io), service)
             .with_upgrades();
+        let (header, idle) = (self.limits.header_timeout, self.limits.idle_timeout);
         Some(async move {
             let _open = open;
             let kick = Arc::clone(&slot.kick);
             let _slot = slot;
+            let timer = relay.timer().clone();
             let mut conn = std::pin::pin!(conn);
-            let result = tokio::select! {
-                r = conn.as_mut() => r,
-                // A newcomer took this connection's place: drop it.
-                () = kick.notified() => Ok(()),
-                () = until_true(&mut stop) => {
-                    conn.as_mut().graceful_shutdown();
-                    conn.await
+            let mut stopping = false;
+            loop {
+                let due = state.deadline(header, idle);
+                let expired = async {
+                    match due {
+                        Some((at, _)) => timer.sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    _ = conn.as_mut() => return,
+                    // A newcomer took this connection's place: drop it.
+                    () = kick.notified() => return,
+                    () = until_true(&mut stop), if !stopping => {
+                        stopping = true;
+                        conn.as_mut().graceful_shutdown();
+                    }
+                    () = expired => {
+                        if let Some((_, why)) = due {
+                            relay.metrics().timeout(why);
+                        }
+                        return;
+                    }
+                    // The phase changed: look at the deadline again.
+                    () = state.changed() => {}
                 }
-            };
-            if let Err(e) = result
-                && e.is_timeout()
-            {
-                relay.metrics().timeout(Timeout::Header);
             }
         })
     }

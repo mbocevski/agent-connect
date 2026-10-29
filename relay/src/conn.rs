@@ -22,6 +22,7 @@ use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Notify;
 
+use crate::phase::ConnState;
 use crate::timer::Timer;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -316,9 +317,19 @@ pub enum Refused {
     Full,
 }
 
+/// How many requests being served one source can shield from eviction.
+const PROTECTED_PER_SOURCE: usize = 2;
+
 /// Connections under a total cap and a per-source cap, fairly: at the total
-/// cap a newcomer closes the oldest connection of the source holding the
-/// most, instead of waiting or being refused.
+/// cap a newcomer closes a connection of the source holding the most,
+/// instead of waiting or being refused.
+///
+/// A connection that has a [`ConnState`] (an HTTP one) and is serving a
+/// request, its body in and its answer not done, is shielded from that, two
+/// per source at most: a connection that has not completed a request goes
+/// before one that has, then the oldest. With nothing to close, the newcomer
+/// is refused. A connection without a state (a WebSocket one) is always a
+/// candidate.
 #[derive(Debug, Default)]
 pub struct Fair {
     state: Mutex<FairState>,
@@ -329,7 +340,24 @@ pub struct Fair {
 struct FairState {
     next: u64,
     held: usize,
-    by_source: HashMap<SourceKey, std::collections::VecDeque<(u64, Arc<Notify>)>>,
+    by_source: HashMap<SourceKey, std::collections::VecDeque<Entry>>,
+}
+
+#[derive(Debug)]
+struct Entry {
+    id: u64,
+    kick: Arc<Notify>,
+    state: Option<Arc<ConnState>>,
+}
+
+impl Entry {
+    fn protected(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.protected())
+    }
+
+    fn served(&self) -> bool {
+        self.state.as_ref().is_some_and(|s| s.served())
+    }
 }
 
 /// One connection held in a [`Fair`] until dropped.
@@ -352,7 +380,7 @@ impl FairSlot {
         !state
             .by_source
             .get(&self.source)
-            .is_some_and(|q| q.iter().any(|(id, _)| *id == self.id))
+            .is_some_and(|q| q.iter().any(|e| e.id == self.id))
     }
 }
 
@@ -360,7 +388,7 @@ impl Drop for FairSlot {
     fn drop(&mut self) {
         let mut state = lock(&self.fair.state);
         if let Some(q) = state.by_source.get_mut(&self.source)
-            && let Some(i) = q.iter().position(|(id, _)| *id == self.id)
+            && let Some(i) = q.iter().position(|e| e.id == self.id)
         {
             q.remove(i);
             if q.is_empty() {
@@ -387,19 +415,26 @@ impl Fair {
     }
 
     /// Admit a connection from `source`: at most `per_source` for it and
-    /// `total` in all. At the total, the source holding the most loses its
-    /// oldest connection; if that is `source` itself, only when `evict_own`.
+    /// `total` in all. At the total, one connection is closed: of the source
+    /// with the most candidates, the one that has not completed a request
+    /// yet, if any, then the oldest (a source's protected requests beyond
+    /// the newest two count as candidates; sources with as many candidates
+    /// are chosen by their best one in that order). If that source is
+    /// `source` itself, only when `evict_own`. `conn` is the connection's
+    /// request state, if it is an HTTP one.
     ///
     /// # Errors
     ///
     /// [`Refused::Source`] past the source's cap, [`Refused::Full`] at the
-    /// total when nobody else may make room.
+    /// total when nobody else may make room (every connection is a
+    /// protected request, no source has more than two).
     pub fn admit(
         self: &Arc<Self>,
         source: SourceKey,
         per_source: usize,
         total: usize,
         evict_own: bool,
+        conn: Option<&Arc<ConnState>>,
     ) -> Result<FairSlot, Refused> {
         let mut state = lock(&self.state);
         let own = state
@@ -411,21 +446,15 @@ impl Fair {
         }
         let mut evicted = false;
         if state.held >= total.max(1) {
-            // The source holding the most; on a tie, the one whose oldest
-            // connection is oldest.
-            let top = state
-                .by_source
-                .iter()
-                .filter(|(_, q)| !q.is_empty())
-                .max_by_key(|(_, q)| (q.len(), std::cmp::Reverse(q[0].0)))
-                .map(|(k, _)| *k);
-            let Some(top) = top.filter(|t| evict_own || *t != source) else {
+            let victim = Self::victim(&state).filter(|(top, _)| evict_own || *top != source);
+            let Some((top, id)) = victim else {
                 return Err(Refused::Full);
             };
             if let Some(q) = state.by_source.get_mut(&top)
-                && let Some((_, kick)) = q.pop_front()
+                && let Some(i) = q.iter().position(|e| e.id == id)
+                && let Some(entry) = q.remove(i)
             {
-                kick.notify_one();
+                entry.kick.notify_one();
                 if q.is_empty() {
                     state.by_source.remove(&top);
                 }
@@ -436,11 +465,11 @@ impl Fair {
         state.next += 1;
         let id = state.next;
         let kick = Arc::new(Notify::new());
-        state
-            .by_source
-            .entry(source)
-            .or_default()
-            .push_back((id, Arc::clone(&kick)));
+        state.by_source.entry(source).or_default().push_back(Entry {
+            id,
+            kick: Arc::clone(&kick),
+            state: conn.map(Arc::clone),
+        });
         state.held += 1;
         drop(state);
         Ok(FairSlot {
@@ -450,6 +479,36 @@ impl Fair {
             kick,
             evicted,
         })
+    }
+
+    /// The connection to close for a newcomer: the best candidate of the
+    /// source with the most candidates. A source's candidates are its
+    /// connections that are not protected, and its protected ones beyond
+    /// the newest [`PROTECTED_PER_SOURCE`]. The best candidate is one that
+    /// has not completed a request, then the oldest.
+    fn victim(state: &FairState) -> Option<(SourceKey, u64)> {
+        state
+            .by_source
+            .iter()
+            .filter_map(|(source, q)| {
+                let mut shielded = 0;
+                let mut candidates = 0_usize;
+                let mut best: Option<(bool, u64)> = None;
+                // Newest first, so the newest protected requests are the
+                // ones kept.
+                for e in q.iter().rev() {
+                    if e.protected() && shielded < PROTECTED_PER_SOURCE {
+                        shielded += 1;
+                        continue;
+                    }
+                    candidates += 1;
+                    let key = (e.served(), e.id);
+                    best = Some(best.map_or(key, |b| b.min(key)));
+                }
+                best.map(|(served, id)| (candidates, std::cmp::Reverse((served, id)), *source, id))
+            })
+            .max_by_key(|(candidates, best, _, _)| (*candidates, *best))
+            .map(|(_, _, source, id)| (source, id))
     }
 
     /// Wait until no connection is held.
@@ -496,6 +555,7 @@ pub struct Io<I> {
     timer: Timer,
     write_timeout: Duration,
     stalled: Option<SleepFuture>,
+    phase: Option<Arc<ConnState>>,
 }
 
 impl<I> Io<I> {
@@ -507,7 +567,16 @@ impl<I> Io<I> {
             timer,
             write_timeout,
             stalled: None,
+            phase: None,
         }
+    }
+
+    /// Tell `phase` when bytes arrive, so an HTTP connection knows when a
+    /// request head begins.
+    #[must_use]
+    pub fn noting(mut self, phase: Arc<ConnState>) -> Self {
+        self.phase = Some(phase);
+        self
     }
 
     /// The write made no progress: start (or keep) the stall deadline, and
@@ -543,6 +612,11 @@ impl<I: AsyncRead + Unpin> AsyncRead for Io<I> {
         if let Poll::Ready(Ok(())) = r {
             let n = buf.filled().len() - before;
             self.rx.add(u64::try_from(n).unwrap_or(u64::MAX));
+            if n > 0
+                && let Some(phase) = &self.phase
+            {
+                phase.bytes_read();
+            }
         }
         r
     }
@@ -672,29 +746,155 @@ mod tests {
         assert!(!welcome.shed.load(Ordering::Relaxed));
     }
 
+    fn http(timer: &Timer) -> Arc<ConnState> {
+        ConnState::new(timer.clone())
+    }
+
+    /// A connection whose request is being served: head and body are in.
+    fn serving(conn: &ConnState) {
+        conn.request_started(false);
+        conn.body_done();
+    }
+
+    fn key(n: u8) -> SourceKey {
+        SourceKey::of(format!("192.0.2.{n}").parse().unwrap())
+    }
+
+    #[test]
+    fn a_request_being_served_is_not_pushed_out() {
+        let fair = Fair::new();
+        let timer = Timer::default();
+        // The honest client's request is being served; sixteen sources with
+        // one idle connection each fill a total of 17, then keep coming.
+        let conn = http(&timer);
+        serving(&conn);
+        let honest = fair.admit(key(200), 8, 17, true, Some(&conn)).unwrap();
+        let mut others = Vec::new();
+        for i in 1..=40 {
+            let c = http(&timer);
+            let slot = fair.admit(key(i), 8, 17, true, Some(&c)).unwrap();
+            assert_eq!(slot.evicted, i > 16);
+            others.push((slot, c));
+        }
+        assert!(!honest.was_evicted());
+        assert_eq!(fair.held(), 17);
+    }
+
+    #[test]
+    fn a_request_whose_body_is_still_arriving_is_not_protected() {
+        let fair = Fair::new();
+        let timer = Timer::default();
+        let slow = http(&timer);
+        slow.request_started(false);
+        let slow_slot = fair.admit(key(1), 8, 2, true, Some(&slow)).unwrap();
+        let other = http(&timer);
+        let _other_slot = fair.admit(key(2), 8, 2, true, Some(&other)).unwrap();
+        // A newcomer pushes the upload out, the oldest of equals.
+        let c = http(&timer);
+        let newcomer = fair.admit(key(3), 8, 2, true, Some(&c)).unwrap();
+        assert!(newcomer.evicted && slow_slot.was_evicted());
+    }
+
+    #[test]
+    fn a_source_protects_at_most_two_requests() {
+        let fair = Fair::new();
+        let timer = Timer::default();
+        // Five requests being served from one source fill a total of 5.
+        let held: Vec<_> = (0..5)
+            .map(|_| {
+                let c = http(&timer);
+                serving(&c);
+                (fair.admit(key(1), 8, 5, true, Some(&c)).unwrap(), c)
+            })
+            .collect();
+        // A newcomer from another source pushes out the oldest of them: the
+        // newest two are the ones kept.
+        let c = http(&timer);
+        let newcomer = fair.admit(key(2), 8, 5, true, Some(&c)).unwrap();
+        assert!(newcomer.evicted);
+        assert!(held[0].0.was_evicted());
+        assert!(held[1..].iter().all(|(slot, _)| !slot.was_evicted()));
+    }
+
+    #[test]
+    fn a_newcomer_is_refused_only_when_many_sources_hold_protected_requests() {
+        let fair = Fair::new();
+        let timer = Timer::default();
+        // Four sources with two requests being served each: nothing to push
+        // out under a total of 8.
+        let mut held = Vec::new();
+        for source in 1..=4 {
+            for _ in 0..2 {
+                let c = http(&timer);
+                serving(&c);
+                held.push((fair.admit(key(source), 8, 8, true, Some(&c)).unwrap(), c));
+            }
+        }
+        let c = http(&timer);
+        assert!(matches!(
+            fair.admit(key(9), 8, 8, true, Some(&c)),
+            Err(Refused::Full)
+        ));
+        assert_eq!(fair.held(), 8);
+    }
+
+    #[test]
+    fn a_connection_that_never_completed_a_request_goes_before_one_that_did() {
+        let fair = Fair::new();
+        let timer = Timer::default();
+        // Two singletons: the older one has served a request.
+        let served_conn = http(&timer);
+        served_conn.request_started(true);
+        served_conn.request_ended();
+        let served = fair.admit(key(1), 8, 2, true, Some(&served_conn)).unwrap();
+        let fresh_conn = http(&timer);
+        let fresh = fair.admit(key(2), 8, 2, true, Some(&fresh_conn)).unwrap();
+        let c = http(&timer);
+        let newcomer = fair.admit(key(3), 8, 2, true, Some(&c)).unwrap();
+        assert!(newcomer.evicted && fresh.was_evicted() && !served.was_evicted());
+    }
+
+    #[test]
+    fn a_connection_without_a_request_state_is_always_a_candidate() {
+        let fair = Fair::new();
+        let timer = Timer::default();
+        let conn = http(&timer);
+        serving(&conn);
+        let _http = fair.admit(key(1), 8, 2, true, Some(&conn)).unwrap();
+        let socket = fair.admit(key(2), 8, 2, true, None).unwrap();
+        let newcomer = fair.admit(key(3), 8, 2, true, None).unwrap();
+        assert!(newcomer.evicted && socket.was_evicted());
+    }
+
     #[test]
     fn at_the_cap_the_oldest_of_the_source_holding_the_most_makes_room() {
         let fair = Fair::new();
         let a = SourceKey::of("192.0.2.1".parse().unwrap());
         let b = SourceKey::of("192.0.2.2".parse().unwrap());
         let c = SourceKey::of("192.0.2.3".parse().unwrap());
-        let a1 = fair.admit(a, 10, 4, true).unwrap();
-        let _b1 = fair.admit(b, 10, 4, true).unwrap();
-        let a2 = fair.admit(a, 10, 4, true).unwrap();
-        let _a3 = fair.admit(a, 10, 4, true).unwrap();
+        let a1 = fair.admit(a, 10, 4, true, None).unwrap();
+        let _b1 = fair.admit(b, 10, 4, true, None).unwrap();
+        let a2 = fair.admit(a, 10, 4, true, None).unwrap();
+        let _a3 = fair.admit(a, 10, 4, true, None).unwrap();
         assert_eq!(fair.held(), 4);
         // Full: a newcomer from c pushes out a's oldest.
-        let c1 = fair.admit(c, 10, 4, true).unwrap();
+        let c1 = fair.admit(c, 10, 4, true, None).unwrap();
         assert!(c1.evicted);
         assert!(a1.was_evicted());
         assert!(!a2.was_evicted());
         assert_eq!(fair.held(), 4);
         // A newcomer from the source holding the most is refused when it
         // may not push out its own.
-        let _a4 = fair.admit(c, 10, 5, true).unwrap();
-        assert!(matches!(fair.admit(a, 10, 5, false), Err(Refused::Full)));
+        let _a4 = fair.admit(c, 10, 5, true, None).unwrap();
+        assert!(matches!(
+            fair.admit(a, 10, 5, false, None),
+            Err(Refused::Full)
+        ));
         // The per-source cap holds whatever the total.
-        assert!(matches!(fair.admit(b, 1, 100, true), Err(Refused::Source)));
+        assert!(matches!(
+            fair.admit(b, 1, 100, true, None),
+            Err(Refused::Source)
+        ));
         drop(c1);
         assert_eq!(fair.held(), 4);
     }
@@ -702,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn until_empty_waits_for_the_last_slot() {
         let fair = Fair::new();
-        let slot = fair.admit(SourceKey::unknown(), 1, 1, true).unwrap();
+        let slot = fair.admit(SourceKey::unknown(), 1, 1, true, None).unwrap();
         let waiting = fair.until_empty();
         tokio::pin!(waiting);
         assert!(futures_poll(&mut waiting).is_pending());

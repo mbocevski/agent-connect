@@ -149,6 +149,8 @@ impl Eviction {
 pub(crate) enum Timeout {
     /// The request headers didn't arrive in time.
     Header,
+    /// A kept-alive HTTP connection sent no request for the idle timeout.
+    HttpIdle,
     /// A request (its body, its handling) didn't finish in time.
     Request,
     /// The client didn't answer the WebSocket challenge in time.
@@ -164,8 +166,9 @@ pub(crate) enum Timeout {
 }
 
 impl Timeout {
-    const ALL: [Timeout; 6] = [
+    const ALL: [Timeout; 7] = [
         Timeout::Header,
+        Timeout::HttpIdle,
         Timeout::Request,
         Timeout::Auth,
         Timeout::Idle,
@@ -176,6 +179,7 @@ impl Timeout {
     fn as_str(self) -> &'static str {
         match self {
             Timeout::Header => "header",
+            Timeout::HttpIdle => "http_idle",
             Timeout::Request => "request",
             Timeout::Auth => "auth",
             Timeout::Idle => "idle",

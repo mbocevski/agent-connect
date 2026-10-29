@@ -208,6 +208,7 @@ code = [
     "relay/src/conn.rs",
     "relay/src/landing.rs",
     "relay/src/logging.rs",
+    "relay/src/phase.rs",
     "relay/src/proto.rs",
     "relay/src/quota.rs",
     "relay/src/relay.rs",

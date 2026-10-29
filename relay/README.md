@@ -59,9 +59,10 @@ Connection limits (below), all in memory, none of them logged:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AC_RELAY_MAX_HTTP_CONNECTIONS` | `512` | TCP connections still in the HTTP phase (not WebSockets yet). At the limit a new one closes the oldest connection of the source holding the most; accepting never pauses. |
+| `AC_RELAY_MAX_HTTP_CONNECTIONS` | `512` | TCP connections still in the HTTP phase (not WebSockets yet). At the limit a new one closes a connection that is not being served, of the source holding the most; accepting never pauses. |
 | `AC_RELAY_MAX_HTTP_CONNECTIONS_PER_SOURCE` | `8` | HTTP-phase connections one source may hold. Past it a new one is closed at once. A daemon makes one REST request at a time and holds its WebSocket outside this count, so 8 leaves room for a few daemons behind one address, and it takes 64 sources to reach the total. |
-| `AC_RELAY_HEADER_TIMEOUT_SECS` | `10` | How long a client has to send a request's headers, also the next request's on a kept-alive connection. Then the connection is closed. |
+| `AC_RELAY_HEADER_TIMEOUT_SECS` | `10` | How long a client has to send a request's headers, from their first byte (from the connection's start, for the first request). Then the connection is closed. |
+| `AC_RELAY_HTTP_IDLE_TIMEOUT_SECS` | `75` | How long a kept-alive connection may stay open between an answer and the next request. Keep a reverse proxy's upstream keep-alive below it. |
 | `AC_RELAY_REQUEST_TIMEOUT_SECS` | `30` | How long a request may take once its headers are in: reading the body and handling it. Then the answer is 408 and the connection closes. |
 | `AC_RELAY_WRITE_TIMEOUT_SECS` | `30` | How long a write of an HTTP response may make no progress before the connection is dropped. |
 | `AC_RELAY_MAX_BODY_BYTES` | `65536` | The largest request body (413 past it). |
@@ -113,11 +114,15 @@ proxy has no per-source share there, only the total.
 
 - **HTTP phase.** Every stage has a deadline: the headers, the request (body
   and handling), and each write of the answer. One source holds at most its
-  share of the HTTP slots, and at the total a new connection closes the
-  oldest connection of the source holding the most rather than wait, so
-  connections that stall after their headers, or pipeline requests and never
-  read the answers, can't keep everyone else out, from one source or from
-  many. An idle kept-alive connection is closed at the header timeout; a
+  share of the HTTP slots, and at the total a new connection closes one that
+  is not being served, of the source holding the most, rather than wait, so
+  connections that stall in their headers or their body, or pipeline requests
+  and never read the answers, can't keep everyone else out, from one source
+  or from many. A request is protected from that once its body is in, until
+  its answer is done, and a source protects two at most; when every
+  connection is a protected request, the new one is closed instead. An idle
+  kept-alive connection is closed after `AC_RELAY_HTTP_IDLE_TIMEOUT_SECS`
+  (75 s), not at the header timeout, which covers a request head only; a
   reverse proxy's upstream keep-alive should be shorter than that, or it may
   reuse a connection the relay is closing.
 - **WebSockets.** Sockets that haven't authenticated wait in their own pool
@@ -298,7 +303,7 @@ counted as frames.
 | `connections_refused_total{reason}` | counter | Connections refused at a cap: `total`, `unauthenticated`, `source` (WebSocket) or `http_source`. |
 | `connections_replaced_total` | counter | Connections closed because a newer one for the same mailbox passed the per-mailbox cap. |
 | `connections_shed_total` | counter | Connections closed because the read budget was exceeded. |
-| `connection_timeouts_total{kind}` | counter | Connections closed by a deadline: `header`, `request`, `auth`, `idle`, `upload` (a message arriving too slowly) or `send`. |
+| `connection_timeouts_total{kind}` | counter | Connections closed by a deadline: `header`, `http_idle` (a kept-alive HTTP connection with no request), `request`, `auth`, `idle`, `upload` (a message arriving too slowly) or `send`. |
 | `frames_rate_limited_total` | counter | Client frames over the frame rate: refused, or delayed for acks. |
 | `read_bytes_held` | gauge | Bytes read from WebSocket clients and not yet handed on as whole messages. |
 | `drain_bytes_total` | counter | Bytes of queued messages other than knocks sent to connections, on reconnect and live. |

@@ -132,7 +132,7 @@ server {
   (`AC_RELAY_PING_INTERVAL_SECS`, 30 s), or the proxy closes quiet
   WebSockets.
 - If you enable upstream keep-alive, keep its idle timeout below the relay's
-  header timeout (`AC_RELAY_HEADER_TIMEOUT_SECS`, 10 s), or the proxy may
+  HTTP idle timeout (`AC_RELAY_HTTP_IDLE_TIMEOUT_SECS`, 75 s), or the proxy may
   reuse a connection the relay is closing.
 - The proxy must not rewrite the request path: signed REST requests sign
   it.

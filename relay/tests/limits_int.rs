@@ -287,9 +287,12 @@ async fn unfinished_headers_and_silent_clients_are_dropped() {
 async fn stalled_http_requests_cannot_lock_out_other_clients() {
     // The review's finding 1: 512 requests whose body never comes, or whose
     // pipelined answers are never read, used to hold every HTTP slot.
+    // Answers that fit in the socket buffers leave a kept-alive connection
+    // idle, so it ends at the idle timeout (default 75 s), not the header one.
     let relay = Relay::start(&[
         ("AC_RELAY_REQUEST_TIMEOUT_SECS", "2"),
         ("AC_RELAY_WRITE_TIMEOUT_SECS", "2"),
+        ("AC_RELAY_HTTP_IDLE_TIMEOUT_SECS", "2"),
     ]);
     let mut held = Vec::new();
     for i in 0..80 {
