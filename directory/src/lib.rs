@@ -17,6 +17,7 @@
 pub mod api;
 pub mod card;
 pub mod config;
+pub mod conn;
 pub mod directory;
 pub mod http;
 pub mod logging;

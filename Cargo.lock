@@ -80,6 +80,7 @@ dependencies = [
  "axum",
  "futures-util",
  "http-body-util",
+ "hyper",
  "hyper-rustls",
  "hyper-util",
  "proptest",

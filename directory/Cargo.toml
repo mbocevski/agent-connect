@@ -14,7 +14,8 @@ axum.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
 hyper-rustls.workspace = true
-hyper-util.workspace = true
+hyper.workspace = true
+hyper-util = { workspace = true, features = ["server", "service"] }
 rmcp.workspace = true
 rustls.workspace = true
 schemars.workspace = true

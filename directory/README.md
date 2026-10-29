@@ -84,6 +84,9 @@ give the supervisor a longer stop timeout too (`docker stop -t`,
 | `AC_DIRECTORY_TRUST_ANY_PROXY` | unset | `1` allows the broad blocks above. |
 | `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
 | `AC_DIRECTORY_SHUTDOWN_GRACE_SECS` | `8` | After SIGTERM or SIGINT, how long open connections may hold the exit up (1 to 3600 seconds). |
+| `AC_DIRECTORY_HEADER_TIMEOUT_SECS` | `10` | How long a connection may take to send a request head, on a new connection and between requests; a slower one is closed (1 to 3600 seconds). |
+| `AC_DIRECTORY_MAX_CONNECTIONS` | `512` | Connections open at once. At the limit a new connection closes the oldest one of the source holding the most. |
+| `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` | `8` | Connections open at once from one source (an IPv4 address or an IPv6 /64); the next one is closed at once. A connection from a trusted proxy is not held to it. |
 | `AC_DIRECTORY_STYLESHEET` | none | A CSS file served instead of the default stylesheet. |
 | `AC_DIRECTORY_FONT_DIR` | none | A directory of font files (`.woff2`, `.woff`, `.ttf`, `.otf`) served at `/static/fonts/<file>`, for a replacement stylesheet to load with `@font-face`. Setting it adds `font-src 'self'` to the Content-Security-Policy; without it the policy has no `font-src`. Only regular files directly in the directory are served: no symlinks or subdirectories. |
 | `AC_DIRECTORY_NAME` | none | The operator's name for the site, e.g. `Example directory`: the home page's heading and the header's site name, with "AgentConnect directory" above the heading and after the name in page titles (`Example directory · AgentConnect directory`). It is trimmed, and may not be empty, hold control characters or be longer than 80 characters. |
@@ -101,6 +104,28 @@ and the MCP library at `error` (its warnings quote request headers),
 whatever `RUST_LOG` says: at `trace`, `axum::serve` would log client
 addresses. Colours are used only when stdout is a terminal. Rate-limit
 windows live in memory, are never logged, and are capped in number.
+
+### Connection limits
+
+A client that sends part of a request head and stops, or opens many
+connections, would otherwise hold the directory's descriptors and memory
+for as long as it likes. The head has to arrive within
+`AC_DIRECTORY_HEADER_TIMEOUT_SECS`, and a source may hold
+`AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` connections: the next one from it
+is closed at once, and another source is not affected. At
+`AC_DIRECTORY_MAX_CONNECTIONS` a new connection closes the oldest one of
+the source holding the most, so one source can't fill the directory against
+everybody else. The defaults are the relay's. `/metrics` counts
+`connection` events with the outcomes `refused`, `evicted` and
+`header_timeout`; the counts carry no address.
+
+Behind a reverse proxy, set `AC_DIRECTORY_TRUSTED_PROXIES` (below): without
+it every client is the proxy, which then holds at most
+`AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE` connections to the directory.
+A connection from a trusted proxy is held to the total only, since before its
+headers it can't be told from the proxy's other clients. If the proxy keeps
+upstream connections alive, keep its idle timeout below the header timeout,
+or it may reuse a connection the directory is closing.
 
 ### Behind a reverse proxy
 
