@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import stat
 import tempfile
@@ -251,8 +252,9 @@ async def test_the_receiver_serves_a_unix_socket(
     server = agent.webhook_receiver(path=path)
     await server.start()
     try:
-        # The daemon's user (the group, in the separate-OS-user mode) connects.
-        assert stat.S_IMODE(path.stat().st_mode) == 0o660
+        # Only this user connects: the daemon runs as it outside the
+        # separate-OS-user mode.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert server.path == path
         body = json.dumps(make_payload(msg_id="m1")).encode()
         assert await post_unix(path, body, signed(secret, body)) == (200, {"status": "handled"})
@@ -264,6 +266,92 @@ async def test_the_receiver_serves_a_unix_socket(
     await stale.start()
     await stale.close()
     assert not path.exists()
+
+
+async def test_in_the_separate_os_user_mode_the_socket_is_open_to_its_group(
+    isolated_env: None, data_dir: Path, sockdir: Path, tmp_path: Path
+) -> None:
+    # The daemon's user connects through the group of the setgid receiver
+    # directory (docs/isolation.md); nobody else is in that group.
+    path = sockdir / "hook.sock"
+    config = tmp_path / "daemon.toml"
+    config.write_text(
+        f'[isolation]\nenabled = true\n\n[webhook]\ncallback_socket = "{path}"\n',
+        encoding="utf-8",
+    )
+    server = AgentConnect(data_dir=data_dir, config_path=config).webhook_receiver()
+    await server.start()
+    try:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o660
+    finally:
+        await server.close()
+
+
+@pytest.mark.parametrize(("group_access", "mode"), [(False, 0o600), (True, 0o660)])
+async def test_starting_on_a_socket_leaves_the_process_umask_alone(
+    agent: AgentConnect, sockdir: Path, group_access: bool, mode: int
+) -> None:
+    # The umask is process-wide: the host app's coroutines (and threads)
+    # running while the receiver starts must create files as usual.
+    seen: list[int] = []
+    done = asyncio.Event()
+
+    async def host_app() -> None:
+        i = 0
+        while not done.is_set():
+            f = sockdir / f"host-{i}"
+            f.write_text("x")
+            seen.append(stat.S_IMODE(f.stat().st_mode))
+            i += 1
+            await asyncio.sleep(0)
+
+    usual = os.umask(0o022)
+    try:
+        task = asyncio.create_task(host_app())
+        await asyncio.sleep(0)
+        server = WebhookReceiver(
+            agent.dispatch,
+            agent._webhook_verifier(),
+            path=sockdir / "h.sock",
+            group_access=group_access,
+        )
+        await server.start()
+        done.set()
+        await task
+        try:
+            assert os.umask(0o022) == 0o022
+            assert stat.S_IMODE((sockdir / "h.sock").lstat().st_mode) == mode
+        finally:
+            await server.close()
+    finally:
+        os.umask(usual)
+    assert len(seen) > 1
+    assert set(seen) == {0o644}
+
+
+async def test_a_private_socket_in_a_group_directory_is_warned_about(
+    agent: AgentConnect, sockdir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A setgid directory with another group is the separate-OS-user layout:
+    # a 0600 socket there is one the daemon's user can't reach.
+    others = [g for g in os.getgroups() if g != os.getgid()]
+    if not others:
+        pytest.skip("needs a second group to set on the directory")
+    os.chown(sockdir, -1, others[0])
+    os.chmod(sockdir, 0o2700)  # setgid; the group needs no access for the check
+    server = agent.webhook_receiver(path=sockdir / "h.sock")
+    with caplog.at_level("WARNING"):
+        await server.start()
+    await server.close()
+    assert any("receiver_socket_private" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    server = WebhookReceiver(
+        agent.dispatch, agent._webhook_verifier(), path=sockdir / "h.sock", group_access=True
+    )
+    with caplog.at_level("WARNING"):
+        await server.start()
+    await server.close()
+    assert not any("receiver_socket_private" in r.getMessage() for r in caplog.records)
 
 
 async def test_serve_listens_on_the_configured_socket(  # noqa: PLR0913, PLR0917

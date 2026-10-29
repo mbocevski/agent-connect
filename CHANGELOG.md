@@ -19,6 +19,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 - The separate-OS-user mode refuses the A2A facade on a port
   (`a2a.facade_port`): set `a2a.facade_socket`.
+- The SDK's webhook receiver on a Unix socket (`WebhookReceiver(path=)`,
+  `serve()` with `callback_socket`) makes the socket 0600, and 0660 only
+  when the daemon config sets `isolation.enabled`.
+- The separate-OS-user packaging gives receiver directories their own group,
+  `agentconnect-recv`, whose only member is the daemon's user
+  (`agentconnect.sysusers.conf`, `agentconnect.tmpfiles.conf`). Existing
+  setups: create the group, add only the daemon's user to it, and
+  `chgrp agentconnect-recv` each receiver directory, then restart the
+  daemon (it gets the new group only when it starts) and the agents (so
+  their sockets get the group). Agent users of one daemon can then no
+  longer connect to each other's receiver sockets, where the shared
+  `webhook-secret` let one post signed deliveries to another.
 
 ### Fixed
 
