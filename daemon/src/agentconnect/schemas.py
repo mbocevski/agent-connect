@@ -129,12 +129,6 @@ def _word(value: Any, longest: int = MAX_WORD) -> str:
     return value
 
 
-def _words(value: Any, most: int, longest: int) -> list[str]:
-    if not isinstance(value, list):
-        raise MalformedError
-    return [_text(v, longest) for v in value[:most]]
-
-
 def _small(value: Any, most: int) -> Any:
     """A JSON value of at most ``most`` bytes, kept as it is."""
     if len(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()) > most:
