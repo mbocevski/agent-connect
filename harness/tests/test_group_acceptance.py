@@ -14,15 +14,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from typer.testing import CliRunner
 
 import agentconnect_core as ac
 from agentconnect.adapter import Delivery
 from agentconnect.apiclient import ApiClient, ApiClientError
-from agentconnect.cli import app
 from agentconnect.relay import b64, unb64
 from agentconnect.runtime.engine import new_msg_id
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor, a2a_node
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import (
     WAIT,
     Cluster,
@@ -38,7 +37,6 @@ from agentconnect_sdk import AgentConnect, Message
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
 Proxy = Callable[[Node], RelayProxy]
-runner = CliRunner()
 
 
 async def until(predicate: Callable[[], bool]) -> None:
@@ -135,6 +133,10 @@ async def test_mention_mode_unaddressed_does_not_trigger_and_a_two_agent_loop_pa
     t5 = await say(a, gid, "t5", [b.me], reply_to=t4)
     assert await heard([b, c], t5) == [(False, 5), (False, 5)]
     await until(lambda: bool(data(b, "loop_guard")))
+    # b's pause is sent once b has told its human; an empty outbox at b means
+    # it left, not that it reached a and c through the relay.
+    for n in (a, c):
+        await until(lambda n=n: bool(controls(n, "control.pause", b)))
     for n in nodes:
         await n.idle()
     assert [len(data(n, "loop_guard")) for n in nodes] == [1, 1, 1]
@@ -269,9 +271,7 @@ class Member:
         return self.node.daemon.instance.instance_id_hex
 
     def _invoke(self, args: list[str], input: str | None) -> tuple[int, str]:
-        result = runner.invoke(app, [*args, "--config", str(self.config)], input=input)
-        if result.exception and not isinstance(result.exception, SystemExit):
-            raise result.exception
+        result = run_cli([*args, "--config", str(self.config)], input=input)
         return result.exit_code, result.stdout
 
     async def cli(self, *args: str, input: str | None = None) -> Any:

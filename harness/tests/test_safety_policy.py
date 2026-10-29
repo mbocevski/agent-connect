@@ -20,20 +20,18 @@ from a2a.utils.signing import create_agent_card_signer
 from cryptography.hazmat.primitives.asymmetric import ec
 from jwt import PyJWK
 from jwt.utils import base64url_encode
-from typer.testing import CliRunner
 
 from agentconnect.a2a_adapter import cards, convert
 from agentconnect.adapter import Event
-from agentconnect.cli import app
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import DaemonError, new_msg_id
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token, serve_api
 from agentconnect_harness.headless import headless
 from agentconnect_sdk import Group, Message, parse_payload
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
 Advance = Callable[[float], Awaitable[None]]
-runner = CliRunner()
 MARKER = "PLAINTEXT-MARKER-safety"
 
 
@@ -71,9 +69,7 @@ class Human:
     async def cli(self, *args: str, positional: tuple[str, ...] = ()) -> tuple[int, Any]:
         """``agentconnect <args> --json -- <positional>`` (ids may start with -)."""
         argv = [*args, "--json", "--config", str(self.config), "--", *positional]
-        result = await asyncio.to_thread(runner.invoke, app, argv)
-        if result.exception and not isinstance(result.exception, SystemExit):
-            raise result.exception
+        result = await asyncio.to_thread(run_cli, argv)
         lines = result.stdout.strip().splitlines()
         return result.exit_code, json.loads(lines[-1]) if lines else None
 
