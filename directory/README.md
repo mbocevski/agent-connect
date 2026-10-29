@@ -135,10 +135,11 @@ served, of the source holding the most of them: a connection that has not
 completed a request goes before one that has, then the oldest. A request is
 being served once its body is in and its handler is working; while a body is
 still arriving, the connection is at the client's pace, like a head, and can
-be pushed out. A source can shield two requests being served at most; its
+be pushed out. A source can shield two requests being served at most (a trusted proxy,
+which is many clients behind one source, has all of its shielded); its
 others are pushed out like any connection. When every connection is a
 protected request, which takes protected requests from many distinct
-sources, the new connection is closed instead. The defaults are the relay's.
+sources or from a trusted proxy, the new connection is closed instead. The defaults are the relay's.
 `/metrics` counts `connection` events with the outcomes `refused`, `evicted`,
 `header_timeout`, `idle_timeout`, `request_timeout` and `write_timeout`; the
 counts carry no address.
