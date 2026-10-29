@@ -354,7 +354,9 @@ class Facade:
         self._token = token
         self._server = LoopbackServer(self, port)
         self._groups: dict[str, _GroupApps] = {}
-        self._http = httpx.AsyncClient(timeout=10.0)
+        # Push notifications go to the push URL itself: never through an
+        # environment proxy, never on to where a redirect points (SR-30).
+        self._http = httpx.AsyncClient(timeout=10.0, trust_env=False, follow_redirects=False)
         # msg_id sent by the facade -> the request waiting for replies to it
         self.waiters: dict[str, asyncio.Queue[Delivery]] = {}
         # facade task id -> its peer side
