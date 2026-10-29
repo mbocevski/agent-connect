@@ -409,6 +409,82 @@ fn processing_after_eviction_and_public_messages() {
     assert!(format!("{:?}", cs[0]).contains("Client"));
 }
 
+#[test]
+fn a_real_external_commit_is_refused_before_openmls_sees_it() {
+    // RFC 9420 sends an external commit as a PublicMessage, and core takes
+    // only PrivateMessage: openmls bugs in external commits can't be
+    // reached. An outsider builds a genuine one from a member's GroupInfo.
+    let (cs, mut gs) = trio();
+    let info = gs[0]
+        .mls
+        .export_group_info(cs[0].provider.crypto(), &cs[0].signer(), true)
+        .unwrap();
+    let MlsMessageBodyIn::GroupInfo(info) =
+        MlsMessageIn::tls_deserialize_exact(wire(&info).unwrap())
+            .unwrap()
+            .extract()
+    else {
+        panic!("a GroupInfo");
+    };
+    let outsider = client(40, &Arc::new(FakeClock::default()));
+    let (_, bundle) = MlsGroup::external_commit_builder()
+        .build_group(&outsider.provider, info, outsider.credential())
+        .unwrap()
+        .leaf_node_parameters(
+            LeafNodeParameters::builder()
+                .with_capabilities(capabilities())
+                .build(),
+        )
+        .load_psks(outsider.provider.storage())
+        .unwrap()
+        .build(
+            outsider.provider.rand(),
+            outsider.provider.crypto(),
+            &outsider.signer(),
+            |_| true,
+        )
+        .unwrap()
+        .finalize(&outsider.provider)
+        .unwrap();
+    let (commit, _, _) = bundle.into_contents();
+    let commit = wire(&commit).unwrap();
+    let parsed = MlsMessageIn::tls_deserialize_exact(&commit).unwrap();
+    assert_eq!(parsed.wire_format(), WireFormat::PublicMessage);
+    let ProtocolMessage::PublicMessage(public) = parsed.try_into_protocol_message().unwrap() else {
+        panic!("an external commit is a PublicMessage");
+    };
+    assert!(matches!(public.sender(), Sender::NewMemberCommit));
+
+    let before: Vec<_> = gs
+        .iter()
+        .map(|g| (g.epoch(), g.mls.export_ratchet_tree()))
+        .collect();
+    for (c, g) in cs.iter().zip(gs.iter_mut()) {
+        assert_eq!(
+            g.process(c, &commit),
+            Err(Error::UnexpectedMessage("only PrivateMessage is accepted"))
+        );
+    }
+    assert_eq!(
+        peek_header(&commit),
+        Err(Error::UnexpectedMessage("only PrivateMessage is accepted"))
+    );
+    let after: Vec<_> = gs
+        .iter()
+        .map(|g| (g.epoch(), g.mls.export_ratchet_tree()))
+        .collect();
+    assert_eq!(before, after);
+    // The group still works: a member's next commit lands everywhere.
+    let out = gs[1].update(&cs[1]).unwrap();
+    gs[1].confirm_pending_commit(&cs[1], &out.msg_id).unwrap();
+    for i in [0, 2] {
+        assert!(matches!(
+            gs[i].process(&cs[i], &out.commit),
+            Ok(Event::Commit(_))
+        ));
+    }
+}
+
 /// Review F1, malicious member: any member can write sender data naming
 /// another member's leaf. A has `Remove(B)` pending; a commit that claims
 /// A's leaf but isn't the one A sent must neither merge A's pending commit
