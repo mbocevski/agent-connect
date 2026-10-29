@@ -358,6 +358,16 @@ def test_isolation_refuses_a_facade_on_a_port(short_dir: Path) -> None:
     )
 
 
+def test_isolation_keeps_the_facade_socket_in_the_agent_dir(short_dir: Path) -> None:
+    with pytest.raises(IsolationError, match="agent_dir"):
+        check_config(
+            _isolated(short_dir, a2a_facade_socket=short_dir / "facade.sock"),
+            EUID + 2,
+            {EUID + 1},
+            set(),
+        )
+
+
 def test_the_facade_admits_the_daemons_user_and_the_agent_users(
     short_dir: Path, rng: random.Random
 ) -> None:

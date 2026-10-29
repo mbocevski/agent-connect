@@ -279,8 +279,11 @@ daemon's own user or, in the separate-OS-user mode, one of
 `isolation.agent_users`. Nothing the client sent is read, and
 `a2a_facade_peer_refused` is logged with its UID. The token is still
 required, and so is the absence of `Origin`; the client address and `Host`
-checks don't apply on the socket. A stale socket left at the path is
-replaced; any other file there stops the start. The cards name
+checks don't apply on the socket. The socket's directory must belong to the
+daemon's user, with no write access for anyone else, so nobody can replace
+the socket or swap it for a link; in the separate-OS-user mode it must be
+the agent directory. A stale socket left at the path is replaced; a socket
+another server is listening on, or any other file, stops the start. The cards name
 `http://localhost/g/<group_id>/`: the socket carries every request, and the
 URL gives only the path.
 

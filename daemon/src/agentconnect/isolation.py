@@ -221,6 +221,14 @@ def check_config(cfg: Config, euid: int, agent_uids: set[int], human_uids: set[i
         # Any local user could hold the port and take the clients' token.
         msg = "isolation needs a2a.facade_socket: a TCP client's user can't be checked"
         raise IsolationError(msg)
+    if (
+        cfg.a2a_facade_socket is not None
+        and cfg.a2a_facade_socket.parent != cfg.isolation_agent_dir
+    ):
+        # The agent directory is the daemon's and only it can write there,
+        # so nobody can replace the socket; agents' users can reach it.
+        msg = "isolation: a2a.facade_socket must be in isolation.agent_dir"
+        raise IsolationError(msg)
     if (cfg.webhook_socket or cfg.a2a_local_agent_socket) is not None and not agent_uids:
         # Only an agent user may serve a receiver: with none, every
         # delivery would be refused and retried forever.

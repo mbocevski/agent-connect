@@ -53,8 +53,9 @@ is no user boundary to put between them.
   stops the start too. The receiver directory's permissions are defence in
   depth, not the boundary.
 - **The A2A facade is a socket too.** With the facade on, it must be on
-  `a2a.facade_socket` (in the agent directory, so agents' users can reach
-  it); a `facade_port` stops the start. The daemon closes a connection to
+  `a2a.facade_socket`, in the agent directory (so agents' users can reach
+  it, and only the daemon's user can replace it); a `facade_port` or a
+  socket elsewhere stops the start. The daemon closes a connection to
   it unless its user is the daemon's own or one of `isolation.agent_users`,
   before anything is read (`a2a_facade_peer_refused`, with the UID), so a
   user who isn't listed gets nothing even with the facade token
@@ -74,7 +75,8 @@ is no user boundary to put between them.
   - a webhook or local A2A agent is set without its socket
     (`webhook.callback_url` without `webhook.callback_socket`,
     `a2a.local_agent_url` without `a2a.local_agent_socket`), or the A2A
-    facade is on a port (`a2a.facade_port`; use `a2a.facade_socket`);
+    facade is on a port (`a2a.facade_port`; use `a2a.facade_socket`) or
+    its socket isn't in the agent directory;
   - the data directory isn't owned by the daemon's user with mode 0700, or a
     token or `webhook-secret` isn't a regular file owned by it with mode 0600;
   - the agent directory isn't owned by the daemon's user and

@@ -571,8 +571,9 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "Serve the A2A facade on this Unix socket instead of a port: a connection is "
         "accepted only from the daemon's user (and `isolation.agent_users` in the "
         "separate-OS-user mode), before anything is read "
-        "([adapters/a2a.md](adapters/a2a.md#facade-on-a-unix-socket)). Required in the "
-        "separate-OS-user mode.",
+        "([adapters/a2a.md](adapters/a2a.md#facade-on-a-unix-socket)). Its directory must "
+        "be the daemon user's, writable by nobody else. Required in the separate-OS-user "
+        "mode, in `isolation.agent_dir`.",
     ),
     ConfigKey(
         "a2a.context_messages",

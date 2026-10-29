@@ -30,7 +30,6 @@ import asyncio
 import contextlib
 import hmac
 import re
-import socket
 import time
 from collections import OrderedDict
 from collections.abc import Callable
@@ -534,12 +533,15 @@ class Facade:
         group.apps[member] = app
         return app
 
-    def _admit(self, conn: socket.socket) -> bool:
+    def _admit(self, conn: Any) -> bool:
         """Unix socket: whether the connection's user may use the facade,
-        from the kernel (SO_PEERCRED or getpeereid)."""
+        from the kernel (SO_PEERCRED or getpeereid). ``conn`` is the
+        connection's socket, as the event loop's transport gives it."""
         try:
+            if conn is None:
+                raise OSError("no socket")
             uid = isolation.peer_credentials(conn).uid
-        except OSError:
+        except (OSError, AttributeError):
             LOG.warning("a2a_facade_peer_unknown")
             return False
         if uid not in self._uids:

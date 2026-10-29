@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
 import os
 import random
@@ -13,9 +14,10 @@ import shutil
 import socket
 import stat
 import tempfile
+import types
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 
 import httpx
 import pytest
@@ -38,6 +40,7 @@ from a2a.types import (
 
 from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, convert
 from agentconnect.a2a_adapter import facade as facade_module
+from agentconnect.a2a_adapter import serve as serve_module
 from agentconnect.a2a_adapter.serve import LoopbackServer
 from agentconnect.adapter import Delivery, Event, GroupView, Sender
 from agentconnect.isolation import PeerCred
@@ -533,3 +536,118 @@ async def test_the_facade_socket_replaces_a_stale_one_only(sockdir: Path, tmp_pa
     stale.close()  # left behind by an earlier run
     adapter = await socket_facade(sockdir, tmp_path)
     await adapter.aclose()
+
+
+# -- the socket server itself (serve.UnixServer) ------------------------------
+
+
+async def _reached_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+    if scope["type"] == "http":
+        REACHED.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+
+REACHED: list[str] = []
+
+
+def _ask(path: Path) -> bytes:
+    with socket.socket(socket.AF_UNIX) as c:
+        c.settimeout(5)
+        c.connect(str(path))
+        try:
+            c.sendall(b"GET /secret HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            return c.recv(4096)
+        except OSError:
+            return b""
+
+
+def _loops() -> list[Any]:
+    loops: list[Any] = [pytest.param(asyncio.new_event_loop, id="asyncio")]
+    try:
+        uvloop = importlib.import_module("uvloop")  # optional: not a dependency
+    except ImportError:
+        loops.append(pytest.param(None, id="uvloop", marks=pytest.mark.skip("no uvloop")))
+    else:
+        loops.append(pytest.param(uvloop.new_event_loop, id="uvloop"))
+    return loops
+
+
+@pytest.mark.parametrize("loop_factory", _loops())
+def test_the_peer_check_holds_on_every_event_loop(sockdir: Path, loop_factory: Any) -> None:
+    # The check is in the protocol, not in the listening socket's accept(),
+    # which uvloop doesn't call from Python.
+    seen: list[object] = []
+
+    def refuse(sock: object) -> bool:
+        seen.append(sock)
+        return False
+
+    async def run() -> bytes:
+        server = serve_module.UnixServer(_reached_app, sockdir / "f.sock", refuse)
+        await server.start()
+        try:
+            return await asyncio.to_thread(_ask, sockdir / "f.sock")
+        finally:
+            await server.stop()
+
+    REACHED.clear()
+    with asyncio.Runner(loop_factory=loop_factory) as runner:
+        answer = runner.run(run())
+    assert answer == b""
+    assert REACHED == []
+    assert len(seen) == 1
+
+
+async def test_the_socket_directory_must_be_private(sockdir: Path) -> None:
+    os.chmod(sockdir, 0o775)  # noqa: S103 - group-writable on purpose: the case refused
+    server = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True)
+    with pytest.raises(PermissionError, match="only it can write"):
+        await server.start()
+
+
+async def test_a_running_server_at_the_path_is_not_replaced(sockdir: Path) -> None:
+    first = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True)
+    await first.start()
+    try:
+        second = serve_module.UnixServer(_reached_app, sockdir / "f.sock", lambda _s: True)
+        with pytest.raises(FileExistsError, match="in use"):
+            await second.start()
+        assert (await asyncio.to_thread(_ask, sockdir / "f.sock")).startswith(b"HTTP/1.1 200")
+    finally:
+        await first.stop()
+
+
+@pytest.mark.parametrize(("gid", "mode"), [(None, 0o600), (os.getgid(), 0o660)])
+async def test_the_mode_is_set_at_bind_and_no_link_is_followed(
+    sockdir: Path, monkeypatch: pytest.MonkeyPatch, gid: int | None, mode: int
+) -> None:
+    path = sockdir / "f.sock"
+    server = serve_module.UnixServer(_reached_app, path, lambda _s: True, gid)
+    await server.start()
+    assert stat.S_IMODE(path.lstat().st_mode) == mode
+    await server.stop()
+    # Someone who could write to the directory swaps the socket for a link
+    # right after bind(): nothing done through the path afterwards reaches
+    # the link's target.
+    victim = sockdir / "victim"
+    victim.write_text("secret")
+    victim.chmod(0o600)
+
+    class Racing(socket.socket):
+        @override
+        def bind(self, address: Any) -> None:
+            super().bind(address)
+            if self.family == socket.AF_UNIX:
+                os.unlink(address)
+                os.symlink(victim, address)
+
+    fake = types.SimpleNamespace(
+        socket=Racing, AF_UNIX=socket.AF_UNIX, SOCK_STREAM=socket.SOCK_STREAM
+    )
+    monkeypatch.setattr(serve_module, "socket", fake)
+    racing = serve_module.UnixServer(_reached_app, path, lambda _s: True, gid)
+    await racing.start()
+    await racing.stop()
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+    assert victim.read_text() == "secret"
