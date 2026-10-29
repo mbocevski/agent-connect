@@ -15,20 +15,18 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from typer.testing import CliRunner
 
 from agentconnect.apiclient import ApiClient, ApiClientError
-from agentconnect.cli import app
 from agentconnect.cli_json import SCHEMAS
 from agentconnect.config import load_config
 from agentconnect.runtime.api import ApiServer
 from agentconnect.runtime.engine import DaemonError
 from agentconnect.shapes import conforms
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import WAIT, Cluster, Node, converged, status
 from agentconnect_harness.relay import on_free_port
 
 GroupFixture = Callable[..., Awaitable[tuple[list[Node], str]]]
-runner = CliRunner()
 
 
 def config_for(data_dir: Path, relay_url: str, tcp_port: int = 0) -> Path:
@@ -47,9 +45,7 @@ def config_for(data_dir: Path, relay_url: str, tcp_port: int = 0) -> Path:
 def cli(config: Path, *args: str, input: str | None = None) -> tuple[int, Any]:
     """`agentconnect <args> --json --config <config>`: the exit code and the
     JSON it printed."""
-    result = runner.invoke(app, [*args, "--json", "--config", str(config)], input=input)
-    if result.exception and not isinstance(result.exception, SystemExit):
-        raise result.exception
+    result = run_cli([*args, "--json", "--config", str(config)], input=input)
     lines = result.stdout.strip().splitlines()
     return result.exit_code, json.loads(lines[-1]) if lines else None
 

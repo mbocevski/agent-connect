@@ -31,6 +31,7 @@ from agentconnect.mcp.backend import AttachBackend, OwnerGoneError, ToolError
 from agentconnect.runtime.api import MAX_PENDING, MAX_PENDING_HARD, ApiServer
 from agentconnect.sockets import local_async_tcp_transport
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import WAIT, Cluster, Node, api_token
 from agentconnect_harness.relay import on_free_port
 from agentconnect_sdk import AgentConnect, AgentConnectError
@@ -388,22 +389,19 @@ async def test_api_over_loopback_tcp_and_cli_status(cluster: Cluster) -> None:
     assert info["identity"] == node.me
     with pytest.raises(ApiClientError, match="not_found"):
         await asyncio.to_thread(client.request, "GET", "/v0/nope")
-    runner = CliRunner()
     cfg_file = node.config.data_dir / "config.toml"
     cfg_file.write_text(
         f'[relay]\nurl = "{node.config.relay_url}"\n[daemon]\ndata_dir = "{node.config.data_dir}"\n'
         f"[api]\ntcp_port = {node.daemon.config.api_tcp_port}\n",
         encoding="utf-8",
     )
-    result = await asyncio.to_thread(runner.invoke, app, ["status", "--config", str(cfg_file)])
+    result = await asyncio.to_thread(run_cli, ["status", "--config", str(cfg_file)])
     assert result.exit_code == 0, result.output
     assert "fingerprint" in result.stdout
-    result = await asyncio.to_thread(
-        runner.invoke, app, ["status", "--json", "--config", str(cfg_file)]
-    )
+    result = await asyncio.to_thread(run_cli, ["status", "--json", "--config", str(cfg_file)])
     assert node.me in result.stdout
     await server.stop()
-    result = await asyncio.to_thread(runner.invoke, app, ["status", "--config", str(cfg_file)])
+    result = await asyncio.to_thread(run_cli, ["status", "--config", str(cfg_file)])
     assert result.exit_code == 5
     assert "cannot reach" in result.output
 

@@ -13,21 +13,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from typer.testing import CliRunner
 
-from agentconnect.cli import app
 from agentconnect.deliveries import DeliveryQueue
 from agentconnect.keystore import DataDirLock
 from agentconnect.mcp.tools import HUMAN_ONLY_NOTE, UNTRUSTED_NOTE
 from agentconnect.runtime.agent import a2a_text
 from agentconnect.tokens import HUMAN_TOKEN_FILE
+from agentconnect_harness.cli import run_cli
 from agentconnect_harness.cluster import WAIT, Cluster
 from agentconnect_harness.mcp import McpClient, McpInstance
 
 # Scenarios about the MCP host itself: the cluster's own host doesn't matter.
 pytestmark = pytest.mark.hosts("daemon")
 
-runner = CliRunner()
 
 AGENT_TOOLS = {
     "agentconnect_create_group",
@@ -65,9 +63,7 @@ def human_cli(instance: McpInstance, *args: str) -> tuple[int, str]:
     """``agentconnect ...`` as the human, against the server's local API."""
     config = instance.data_dir.parent / f"{instance.name}-cli.toml"
     config.write_text(f'[daemon]\ndata_dir = "{instance.data_dir}"\n', encoding="utf-8")
-    result = runner.invoke(app, [*args, "--config", str(config)])
-    if result.exception and not isinstance(result.exception, SystemExit):
-        raise result.exception
+    result = run_cli([*args, "--config", str(config)])
     return result.exit_code, result.stdout
 
 
