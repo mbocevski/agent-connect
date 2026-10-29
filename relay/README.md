@@ -20,7 +20,9 @@ agentconnect-relay healthcheck  # GET /healthz on AC_RELAY_METRICS_ADDR: exit 0,
 
 `healthcheck` is for container health checks: the image has no shell or
 `curl`. It reads the same `AC_RELAY_*` variables as the relay, and probes
-an unspecified address such as `0.0.0.0` on loopback. Any other argument is
+the operator listener, which is always bound (`127.0.0.1:9091` unless
+`AC_RELAY_METRICS_ADDR` says otherwise); an unspecified address such as
+`0.0.0.0` is probed on loopback. Any other argument is
 refused (exit 2).
 
 ## Configuration

@@ -55,14 +55,19 @@ list.
 ```sh
 AC_DIRECTORY_HOST=directory.example.org AC_DIRECTORY_RELAYS=relay.example.org AC_DIRECTORY_TOKEN_KEYS=<DK.pub> just directory   # in-memory store, 127.0.0.1:8090
 docker build -f directory/Dockerfile -t agentconnect-directory .   # from the repo root
-agentconnect-directory healthcheck   # GET /healthz on AC_DIRECTORY_ADDR: exit 0, or 1 and why
+agentconnect-directory healthcheck   # GET /healthz: exit 0, or 1 and why
 ```
 
 `healthcheck` is for container health checks, since the image has no shell
 or `curl` (in compose: `test: ["CMD", "/usr/local/bin/agentconnect-directory",
 "healthcheck"]`). It reads the same `AC_DIRECTORY_*` variables as the
-directory, and probes an unspecified address such as `0.0.0.0` on loopback.
-Any other argument is refused (exit 2).
+directory. It probes the metrics listener (`AC_DIRECTORY_METRICS_ADDR`)
+when one is set, else the directory's listener (`AC_DIRECTORY_ADDR`), and an
+unspecified address such as `0.0.0.0` on loopback. Set
+`AC_DIRECTORY_METRICS_ADDR` when the check decides restarts: the public
+listener's connection caps can refuse a probe while the directory is busy
+or under attack, and a restart would only drop its rate-limit windows. Any
+other argument is refused (exit 2).
 
 Releases publish the image for `linux/amd64` and `linux/arm64` as
 `ghcr.io/mbocevski/agentconnect-directory:<version>`, signed and with build
@@ -89,7 +94,7 @@ give the supervisor a longer stop timeout too (`docker stop -t`,
 | `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header reverse proxies append the client address to, for rate limiting. Believed only on connections from `AC_DIRECTORY_TRUSTED_PROXIES`, which it requires. |
 | `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6), `/0` included, are refused. Write IPv4 proxies as IPv4 blocks: a peer on an IPv4-mapped IPv6 address is matched as IPv4. |
 | `AC_DIRECTORY_TRUST_ANY_PROXY` | unset | `1` allows the broad blocks above. |
-| `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. |
+| `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. It serves `/healthz` too, without the public listener's connection caps, and `healthcheck` probes it. |
 | `AC_DIRECTORY_SHUTDOWN_GRACE_SECS` | `8` | After SIGTERM or SIGINT, how long open connections may hold the exit up (1 to 3600 seconds). |
 | `AC_DIRECTORY_HEADER_TIMEOUT_SECS` | `10` | How long a request head may take, from its first byte (from the connection's start, for the first request); a slower one is closed (1 to 3600 seconds). |
 | `AC_DIRECTORY_IDLE_TIMEOUT_SECS` | `75` | How long a connection may stay open between a response and the next request (1 to 3600 seconds). Keep it above the keep-alive of the reverse proxy in front. |

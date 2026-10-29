@@ -766,6 +766,10 @@ pub fn metrics_app<S: Store>(dir: Arc<Directory<S>>) -> Router {
     });
     Router::new()
         .route("/metrics", get(metrics::<S>))
+        // For health checks: the public listener's connection caps can
+        // refuse a probe under load, and an orchestrator would then restart
+        // a working directory.
+        .route("/healthz", get(healthz))
         .with_state(state)
 }
 

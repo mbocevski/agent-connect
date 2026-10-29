@@ -91,7 +91,8 @@ docker run -d --name relay \
   20s` in compose.
 - **Health checks.** The image has no shell or `curl`, so the binary checks
   itself: `agentconnect-relay healthcheck` asks the operator listener
-  (`AC_RELAY_METRICS_ADDR`) for `/healthz` and exits 0 when the relay
+  (`AC_RELAY_METRICS_ADDR`, always bound, `127.0.0.1:9091` by default) for
+  `/healthz` and exits 0 when the relay
   answers, 1 with the reason otherwise. It runs inside the container with
   the relay's environment, so it finds the listener the relay was given; an
   unspecified address such as `0.0.0.0` is probed on loopback.
@@ -114,8 +115,12 @@ services:
       retries: 3
 ```
 
-The directory has the same subcommand, `agentconnect-directory healthcheck`,
-which probes its own listener (`AC_DIRECTORY_ADDR`).
+The directory has the same subcommand, `agentconnect-directory healthcheck`.
+It probes the directory's metrics listener (`AC_DIRECTORY_METRICS_ADDR`)
+when one is set, and its public listener (`AC_DIRECTORY_ADDR`) otherwise.
+Set the metrics listener for a check that restarts the directory: under
+load or an attack the public listener's connection caps can refuse the
+probe, and a restart would only drop the directory's rate-limit windows.
 
 To run the binary without a container, build it with
 `cargo build --release -p agentconnect-relay` and run it under a service
