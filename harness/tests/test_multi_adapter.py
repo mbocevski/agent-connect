@@ -483,6 +483,17 @@ async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
     a, b, gid = await pair(cluster, stuck)
     acked = watch_acks(a)
     sent = [f"secret-{i}-" + "x" * 900 for i in range(8)]
+    # The stall names the adapters whose acks for the oldest pending message
+    # the daemon has not recorded when the limit is first crossed. The
+    # recording adapter has the capabilities message when `pair` returns,
+    # but the daemon records its ack a moment later: wait for it, or a
+    # burst that crosses the limit in that moment names the recording adapter.
+    await a.wait(
+        lambda: all(
+            a.daemon.store.delivered_to(row.seq, "recording")
+            for row in a.daemon.store.pending_deliveries()
+        )
+    )
     for text in sent:
         b.daemon.send_message(gid, {"text": text})
     assert await a.wait_texts(gid, 8) == sent
@@ -516,6 +527,41 @@ async def test_a_dead_adapter_stops_the_early_ack_past_the_pending_limits(
     await until(lambda: a.clock.sleepers > 0)
     await advance(8 * 24 * 3600)
     await a.wait(lambda: len(recorded(a, "delivery_stalled")) == 2)
+
+
+async def test_an_adapter_whose_ack_is_not_recorded_yet_is_named_when_a_group_stalls(
+    cluster: Cluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``delivery_stalled`` names the adapters whose acks for the oldest
+    pending message are not recorded when the limit is crossed, not only the
+    one that is stuck for good: an adapter that has the message but returns
+    from ``deliver`` late is named too."""
+    monkeypatch.setattr("agentconnect.runtime.engine.PENDING_MAX_BYTES", 4096)
+    stuck = Stuck()
+    a = await cluster.node("a", adapters=("recording", stuck.name), make_adapters=extra(stuck))
+    a.events_may_fail = True
+    b = await cluster.node("b")
+    release = asyncio.Event()
+    deliver = a.adapter.deliver
+
+    async def late(
+        group: GroupView, sender: Sender, to: list[str], inner: Delivery
+    ) -> DeliveryResult:
+        result = await deliver(group, sender, to, inner)
+        await release.wait()  # it has the message; the daemon has no ack yet
+        return result
+
+    monkeypatch.setattr(a.adapter, "deliver", late)
+    gid = a.daemon.create_group("Team", "Plan the release")
+    await a.idle()
+    await cluster.invite(a, b, gid)
+    await announced(a, b, gid)
+    for i in range(8):
+        b.daemon.send_message(gid, {"text": f"secret-{i}-" + "x" * 900})
+    await a.wait(lambda: bool(recorded(a, "delivery_stalled")))
+    (stalled,) = recorded(a, "delivery_stalled")
+    assert stalled["data"]["adapters"] == ["recording", "stuck"]
+    release.set()
 
 
 async def test_an_adapter_taken_out_gets_nothing_more_of_its_batch(
