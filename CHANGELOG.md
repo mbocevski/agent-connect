@@ -28,7 +28,7 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `isolation.agent_users` in the separate-OS-user mode), before anything is
   read.
 - `agentconnect-relay backup <path>`: an online copy of the relay's database
-  to a new 0600 file, in a directory only the relay's user (or root) can
+  to a new 0600 file, under directories only the relay's user (or root) can
   change, taken by the relay binary in its own container, so no
   `sqlite3` (which the image lacks) or root-owned `-wal`/`-shm` files are
   involved. `docs/relay-operations.md` describes backup and restore,

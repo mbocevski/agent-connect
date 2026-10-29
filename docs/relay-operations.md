@@ -282,8 +282,9 @@ of the last committed state (SQLite `VACUUM INTO` on a read-only
 connection), without the space deletes freed. It refuses a path that
 exists, writes the copy in a private directory beside it and links it
 into place (so nothing swapped in at the path is followed or replaced),
-refuses a directory that isn't the relay user's (or root's) or that its
-group or others can write unless it is sticky (`/data` qualifies),
+refuses a path where any directory from `/` down isn't the relay user's
+(or root's), is writable by its group or others without being sticky, or
+is a symlink (`/` and `/data` in the container qualify),
 creates it 0600 (it holds every queued ciphertext) and
 prints its size; it needs free space on the volume for a full copy. While
 it runs it holds a read snapshot, so the relay can't fold its WAL back into

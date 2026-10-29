@@ -12,7 +12,7 @@
 //! is there already, and the directory is removed. The copy is 0600.
 
 use std::fs::{DirBuilder, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sqlx::sqlite::SqliteConnectOptions;
@@ -40,9 +40,14 @@ pub async fn backup(db: &str, target: &Path) -> Result<u64, String> {
     if target.symlink_metadata().is_ok() {
         return Err(exists(target));
     }
-    let parent = parent_of(target);
-    let parent_meta = closed_parent(parent)?;
-    let private = private_dir(parent)?;
+    let target = absolute(target)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| "the backup path needs a file name".to_owned())?
+        .to_path_buf();
+    let chain = secure_chain(&parent)?;
+    let parent_id = dir_id(&chain[chain.len() - 1].1);
+    let private = private_dir(&parent)?;
     let copy = private.join("backup.db");
     let mut create = OpenOptions::new();
     create.write(true).create_new(true);
@@ -56,63 +61,94 @@ pub async fn backup(db: &str, target: &Path) -> Result<u64, String> {
         }
     };
     // This process created the file: its owner is our user, from our own
-    // handle. With the parent ours (or root's), nobody else can rename the
-    // private directory away from now on.
-    if let Err(e) = owned_by_us_or_root(parent, &parent_meta, &file) {
+    // handle. With every directory up to / ours or root's, nobody else can
+    // rename the private directory, or any directory above it, from now on.
+    if let Err(e) = owned_by_us_or_root(&chain, &file) {
         // Remove only what we made: the directory may not be ours any more.
         let _ = std::fs::remove_file(&copy);
         let _ = std::fs::remove_dir(&private);
         return Err(e);
     }
     drop(file);
-    let copied = copy_and_place(&source, &copy, target).await;
+    let copied = copy_and_place(&source, &copy, &target, &parent, parent_id).await;
     let _ = std::fs::remove_dir_all(&private);
     copied
 }
 
-/// The directory `target` goes in.
-fn parent_of(target: &Path) -> &Path {
-    match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
+/// `target` as an absolute path of plain components: the working directory
+/// (as the kernel reports it, without symlinks) joined with a relative
+/// path, and `..` refused, so the chain checked is the one written to.
+fn absolute(target: &Path) -> Result<PathBuf, String> {
+    let joined = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot read the working directory: {e}"))?
+            .join(target)
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::ParentDir => {
+                return Err(format!("{}: use a path without ..", target.display()));
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
     }
+    Ok(out)
 }
 
-/// The parent must be a real directory that only its owner can change
-/// entries in: no group or other write, unless it is sticky. Otherwise
-/// another user could rename the private directory away and plant theirs
-/// before the copy is written (the rule `a2a.facade_socket` uses too).
-fn closed_parent(parent: &Path) -> Result<std::fs::Metadata, String> {
-    let meta = parent
-        .symlink_metadata()
-        .map_err(|e| format!("cannot use {}: {e}", parent.display()))?;
-    if !meta.file_type().is_dir() {
+/// Every directory from / down to `parent`, each a real directory (lstat:
+/// a symlink anywhere is refused) that only its owner can change entries
+/// in: no group or other write, unless it is sticky (the OpenSSH rule for
+/// key directories). Otherwise another user could rename the private
+/// directory, or a directory above it, away and plant theirs before the
+/// copy is written. Owners are checked once this process's user is known
+/// ([`owned_by_us_or_root`]).
+fn secure_chain(parent: &Path) -> Result<Vec<(PathBuf, std::fs::Metadata)>, String> {
+    let mut chain = Vec::new();
+    let mut at = PathBuf::new();
+    for c in parent.components() {
+        at.push(c);
+        let meta = at
+            .symlink_metadata()
+            .map_err(|e| format!("cannot use {}: {e}", at.display()))?;
+        if !meta.file_type().is_dir() {
+            return Err(format!(
+                "{} is not a directory (a symlink in the path is refused)",
+                at.display()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = meta.permissions().mode();
+            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+                return Err(format!(
+                    "{} is writable by its group or others: back up into a directory \
+                     only its owner can change, under directories only theirs can (or \
+                     sticky ones)",
+                    at.display()
+                ));
+            }
+        }
+        chain.push((at.clone(), meta));
+    }
+    if chain.is_empty() {
         return Err(format!(
-            "{} is not a directory (a symlink is refused)",
+            "{}: no directory to back up into",
             parent.display()
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = meta.permissions().mode();
-        if mode & 0o022 != 0 && mode & 0o1000 == 0 {
-            return Err(format!(
-                "{} is writable by its group or others: back up into a directory \
-                 only its owner can write (or a sticky one)",
-                parent.display()
-            ));
-        }
-    }
-    Ok(meta)
+    Ok(chain)
 }
 
-/// The parent belongs to this process's user (the owner of `ours`, a file
-/// it just created) or to root.
+/// Every directory in `chain` belongs to this process's user (the owner of
+/// `ours`, a file it just created) or to root.
 #[cfg(unix)]
 fn owned_by_us_or_root(
-    parent: &Path,
-    parent_meta: &std::fs::Metadata,
+    chain: &[(PathBuf, std::fs::Metadata)],
     ours: &std::fs::File,
 ) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
@@ -120,36 +156,71 @@ fn owned_by_us_or_root(
         .metadata()
         .map_err(|e| format!("cannot read the backup file: {e}"))?
         .uid();
-    let owner = parent_meta.uid();
-    if owner == me || owner == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} belongs to user {owner}, not this one ({me}) or root: back up into \
-             a directory this user owns",
-            parent.display()
-        ))
+    for (dir, meta) in chain {
+        let owner = meta.uid();
+        if owner != me && owner != 0 {
+            return Err(format!(
+                "{} belongs to user {owner}, not this one ({me}) or root: back up \
+                 into a directory this user owns",
+                dir.display()
+            ));
+        }
     }
+    Ok(())
 }
 
 #[cfg(not(unix))]
 fn owned_by_us_or_root(
-    _parent: &Path,
-    _parent_meta: &std::fs::Metadata,
+    _chain: &[(PathBuf, std::fs::Metadata)],
     _ours: &std::fs::File,
 ) -> Result<(), String> {
     Ok(())
 }
 
-async fn copy_and_place(source: &Path, copy: &Path, target: &Path) -> Result<u64, String> {
+/// Which directory this is: device and inode.
+#[cfg(unix)]
+fn dir_id(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(not(unix))]
+fn dir_id(_meta: &std::fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+async fn copy_and_place(
+    source: &Path,
+    copy: &Path,
+    target: &Path,
+    parent: &Path,
+    parent_id: (u64, u64),
+) -> Result<u64, String> {
     let copy_text = copy
         .to_str()
         .ok_or_else(|| "the backup path must be valid UTF-8".to_owned())?;
     vacuum_into(source, copy_text).await?;
+    still_the_same(parent, parent_id)?;
     place(copy, target)?;
     std::fs::metadata(target)
         .map(|m| m.len())
         .map_err(|e| format!("cannot read {}: {e}", target.display()))
+}
+
+/// The backstop before the link: `parent` is still the directory checked
+/// at the start (same device and inode), not one swapped in since.
+pub(crate) fn still_the_same(parent: &Path, id: (u64, u64)) -> Result<(), String> {
+    let now = parent
+        .symlink_metadata()
+        .map_err(|e| format!("cannot use {}: {e}", parent.display()))?;
+    if now.file_type().is_dir() && dir_id(&now) == id {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} was replaced during the backup; nothing was written there",
+            parent.display()
+        ))
+    }
 }
 
 /// A new 0700 directory in `parent`, on the target's file system.
@@ -235,5 +306,19 @@ mod tests {
         std::fs::remove_file(&target).unwrap();
         place(&copy, &target).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"backup");
+    }
+
+    #[test]
+    fn a_parent_swapped_during_the_copy_is_caught_before_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("out");
+        std::fs::create_dir(&parent).unwrap();
+        let id = dir_id(&parent.symlink_metadata().unwrap());
+        still_the_same(&parent, id).unwrap();
+        // Renamed away, and another directory put in its place.
+        std::fs::rename(&parent, dir.path().join("moved")).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        let err = still_the_same(&parent, id).unwrap_err();
+        assert!(err.contains("was replaced"), "{err}");
     }
 }

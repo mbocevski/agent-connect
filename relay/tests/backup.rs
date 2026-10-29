@@ -16,7 +16,10 @@ use agentconnect_relay::store::{CreateGroupOutcome, Store};
 #[tokio::test]
 async fn a_backup_of_an_open_database_holds_what_was_written() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("relay.db");
+    // The real path: on macOS the temporary directory is behind a symlink
+    // (/var), which a backup path may not contain.
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let db = base.as_path().join("relay.db");
     let db = db.to_str().unwrap();
     let store = SqliteStore::open(db).await.unwrap();
     assert!(matches!(
@@ -24,7 +27,7 @@ async fn a_backup_of_an_open_database_holds_what_was_written() {
         CreateGroupOutcome::Created
     ));
     // The relay keeps the database open (WAL): the copy is taken anyway.
-    let copy = dir.path().join("backup.db");
+    let copy = base.as_path().join("backup.db");
     let bytes = backup(db, &copy).await.unwrap();
     assert!(bytes > 0);
     assert_eq!(bytes, std::fs::metadata(&copy).unwrap().len());
@@ -33,7 +36,7 @@ async fn a_backup_of_an_open_database_holds_what_was_written() {
         0o600,
         "every queued ciphertext is in it"
     );
-    assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+    assert_eq!(leftovers(base.as_path()), Vec::<String>::new());
     drop(store);
     let restored = SqliteStore::open(copy.to_str().unwrap()).await.unwrap();
     assert!(matches!(
@@ -45,15 +48,18 @@ async fn a_backup_of_an_open_database_holds_what_was_written() {
 #[tokio::test]
 async fn an_existing_target_is_left_alone() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("relay.db");
+    // The real path: on macOS the temporary directory is behind a symlink
+    // (/var), which a backup path may not contain.
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let db = base.as_path().join("relay.db");
     let db = db.to_str().unwrap();
     let _store = SqliteStore::open(db).await.unwrap();
-    let copy = dir.path().join("backup.db");
+    let copy = base.as_path().join("backup.db");
     std::fs::write(&copy, b"yesterday's backup").unwrap();
     let err = backup(db, &copy).await.unwrap_err();
     assert!(err.contains("exists"), "{err}");
     assert_eq!(std::fs::read(&copy).unwrap(), b"yesterday's backup");
-    assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+    assert_eq!(leftovers(base.as_path()), Vec::<String>::new());
 }
 
 #[tokio::test]
@@ -61,7 +67,10 @@ async fn only_a_directory_its_owner_alone_can_change_takes_a_backup() {
     // Anyone else who could rename entries there could swap the private
     // directory for theirs before the copy is written.
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("relay.db");
+    // The real path: on macOS the temporary directory is behind a symlink
+    // (/var), which a backup path may not contain.
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let db = base.as_path().join("relay.db");
     let db = db.to_str().unwrap();
     let _store = SqliteStore::open(db).await.unwrap();
     for (mode, refused) in [
@@ -70,7 +79,7 @@ async fn only_a_directory_its_owner_alone_can_change_takes_a_backup() {
         (0o1770, false),
         (0o755, false),
     ] {
-        let out = dir.path().join(format!("out-{mode:o}"));
+        let out = base.as_path().join(format!("out-{mode:o}"));
         std::fs::create_dir(&out).unwrap();
         std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode)).unwrap();
         let copy = out.join("backup.db");
@@ -96,11 +105,39 @@ async fn only_a_directory_its_owner_alone_can_change_takes_a_backup() {
             assert_eq!(leftovers(&out), Vec::<String>::new());
         }
     }
+    // A level up counts too: a writable, non-sticky ancestor lets another
+    // user rename the whole parent away; a sticky one (like /tmp) doesn't.
+    for (mode, refused) in [(0o777, true), (0o775, true), (0o1777, false)] {
+        let above = base.as_path().join(format!("above-{mode:o}"));
+        let out = above.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::set_permissions(&above, std::fs::Permissions::from_mode(mode)).unwrap();
+        let done = backup(db, &out.join("backup.db")).await;
+        if refused {
+            let err = done.unwrap_err();
+            assert!(
+                err.contains(above.to_str().unwrap()),
+                "names the ancestor: {err}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&out).unwrap().count(),
+                0,
+                "nothing created"
+            );
+        } else {
+            done.unwrap();
+        }
+    }
     // A symlink to a fine directory is refused as the parent too.
-    let link = dir.path().join("link");
-    std::os::unix::fs::symlink(dir.path().join("out-755"), &link).unwrap();
+    let link = base.as_path().join("link");
+    std::os::unix::fs::symlink(base.as_path().join("out-755"), &link).unwrap();
     let err = backup(db, &link.join("b2.db")).await.unwrap_err();
     assert!(err.contains("not a directory"), "{err}");
+    // So is a path that climbs with ..
+    let err = backup(db, &base.as_path().join("out-755/../out-755/b3.db"))
+        .await
+        .unwrap_err();
+    assert!(err.contains(".."), "{err}");
 }
 
 /// The private directories a backup left in `dir`: none, whatever happened.
@@ -115,8 +152,11 @@ fn leftovers(dir: &std::path::Path) -> Vec<String> {
 #[tokio::test]
 async fn only_an_existing_database_file_is_backed_up() {
     let dir = tempfile::tempdir().unwrap();
-    let copy = dir.path().join("backup.db");
-    let missing = dir.path().join("none.db");
+    // The real path: on macOS the temporary directory is behind a symlink
+    // (/var), which a backup path may not contain.
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let copy = base.as_path().join("backup.db");
+    let missing = base.as_path().join("none.db");
     let err = backup(missing.to_str().unwrap(), &copy).await.unwrap_err();
     assert!(err.contains("no database"), "{err}");
     assert!(!missing.exists(), "not created by the backup");
@@ -154,7 +194,10 @@ fn run(args: &[&str], db: &std::path::Path) -> Output {
 #[tokio::test]
 async fn the_backup_subcommand_copies_a_running_relays_database() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("relay.db");
+    // The real path: on macOS the temporary directory is behind a symlink
+    // (/var), which a backup path may not contain.
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let db = base.as_path().join("relay.db");
     let mut child = Command::new(env!("CARGO_BIN_EXE_agentconnect-relay"))
         .env("AC_RELAY_ADDR", "127.0.0.1:0")
         .env("AC_RELAY_METRICS_ADDR", "127.0.0.1:0")
@@ -183,7 +226,7 @@ async fn the_backup_subcommand_copies_a_running_relays_database() {
         .contains("relay listening")
     {}
 
-    let copy = dir.path().join("backup.db");
+    let copy = base.as_path().join("backup.db");
     let out = run(&["backup", copy.to_str().unwrap()], &db);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stdout).contains("backup.db"));
