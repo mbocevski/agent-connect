@@ -33,6 +33,7 @@ async fn a_backup_of_an_open_database_holds_what_was_written() {
         0o600,
         "every queued ciphertext is in it"
     );
+    assert_eq!(leftovers(dir.path()), Vec::<String>::new());
     drop(store);
     let restored = SqliteStore::open(copy.to_str().unwrap()).await.unwrap();
     assert!(matches!(
@@ -52,6 +53,16 @@ async fn an_existing_target_is_left_alone() {
     let err = backup(db, &copy).await.unwrap_err();
     assert!(err.contains("exists"), "{err}");
     assert_eq!(std::fs::read(&copy).unwrap(), b"yesterday's backup");
+    assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+}
+
+/// The private directories a backup left in `dir`: none, whatever happened.
+fn leftovers(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".agentconnect-backup-"))
+        .collect()
 }
 
 #[tokio::test]

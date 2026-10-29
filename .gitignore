@@ -31,3 +31,12 @@ lcov.info
 
 # cargo-mutants output
 /mutants.out*/
+
+# SQLite files a local relay leaves behind (AC_RELAY_DB defaults to
+# agentconnect-relay.db in the working directory), with its WAL, shared
+# memory and clean-shutdown marker, and backups made beside them.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.db.clean-shutdown

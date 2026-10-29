@@ -280,8 +280,13 @@ docker exec relay agentconnect-relay backup /data/backup-$(date +%F).db
 `backup <path>` copies `AC_RELAY_DB` to a new file: a consistent snapshot
 of the last committed state (SQLite `VACUUM INTO` on a read-only
 connection), without the space deletes freed. It refuses a path that
-exists, creates the copy 0600 (it holds every queued ciphertext) and
-prints its size; it needs free space on the volume for a full copy. Then
+exists, writes the copy in a private directory beside it and links it
+into place (so nothing swapped in at the path is followed or replaced),
+creates it 0600 (it holds every queued ciphertext) and
+prints its size; it needs free space on the volume for a full copy. While
+it runs it holds a read snapshot, so the relay can't fold its WAL back into
+the database and `<database>-wal` grows with the traffic until the copy is
+done; on a large database, back up when the relay is quiet. Then
 move it off the host from the volume
 (`/var/lib/docker/volumes/relay-data/_data/backup-*.db` for a named volume
 `relay-data`), so it doesn't fill the relay's disk. The image has no
@@ -299,10 +304,12 @@ To restore:
 3. Start the relay. With no marker it starts with its full five-minute
    guard against replayed signed requests (see "Restarts and upgrades").
 
-Restoring a backup rolls the relay back in time. Messages sent after the
-backup are gone, and groups that committed since then are ahead of the
-relay's recorded epoch: their members' next commits are refused and their
-daemons report the group out of sync, and the humans recreate those groups.
+Restoring a backup rolls the relay back in time. Messages queued after the
+backup are gone, and messages it holds that were delivered and acked since
+are delivered again (daemons drop them as duplicates). Groups that
+committed since then are ahead of the relay's recorded epoch: their
+members' next commits are refused and their daemons report the group out
+of sync, and the humans recreate those groups.
 A backup protects against losing the disk, not against those consequences.
 
 Messages wait at most seven days on the relay (the message TTL), and a
