@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import hmac
 import ipaddress
+import logging
 import re
 import time
 from collections import OrderedDict
@@ -60,6 +61,7 @@ from a2a.types import (
     Role,
     SendMessageRequest,
     Task,
+    TaskPushNotificationConfig,
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
@@ -348,11 +350,27 @@ class _GroupApps:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self.tasks = InMemoryTaskStore()
         self.push = InMemoryPushNotificationConfigStore()
-        self.sender = BasePushNotificationSender(
-            http, self.push, push_url_validator=loopback_push_url
-        )
+        self.sender = _PushSender(http, self.push, push_url_validator=loopback_push_url)
         self.apps: dict[str | None, Any] = {}
         self.handlers: list[DefaultRequestHandler] = []
+
+
+# a2a-sdk logs a failed push with its URL, query secrets included, and a
+# traceback; the facade logs its own event instead (_PushSender).
+logging.getLogger("a2a.server.tasks.base_push_notification_sender").setLevel(logging.CRITICAL)
+
+
+class _PushSender(BasePushNotificationSender):
+    """a2a-sdk's push sender, logging a failure with the task id only."""
+
+    @override
+    async def _dispatch_notification(
+        self, event: Any, push_info: TaskPushNotificationConfig, task_id: str
+    ) -> bool:
+        sent = await super()._dispatch_notification(event, push_info, task_id)
+        if not sent:
+            LOG.warning("a2a_facade_push_failed", task=task_id)
+        return sent
 
 
 async def loopback_push_url(url: str) -> bool:

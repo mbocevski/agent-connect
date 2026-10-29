@@ -764,6 +764,11 @@ async def test_binding_the_socket_leaves_the_process_umask_alone(
         ("ftp://127.0.0.1/hook", False),
         ("http://127.0.0.1:99999/hook", False),
         ("http://user@127.0.0.1/hook", False),
+        # urlsplit and httpx disagree on the host of these: the "@" rule
+        # refuses them all.
+        ("http://127.0.0.1\\@evil.example/h", False),
+        ("http://127.0.0.1:80@evil.example/h", False),
+        ("http://127.0.0.1%2f@evil.example/h", False),
         ("http:///hook", False),
         ("not a url", False),
     ],
@@ -816,3 +821,33 @@ RECORDED: list[bytes] = []
 async def _record(request: Request) -> Response:
     RECORDED.append(await request.body())
     return JSONResponse({})
+
+
+async def test_a_failed_push_logs_no_url(
+    setup: Any,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    rng: random.Random,
+) -> None:
+    # a2a-sdk logs a failed push with its URL (query secrets included) and a
+    # traceback; the facade logs its own event with ids only.
+    adapter, _group, _client = setup
+    assert adapter.facade is not None
+    adapter.facade._app(GID, None)
+    apps = adapter.facade._groups[GID]
+    with socket.socket() as probe:  # a loopback port nothing listens on
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    secret = f"{rng.getrandbits(64):016x}"
+    config = TaskPushNotificationConfig(
+        task_id="t1", id="cfg", url=f"http://127.0.0.1:{port}/hook?key={secret}"
+    )
+    await apps.push.set_info("t1", config, ServerCallContext())
+    task = Task(id="t1", context_id=GID, status=TaskStatus(state=TaskState.TASK_STATE_WORKING))
+    await apps.sender.send_notification("t1", task)
+    err = capsys.readouterr().err
+    assert secret not in caplog.text
+    assert secret not in err
+    events = [json.loads(line) for line in err.splitlines() if line.startswith("{")]
+    (failed,) = [e for e in events if e["event"] == "a2a_facade_push_failed"]
+    assert failed["task"] == "t1"

@@ -45,6 +45,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   any other URL, a host name included, is refused, and the URL is checked
   again before each send. A client with the facade token could make the
   daemon POST task updates, peer replies included, to any address (SR-31).
+- A push notification the facade can't send is logged with its task id
+  only: a2a-sdk's own log line, which held the push URL with any secret in
+  its query and a traceback, is silenced.
 
 ## [0.1.0a2] - 2026-10-29
 

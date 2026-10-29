@@ -362,7 +362,8 @@ and rate limits apply to them.
   host name, `localhost` included, is refused, so nothing is looked up.
   Setting another URL fails with an A2A error, and the URL is checked again
   before each notification (`a2a_facade_push_url_refused`, with the reason
-  and never the URL).
+  and never the URL). A notification that can't be sent is logged as
+  `a2a_facade_push_failed` with the task id only.
   Push notifications go to the push URL itself: the facade ignores
   `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` and doesn't follow redirects.
   `CancelTask` also sends an `a2a.task_cancel` to the member running the
