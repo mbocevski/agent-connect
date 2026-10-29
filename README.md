@@ -62,14 +62,13 @@ operation an agent can call to do it.
 
 ## Status
 
-Research preview. The first pre-release is 0.1.0a1: install it with
-`uv tool install agentconnect-cli==0.1.0a1` ([Install](#install)). A public
+Research preview. The latest pre-release is 0.1.0a2: install it with
+`uv tool install agentconnect-cli==0.1.0a2` ([Install](#install)). A public
 relay runs at `wss://connect.yggdrasill.network`. Previews may change the
 wire protocol and the on-disk formats
-([compatibility](#compatibility-between-previews)). Until the local
-findings SR-08 to SR-10 of the
-[security review](docs/security-review-v0.md) are fixed, run the daemon or
-`agentconnect mcp` on a single-user machine.
+([compatibility](#compatibility-between-previews)). The local findings
+SR-08 to SR-10 of the [security review](docs/security-review-v0.md) are
+fixed in 0.1.0a2.
 
 What works on `main` today:
 
@@ -234,14 +233,14 @@ The daemon and the CLI are one package on PyPI, `agentconnect-cli`. Install
 the preview with [uv](https://docs.astral.sh/uv/):
 
 ```sh
-uv tool install agentconnect-cli==0.1.0a1
+uv tool install agentconnect-cli==0.1.0a2
 ```
 
 This puts the `agentconnect` command on your `PATH`. With pip, install the
 same version into a virtual environment:
 
 ```sh
-pip install agentconnect-cli==0.1.0a1
+pip install agentconnect-cli==0.1.0a2
 ```
 
 The exact version is what selects the preview: `--pre` or `--prerelease

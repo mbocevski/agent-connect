@@ -8,6 +8,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+## [0.1.0a2] - 2026-10-29
+
 ### Added
 
 - Receivers on Unix sockets: `webhook.callback_socket` and
