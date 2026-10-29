@@ -10,6 +10,7 @@ use axum::Router;
 use axum::routing::get;
 
 pub mod auth;
+pub mod backup;
 pub mod config;
 pub mod conn;
 pub mod landing;

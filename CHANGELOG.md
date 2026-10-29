@@ -27,6 +27,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   a connection to it unless its user is the daemon's own (or one of
   `isolation.agent_users` in the separate-OS-user mode), before anything is
   read.
+- `agentconnect-relay backup <path>`: an online copy of the relay's database
+  to a new 0600 file, taken by the relay binary in its own container, so no
+  `sqlite3` (which the image lacks) or root-owned `-wal`/`-shm` files are
+  involved. `docs/relay-operations.md` describes backup and restore,
+  including deleting the clean-shutdown marker. Any other argument to the
+  relay binary is now refused (exit 2) instead of ignored.
 
 ### Changed
 

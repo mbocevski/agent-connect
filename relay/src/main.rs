@@ -75,15 +75,41 @@ fn healthcheck() -> i32 {
     }
 }
 
+/// `agentconnect-relay backup <path>`: an online copy of `AC_RELAY_DB` to
+/// the new file `path`, while the relay runs. 0 with the path and size on
+/// stdout, 1 with the reason on stderr.
+async fn backup(target: &std::ffi::OsStr) -> i32 {
+    let db = match Config::from_env() {
+        Ok(config) => config.db,
+        Err(reason) => {
+            eprintln!("backup failed: {reason}");
+            return 1;
+        }
+    };
+    let target = std::path::Path::new(target);
+    match agentconnect_relay::backup::backup(&db, target).await {
+        Ok(bytes) => {
+            println!("backed up {db} to {} ({bytes} bytes)", target.display());
+            0
+        }
+        Err(reason) => {
+            eprintln!("backup failed: {reason}");
+            1
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut args = std::env::args_os().skip(1);
-    match (args.next(), args.next()) {
-        (None, _) => {}
-        (Some(cmd), None) if cmd == "healthcheck" => std::process::exit(healthcheck()),
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    match args.as_slice() {
+        [] => {}
+        [cmd] if cmd == "healthcheck" => std::process::exit(healthcheck()),
+        [cmd, target] if cmd == "backup" => std::process::exit(backup(target).await),
         _ => {
             eprintln!(
-                "usage: agentconnect-relay [healthcheck] (configured by AC_RELAY_* variables)"
+                "usage: agentconnect-relay [healthcheck | backup <path>] \
+                 (configured by AC_RELAY_* variables)"
             );
             std::process::exit(2);
         }

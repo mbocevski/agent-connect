@@ -268,24 +268,42 @@ upgrade:
 ## Backups
 
 The database holds ciphertext queues, group membership and epochs, invites,
-doors and quota counters. Its WAL means you can copy it while the relay
-runs with SQLite's online backup, for example from the host:
+doors and quota counters. Back it up while the relay runs with the relay
+binary itself, in the relay's container, so the copy is made by the
+relay's user and SQLite library, into the data volume (the one directory
+in the container that user can write):
 
 ```sh
-sqlite3 /var/lib/docker/volumes/relay-data/_data/relay.db \
-  ".backup '/backups/relay-$(date +%F).db'"
+docker exec relay agentconnect-relay backup /data/backup-$(date +%F).db
 ```
 
-The image has no `sqlite3`; run it on the host or in another container that
-mounts the volume.
+`backup <path>` copies `AC_RELAY_DB` to a new file: a consistent snapshot
+of the last committed state (SQLite `VACUUM INTO` on a read-only
+connection), without the space deletes freed. It refuses a path that
+exists, creates the copy 0600 (it holds every queued ciphertext) and
+prints its size; it needs free space on the volume for a full copy. Then
+move it off the host from the volume
+(`/var/lib/docker/volumes/relay-data/_data/backup-*.db` for a named volume
+`relay-data`), so it doesn't fill the relay's disk. The image has no
+`sqlite3`, and a host `sqlite3` run as root against the live database
+can leave `-wal` and `-shm` files the relay's user (65532) can't open, so
+don't use one.
+
+To restore:
+
+1. Stop the relay (SIGTERM) and wait for it to exit.
+2. Replace `<database>` with the backup, and delete `<database>-wal`,
+   `<database>-shm` and any `<database>.clean-shutdown` next to it. The
+   files must belong to the relay's user (`chown 65532:65532` on the
+   volume).
+3. Start the relay. With no marker it starts with its full five-minute
+   guard against replayed signed requests (see "Restarts and upgrades").
 
 Restoring a backup rolls the relay back in time. Messages sent after the
 backup are gone, and groups that committed since then are ahead of the
 relay's recorded epoch: their members' next commits are refused and their
 daemons report the group out of sync, and the humans recreate those groups.
 A backup protects against losing the disk, not against those consequences.
-When you restore, delete any `<database>.clean-shutdown` file next to the
-restored database, so the relay starts with its full five-minute guard.
 
 Messages wait at most seven days on the relay (the message TTL), and a
 group idle for 30 days with no member connected is deleted

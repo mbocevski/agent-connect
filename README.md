@@ -82,8 +82,9 @@ What works on `main` today:
   mailboxes, the invite registry, the door registry and an invite landing
   page without JavaScript, which can link the operator's terms and abuse
   contact, with connection caps, timeouts and a frame rate limit for a
-  public deployment, and a `healthcheck` subcommand for container health
-  checks ([relay/README.md](relay/README.md); running one:
+  public deployment, a `healthcheck` subcommand for container health
+  checks and a `backup` subcommand for online copies of its database
+  ([relay/README.md](relay/README.md); running one:
   [docs/relay-operations.md](docs/relay-operations.md)).
   Each payload is stored once; traffic from non-members has its own part
   of a mailbox queue, and a per-sender budget and a storage high-water

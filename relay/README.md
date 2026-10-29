@@ -16,14 +16,19 @@ layers in front.
 just relay                      # cargo run -p agentconnect-relay
 docker build -f relay/Dockerfile -t agentconnect-relay .   # from the repo root
 agentconnect-relay healthcheck  # GET /healthz on AC_RELAY_METRICS_ADDR: exit 0, or 1 and why
+agentconnect-relay backup /data/backup.db   # online copy of AC_RELAY_DB to a new 0600 file
 ```
 
 `healthcheck` is for container health checks: the image has no shell or
 `curl`. It reads the same `AC_RELAY_*` variables as the relay, and probes
 the operator listener, which is always bound (`127.0.0.1:9091` unless
 `AC_RELAY_METRICS_ADDR` says otherwise); an unspecified address such as
-`0.0.0.0` is probed on loopback. Any other argument is
-refused (exit 2).
+`0.0.0.0` is probed on loopback.
+
+`backup <path>` copies the database while the relay runs, through the
+relay's own SQLite library and user; how to back up and restore is in
+[docs/relay-operations.md](../docs/relay-operations.md#backups). Any other
+argument is refused (exit 2).
 
 ## Configuration
 
