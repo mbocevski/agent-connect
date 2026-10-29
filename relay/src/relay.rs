@@ -803,7 +803,7 @@ pub struct Relay<S: Store> {
     /// process accepted.
     replay_floor_secs: u64,
     /// Whether each [`ClientIpWarning`] was logged already.
-    warned: [AtomicBool; 2],
+    warned: [AtomicBool; 3],
     /// When the purge last looked for idle groups, unix ms. Starts at the
     /// start time, so members have an hour to reconnect after a restart.
     idle_swept_at: AtomicU64,
@@ -918,7 +918,11 @@ impl<S: Store> Relay<S> {
             live_invites: Mutex::default(),
             live_groups: Mutex::default(),
             replay_floor_secs: 0,
-            warned: [AtomicBool::new(false), AtomicBool::new(false)],
+            warned: [
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+            ],
             idle_swept_at: AtomicU64::new(started),
             metrics,
             ws_limits: WsLimits::default(),
@@ -1149,6 +1153,14 @@ impl<S: Store> Relay<S> {
                     1,
                     "a trusted proxy's client-address header has no address at \
                      AC_RELAY_PROXY_HOPS from the right; the request counts as the proxy's",
+                ),
+                ClientIpWarning::UntrustedPeer => (
+                    2,
+                    "a request carries a client-address header (X-Forwarded-For or \
+                     Forwarded) from a peer outside AC_RELAY_TRUSTED_PROXIES: the header is \
+                     ignored, so every client behind that proxy shares its per-address \
+                     limits; list the proxy's address as the relay sees it (behind Docker, \
+                     the bridge gateway, not 127.0.0.1)",
                 ),
             };
             if !self.warned[i].swap(true, Ordering::Relaxed) {

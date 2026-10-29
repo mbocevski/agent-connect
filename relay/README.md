@@ -276,7 +276,11 @@ nginx). Entries a client writes itself are further left and never used,
 even from inside a trusted block. `ip:port` and `[v6]:port` entries are
 read, and so are RFC 7239 `for=` values with `AC_RELAY_CLIENT_IP_HEADER=forwarded`.
 A header too short for the hop count, or with no address at that place,
-counts as the proxy's address and logs a warning once.
+counts as the proxy's address and logs a warning once. A request that
+carries the header (or `X-Forwarded-For` or `Forwarded`) from a peer outside
+`AC_RELAY_TRUSTED_PROXIES` is served as that peer and logs a warning once,
+without an address: the usual cause is a proxy listed by the wrong address,
+such as `127.0.0.1` where the relay sees the Docker bridge gateway.
 
 ### Metrics
 

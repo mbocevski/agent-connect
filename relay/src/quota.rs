@@ -120,6 +120,11 @@ pub enum ClientIpWarning {
     /// The configured header came from a trusted proxy but has fewer
     /// entries than the hop count, or an entry that isn't an address.
     Unreadable,
+    /// The request carries the client-address header (or `X-Forwarded-For`
+    /// or `Forwarded`) but its peer is outside the trusted proxies: the
+    /// header is ignored and the peer is the client. Behind a proxy whose
+    /// address isn't listed, every client shares that proxy's buckets.
+    UntrustedPeer,
 }
 
 impl ClientIp {
@@ -146,7 +151,13 @@ impl ClientIp {
         };
         let trusted = |ip: IpAddr| self.trusted_proxies.iter().any(|c| c.contains(ip));
         if !peer.is_some_and(trusted) {
-            return (peer, None);
+            // A peer outside the trusted blocks that still names a client
+            // is, most likely, a proxy that isn't listed.
+            let forwarded = headers.contains_key(name)
+                || headers.contains_key("x-forwarded-for")
+                || headers.contains_key("forwarded");
+            let warning = (forwarded && peer.is_some()).then_some(ClientIpWarning::UntrustedPeer);
+            return (peer, warning);
         }
         let rfc7239 = name.as_str() == "forwarded";
         let entries: Vec<&str> = headers
@@ -478,12 +489,51 @@ mod tests {
         // A client that reaches the port directly can't choose its key.
         assert_eq!(
             c.resolve(Some(ip("198.51.100.7")), &h),
-            (Some(ip("198.51.100.7")), None)
+            (
+                Some(ip("198.51.100.7")),
+                Some(ClientIpWarning::UntrustedPeer)
+            )
         );
         // A trusted peer that sends no header is itself the client.
         assert_eq!(
             c.resolve(Some(ip("127.0.0.1")), &HeaderMap::new()),
             (Some(ip("127.0.0.1")), Some(ClientIpWarning::Unreadable))
+        );
+    }
+
+    #[test]
+    fn a_forwarded_header_from_an_untrusted_peer_warns() {
+        // The proxy is at 172.17.0.1, the trusted block is 127.0.0.1: the
+        // header is ignored, and the operator is told once.
+        let c = behind(XFF, &["127.0.0.1/32"], 1);
+        let proxy = Some(ip("172.17.0.1"));
+        for (name, value) in [(XFF, "203.0.113.9"), ("forwarded", "for=203.0.113.9")] {
+            assert_eq!(
+                c.resolve(proxy, &headers(name, &[value])),
+                (proxy, Some(ClientIpWarning::UntrustedPeer))
+            );
+        }
+        // Another configured header counts too.
+        let custom = behind("x-real-ip", &["127.0.0.1/32"], 1);
+        assert_eq!(
+            custom.resolve(proxy, &headers("x-real-ip", &["203.0.113.9"])),
+            (proxy, Some(ClientIpWarning::UntrustedPeer))
+        );
+        // A request that names no client is no sign of a proxy.
+        assert_eq!(c.resolve(proxy, &HeaderMap::new()), (proxy, None));
+        assert_eq!(
+            c.resolve(proxy, &headers("accept", &["*/*"])),
+            (proxy, None)
+        );
+        // Nor is a request with no peer address (in-memory tests).
+        assert_eq!(
+            c.resolve(None, &headers(XFF, &["203.0.113.9"])),
+            (None, None)
+        );
+        // A trusted peer is believed, with no warning.
+        assert_eq!(
+            c.resolve(Some(ip("127.0.0.1")), &headers(XFF, &["203.0.113.9"])),
+            (Some(ip("203.0.113.9")), None)
         );
     }
 

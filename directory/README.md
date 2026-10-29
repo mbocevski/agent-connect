@@ -159,8 +159,11 @@ That proxy should add `Strict-Transport-Security`. Without
 `AC_DIRECTORY_CLIENT_IP_HEADER`, every request is limited as the proxy's own
 address, so one client can use up everyone's budget (the directory warns at
 start when no proxy is configured). Set the header the proxy writes and
-`AC_DIRECTORY_TRUSTED_PROXIES` to the proxy's addresses. With nginx on the
-same machine:
+`AC_DIRECTORY_TRUSTED_PROXIES` to the proxy's addresses; the directory warns
+once, without an address, when a request carries the header (or
+`X-Forwarded-For` or `Forwarded`) from a peer outside those blocks, which is
+what a proxy listed by the wrong address looks like (behind Docker, use the
+bridge gateway, not `127.0.0.1`). With nginx on the same machine:
 
 ```nginx
 location / {

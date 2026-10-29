@@ -12,6 +12,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::body::Bytes;
 use axum::extract::{
@@ -88,6 +89,9 @@ pub struct HttpConfig {
 struct App<S: Store> {
     dir: Arc<Directory<S>>,
     config: HttpConfig,
+    /// Whether the operator has been told about a forwarded client address
+    /// from a peer that isn't a trusted proxy.
+    warned_untrusted_proxy: AtomicBool,
 }
 
 type Shared<S> = Arc<App<S>>;
@@ -638,18 +642,25 @@ async fn fallback<S: Store>(State(app): State<Shared<S>>, headers: HeaderMap) ->
 }
 
 /// The client address used for rate limiting: the trusted proxy header's
-/// last value if configured, else the TCP peer.
-fn client_ip(req: &Request, config: &HttpConfig) -> Option<IpAddr> {
+/// last value if configured, else the TCP peer. Also whether the request
+/// names a client (the header, `X-Forwarded-For` or `Forwarded`) while its
+/// peer is outside the trusted proxies, which suggests a proxy that isn't
+/// listed.
+fn client_ip(req: &Request, config: &HttpConfig) -> (Option<IpAddr>, bool) {
     let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0.ip());
     let trusted = |ip: IpAddr| config.trusted_proxies.iter().any(|c| c.contains(ip));
     let Some(name) = &config.client_ip_header else {
-        return peer;
+        return (peer, false);
     };
     if !peer.is_some_and(trusted) {
-        return peer;
+        let headers = req.headers();
+        let names_a_client = headers.contains_key(name)
+            || headers.contains_key("x-forwarded-for")
+            || headers.contains_key("forwarded");
+        return (peer, peer.is_some() && names_a_client);
     }
     // Walk the chain from the right (each proxy appends the address it saw),
     // skipping trusted proxies; the first untrusted hop is the client. An
@@ -671,7 +682,7 @@ fn client_ip(req: &Request, config: &HttpConfig) -> Option<IpAddr> {
             break;
         }
     }
-    key
+    (key, false)
 }
 
 /// The rate-limit key a request was counted under, for the handlers' own
@@ -702,7 +713,16 @@ async fn guard<S: Store>(State(app): State<Shared<S>>, mut req: Request, next: N
             .map(MatchedPath::as_str),
     );
     let method = req.method().clone();
-    let key = client_ip(&req, &app.config);
+    let (key, from_untrusted_proxy) = client_ip(&req, &app.config);
+    if from_untrusted_proxy && !app.warned_untrusted_proxy.swap(true, Ordering::Relaxed) {
+        // Never with an address: the peer and the client are not logged.
+        tracing::warn!(
+            "a request carries a client-address header (X-Forwarded-For or Forwarded) from a \
+             peer outside AC_DIRECTORY_TRUSTED_PROXIES: the header is ignored, so every client \
+             behind that proxy shares its rate limits and its connection cap; list the proxy's \
+             address as the directory sees it (behind Docker, the bridge gateway, not 127.0.0.1)"
+        );
+    }
     req.extensions_mut().insert(ClientKey(key));
     let limited = app.dir.rate_check(key, class_of(route, &req));
     let mut resp = match limited {
@@ -742,6 +762,7 @@ pub fn metrics_app<S: Store>(dir: Arc<Directory<S>>) -> Router {
     let state = Arc::new(App {
         dir,
         config: HttpConfig::default(),
+        warned_untrusted_proxy: AtomicBool::new(false),
     });
     Router::new()
         .route("/metrics", get(metrics::<S>))
@@ -753,7 +774,11 @@ pub fn app<S: Store>(dir: Arc<Directory<S>>, config: HttpConfig) -> Router {
     let mcp = crate::mcp::service(Arc::clone(&dir), &dir.settings().host);
     let hide_metrics = config.hide_metrics;
     let has_fonts = config.font_dir.is_some();
-    let state = Arc::new(App { dir, config });
+    let state = Arc::new(App {
+        dir,
+        config,
+        warned_untrusted_proxy: AtomicBool::new(false),
+    });
     let router = Router::new()
         .route("/", get(home::<S>))
         .route("/index.md", get(index_md::<S>))
