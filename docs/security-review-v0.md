@@ -68,7 +68,7 @@ the protocol changes. Everything else is measured against
 |---|---|---|
 | High | 1 | Fixed in #67 |
 | Medium | 12 | SR-61 fixed in #72; SR-02 and SR-07 fixed in #71; SR-06 fixed in #74; SR-03 to SR-05 fixed in #73 (SR-05's frame rate limit in #74); SR-11 fixed in #87; SR-12 fixed in #89; SR-09 fixed in #103; SR-08 fixed in #107; SR-10 fixed in #108 |
-| Low | 29 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; SR-28 fixed in #61; SR-30 fixed in #108 and #113; SR-62 fixed in #115; the rest open, follow-up task |
+| Low | 29 | SR-13 and SR-15 fixed in #74; SR-14 fixed in #74 and #77; SR-16 fixed in #74 and #73; SR-17 and SR-18 fixed in #73; SR-19 fixed in #71; SR-28 fixed in #61; SR-30 fixed in #108 and #113; SR-31 fixed in #117; SR-62 fixed in #115; the rest open, follow-up task |
 | Info | 20 | Notes; 7 accepted; SR-54 fixed in #87 |
 
 - **SR-01 (High).** The short code is a 39-bit (decimal) or 42-bit (emoji)
@@ -596,7 +596,7 @@ store written the old way.
 | SR-28 | daemon | Unauthenticated connections fill the local API's 64 slots and lock the human out (503) for 10 s at a time. In separate-OS-user mode any listed agent user can do it without a token. | `runtime/api.py:63-70`, `api.py:1552-1558`. Probe: human request 503 while 64 idle connections were held. Confirmed. | Fixed in #61: unfinished connections give way (32, hard 128; 8 and 64 per UID in separate-OS-user mode), quiet ones first after 0.5 s, and a connection whose headers arrived is never closed. Re-probed on c0d0c12: with 64 or 200 idle connections held, on the socket and on TCP, the human's requests are answered at once. Tests: `harness/tests/test_api.py` (`test_half_sent_connections_dont_keep_the_human_out`, `test_a_connection_that_sent_nothing_gives_way_first`, `test_connects_behind_a_whole_request_dont_close_it`, `test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one`) |
 | SR-29 | daemon | `check_agent_dir` accepts a group-writable agent directory (0770, 0730) and doesn't check its parents, so an agent user may be able to replace the socket and show the human forged approvals or a forged code. | `isolation.py:158-180`. Probe: 770 and 730 accepted. Confirmed. | Open (T-29) |
 | SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Fixed: the adapter's client in #108, the facade's push client in #113 (`trust_env=False`, no redirects) |
-| SR-31 | daemon | Facade push-notification URLs are not screened, so the facade token holder can make the daemon POST task updates to any address. | `a2a_adapter/facade.py:346`. By reading. | Open (T-31) |
+| SR-31 | daemon | Facade push-notification URLs are not screened, so the facade token holder can make the daemon POST task updates to any address. | `a2a_adapter/facade.py:346`. By reading; later confirmed with a probe. | Fixed in #117: push URLs must be `http`/`https` to a literal loopback address, checked when set and before each send |
 | SR-32 | daemon | `GET /v0/status` with the agent token counts a group hidden from the agent (an approved knock before the knocker joins) and lists its id in `out_of_sync`. | `engine.py:3616-3628`, `runtime/agent.py:58-63`, `api.py:1426-1427`. Confirmed. | Open (T-32) |
 | SR-33 | daemon | The agent's `reply_to` choice resets the loop-guard hop: two agents that keep naming the human's first message never reach `max_agent_turns`. | `engine.py:1672-1691`, `engine.py:1518-1524`, `mcp/tools.py:283-288`. Probe: eight replies at hop 1, no pause. Confirmed. | Open (T-33) |
 | SR-34 | daemon | `close_requested` carries the owner's 200-character reason to the agent while `require_verified` still holds deliveries, and the agent may then leave, though SPEC §7.3 makes that the human's decision. | `engine.py:1427-1436`, `engine.py:146-157`. Confirmed. | Open (T-34) |
@@ -964,7 +964,7 @@ backticks); `llms.txt` has slugs only; MCP checks `Host` and `Origin`.
   only listed users (SR-62); MCP tool descriptions and instructions
   are constants and ids are checked before they go into a path; SSE takes
   a bearer token only, sends no CORS headers and filters human-only events.
-  SR-31 and SR-37 are the gaps; SR-30 is fixed for both clients.
+  SR-37 is the gap; SR-30 (both clients) and SR-31 are fixed.
 
 ## Policy layer
 
@@ -1150,7 +1150,7 @@ One line per open item, ready to file.
   and check its parents.
 - **T-30 (Low, SR-30, fixed in #108 and #113):** Daemon: `trust_env=False` and no redirects in the
   A2A adapter and facade HTTP clients.
-- **T-31 (Low, SR-31):** Daemon: screen facade push URLs, or turn push
+- **T-31 (Low, SR-31, fixed in #117):** Daemon: screen facade push URLs, or turn push
   configs off.
 - **T-32 (Low, SR-32):** Daemon: filter hidden groups from the agent's
   status, pending counts and SSE group checks.

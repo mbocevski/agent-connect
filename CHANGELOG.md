@@ -40,6 +40,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `a2a.facade_socket`: a connection from a user who isn't listed is closed
   before it is read. The facade on a port keeps that risk outside the
   separate-OS-user mode (SR-62).
+- The A2A facade sends push notifications only to a literal loopback
+  address (`127.0.0.0/8` or `::1`) over `http` or `https`: a config with
+  any other URL, a host name included, is refused, and the URL is checked
+  again before each send. A client with the facade token could make the
+  daemon POST task updates, peer replies included, to any address (SR-31).
+- A push notification the facade can't send is logged with its task id
+  only: a2a-sdk's own log line, which held the push URL with any secret in
+  its query and a traceback, is silenced.
 
 ## [0.1.0a2] - 2026-10-29
 

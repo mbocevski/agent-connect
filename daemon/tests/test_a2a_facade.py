@@ -23,6 +23,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from a2a.client import Client, ClientConfig, ClientFactory
+from a2a.server.context import ServerCallContext
 from a2a.types import (
     AgentCard,
     CancelTaskRequest,
@@ -33,10 +34,16 @@ from a2a.types import (
     StreamResponse,
     Task,
     TaskArtifactUpdateEvent,
+    TaskPushNotificationConfig,
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
 )
+from a2a.utils.errors import A2AError
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
 from agentconnect.a2a_adapter import A2AAdapter, A2AOptions, convert
 from agentconnect.a2a_adapter import facade as facade_module
@@ -738,3 +745,109 @@ async def test_binding_the_socket_leaves_the_process_umask_alone(
     finally:
         await server.stop()
     assert seen == [0o666 & ~usual]
+
+
+# -- push URLs: literal loopback only (SR-31) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "accepted"),
+    [
+        ("http://127.0.0.1:8080/hook", True),
+        ("https://127.5.5.5/hook", True),
+        ("http://[::1]:9000/hook", True),
+        ("http://10.1.2.3/hook", False),
+        ("http://192.168.1.20:8080/hook", False),
+        ("http://localhost:8080/hook", False),  # a name: no lookup, no rebinding
+        ("http://agent.example.org/hook", False),
+        ("http://[::ffff:127.0.0.1]/hook", False),
+        ("ftp://127.0.0.1/hook", False),
+        ("http://127.0.0.1:99999/hook", False),
+        ("http://user@127.0.0.1/hook", False),
+        # urlsplit and httpx disagree on the host of these: the "@" rule
+        # refuses them all.
+        ("http://127.0.0.1\\@evil.example/h", False),
+        ("http://127.0.0.1:80@evil.example/h", False),
+        ("http://127.0.0.1%2f@evil.example/h", False),
+        ("http:///hook", False),
+        ("not a url", False),
+    ],
+)
+async def test_only_literal_loopback_push_urls_are_accepted(url: str, accepted: bool) -> None:
+    assert await facade_module.loopback_push_url(url) is accepted
+
+
+async def test_a_push_config_off_loopback_is_refused_when_it_is_set(setup: Any) -> None:
+    _adapter, group, client = setup
+    group.fail = "rate_limited"  # a task, finished at once
+    events = [e async for e in client.send_message(user("hi"))]
+    task_id = events[0].task.id
+    for url in ("http://10.1.2.3/hook", "http://localhost:8080/hook", "ftp://127.0.0.1/hook"):
+        config = TaskPushNotificationConfig(task_id=task_id, id="bad", url=url)
+        with pytest.raises(A2AError):
+            await client.create_task_push_notification_config(config)
+    ok = TaskPushNotificationConfig(task_id=task_id, id="ok", url="http://127.0.0.1:1/hook")
+    assert (await client.create_task_push_notification_config(ok)).url == ok.url
+
+
+async def test_a_stored_push_url_off_loopback_is_refused_at_send_time(
+    setup: Any, rng: random.Random
+) -> None:
+    adapter, _group, _client = setup
+    assert adapter.facade is not None
+    # Listens on 127.0.0.1, so "localhost" would reach it if it were looked up.
+    receiver = LoopbackServer(Starlette(routes=[Route("/hook", _record, methods=["POST"])]))
+    port = await receiver.start()
+    try:
+        adapter.facade._app(GID, None)  # the group's stores and sender
+        apps = adapter.facade._groups[GID]
+        context = ServerCallContext()
+        for name, host in (("bad", "localhost"), ("good", "127.0.0.1")):
+            config = TaskPushNotificationConfig(
+                task_id="t1", id=name, url=f"http://{host}:{port}/hook", token=str(rng.random())
+            )
+            await apps.push.set_info("t1", config, context)
+        task = Task(id="t1", context_id=GID, status=TaskStatus(state=TaskState.TASK_STATE_WORKING))
+        RECORDED.clear()
+        await apps.sender.send_notification("t1", task)
+        assert len(RECORDED) == 1  # the loopback one; the named one was refused
+    finally:
+        await receiver.stop()
+
+
+RECORDED: list[bytes] = []
+
+
+async def _record(request: Request) -> Response:
+    RECORDED.append(await request.body())
+    return JSONResponse({})
+
+
+async def test_a_failed_push_logs_no_url(
+    setup: Any,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    rng: random.Random,
+) -> None:
+    # a2a-sdk logs a failed push with its URL (query secrets included) and a
+    # traceback; the facade logs its own event with ids only.
+    adapter, _group, _client = setup
+    assert adapter.facade is not None
+    adapter.facade._app(GID, None)
+    apps = adapter.facade._groups[GID]
+    with socket.socket() as probe:  # a loopback port nothing listens on
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    secret = f"{rng.getrandbits(64):016x}"
+    config = TaskPushNotificationConfig(
+        task_id="t1", id="cfg", url=f"http://127.0.0.1:{port}/hook?key={secret}"
+    )
+    await apps.push.set_info("t1", config, ServerCallContext())
+    task = Task(id="t1", context_id=GID, status=TaskStatus(state=TaskState.TASK_STATE_WORKING))
+    await apps.sender.send_notification("t1", task)
+    err = capsys.readouterr().err
+    assert secret not in caplog.text
+    assert secret not in err
+    events = [json.loads(line) for line in err.splitlines() if line.startswith("{")]
+    (failed,) = [e for e in events if e["event"] == "a2a_facade_push_failed"]
+    assert failed["task"] == "t1"
