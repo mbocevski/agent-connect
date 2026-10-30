@@ -332,7 +332,8 @@ connection limits (`AC_DIRECTORY_HEADER_TIMEOUT_SECS`,
 `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`),
 which default to the relay's. Two points for a directory behind a reverse
 proxy: set `AC_DIRECTORY_CLIENT_IP_HEADER` and
-`AC_DIRECTORY_TRUSTED_PROXIES`, or the proxy is one source held to 8
+`AC_DIRECTORY_TRUSTED_PROXIES` (and `AC_DIRECTORY_TRUSTED_HOPS` when more
+than one proxy stands in front), or the proxy is one source held to 8
 connections; and keep the proxy's upstream keep-alive timeout below
 `AC_DIRECTORY_IDLE_TIMEOUT_SECS` (75 s).
 

@@ -117,7 +117,8 @@ give the supervisor a longer stop timeout too (`docker stop -t`,
 | `AC_DIRECTORY_RELAYS` | required | Comma-separated relays a listing may point at. The first is shown on the site. |
 | `AC_DIRECTORY_TOKEN_KEYS` | required | Comma-separated operator token public keys (`DK.pub`, base64url): one, or two while rotating. Tokens, revocations and the well-known file use them. |
 | `AC_DIRECTORY_CLIENT_IP_HEADER` | none | A header reverse proxies append the client address to, for rate limiting. Believed only on connections from `AC_DIRECTORY_TRUSTED_PROXIES`, which it requires. |
-| `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6), `/0` included, are refused. Write IPv4 proxies as IPv4 blocks: a peer on an IPv4-mapped IPv6 address is matched as IPv4. |
+| `AC_DIRECTORY_TRUSTED_PROXIES` | none | Comma-separated address blocks (`10.0.0.0/8`, `::1`) of the reverse proxies whose client-address header is believed. Blocks broader than /8 (IPv4) or /32 (IPv6), `/0` included, are refused. Write IPv4 proxies as IPv4 blocks: a peer on an IPv4-mapped IPv6 address is matched as IPv4. List your own proxies, not a CDN's shared ranges: anyone sending from such a range is believed as a proxy. |
+| `AC_DIRECTORY_TRUSTED_HOPS` | `1` | How many proxies stand in front of the directory, the connecting one included (1 to 8). At most this many entries of the client-address header, from the right, are believed; the client is the first one outside `AC_DIRECTORY_TRUSTED_PROXIES`, or the last one believed. Set it to 2 for a CDN in front of your own proxy. |
 | `AC_DIRECTORY_TRUST_ANY_PROXY` | unset | `1` allows the broad blocks above. |
 | `AC_DIRECTORY_METRICS_ADDR` | none | Serve `/metrics` only on this address (a private interface) instead of the public listener. It serves `/healthz` too, without the public listener's connection caps, and `healthcheck` probes it. |
 | `AC_DIRECTORY_SHUTDOWN_GRACE_SECS` | `8` | After SIGTERM or SIGINT, how long open connections may hold the exit up (1 to 3600 seconds). |
@@ -205,7 +206,11 @@ start when no proxy is configured). Set the header the proxy writes and
 once, without an address, when a request carries the header (or
 `X-Forwarded-For` or `Forwarded`) from a peer outside those blocks, which is
 what a proxy listed by the wrong address looks like (behind Docker, use the
-bridge gateway, not `127.0.0.1`). With nginx on the same machine:
+bridge gateway, not `127.0.0.1`). With more than one proxy in front (a CDN
+before your own proxy), set `AC_DIRECTORY_TRUSTED_HOPS` to how many there
+are: entries past that count are the client's own say and are never
+believed, so a client can't pick its rate-limit bucket by prepending
+addresses, even from inside a listed block. With nginx on the same machine:
 
 ```nginx
 location / {
@@ -222,9 +227,11 @@ AC_DIRECTORY_TRUSTED_PROXIES=127.0.0.1/32
 
 The header is ignored on any other connection, so a client that reaches the
 port directly can't choose its own bucket. Behind a chain of proxies, list
-every hop's block: the directory reads the header from the right, skips
-addresses in `AC_DIRECTORY_TRUSTED_PROXIES`, and takes the first one that
-isn't, so entries a client writes itself further left are never used. Writes are limited per address
+every hop's block and set `AC_DIRECTORY_TRUSTED_HOPS`: the directory reads
+at most that many entries from the right, skips addresses in
+`AC_DIRECTORY_TRUSTED_PROXIES`, and takes the first one that isn't (or the
+last one it read), so entries a client writes itself further left are never
+used. Writes are limited per address
 and also per (address, listing name), so a flood against one name doesn't
 block publishing or withdrawing the others.
 

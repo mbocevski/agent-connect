@@ -244,14 +244,16 @@ async fn m2_client_ip_header_only_from_trusted_proxies() {
     }
 }
 
-/// N3: behind a chain of trusted proxies the first untrusted hop from the
-/// right is the client; entries a client prepends don't move its bucket.
+/// N3: behind a chain of trusted proxies (two here, `trusted_hops`) the
+/// first untrusted hop from the right is the client; entries a client
+/// prepends don't move its bucket.
 #[tokio::test]
 async fn n3_forwarded_chains_walk_past_trusted_proxies() {
     let mut h = Harness::with(|d| d.with_limits(tight()));
     h.http.client_ip_header = Some(HeaderName::from_static("x-forwarded-for"));
     h.http.trusted_proxies =
         vec![agentconnect_directory::config::Cidr::parse("10.0.0.0/8").unwrap()];
+    h.http.trusted_hops = 2;
     let proxy: IpAddr = PROXY.parse().unwrap();
     for xff in [
         "203.0.113.7, 10.0.0.9",
@@ -272,6 +274,25 @@ async fn n3_forwarded_chains_walk_past_trusted_proxies() {
         .send_from(from("/healthz", Some("203.0.113.8, 10.0.0.9")), proxy)
         .await;
     assert_eq!(r.status, StatusCode::OK);
+}
+
+/// SR-22: a client whose own address is inside a trusted block (a shared
+/// CDN range listed as a proxy) can't pick its bucket by prepending
+/// addresses: the walk stops after `trusted_hops` entries (one by default).
+#[tokio::test]
+async fn a_client_inside_a_trusted_range_cannot_pick_its_bucket() {
+    let mut h = Harness::with(|d| d.with_limits(tight()));
+    h.http.client_ip_header = Some(HeaderName::from_static("x-forwarded-for"));
+    h.http.trusted_proxies =
+        vec![agentconnect_directory::config::Cidr::parse("10.0.0.0/8").unwrap()];
+    let proxy: IpAddr = PROXY.parse().unwrap();
+    let mut limited = false;
+    for k in 1..=5 {
+        let xff = format!("192.0.2.{k}, 10.1.2.3");
+        let r = h.send_from(from("/healthz", Some(&xff)), proxy).await;
+        limited |= r.status == StatusCode::TOO_MANY_REQUESTS;
+    }
+    assert!(limited, "every request counted against 10.1.2.3");
 }
 
 /// M2: one client flooding one name doesn't block publishing other names.

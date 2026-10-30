@@ -120,6 +120,7 @@ async fn serve<S: Store>(
             .as_deref()
             .and_then(|h| HeaderName::from_bytes(h.as_bytes()).ok()),
         trusted_proxies: config.trusted_proxies.clone(),
+        trusted_hops: config.trusted_hops,
         hide_metrics: config.metrics_addr.is_some(),
         stylesheet: match &config.stylesheet {
             Some(path) => Some(std::fs::read_to_string(path)?.into()),
