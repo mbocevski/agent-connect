@@ -43,7 +43,7 @@ def populate(rng: random.Random, db: Path, db_key: bytes) -> bytes:
     gid = a.create_group(NAME, PURPOSE)
     invite = a.create_invite("relay.example", 3600)
     link = ac.parse_invite_url(invite.url)
-    verified = a.verify_join_request(b.create_join_request(link, "joiner"), invite)
+    verified = a.verify_join_request(b.create_join_request(link, "joiner"), invite, b.mailbox_id)
     out = a.add_member(gid, verified, invite)
     a.confirm_pending_commit(gid, out["msg_id"])
     welcome = out["welcome"]

@@ -104,7 +104,9 @@ impl Members {
         )
         .unwrap();
         let req = joiner.create_join_request(inv.secret(), "j").unwrap();
-        let v = self.cs[by].verify_join_request(&req, &inv).unwrap();
+        let v = self.cs[by]
+            .verify_join_request(&req, &inv, &req.mailbox_id)
+            .unwrap();
         let out = self.gs[by]
             .add_member(&self.cs[by], &v, &inv, true)
             .unwrap();
@@ -1192,7 +1194,9 @@ fn a_group_is_created_with_a_policy() {
     let d = client("create-d", &clock);
     let inv = Invite::create(m.cs[0].rng(), m.cs[0].clock(), "r", Duration::from_secs(60)).unwrap();
     let req = d.create_join_request(inv.secret(), "d").unwrap();
-    let v = m.cs[0].verify_join_request(&req, &inv).unwrap();
+    let v = m.cs[0]
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     assert_eq!(
         m.gs[0].add_member(&m.cs[0], &v, &inv, true).unwrap_err(),
         Error::Unauthorized("group would exceed max_members")
@@ -1350,7 +1354,9 @@ fn a_repeated_instance_id_is_refused_by_the_committer_and_every_member() {
     )
     .unwrap();
     let req = twin.create_join_request(inv.secret(), "j").unwrap();
-    let v = m.cs[0].verify_join_request(&req, &inv).unwrap();
+    let v = m.cs[0]
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     assert_eq!(
         m.gs[0].add_member(&m.cs[0], &v, &inv, true).map(|_| ()),
         Err(Error::Unauthorized(REPEATED_INSTANCE))
@@ -1544,7 +1550,9 @@ fn a_welcome_whose_tree_repeats_an_instance_id_is_refused() {
     )
     .unwrap();
     let req = joiner.create_join_request(inv.secret(), "j").unwrap();
-    let v = m.cs[0].verify_join_request(&req, &inv).unwrap();
+    let v = m.cs[0]
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let (c, g) = (&m.cs[0], &mut m.gs[0]);
     let signer = c.signer();
     let bundle = g
@@ -1608,7 +1616,9 @@ fn wire_sizes_fit_the_relay_caps() {
         .create_join_request(inv.secret(), &"n".repeat(80))
         .unwrap();
     let join = req.to_json().unwrap().len();
-    let v = m.cs[0].verify_join_request(&req, &inv).unwrap();
+    let v = m.cs[0]
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = m.gs[0].add_member(&m.cs[0], &v, &inv, true).unwrap();
     let welcome = out.welcome.as_ref().unwrap().len();
     m.gs[0].discard_pending_commit(&m.cs[0]).unwrap();

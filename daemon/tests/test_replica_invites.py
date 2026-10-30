@@ -135,13 +135,15 @@ async def owner(
 
 async def stale_requests(owner: Owner, rng: random.Random, url: str, n: int) -> list[Joiner]:
     """``n`` requests for ``url`` built from KeyPackages of the owner's own
-    identity that a link holder saw elsewhere (each sent to another invite)."""
+    identity that a link holder saw elsewhere (each sent to another invite),
+    delivered by a relay that names each KeyPackage's own mailbox as the
+    sender: from the holder's mailbox the sender check drops them first
+    (SPEC 6.2 step 3)."""
     elsewhere = (await owner.invite(max_uses=n))["url"]
     stale = []
     for _ in range(n):
         old = Joiner(rng, owner.now, owner.identity())
-        holder = Joiner(rng, owner.now)
-        await owner.deliver(rewrapped(old.request(elsewhere), url), holder.mailbox)
+        await owner.deliver(rewrapped(old.request(elsewhere), url), old.mailbox)
         stale.append(old)
     return stale
 

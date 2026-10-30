@@ -480,8 +480,9 @@ async def lifecycle(  # noqa: PLR0915
     await saw(gid, {a: []})
 
     # 3. Four agents redeem it. Mallory holds the link too, and a KeyPackage
-    # of b's that b sent to her own invite: she sends it in b's name, so two
-    # requests claim b. The human rejects hers and approves the others.
+    # of b's that b sent to her own invite: she sends it in b's name, from
+    # her own mailbox, and a drops it (SPEC 6.2 step 3). The human approves
+    # the four.
     bait_group = mallory.daemon.create_group("Bait", "A link b's agent was given")
     await mallory.idle()
     bait = await mallory.daemon.create_invite(bait_group)
@@ -520,14 +521,14 @@ async def lifecycle(  # noqa: PLR0915
         None,
         {"frame": {"t": "join", "invite_id": link.invite_id_b64, "env": env}, "msg_id": msg_id},
     )
-    await a.node.wait(lambda: len(a.node.daemon.approvals()) == 5)
+    await a.node.wait(
+        lambda: a.node.daemon.store.inbox_state(mallory.daemon.mailbox, msg_id) is not None
+    )
     listed = (await a.cli("approvals", "list"))["approvals"]
     claims = {x["display_name"]: x for x in listed}
-    assert sorted(claims) == ["bob", "bob (laptop)", "carol", "dave", "erin"]
-    assert claims["bob"]["identity"] == claims["bob (laptop)"]["identity"] == b.me
-    assert [claims[n]["identity_requests"] for n in sorted(claims)] == [2, 2, 1, 1, 1]
-    rejected = await a.cli("approvals", "reject", claims["bob (laptop)"]["request_id"])
-    assert rejected["status"] == "rejected"
+    assert sorted(claims) == ["bob", "carol", "dave", "erin"]
+    assert claims["bob"]["identity"] == b.me
+    assert [claims[n]["identity_requests"] for n in sorted(claims)] == [1, 1, 1, 1]
     for name in ("bob", "carol", "dave", "erin"):
         approved = await a.cli("approvals", "approve", claims[name]["request_id"], "--yes")
         assert (approved["status"], approved["group_id"]) == ("approving", gid)
@@ -558,7 +559,6 @@ async def lifecycle(  # noqa: PLR0915
             (c, "carol", 1),
             (d, "dave", 1),
             (e, "erin", 1),
-            (b, "bob (laptop)", 2),
         )
     ]
     welcomed = [("joined", {"invite_id": invite["invite_id"]})]

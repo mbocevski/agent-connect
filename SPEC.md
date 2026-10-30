@@ -409,8 +409,16 @@ The inviter instance A MUST:
    signature, instance certificate, and required capabilities. All of this
    MUST happen before the KeyPackage is handed to the MLS library. The
    request's `mailbox_id` MUST be the one derived from the KeyPackage's leaf
-   `signature_key` (§2). The KeyPackage MUST NOT carry KeyPackage
-   extensions and MUST NOT be a last-resort KeyPackage.
+   `signature_key` (§2), and the envelope's `sender`, the mailbox the relay
+   authenticated, MUST be the request's `mailbox_id`: otherwise drop the
+   request as for a failed MAC (step 2). The MAC shows only that the sender
+   holds the link, and anyone with the link can MAC any KeyPackage, so
+   without this check a link holder who saw another identity's unused
+   KeyPackage could have it added as a leaf nobody controls. The check
+   holds against link holders, not against a malicious relay, which can
+   name any sender; that case needs a JoinRequest signature under the
+   KeyPackage's leaf key, which v0 doesn't have. The KeyPackage MUST NOT
+   carry KeyPackage extensions and MUST NOT be a last-resort KeyPackage.
    It MUST also be **unused** (see "KeyPackage reuse" below).
 4. Drop the request silently if it is a replay ("Replays" below). Otherwise
    approve the join, either automatically (when policy allows) or through its

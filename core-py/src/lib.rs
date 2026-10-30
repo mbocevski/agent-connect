@@ -962,17 +962,20 @@ impl Client {
         Ok(PyBytes::new(py, &json))
     }
 
-    /// Verifies a JoinRequest (JSON bytes) against one of our invites.
+    /// Verifies a JoinRequest (JSON bytes) against one of our invites;
+    /// `sender` is the envelope's relay-authenticated sender, which must be
+    /// the mailbox the request names (SPEC §6.2 step 3).
     fn verify_join_request(
         &self,
         py: Python<'_>,
         request: &[u8],
         invite: &Invite,
+        sender: &str,
     ) -> PyResult<VerifiedJoinRequest> {
         let v = py.detach(|| {
             with_client!(self, |c, _g| {
                 let req = core::JoinRequest::from_json(request)?;
-                c.verify_join_request(&req, &invite.0)
+                c.verify_join_request(&req, &invite.0, sender)
             })
         })?;
         Ok(VerifiedJoinRequest {

@@ -760,7 +760,10 @@ fn an_invite_journal_entry_does_not_replay_as_a_knock_join() {
     )
     .unwrap();
     let req = s.knocker.create_join_request(inv.secret(), "j").unwrap();
-    let vr = s.owner.verify_join_request(&req, &inv).unwrap();
+    let vr = s
+        .owner
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = ga.add_member(&s.owner, &vr, &inv, true).unwrap();
     ga.confirm_pending_commit(&s.owner, &out.msg_id).unwrap();
     let w = out.welcome.unwrap();
@@ -862,7 +865,10 @@ fn one_join_request_is_not_added_into_two_pending_groups() {
     )
     .unwrap();
     let req = s.knocker.create_join_request(inv.secret(), "j").unwrap();
-    let vr = s.owner.verify_join_request(&req, &inv).unwrap();
+    let vr = s
+        .owner
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let mut g1 = s.owner.create_group("g", "p").unwrap();
     let mut g2 = s.owner.create_group("g", "p").unwrap();
     g1.add_member(&s.owner, &vr, &inv, true).unwrap();
@@ -894,7 +900,10 @@ fn a_pending_add_that_loses_its_epoch_releases_the_key_package() {
     )
     .unwrap();
     let req = third.create_join_request(inv.secret(), "t").unwrap();
-    let vr = s.owner.verify_join_request(&req, &inv).unwrap();
+    let vr = s
+        .owner
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     ga.add_member(&s.owner, &vr, &inv, false).unwrap();
     // The knocker's update wins the epoch at the relay.
     let up = gb.update(&s.knocker).unwrap();

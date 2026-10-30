@@ -52,7 +52,9 @@ fn join(
     .unwrap();
     let link = InviteLink::parse(&inv.url()).unwrap();
     let req = joiner.create_join_request(link.secret(), "joiner").unwrap();
-    let verified = inviter.verify_join_request(&req, &inv).unwrap();
+    let verified = inviter
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = group.add_member(inviter, &verified, &inv, true).unwrap();
     group.confirm_pending_commit(inviter, &out.msg_id).unwrap();
     let meta = InviteMeta::expected(inv.secret().id(), "Fuzz", "Fuzz the receiver");

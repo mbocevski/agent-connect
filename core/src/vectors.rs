@@ -1475,6 +1475,96 @@ fn owner_file_vectors() {
     check_or_write("owner-files.json", &out);
 }
 
+/// `join-requests.json`: a JoinRequest is verified against the mailbox
+/// that sent it (SPEC 6.2 step 3), after the MAC and before the KeyPackage
+/// is parsed, so the KeyPackage here is placeholder bytes and every case is
+/// computed from the seed.
+#[test]
+fn join_request_vectors() {
+    use std::sync::Arc;
+
+    use crate::invite::Invite;
+    use crate::join::JoinRequest;
+    let name = "join-requests.json";
+    let (seed, rng) = vector_rng(name);
+    let clock = Arc::new(FakeClock::default());
+    let now = crate::clock::Clock::unix_millis(&*clock) / 1000;
+    let id: [u8; 16] = rng.array().unwrap();
+    let secret: [u8; 32] = rng.array().unwrap();
+    let invite = Invite::from_parts(
+        "relay.example.org".to_owned(),
+        InviteSecret::from_parts(id, &secret),
+        now + 86_400,
+    );
+    let mut req = JoinRequest {
+        invite_id: id,
+        display_name: "Bob's agent".to_owned(),
+        key_package: rng.array::<64>().unwrap().to_vec(),
+        mailbox_id: mailbox_id(&rng.array::<32>().unwrap()),
+        mac: [0; 32],
+    };
+    req.mac = join_request_mac(&invite.secret().join_key(), &req.mac_input());
+    let mut bad_mac = req.clone();
+    bad_mac.mac[0] ^= 1;
+    let other = mailbox_id(&rng.array::<32>().unwrap());
+    let verifier = {
+        let id = Identity::from_secret_bytes(&rng.array().unwrap());
+        let inst = id.create_instance(&rng, &*clock).unwrap();
+        crate::Client::new(
+            crate::MemoryStore::new(),
+            Rng::seeded(rng.array().unwrap()),
+            inst,
+            clock.clone(),
+        )
+        .unwrap()
+    };
+    let mut cases = Vec::new();
+    for (name, r, sender) in [
+        ("another mailbox sends it", &req, &other),
+        ("a bad MAC is reported first", &bad_mac, &other),
+        (
+            "from its own mailbox it reaches the KeyPackage checks",
+            &req,
+            &req.mailbox_id,
+        ),
+    ] {
+        let e = verifier
+            .verify_join_request(r, &invite, sender)
+            .unwrap_err();
+        cases.push(json!({
+            "name": name,
+            "request": s(&r.to_json().unwrap()),
+            "sender": sender,
+            "error": e.to_string(),
+            "kind": e.kind().as_str(),
+        }));
+    }
+    assert_eq!(
+        cases[0]["error"],
+        "credential mismatch: sender is not the request's mailbox_id"
+    );
+    assert_eq!(cases[1]["kind"], "authentication");
+    assert!(
+        cases[2]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid key package")
+    );
+    let mut v = header(
+        "SPEC 6.2 step 3: the inviter verifies a JoinRequest against the relay-authenticated sender of its envelope, which must be the request's mailbox_id (anyone with the link can MAC any KeyPackage). The check comes after the MAC (step 2) and before the KeyPackage is parsed, so `key_package` is placeholder bytes. Verify `request` (JoinRequest JSON) at `now` against the invite rebuilt from its parts (invite_id and secret in hex) with `sender`, and expect `error` and `kind`.",
+        &seed,
+    );
+    v["now"] = json!(now);
+    v["invite"] = json!({
+        "relay_host": invite.relay_host(),
+        "invite_id": hex(&id),
+        "secret": hex(&secret),
+        "expires_at": invite.expires_at(),
+    });
+    v["cases"] = cases.into();
+    check_or_write(name, &v);
+}
+
 /// Knock vectors can't be recomputed: HPKE encapsulation draws from the
 /// provider's own randomness and KeyPackage lifetimes from the system
 /// clock. The check re-derives the door from the seed, opens the stored

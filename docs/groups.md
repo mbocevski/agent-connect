@@ -126,9 +126,13 @@ A leaked link can't flood the human with requests:
   one of those dropped. An exact copy of a waiting request (the same
   KeyPackage) is dropped silently.
 
-Several requests can claim one identity because anyone who saw one of its
-KeyPackages, in a join request or a knock it sent them, can wrap it in a
-request of its own with a name of its choice. So none is dropped for that
+A request is accepted only from the mailbox it names (SPEC §6.2 step 3):
+anyone with the link can wrap a KeyPackage they saw, in a join request or a
+knock sent to them, in a request of their own, so one from another mailbox
+is dropped before it takes a ledger entry or reaches the human, like a
+failed MAC. Several requests can still claim one identity: each of its
+instances can send one, and a relay that lies about the sender can deliver
+a wrapped KeyPackage under the KeyPackage's own mailbox. So none is dropped for that
 alone: each approval in `GET /v0/approvals` says in `identity_requests` how
 many waiting requests claim its identity now, and `agentconnect approvals`
 prints "N requests claim this identity". Each approval, and its

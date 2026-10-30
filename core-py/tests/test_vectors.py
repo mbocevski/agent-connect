@@ -74,6 +74,24 @@ def test_invite_kdf_vectors() -> None:
             ac.unwrap_welcome(invite_id, secret, bytes(tampered))
 
 
+def test_join_request_vectors(rng: random.Random) -> None:
+    """SPEC 6.2 step 3: a JoinRequest only from the mailbox it names."""
+    v = load("join-requests.json")
+    identity = ac.Identity._generate_for_testing(rng.getrandbits(64))
+    instance = identity._create_instance_for_testing(seed=rng.getrandbits(64))
+    verifier = ac.Client._for_testing(None, instance.to_secret_bytes(), rng.getrandbits(64))
+    verifier._set_time_for_testing(v["now"])
+    inv = v["invite"]
+    invite = ac.Invite.from_parts(
+        inv["relay_host"], h(inv["invite_id"]), h(inv["secret"]), inv["expires_at"]
+    )
+    for case in v["cases"]:
+        with pytest.raises(ac.AgentConnectError) as e:
+            verifier.verify_join_request(case["request"].encode(), invite, case["sender"])
+        assert str(e.value) == case["error"], case["name"]
+        assert getattr(e.value, "kind", None) == case["kind"], case["name"]
+
+
 def sas_participant(p: dict[str, str]) -> tuple[str, int, bytes]:
     return p["identity"], int(p["instance_id"], 16), h(p["nonce"])
 
