@@ -35,6 +35,14 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   change to them will be listed here. The method in an API row
   (`span.method`) has `data-method="GET"` or `"POST"`.
 
+### Changed
+
+- `SECURITY.md` states what to expect after a private report (response and
+  fix targets by severity, coordinated disclosure), how fixes ship, how to
+  verify a release, and how the project handles known dependency
+  advisories: temporary patches, ignores, their removal and release
+  blockers.
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added
