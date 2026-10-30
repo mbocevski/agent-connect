@@ -605,7 +605,7 @@ store written the old way.
 | SR-37 | daemon | The A2A facade takes the first reply from any member, even for a request addressed to one member (`/g/<gid>/m/<X>`). | `facade.py:441-451`, `facade.py:182-200`. By reading. | Open (T-37) |
 | SR-62 | daemon | Any local user who listens on `a2a.facade_port` while the daemon is down gets the facade token from a client's first request (the card fetch), and can then send to the groups as the agent through the real facade. Found after this review, with SR-08 to SR-10. | `a2a_adapter/facade.py` (`Facade`, `LoopbackServer`). Confirmed with a probe on main (c0d0c12). | Fixed in #115: `a2a.facade_socket` with a peer-UID check, required in separate-OS-user mode; the TCP facade keeps the documented risk outside it |
 | SR-38 | daemon | Webhook, SSE and SDK agents receive `a2a.task_cancel` from any member, with no requester check and no guidance in the docs; SPEC §7.2 says the member running the task MUST ignore it. Only the A2A adapter checks. | `adapter.py:438-457`, `docs/adapters/webhook.md:93-105`. By reading. | Open (T-38) |
-| SR-39 | build | Signed releases are never verified by a test, `just release-verify` checks the GitHub attestations but not the cosign bundles, and `release.yml` doesn't require the reproducibility check for the tagged commit. | `.github/workflows/release.yml`, `.github/workflows/repro.yml`, `justfile` (`release-verify`). By reading. | Open (T-39) |
+| SR-39 | build | Signed releases are never verified by a test, `just release-verify` checks the GitHub attestations but not the cosign bundles, and `release.yml` doesn't require the reproducibility check for the tagged commit. | `.github/workflows/release.yml`, `.github/workflows/repro.yml`, `justfile` (`release-verify`). By reading. | Fixed in #150: `release-verify` checks every cosign bundle and both image signatures against the release workflow's identity for the tag (`scripts/verify-signatures.sh`), the release workflow verifies each signature right after signing, and publishing waits for `repro.yml` on the released commit. Tests: `scripts/tests/test_release_verify.py` |
 | SR-40 | tooling | No workflow runs the fuzz targets, nightly included. | `.github/workflows/nightly.yml`. By reading. | Fixed in #147: the nightly workflow fuzzes every target of each crate for five minutes (`just nightly-fuzz`) |
 
 ## Findings: Info
@@ -680,7 +680,7 @@ there is a negative test (the attack fails).
 | | Rate limits, own sends included | `limits.py`, `policy.py` | `harness/tests/test_limits_e2e.py::test_senders_refuse_to_break_the_limits`; `harness/tests/test_unsolicited_task_updates.py` | Covered (SR-12 fixed in #89) |
 | | Floor modes | `runtime/floor.py`, `engine.py` (`addressed_to_me`) | `harness/tests/test_floor.py::test_grants_the_policy_does_not_allow_are_ignored`; `harness/tests/test_group_acceptance.py::test_mention_mode_unaddressed_does_not_trigger_and_a_two_agent_loop_pauses` | Covered; SR-35 |
 | Malicious software distributor | Reproducible builds | `.github/workflows/repro.yml` | CI job only | Linux only |
-| | Signed releases with provenance | `.github/workflows/release.yml`, `justfile` (`release-verify`) | none | Gap (SR-39) |
+| | Signed releases with provenance | `.github/workflows/release.yml`, `justfile` (`release-verify`), `scripts/verify-signatures.sh` | `scripts/tests/test_release_verify.py`; every release run verifies its own signatures | Covered (SR-39, fixed in #150) |
 | Spam lister | Token bound to directory, name and identity | `core/src/listing/token.rs`, `directory/src/directory.rs` | `core/src/listing/token.rs::token_binding_checks_every_field`; `directory/tests/publish.rs::token_scope_and_lifetime_are_enforced` | Covered |
 | | Per-address publish limits | `directory/src/ratelimit.rs` | `directory/tests/limits_logs.rs::searches_writes_and_mcp_have_their_own_budgets`; `directory/tests/review_regressions.rs::m2_write_limits_are_per_name_too` | Covered; SR-22 |
 | | Operator revocation | `directory.rs` (`revoke_inner`) | `directory/tests/publish.rs::token_revocation_withdraws_the_listing_and_bars_the_token` | Covered at the directory; SR-23 fixed in #152; SR-25 |
@@ -1169,7 +1169,7 @@ One line per open item, ready to file.
   socket with a peer-UID check, required in separate-OS-user mode.
 - **T-38 (Low, SR-38):** Daemon: deliver a non-requester's
   `a2a.task_cancel` to headless agents as context, and document the rule.
-- **T-39 (Low, SR-39):** Release: verify cosign bundles in
+- **T-39 (Low, SR-39, fixed in #150):** Release: verify cosign bundles in
   `release-verify`, test it, and require the reproducibility check before
   publishing.
 - **T-40 (Low, SR-40, fixed in #147):** CI: run every fuzz target for a bounded time in
