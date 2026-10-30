@@ -32,7 +32,7 @@ from agentconnect_sdk.errors import (
 from agentconnect_sdk.models import Event, GroupInfo, Message, Sender, TrustState, parse_payload
 from agentconnect_sdk.signature import WebhookVerifier, sign, verify
 
-__version__ = "0.1.0a2"
+__version__ = "0.1.0a3"
 
 __all__ = [
     "AgentConnect",

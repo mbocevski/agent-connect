@@ -8,6 +8,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+## [0.1.0a3] - 2026-10-30
+
 ### Added
 
 - The A2A facade on a Unix socket: `a2a.facade_socket`. The daemon closes
