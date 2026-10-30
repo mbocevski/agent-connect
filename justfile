@@ -102,9 +102,52 @@ demo-record: demo-image
     asciinema rec --overwrite -q -c "uv run --no-project python demo/run.py one-to-one --no-build" docs/demos/one-to-one.cast
     asciinema rec --overwrite -q -c "uv run --no-project python demo/run.py group --no-build" docs/demos/group.cast
 
+# The nightly workflow also runs nightly-fuzz for each crate.
 # Nightly tier: mutation testing, quarantined tests, long property runs
-# (fuzzing and benchmarks are added with the core)
 test-nightly: nightly-mutants nightly-py nightly-relay-load
+
+# Needs a nightly toolchain and cargo-fuzz. A crash stops it, with the input
+# in <crate>/fuzz/artifacts/<target>/.
+# Fuzz every target of one crate (core, relay or directory) for secs seconds each
+nightly-fuzz crate secs="300":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    crate={{ quote(crate) }}
+    secs={{ quote(secs) }}
+    case "$crate" in
+        core | relay | directory) ;;
+        *) echo "nightly-fuzz: crate must be core, relay or directory" >&2; exit 2 ;;
+    esac
+    case "$secs" in
+        '' | *[!0-9]*) echo "nightly-fuzz: secs must be a whole number" >&2; exit 2 ;;
+    esac
+    cd "$crate"
+    targets="$(cargo +nightly fuzz list)"
+    test -n "$targets" || { echo "no fuzz targets in $crate" >&2; exit 1; }
+    cargo +nightly fuzz build
+    # The fuzzer's output and crashing inputs stay on this machine: the CI
+    # log is public, and a crash is an undisclosed finding (SECURITY.md).
+    out="$(mktemp -d)"
+    failed=()
+    for t in $targets; do
+        echo "fuzzing $crate/$t for $secs s"
+        mkdir "$out/$t"
+        if cargo +nightly fuzz run "$t" -- -max_total_time="$secs" \
+            -artifact_prefix="$out/$t/" >"$out/$t.log" 2>&1; then
+            grep -E '^Done [0-9]+ runs' "$out/$t.log" || true
+        else
+            failed+=("$t")
+            for f in "$out/$t"/*; do
+                test -f "$f" || continue
+                echo "crash in $crate/$t: input sha256 $(sha256sum <"$f" | cut -d' ' -f1)" >&2
+            done
+        fi
+    done
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo "fuzz targets that failed in $crate: ${failed[*]} (output and inputs in $out)" >&2
+        exit 1
+    fi
+    rm -rf "$out"
 
 # Mutation testing of the core, every mutant (hours; config in .cargo/mutants.toml)
 nightly-mutants *args:

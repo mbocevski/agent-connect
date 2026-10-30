@@ -110,6 +110,29 @@ jobs:
           path: mutants.out
           if-no-files-found: ignore
 
+  # Every fuzz target, for a bounded time each (security review SR-40). The
+  # recipe lists each crate's targets itself, so a new target is fuzzed
+  # without a change here. A crash fails the job; the log names the target
+  # and the input's SHA-256 only, and nothing is uploaded (SECURITY.md).
+  fuzz:
+    name: fuzz (${{ matrix.crate }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [core, relay, directory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ${{ matrix.crate }}/fuzz
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: just,cargo-fuzz
+      - run: just nightly-fuzz ${{ matrix.crate }} 300
+
   # The relay's load tests: storage budgets and stall resistance (non-gating).
   relay-load:
     runs-on: ubuntu-24.04

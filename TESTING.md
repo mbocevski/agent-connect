@@ -9,7 +9,7 @@ hard to skip. The protocol is in `SPEC.md`; commands live in the `justfile`.
 |---|---|---|---|---|
 | `just test` | Rust and Python unit, property and contract tests (`just contract`), multi-node harness scenarios | < 60 s | loopback only | pre-push, CI |
 | `just test-int` | docker compose integration: Postgres for the directory store (`compose.test.yaml`), and the demos and the malicious relay double (`demo/compose.yaml`, `integration/tests`); the relay binary's connection limits on real time and its memory under stalled connections (`relay/tests/limits_int.rs`) and the directory binary's shutdown on SIGTERM and SIGINT (`directory/tests/shutdown_int.rs`), both `#[ignore]`d in the fast tier | < 10 min once the image is built | docker | CI (`integration` job, not part of `ci-ok`) |
-| `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests, the relay's load tests and the wire sizes its caps rely on (`just nightly-relay-load`: sender budget, stall resistance, the purge, the largest Welcome and commits); fuzzing and criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
+| `just test-nightly` | mutation testing, long property runs (`HYPOTHESIS_PROFILE=nightly`), quarantined tests, the relay's load tests and the wire sizes its caps rely on (`just nightly-relay-load`: sender budget, stall resistance, the purge, the largest Welcome and commits), every fuzz target (`just nightly-fuzz <crate>`); criterion benchmarks as they land | hours | as needed | nightly workflow, non-gating |
 | `just ci` | exactly the PR pipeline: `lint`, `test`, `cov` (gates and ratchet), `changelog-check`, `docs-check` | minutes | none | PR CI (`ci-ok`) |
 
 `just test` must stay under 60 seconds on a laptop. If it gets slower, move
@@ -24,6 +24,20 @@ mutants into shards, one job each; `just nightly-mutants-shard 3/24` runs
 one of them locally. A missed mutant fails its shard. Add a test that
 catches it, or, if the mutant can't change behaviour, an `exclude_re`
 entry in `.cargo/mutants.toml` with the reason.
+
+Fuzzing (`just nightly-fuzz core`, `relay` or `directory`) runs every
+target in that crate's `fuzz/` project for five minutes each (`secs` to
+change it), on a nightly toolchain with cargo-fuzz. The nightly workflow
+runs one job per crate. The recipe lists the targets with `cargo fuzz
+list`, so a new target is fuzzed without a workflow change, and a test
+(`scripts/tests/test_nightly_fuzz.py`) fails if a fuzz crate is missing
+from the workflow. Every target runs even after one crashes, and the run
+fails at the end, naming each crashed target and the SHA-256 of its
+input. The fuzzer's output and the inputs stay in a temporary directory
+and never reach the log or an upload: the CI log is public and a crash is
+an undisclosed finding (`SECURITY.md`). Reproduce it locally with the same
+command, then add the input to the target's corpus as a regression case
+with the fix.
 
 ## Where tests live
 
