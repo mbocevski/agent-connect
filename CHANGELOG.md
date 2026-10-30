@@ -8,6 +8,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+### Added
+
+- `agentconnect-relay healthcheck` and `agentconnect-directory healthcheck`:
+  a `GET /healthz` on the server's own listener that exits 0 or 1, for
+  container health checks in the distroless images, which have no shell or
+  `curl`. The relay's probes its operator listener; the directory's probes
+  its metrics listener (`AC_DIRECTORY_METRICS_ADDR`), which now serves
+  `/healthz` too, or its public listener without one.
+  `docs/relay-operations.md` has a compose example. Any other argument to
+  either binary is now refused (exit 2) instead of ignored.
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added

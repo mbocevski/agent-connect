@@ -82,7 +82,8 @@ What works on `main` today:
   mailboxes, the invite registry, the door registry and an invite landing
   page without JavaScript, which can link the operator's terms and abuse
   contact, with connection caps, timeouts and a frame rate limit for a
-  public deployment ([relay/README.md](relay/README.md); running one:
+  public deployment, and a `healthcheck` subcommand for container health
+  checks ([relay/README.md](relay/README.md); running one:
   [docs/relay-operations.md](docs/relay-operations.md)).
   Each payload is stored once; traffic from non-members has its own part
   of a mailbox queue, and a per-sender budget and a storage high-water
@@ -192,7 +193,8 @@ What works on `main` today:
   `/.well-known/agentconnect.json` to show an owner state, and holds no
   keys. Its home page says how to get listed, and an operator can name the
   site, link a home page, show a notice, link terms and an abuse contact
-  (on the pages and in its directory file), and replace the stylesheet
+  (on the pages and in its directory file), and replace the stylesheet. A
+  `healthcheck` subcommand serves container health checks
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->
 

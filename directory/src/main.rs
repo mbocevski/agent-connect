@@ -108,7 +108,7 @@ async fn serve<S: Store>(
     if let Some(addr) = config.metrics_addr {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let metrics = metrics_app(Arc::clone(&dir));
-        tracing::info!(%addr, "metrics listening");
+        tracing::info!(addr = %listener.local_addr()?, "metrics listening");
         tokio::spawn(async move {
             let _ = axum::serve(listener, metrics).await;
         });
@@ -173,8 +173,41 @@ async fn serve<S: Store>(
     .await
 }
 
+/// `agentconnect-directory healthcheck`: `GET /healthz` on the metrics
+/// listener (`AC_DIRECTORY_METRICS_ADDR`) when there is one, else on the
+/// directory's listener (`AC_DIRECTORY_ADDR`), for a container health check
+/// in an image without a shell or `curl`. The metrics listener has no
+/// connection caps, so a busy public listener doesn't fail the check. 0 when
+/// healthy, 1 with the reason on stderr otherwise.
+fn healthcheck() -> i32 {
+    let checked = Config::from_env().and_then(|config| {
+        agentconnect_core::healthcheck::probe(
+            config.metrics_addr.unwrap_or(config.addr),
+            agentconnect_core::healthcheck::TIMEOUT,
+        )
+    });
+    match checked {
+        Ok(()) => 0,
+        Err(reason) => {
+            eprintln!("unhealthy: {reason}");
+            1
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    match (args.next(), args.next()) {
+        (None, _) => {}
+        (Some(cmd), None) if cmd == "healthcheck" => std::process::exit(healthcheck()),
+        _ => {
+            eprintln!(
+                "usage: agentconnect-directory [healthcheck] (configured by AC_DIRECTORY_* variables)"
+            );
+            std::process::exit(2);
+        }
+    }
     let spec = std::env::var("RUST_LOG").ok();
     // Colours only on a terminal, so log files and collectors get plain text.
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stdout());

@@ -55,8 +55,39 @@ fn stop_signal() -> impl Future<Output = ()> {
     }
 }
 
+/// `agentconnect-relay healthcheck`: `GET /healthz` on the operator
+/// listener (`AC_RELAY_METRICS_ADDR`), for a container health check in an
+/// image without a shell or `curl`. 0 when healthy, 1 with the reason on
+/// stderr otherwise.
+fn healthcheck() -> i32 {
+    let checked = Config::from_env().and_then(|config| {
+        agentconnect_core::healthcheck::probe(
+            config.metrics_addr,
+            agentconnect_core::healthcheck::TIMEOUT,
+        )
+    });
+    match checked {
+        Ok(()) => 0,
+        Err(reason) => {
+            eprintln!("unhealthy: {reason}");
+            1
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let mut args = std::env::args_os().skip(1);
+    match (args.next(), args.next()) {
+        (None, _) => {}
+        (Some(cmd), None) if cmd == "healthcheck" => std::process::exit(healthcheck()),
+        _ => {
+            eprintln!(
+                "usage: agentconnect-relay [healthcheck] (configured by AC_RELAY_* variables)"
+            );
+            std::process::exit(2);
+        }
+    }
     let rust_log = std::env::var("RUST_LOG").ok();
     logging::subscriber(rust_log.as_deref(), std::io::stdout).init();
 

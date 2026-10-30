@@ -473,6 +473,13 @@ async fn l9_metrics_on_a_separate_listener() {
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
+    // /healthz is there too, for health checks that mustn't meet the public
+    // listener's connection caps.
+    let r = agentconnect_directory::http::metrics_app(h.dir.clone())
+        .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
     // The sweep runs on its own timer and forgets idle windows.
     h.dir.sweep_limits();
 }
