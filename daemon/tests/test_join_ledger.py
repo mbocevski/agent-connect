@@ -229,6 +229,65 @@ async def test_a_request_id_or_key_package_taken_is_dropped_past_the_ledger(
     assert len(owner.engine.join_approvals()) == 1
 
 
+async def test_a_request_id_taken_from_the_holders_own_mailbox_is_a_replay(
+    owner: Owner, rng: random.Random
+) -> None:
+    """Past the ledger's window a link holder may reuse a decided request's
+    msg_id from its own mailbox, with a KeyPackage of its own: the request
+    id stays taken, so it gets no approval."""
+    url = await owner.invite()
+    bob, carol = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    first = await owner.deliver(bob.request(url), bob.mailbox)
+    owner.engine.reject(first)
+    owner.engine.store.ledger_purge(owner.now + 30 * 86_400, ledger="join")
+    owner.engine._join_ledger = ac.ReplayLedger()
+    await owner.deliver(carol.request(url, "carol"), carol.mailbox, msg_id=first)
+    assert owner.audit() == ["join_replay"]
+    assert owner.engine.join_approvals() == []
+
+
+async def test_an_approval_an_older_daemon_stored_from_another_sender_is_refused(
+    owner: Owner, rng: random.Random
+) -> None:
+    """An older daemon didn't compare a request's mailbox with its envelope's
+    sender (SPEC 6.2 step 3), so it may have stored an approval for a request
+    a link holder built from someone else's KeyPackage. Its inbox row is
+    keyed by the holder's mailbox, not the one the request names: neither the
+    human's approval nor a rebuilt Add accepts it, and it expires."""
+    url, elsewhere = await owner.invite(), await owner.invite()
+    victim, attacker = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    forged = _forge(victim.request(elsewhere), url)
+    inv = owner.engine.store.invite(invite_id(url))
+    assert inv is not None
+    obj = owner.engine._invite_object(inv)
+    assert obj is not None
+    v = owner.engine.client.verify_join_request(forged, obj, victim.mailbox)
+    rid = b64(rng.randbytes(16))
+    owner.engine.store.add_approval(
+        {
+            "request_id": rid,
+            "invite_id": inv["invite_id"],
+            "group_id": inv["group_id"],
+            "request": b64(forged),
+            "identity": v.identity,
+            "display_name": v.display_name,
+            "mailbox_id": v.mailbox_id,
+            "received_at": owner.now,
+            "kp_ref": b64(v.key_package_ref),
+            "instance_id": None,
+        }
+    )
+    owner.engine.store.record_inbox(attacker.mailbox, rid, None, "done", owner.now)
+    with pytest.raises(DaemonError, match="mailbox it names"):
+        owner.engine._build(unb64(inv["group_id"]), {"type": "add", "request_id": rid})
+    assert (owner.engine.store.approval(rid) or {})["status"] == "expired"
+    owner.engine.store.set_approval_status(rid, "pending")
+    with pytest.raises(DaemonError, match="mailbox it names"):
+        owner.engine._approve_join(rid)
+    assert (owner.engine.store.approval(rid) or {})["status"] == "expired"
+    assert not [r for r in owner.engine.store.outbox() if r.kind == "commit"]
+
+
 async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(
     owner: Owner, rng: random.Random
 ) -> None:

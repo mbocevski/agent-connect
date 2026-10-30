@@ -59,7 +59,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   familiar fingerprint. The check holds against link holders, not
   against a malicious relay, which can name any sender; that needs a
   JoinRequest signed with the KeyPackage's key, which is planned. `Client.verify_join_request`
-  in the core and its bindings takes the envelope's sender.
+  in the core and its bindings takes the envelope's sender. A pending
+  approval stored by an older daemon is checked the same way, by the
+  sender its envelope came from, when it is approved or its Add is built,
+  and expires if that wasn't the mailbox it names.
 
 ## [0.1.0a3] - 2026-10-30
 
