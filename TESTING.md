@@ -82,9 +82,11 @@ A pull request is classified and gated by the base branch's copy of
 `scripts/changes.py`, which both jobs read with `git show`, never by its own,
 so the change under test cannot decide which checks it faces. An edit to the
 script or its tests is a change to `scripts/` and runs everything; the new
-rules take effect for the next pull request, one PR later. The pull request
-that first adds the script has no base copy, so it runs everything and a
-person reads the script. What this does not cover is an edit to
+rules take effect for the next pull request, one PR later. When the base has
+no copy (the pull request that first adds the script, or one that follows a
+deletion), no code of the pull request runs: every job runs and `ci-ok`
+needs every one of them to have succeeded. A base branch that cannot be read
+fails both jobs instead of running everything. What this does not cover is an edit to
 `.github/workflows/ci.yml` itself (an `if:` that is always false, a gate step
 that is removed): that file runs from the pull request, so a person has to
 read its diff.

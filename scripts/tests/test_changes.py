@@ -178,7 +178,7 @@ def test_classify_main_prints_github_outputs(
 # --- the ci-ok gate ---
 
 
-def _needs(flags: dict[str, str] | None = None, **results: str) -> dict[str, dict[str, Any]]:
+def _needs(flags: dict[str, str] | None = None, /, **results: str) -> dict[str, dict[str, Any]]:
     base = {
         "changes": "success",
         "lint": "success",
@@ -301,21 +301,22 @@ def test_changes_exports_every_flag_and_ci_ok_waits_for_it() -> None:
     assert set(ch.PR_ONLY) <= set(jobs)
 
 
-def test_the_real_gate_input_shape_is_what_the_workflow_feeds_it() -> None:
+def test_the_workflow_feeds_the_gate_the_needs_context() -> None:
     text = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "NEEDS: ${{ toJSON(needs) }}" in text
-    assert re.search(r'python3 "\$script" gate$', text, flags=re.M)
 
 
-def test_both_jobs_run_the_base_branches_copy_of_the_script() -> None:
+def test_neither_job_runs_pull_request_code_on_a_pull_request() -> None:
     jobs = _jobs((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     for name in ("changes", "ci-ok"):
-        assert 'git show "origin/$BASE:scripts/changes.py"' in jobs[name], name
-        assert "fetch-depth: 0" in jobs[name], name
-    # The pull request's own copy only ever runs with --all, or as the
-    # fallback when the base has none (the pull request that adds it).
-    assert "python3 scripts/changes.py classify --all" in jobs["changes"]
-    assert re.search(r"python3 scripts/changes\.py classify(?! --all)", jobs["changes"]) is None
+        body = jobs[name]
+        assert 'git show "origin/$BASE:scripts/changes.py"' in body, name
+        assert 'git ls-tree --name-only "origin/$BASE" -- scripts/changes.py' in body, name
+        assert "fetch-depth: 0" in body, name
+        assert "set -euo pipefail" in body, name
+    # The checked-out copy is never classified with; `ci-ok` runs it only on a push.
+    assert "scripts/changes.py classify" not in jobs["changes"]
+    assert len(re.findall(r"python3 scripts/changes\.py", jobs["ci-ok"])) == 1
 
 
 def _step(job: str, marker: str) -> str:
@@ -327,91 +328,173 @@ def _step(job: str, marker: str) -> str:
     return "\n".join(line[10:] for line in match.group(1).splitlines())
 
 
-def _sh(cwd: Path, script: str, **env: str) -> subprocess.CompletedProcess[str]:
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    return subprocess.run(
-        ["bash", "-e", "-c", script],
+def _clean_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
         cwd=cwd,
-        env=clean | env,
+        env=_clean_env(),
+        check=True,
+        capture_output=True,
+    )
+
+
+# A pull request's own copy of the script: it records that it ran, says that
+# nothing needs to run, and passes any gate.
+FORGED = (
+    "import os, pathlib, sys\n"
+    "pathlib.Path(os.environ['SENTINEL']).write_text('ran')\n"
+    "sys.stdin.read()\n"
+    "for job in ('rust', 'python', 'licences', 'contract', 'platforms', 'image', 'integration'):\n"
+    "    print(f'run_{job}=false')\n"
+    "sys.exit(0)\n"
+)
+
+
+def _repo(
+    tmp_path: Path, *, base_has_script: bool, pr: str = "forged", base_ref: bool = True
+) -> Path:
+    """A checkout of a pull request. `pr` is what it does to scripts/changes.py:
+    "forged" replaces it, "deleted" removes it, "added" adds the real one."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "docs" / "groups.md").write_text("base\n", encoding="utf-8")
+    script = repo / "scripts" / "changes.py"
+    if base_has_script:
+        shutil.copy(REPO / "scripts" / "changes.py", script)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    if base_ref:
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "switch", "-q", "-c", "pr")
+    if pr == "forged":
+        script.write_text(FORGED, encoding="utf-8")
+    elif pr == "deleted":
+        script.unlink()
+    else:
+        shutil.copy(REPO / "scripts" / "changes.py", script)
+    (repo / "docs" / "groups.md").write_text("edited\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pr")
+    return repo
+
+
+def _run(
+    repo: Path, job: str, marker: str, event: str = "pull_request", needs: str = ""
+) -> subprocess.CompletedProcess[str]:
+    tmp = repo.parent
+    env = _clean_env() | {
+        "EVENT": event,
+        "BASE": "main",
+        "RUNNER_TEMP": str(tmp),
+        "GITHUB_OUTPUT": str(tmp / "output"),
+        "SENTINEL": str(tmp / "pr-code-ran"),
+        "NEEDS": needs,
+    }
+    return subprocess.run(
+        ["bash", "-e", "-c", _step(job, marker)],
+        cwd=repo,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
     )
 
 
-def _git(cwd: Path, *args: str) -> None:
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
-        cwd=cwd,
-        env=clean,
-        check=True,
-        capture_output=True,
-    )
-
-
-FORGED = (
-    "import sys\n"
-    "sys.stdin.read()\n"
-    "for job in ('rust', 'python', 'licences', 'contract', 'platforms', 'image', 'integration'):\n"
-    "    print(f'run_{job}=false')\n"
-)
-
-
-def _pull_request(tmp_path: Path, *, base_has_script: bool, forged: bool) -> dict[str, str]:
-    """Run the workflow's `changes` step on a pull request that edits the script."""
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    (repo / "docs").mkdir()
-    _git(repo, "init", "-q", "-b", "main")
-    (repo / "docs" / "groups.md").write_text("base\n", encoding="utf-8")
-    if base_has_script:
-        shutil.copy(REPO / "scripts" / "changes.py", repo / "scripts" / "changes.py")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "base")
-    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-    _git(repo, "switch", "-q", "-c", "pr")
-    script = repo / "scripts" / "changes.py"
-    script.write_text(FORGED if forged else (REPO / "scripts/changes.py").read_text("utf-8"))
-    (repo / "docs" / "groups.md").write_text("edited\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "pr")
-    out = tmp_path / "output"
-    result = _sh(
-        repo,
-        _step("changes", "classify"),
-        EVENT="pull_request",
-        BASE="main",
-        RUNNER_TEMP=str(tmp_path),
-        GITHUB_OUTPUT=str(out),
-    )
-    assert result.returncode == 0, result.stderr
+def _flags(repo: Path) -> dict[str, str]:
+    out = repo.parent / "output"
     return dict(line.split("=", 1) for line in out.read_text("utf-8").splitlines())
 
 
+def _ran_pr_code(repo: Path) -> bool:
+    return (repo.parent / "pr-code-ran").exists()
+
+
+def _all_run(flags: dict[str, str]) -> bool:
+    return {flags[f"run_{job}"] for job in JOBS} == {"true"}
+
+
 def test_a_forged_classifier_in_the_pull_request_is_not_the_one_that_runs(tmp_path: Path) -> None:
-    flags = _pull_request(tmp_path, base_has_script=True, forged=True)
-    assert {flags[f"run_{job}"] for job in JOBS} == {"true"}
-    assert flags["ci"] == "true"
-
-
-def test_the_pull_request_that_adds_the_script_runs_everything(tmp_path: Path) -> None:
-    flags = _pull_request(tmp_path, base_has_script=False, forged=False)
-    assert {flags[f"run_{job}"] for job in JOBS} == {"true"}
-
-
-def test_a_push_runs_everything(tmp_path: Path) -> None:
-    out = tmp_path / "output"
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    shutil.copy(REPO / "scripts" / "changes.py", repo / "scripts" / "changes.py")
-    result = _sh(
-        repo,
-        _step("changes", "classify"),
-        EVENT="push",
-        BASE="",
-        RUNNER_TEMP=str(tmp_path),
-        GITHUB_OUTPUT=str(out),
-    )
+    repo = _repo(tmp_path, base_has_script=True)
+    result = _run(repo, "changes", "classify")
     assert result.returncode == 0, result.stderr
-    assert "run_rust=true" in out.read_text("utf-8").splitlines()
+    assert _all_run(_flags(repo))  # the base's classifier saw a change to scripts/
+    assert not _ran_pr_code(repo)
+
+
+def test_a_pull_request_that_deletes_the_script_still_runs_everything(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, base_has_script=True, pr="deleted")
+    result = _run(repo, "changes", "classify")
+    assert result.returncode == 0, result.stderr
+    assert _all_run(_flags(repo))
+    assert not _ran_pr_code(repo)
+
+
+def test_the_pull_request_that_adds_the_script_runs_everything_without_running_it(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path, base_has_script=False)
+    result = _run(repo, "changes", "classify")
+    assert result.returncode == 0, result.stderr
+    assert _all_run(_flags(repo))
+    assert not _ran_pr_code(repo)
+
+
+def test_a_missing_base_branch_fails_the_step_instead_of_running_everything(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path, base_has_script=True, base_ref=False)
+    result = _run(repo, "changes", "classify")
+    assert result.returncode != 0
+    assert not (tmp_path / "output").exists()
+    assert not _ran_pr_code(repo)
+
+
+def test_a_push_runs_everything_without_running_the_checked_out_script(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, base_has_script=True)
+    result = _run(repo, "changes", "classify", event="push")
+    assert result.returncode == 0, result.stderr
+    assert _all_run(_flags(repo))
+    assert not _ran_pr_code(repo)
+
+
+def _needs_json(**results: str) -> str:
+    return json.dumps(_needs(**results))
+
+
+def test_ci_ok_gates_with_the_base_branches_script(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, base_has_script=True)  # the PR's copy passes any gate
+    failing = _run(repo, "ci-ok", "gate", needs=_needs_json(rust="failure"))
+    assert failing.returncode != 0
+    assert "rust: failure" in failing.stderr
+    # A skip the classifier did not ask for (every flag is true here).
+    skipped = _run(repo, "ci-ok", "gate", needs=_needs_json(python="skipped"))
+    assert skipped.returncode != 0
+    assert _run(repo, "ci-ok", "gate", needs=_needs_json()).returncode == 0
+    assert not _ran_pr_code(repo)
+
+
+def test_ci_ok_is_strict_when_the_base_has_no_script(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, base_has_script=False)
+    assert _run(repo, "ci-ok", "gate", needs=_needs_json()).returncode == 0
+    for results in ({"rust": "failure"}, {"python": "skipped"}, {"hygiene": "cancelled"}):
+        assert _run(repo, "ci-ok", "gate", needs=_needs_json(**results)).returncode != 0, results
+    assert not _ran_pr_code(repo)
+
+
+def test_ci_ok_fails_when_the_base_branch_is_missing(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, base_has_script=True, base_ref=False)
+    assert _run(repo, "ci-ok", "gate", needs=_needs_json()).returncode != 0
+    assert not _ran_pr_code(repo)
+
+
+def test_ci_ok_on_a_push_runs_the_gate_on_main(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, base_has_script=True, pr="added")
+    skipped = _needs_json(changelog="skipped", docs="skipped", hygiene="skipped")
+    assert _run(repo, "ci-ok", "gate", event="push", needs=skipped).returncode == 0
+    assert _run(repo, "ci-ok", "gate", event="push", needs=_needs_json(lint="failure")).returncode

@@ -48,18 +48,33 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
         run: |
-          # A pull request is classified by the base branch's copy of the
-          # script, never its own: otherwise the change under test could
-          # decide which checks it faces. Until the base has the script (the
-          # pull request that adds it) everything runs.
-          if [ "$EVENT" = pull_request ] \
-            && git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"; then
-            # --no-renames lists both paths of a rename.
-            git diff --no-renames --name-only "origin/$BASE...HEAD" > changed.txt
-            python3 "$RUNNER_TEMP/changes.py" classify < changed.txt | tee -a "$GITHUB_OUTPUT"
-          else
-            python3 scripts/changes.py classify --all < /dev/null | tee -a "$GITHUB_OUTPUT"
+          set -euo pipefail
+          # No code of the pull request runs here. It is classified by the
+          # base branch's copy of the script, never its own: otherwise the
+          # change under test could decide which checks it faces. Pushes,
+          # manual runs and a base that has no script (the pull request that
+          # adds it) run everything, which is printed inline. Any git error
+          # fails the step; only a clean "the base has no such file" runs
+          # everything.
+          everything() {
+            for job in rust python licences contract platforms image integration; do
+              echo "run_$job=true"
+            done | tee -a "$GITHUB_OUTPUT"
+          }
+          if [ "$EVENT" != pull_request ]; then
+            everything
+            exit 0
           fi
+          git rev-parse --verify --quiet "origin/$BASE^{commit}" > /dev/null
+          present="$(git ls-tree --name-only "origin/$BASE" -- scripts/changes.py)"
+          if [ -z "$present" ]; then
+            everything
+            exit 0
+          fi
+          git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"
+          # --no-renames lists both paths of a rename.
+          git diff --no-renames --name-only "origin/$BASE...HEAD" > changed.txt
+          python3 "$RUNNER_TEMP/changes.py" classify < changed.txt | tee -a "$GITHUB_OUTPUT"
 
   lint:
     runs-on: ubuntu-24.04
@@ -276,11 +291,22 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
         run: |
-          # The base branch's gate, for the reason given in `changes`. The
-          # pull request's own copy is used only when the base has none.
-          script=scripts/changes.py
-          if [ "$EVENT" = pull_request ] \
-            && git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"; then
-            script="$RUNNER_TEMP/changes.py"
+          set -euo pipefail
+          # The base branch's gate, for the reason given in `changes`. When
+          # the base has none, no code of the pull request runs: every job
+          # must have succeeded, with nothing skipped. Pushes run the gate
+          # that is on main.
+          if [ "$EVENT" != pull_request ]; then
+            python3 scripts/changes.py gate
+            exit 0
           fi
-          python3 "$script" gate
+          git rev-parse --verify --quiet "origin/$BASE^{commit}" > /dev/null
+          present="$(git ls-tree --name-only "origin/$BASE" -- scripts/changes.py)"
+          if [ -n "$present" ]; then
+            git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"
+            python3 "$RUNNER_TEMP/changes.py" gate
+          else
+            echo "the base has no scripts/changes.py: every job must have succeeded"
+            jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+            jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null
+          fi
