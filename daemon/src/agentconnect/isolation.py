@@ -174,9 +174,37 @@ def check_agent_dir(agent_dir: Path, euid: int, gid: int) -> None:
     if st.st_uid != euid or st.st_gid != gid:
         msg = f"{agent_dir} must be owned by UID {euid} and GID {gid}"
         raise IsolationError(msg)
-    if st.st_mode & 0o007 or not st.st_mode & 0o010:
-        msg = f"{agent_dir} must have mode 0750 or 0710 (group access, none for others)"
+    if st.st_mode & 0o027 or not st.st_mode & 0o010:
+        # Group write would let an agent user replace the socket (SR-29).
+        msg = (
+            f"{agent_dir} must have mode 0750 or 0710 "
+            "(the group may enter, not write; others nothing)"
+        )
         raise IsolationError(msg)
+    check_parents(agent_dir, euid)
+
+
+def check_parents(path: Path, euid: int) -> None:
+    """Every directory above ``path``, as the kernel resolves it, belongs
+    to ``euid`` or root, and only its owner can change entries in it: no
+    group or other write unless it is sticky (the OpenSSH secure-path rule).
+    Whoever could rename entries above ``path`` could put their own
+    directory in its place (SR-29)."""
+    real = Path(os.path.realpath(path.parent))
+    for d in (real, *real.parents):
+        st = _lstat(d)
+        if st is None:
+            msg = f"{d} is missing"
+            raise IsolationError(msg)
+        if st.st_uid not in (euid, 0):
+            msg = f"{d} must be owned by UID {euid} or root, as every directory above {path}"
+            raise IsolationError(msg)
+        if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+            msg = (
+                f"{d} must be writable by its owner only (or sticky), "
+                f"as every directory above {path}"
+            )
+            raise IsolationError(msg)
 
 
 def _inside(a: Path, b: Path) -> bool:

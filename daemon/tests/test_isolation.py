@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from agentconnect import isolation
 from agentconnect.apiclient import ApiClientError
 from agentconnect.cli import app
 from agentconnect.cli_support import EXIT_REFUSED, EXIT_USAGE, map_api_error
@@ -220,6 +221,72 @@ def test_agent_dir_permissions(short_dir: Path, rng: random.Random) -> None:
         check_agent_dir(plain, EUID, GID)
     with pytest.raises(IsolationError, match="cannot create"):
         check_agent_dir(short_dir / "no" / "parent", EUID, GID)
+
+
+def _with_mode(
+    monkeypatch: pytest.MonkeyPatch, path: Path, mode: int, uid: int | None = None
+) -> None:
+    """``path``'s lstat reports ``mode`` (and ``uid``): no chmod, so the
+    test never makes anything writable for real."""
+    real = isolation._lstat
+
+    def lstat(p: Path) -> os.stat_result | None:
+        st = real(p)
+        if st is None or Path(p) != path:
+            return st
+        fields = list(st)
+        fields[0] = stat.S_IFMT(st.st_mode) | mode
+        if uid is not None:
+            fields[4] = uid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(isolation, "_lstat", lstat)
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o730])
+def test_a_group_writable_agent_dir_is_refused(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    # An agent user could replace the socket in it and show the human
+    # forged approvals or a forged code (SR-29).
+    agent_dir = short_dir / "agent"
+    check_agent_dir(agent_dir, EUID, GID)
+    _with_mode(monkeypatch, agent_dir, mode)
+    with pytest.raises(IsolationError, match="mode 0750"):
+        check_agent_dir(agent_dir, EUID, GID)
+
+
+@pytest.mark.parametrize(
+    ("mode", "uid", "refused"),
+    [
+        (0o775, None, "its owner only"),  # group-writable, not sticky
+        (0o757, None, "its owner only"),  # other-writable, not sticky
+        (0o1777, None, None),  # sticky, as /tmp
+        (0o755, -1, "owned by"),  # another user's
+        (0o755, 0, None),  # root's
+    ],
+)
+def test_the_agent_dirs_parents_must_be_closed(  # noqa: PLR0913, PLR0917
+    short_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rng: random.Random,
+    mode: int,
+    uid: int | None,
+    refused: str | None,
+) -> None:
+    # Whoever can change entries in a directory above the agent directory
+    # can rename it away and put their own in its place (SR-29).
+    parent = Path(os.path.realpath(short_dir / "up"))
+    parent.mkdir(mode=0o700)
+    agent_dir = parent / "agent"
+    check_agent_dir(agent_dir, EUID, GID)
+    _with_mode(monkeypatch, parent, mode, _uid(rng) if uid == -1 else uid)
+    if refused is None:
+        check_agent_dir(agent_dir, EUID, GID)
+    else:
+        with pytest.raises(IsolationError, match=refused) as e:
+            check_agent_dir(agent_dir, EUID, GID)
+        assert str(parent) in str(e.value)
 
 
 def test_setup_checks_that_need_no_filesystem(short_dir: Path, rng: random.Random) -> None:

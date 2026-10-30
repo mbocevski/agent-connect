@@ -68,6 +68,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`GET`, `POST`, ...), and any other as `other`: a client could put an
   address or a name in the method and have it written to the log (SR-21).
 
+- In the separate-OS-user mode the daemon refuses an agent directory its
+  group can write, and one under a directory that isn't the daemon user's
+  or root's or that others can write without the sticky bit: an agent user
+  who could rename entries there could replace the socket and show the
+  human forged approvals or a forged code (SR-29).
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added

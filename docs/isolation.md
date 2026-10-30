@@ -84,8 +84,12 @@ is no user boundary to put between them.
   - the data directory isn't owned by the daemon's user with mode 0700, or a
     token or `webhook-secret` isn't a regular file owned by it with mode 0600;
   - the agent directory isn't owned by the daemon's user and
-    `isolation.group`, gives others any access, or gives the group no
-    access;
+    `isolation.group`, gives others any access, gives the group write, or
+    gives the group no access;
+  - a directory above the agent directory (its real path) isn't owned by
+    the daemon's user or root, or its group or others can write it and it
+    isn't sticky: whoever can rename entries there could put their own
+    agent directory in its place;
   - `api.socket` is outside the agent directory, or the agent and data
     directories contain each other;
   - a user is in both `agent_users` and `human_users`, or the daemon's own
@@ -220,7 +224,10 @@ In that `config.toml`, set `daemon.data_dir = "/usr/local/var/agentconnect"`,
 `isolation.agent_dir = "/usr/local/var/run/agentconnect"` and
 `isolation.group = "_agentconnect"`. The agent directory isn't under
 `/var/run`, because macOS empties that at boot and the daemon's user can't
-recreate it there. Then load the job:
+recreate it there. Every directory above it must be root's (or
+`_agentconnect`'s): with Homebrew on an Intel Mac, `/usr/local/var` belongs
+to your user, so pick a root-owned location instead, for example
+`/Library/Application Support/agentconnect/run`. Then load the job:
 
 ```sh
 sudo install -m 0644 packaging/launchd/network.yggdrasill.agentconnectd.plist /Library/LaunchDaemons/
