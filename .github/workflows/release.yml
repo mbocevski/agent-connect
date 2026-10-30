@@ -19,6 +19,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UV_FROZEN: "1"
+  # The workspace pulls openmls from GitHub (`[patch.crates-io]`): fetch it
+  # with the git CLI, which recovers from the TLS errors libgit2 did not,
+  # and retry network operations more than cargo's default of 3.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_NET_RETRY: "10"
   # The public relay the verification jobs point `agentconnect mcp` at.
   PUBLIC_RELAY: wss://connect.yggdrasill.network
 
