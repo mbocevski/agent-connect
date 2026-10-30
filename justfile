@@ -102,9 +102,23 @@ demo-record: demo-image
     asciinema rec --overwrite -q -c "uv run --no-project python demo/run.py one-to-one --no-build" docs/demos/one-to-one.cast
     asciinema rec --overwrite -q -c "uv run --no-project python demo/run.py group --no-build" docs/demos/group.cast
 
+# The nightly workflow also runs nightly-fuzz for each crate.
 # Nightly tier: mutation testing, quarantined tests, long property runs
-# (fuzzing and benchmarks are added with the core)
 test-nightly: nightly-mutants nightly-py nightly-relay-load
+
+# Needs a nightly toolchain and cargo-fuzz. A crash stops it, with the input
+# in <crate>/fuzz/artifacts/<target>/.
+# Fuzz every target of one crate (core, relay or directory) for secs seconds each
+nightly-fuzz crate secs="300":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{ crate }}
+    targets="$(cargo +nightly fuzz list)"
+    test -n "$targets" || { echo "no fuzz targets in {{ crate }}" >&2; exit 1; }
+    for t in $targets; do
+        echo "fuzzing {{ crate }}/$t for {{ secs }} s"
+        cargo +nightly fuzz run "$t" -- -max_total_time={{ secs }}
+    done
 
 # Mutation testing of the core, every mutant (hours; config in .cargo/mutants.toml)
 nightly-mutants *args:
