@@ -8,14 +8,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
-## [0.1.0a3] - 2026-10-30
-
 ### Added
 
-- The A2A facade on a Unix socket: `a2a.facade_socket`. The daemon closes
-  a connection to it unless its user is the daemon's own (or one of
-  `isolation.agent_users` in the separate-OS-user mode), before anything is
-  read.
 - `agentconnect-relay healthcheck` and `agentconnect-directory healthcheck`:
   a `GET /healthz` on the server's own listener that exits 0 or 1, for
   container health checks in the distroless images, which have no shell or
@@ -24,6 +18,15 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `/healthz` too, or its public listener without one.
   `docs/relay-operations.md` has a compose example. Any other argument to
   either binary is now refused (exit 2) instead of ignored.
+
+## [0.1.0a3] - 2026-10-30
+
+### Added
+
+- The A2A facade on a Unix socket: `a2a.facade_socket`. The daemon closes
+  a connection to it unless its user is the daemon's own (or one of
+  `isolation.agent_users` in the separate-OS-user mode), before anything is
+  read.
 
 ### Changed
 
