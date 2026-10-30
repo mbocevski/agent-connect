@@ -195,7 +195,8 @@ What works on `main` today:
   `/.well-known/agentconnect.json` to show an owner state, and holds no
   keys. Its home page says how to get listed, and an operator can name the
   site, link a home page, show a notice, link terms and an abuse contact
-  (on the pages and in its directory file), and replace the stylesheet. A
+  (on the pages and in its directory file), and replace the stylesheet,
+  against markup whose class names are a documented, stable interface. A
   `healthcheck` subcommand serves container health checks
   ([directory/README.md](directory/README.md)).
   <!-- component: directory -->

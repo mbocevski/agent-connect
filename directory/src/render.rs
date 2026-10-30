@@ -648,10 +648,10 @@ through {}.</p>\n",
     for e in endpoints(site) {
         let _ = writeln!(
             h,
-            "<dt><code><span class=\"method\">{}</span> {}</code></dt><dd>{}</dd>",
-            e.method,
+            "<dt><code><span class=\"method\" data-method=\"{m}\">{m}</span> {}</code></dt><dd>{}</dd>",
             escape(&e.url),
-            escape(e.what)
+            escape(e.what),
+            m = e.method,
         );
     }
     h.push_str("</dl>\n</section>\n</main>\n");
