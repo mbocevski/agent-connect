@@ -408,6 +408,50 @@ def test_seen_prunes_old_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert not list(tmp_path.glob("*seen*"))
 
 
+def _legacy_seen(path: Path, n: int) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE seen (h TEXT PRIMARY KEY, n INTEGER)")
+    old.executemany(
+        "INSERT INTO seen VALUES (?, ?)", ((Seen._h("m", str(i)), i + 1) for i in range(n))
+    )
+    old.commit()
+    old.close()
+
+
+def test_a_full_old_seen_file_imports_in_one_transaction_at_adapter_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full file (50,000 rows) moves in one transaction when the store is
+    bound, not row by row inside the first delivery: that stalled the event
+    loop for minutes. The directory name has a `#`, which a raw `file:` URI
+    would cut short."""
+    data = tmp_path / "data#dir"
+    legacy = data / adapter_module.SEEN_FILE
+    _legacy_seen(legacy, 50_000)
+    db = Store(tmp_path / "daemon.db", secrets.token_bytes(32))
+    depths: list[int] = []
+    add = db.a2a_seen_add
+
+    def counted(h: str, n: int) -> None:
+        depths.append(db._depth)
+        add(h, n)
+
+    monkeypatch.setattr(db, "a2a_seen_add", counted)
+    adapter = A2AAdapter(A2AOptions(data_dir=data))
+    adapter.bind_store(db)
+    assert not legacy.exists(), "imported when the store is bound"
+    assert len(depths) == 50_000
+    assert set(depths) == {1}, "every row inside one transaction"
+    seen = adapter._seen
+    assert seen.has("m", "0")
+    assert seen.has("m", "49999")
+    assert not (tmp_path / "data").exists(), "no file opened beside the data dir"
+    db.close()
+
+
 def test_an_unreadable_old_seen_file_is_deleted_all_the_same(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

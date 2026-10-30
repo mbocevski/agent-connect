@@ -34,18 +34,24 @@ class Seen:
 
     def _import(self, legacy: Path) -> None:
         """Move an older daemon's plain file into the database, oldest
-        first, then delete it with its journal files."""
-        if legacy.exists():
+        first and in one transaction (row by row it took minutes for a full
+        file), then delete it with its journal files."""
+        if legacy.exists() and self._store is not None:
             try:
-                old = sqlite3.connect(f"file:{legacy}?mode=ro", uri=True)
+                # An escaped URI: a `#` or `?` in the path would cut a raw one
+                # short and open another file.
+                old = sqlite3.connect(legacy.resolve().as_uri() + "?mode=ro", uri=True)
                 try:
                     rows = old.execute("SELECT h FROM seen ORDER BY n").fetchall()
                 finally:
                     old.close()
             except sqlite3.Error:
                 rows = []  # unreadable: at worst one redelivery reaches the agent
-            for (h,) in rows[-LIMIT:]:
-                self._put(str(h))
+            with self._store.tx():
+                for (h,) in rows[-LIMIT:]:
+                    self._n += 1
+                    self._store.a2a_seen_add(str(h), self._n)
+                self._store.a2a_seen_prune(self._n - LIMIT)
         for suffix in ("", "-wal", "-shm", "-journal"):
             legacy.with_name(legacy.name + suffix).unlink(missing_ok=True)
 

@@ -190,8 +190,13 @@ class A2AAdapter:
 
     def bind_store(self, store: Store) -> None:
         """The daemon's database: the local agent's tasks are kept there,
-        so a follow-up or a cancel after a restart still finds its task."""
+        so a follow-up or a cancel after a restart still finds its task, and
+        so is the seen set. An older daemon's plain seen file is taken over
+        here, at start, rather than inside the first delivery."""
         self._store = store
+        data_dir = self.options.data_dir
+        legacy = None if data_dir is None else data_dir / SEEN_FILE
+        self._seen_store = Seen(store, legacy)
 
     def bind_clock(self, clock: Clock) -> None:
         """The runtime's clock, which stamps the task map's entries."""
@@ -232,12 +237,10 @@ class A2AAdapter:
 
     @property
     def _seen(self) -> Seen:
-        # Opened on first use, in the daemon's encrypted database (bound by
-        # then), taking over an older daemon's plain file if one is left.
+        # In the daemon's encrypted database once it is bound (bind_store);
+        # in memory without it (unit use).
         if self._seen_store is None:
-            data_dir = self.options.data_dir
-            legacy = None if data_dir is None else data_dir / SEEN_FILE
-            self._seen_store = Seen(self._store, legacy)
+            self._seen_store = Seen(self._store)
         return self._seen_store
 
     # -- Adapter protocol ----------------------------------------------------
