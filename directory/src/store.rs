@@ -474,9 +474,9 @@ pub trait Store: Send + Sync + 'static {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<FeedEntry>>> + Send;
 
-    /// Delete old feed entries, revoked token ids past every token lifetime,
-    /// and listings expired for longer than the grace period. Tombstones,
-    /// name marks and owner revocations are kept.
+    /// Delete old feed entries and listings expired for longer than the
+    /// grace period. Tombstones, name marks, owner revocations and revoked
+    /// token ids are kept (a revocation names no expiry, SR-23).
     fn purge(&self, now: u64) -> impl Future<Output = StoreResult<PurgeStats>> + Send;
 }
 
