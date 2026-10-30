@@ -1,4 +1,6 @@
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -73,6 +75,48 @@ def test_consistent_tree_passes(repo: Path) -> None:
 
 def test_this_repository_passes() -> None:
     assert ccp.check(REPO) == []
+
+
+def _git(repo: Path, *args: str) -> None:
+    # Without GIT_*: git exports GIT_DIR and friends to the pre-push hook that
+    # runs these tests, and they would point `init` and `add` at the real repository.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "-C", str(repo), *args], env=env, check=True)
+
+
+def _git_add(repo: Path) -> None:
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+
+
+def _untracked_worktree(repo: Path) -> None:
+    # A copy of the tree with an unpatched workspace and an affected lockfile,
+    # like an agent worktree inside the checkout.
+    _write(repo / "worktrees" / "wt" / "Cargo.toml", "[workspace]\n")
+    _write(repo / "worktrees" / "wt" / "fuzz" / "Cargo.toml", "[workspace]\n")
+    _write(
+        repo / "worktrees" / "wt" / "Cargo.lock",
+        _lock(("libcrux-kem", "0.0.9", "registry+https://github.com/rust-lang/crates.io-index")),
+    )
+
+
+def test_untracked_worktrees_are_not_scanned(repo: Path) -> None:
+    _git_add(repo)
+    _untracked_worktree(repo)
+    assert ccp.check(repo) == []
+
+
+def test_tracked_files_are_still_scanned_in_a_checkout(repo: Path) -> None:
+    _git_add(repo)
+    _write(repo / "relay" / "fuzz" / "Cargo.toml", '[package]\nname = "r"\n\n[workspace]\n')
+    _git(repo, "add", "-A")
+    assert any("relay/fuzz/Cargo.toml" in p for p in ccp.check(repo))
+
+
+def test_without_git_every_directory_is_scanned(repo: Path) -> None:
+    _untracked_worktree(repo)
+    problems = ccp.check(repo)
+    assert any("worktrees/wt/Cargo.lock" in p for p in problems)
 
 
 def test_workspace_without_the_patch_fails(repo: Path) -> None:

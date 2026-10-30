@@ -17,6 +17,10 @@ commit (RUSTSEC-2026-0329, -0330, -0331). `check` fails when:
 the `openmls` release the workspace pins. That is the condition for removing
 the patch, so the nightly failure issue tells someone.
 
+In a git checkout `check` reads only the tracked `Cargo.toml` and `Cargo.lock`
+files, so untracked trees such as agent worktrees are ignored; elsewhere it
+walks the directory tree.
+
 usage: check_cargo_patch.py check [ROOT]    (default: the repository root)
        check_cargo_patch.py upstream [ROOT]
 """
@@ -26,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
 import urllib.request
@@ -50,7 +55,39 @@ _FULL = 3  # major.minor.patch
 _MAJOR_MINOR = 2
 
 
+def _tracked(root: Path, name: str) -> list[Path] | None:
+    """The git-tracked `name` files under `root`, or None when `root` is not a checkout.
+
+    Untracked trees (agent worktrees inside the checkout, scratch
+    clones) hold manifests of their own that are not this repository's to check.
+    """
+    # git exports GIT_DIR and friends to hooks (pre-push runs the tests), and
+    # they would override `-C`.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    def git(*args: str) -> str:
+        return subprocess.run(  # noqa: S603
+            ["git", "-C", str(root), *args],  # noqa: S607
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    try:
+        if Path(git("rev-parse", "--show-toplevel").strip()).resolve() != root.resolve():
+            return None
+        listed = git("ls-files", "-z", "--", name, f"*/{name}")
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return sorted(root / rel for rel in listed.split("\0") if rel and (root / rel).is_file())
+
+
 def _files(root: Path, name: str) -> Iterator[Path]:
+    tracked = _tracked(root, name)
+    if tracked is not None:
+        yield from tracked
+        return
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
         if name in filenames:
