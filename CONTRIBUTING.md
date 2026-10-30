@@ -211,9 +211,11 @@ Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
 3. After it merges, run the `release` workflow by hand on `main` (the dry
    run: everything except publishing), then tag `vX.Y.Z` on `main`.
 
-The tag builds the artifacts on every platform, signs them (Sigstore) and
-attests them (SLSA provenance), publishes the three Python packages to PyPI
-through trusted publishing and the relay and directory images to ghcr.io,
-creates the GitHub Release with the CHANGELOG section, the install command
-and the image digests, and then installs the published CLI on clean Linux
-and macOS machines. Verify a release with `just release-verify X.Y.Z`.
+The tag builds the artifacts on every platform, signs them (Sigstore),
+verifies the signatures and attests them (SLSA provenance), and runs the
+reproducibility check on the tagged commit; only when both pass does it
+publish the three Python packages to PyPI through trusted publishing and
+the relay and directory images to ghcr.io, creates the GitHub Release with
+the CHANGELOG section, the install command and the image digests, and then
+installs the published CLI on clean Linux and macOS machines. Verify a
+release with `just release-verify X.Y.Z`.

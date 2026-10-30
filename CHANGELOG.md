@@ -97,6 +97,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   validity window could otherwise be published once the id was forgotten
   (SR-23).
 
+- `just release-verify` also checks every release file's cosign bundle and
+  both images' cosign signatures, and accepts only a signature the release
+  workflow made for that tag (it now needs `cosign`). The release workflow
+  verifies each signature right after making it, and publishes nothing
+  until the reproducibility check passes for the commit it releases
+  (SR-39).
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added

@@ -67,10 +67,14 @@ There is no bounty.
 Every release file is signed with Sigstore and carries a SLSA provenance
 attestation from the release workflow, and so do both container images.
 
-- `just release-verify X.Y.Z` downloads the GitHub Release `vX.Y.Z` and runs
-  `gh attestation verify` on every file, then on the relay and directory
-  images at that version. Pass the version without the `v`, for example
-  `0.1.0a3`.
+- `just release-verify X.Y.Z` downloads the GitHub Release `vX.Y.Z`, runs
+  `gh attestation verify` on every file and checks each file's cosign
+  bundle (`<file>.sigstore.json`), then does both for the relay and
+  directory images at that version. A signature counts only if the release
+  workflow made it for tag `vX.Y.Z`. Pass the version without the `v`, for
+  example `0.1.0a3`. It needs `gh` and `cosign`.
+- To check one file's signature:
+  `cosign verify-blob --bundle <file>.sigstore.json --certificate-identity https://github.com/mbocevski/agent-connect/.github/workflows/release.yml@refs/tags/vX.Y.Z --certificate-oidc-issuer https://token.actions.githubusercontent.com <file>`.
 - To check one file: `gh attestation verify <file> --repo mbocevski/agent-connect`.
 - To check an image by digest, take the digest from the release notes:
   `gh attestation verify oci://ghcr.io/mbocevski/agentconnect-relay@sha256:<digest> --repo mbocevski/agent-connect`

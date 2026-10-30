@@ -152,6 +152,11 @@ jobs:
           for f in dist/*; do
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
           done
+      # The check `just release-verify` runs on a published release, here on
+      # every run: each bundle verifies for its file under this workflow's
+      # identity.
+      - name: Verify the signatures
+        run: scripts/verify-signatures.sh blobs dist "$GITHUB_REPOSITORY" "$GITHUB_REF"
       # Provenance for every file in dist/: binaries, wheels, sdists, checksums.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -160,6 +165,11 @@ jobs:
         with:
           name: release-dist-${{ matrix.target }}
           path: dist/
+
+  # The reproducibility check (repro.yml) on the commit being released:
+  # nothing is published unless two clean builds of it match.
+  repro:
+    uses: ./.github/workflows/repro.yml
 
   # The exact set of files PyPI gets, checked: four core wheels (abi3,
   # cp312+), the pure wheels and the three sdists, all at the release
@@ -297,7 +307,7 @@ jobs:
   pypi:
     name: pypi (${{ matrix.package }})
     if: needs.version.outputs.publish == 'true'
-    needs: [version, pypi-dist, image]
+    needs: [version, pypi-dist, image, repro]
     strategy:
       max-parallel: 1
       matrix:
@@ -331,7 +341,7 @@ jobs:
   image-publish:
     name: image-publish (${{ matrix.component }})
     if: needs.version.outputs.publish == 'true'
-    needs: [version, pypi-dist, image]
+    needs: [version, pypi-dist, image, repro]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -381,6 +391,10 @@ jobs:
         env:
           DIGEST: ${{ steps.index.outputs.digest }}
         run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Verify the signature
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: scripts/verify-signatures.sh image "$IMAGE@$DIGEST" "$GITHUB_REPOSITORY" "$GITHUB_REF"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
@@ -426,7 +440,7 @@ jobs:
 
   release:
     if: needs.version.outputs.publish == 'true'
-    needs: [version, build, pypi, image-publish, notes]
+    needs: [version, build, pypi, image-publish, notes, repro]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

@@ -17,6 +17,8 @@ on:
       - "**/Cargo.toml"
       - "**/pyproject.toml"
   workflow_dispatch:
+  # The release workflow requires it for the commit it releases.
+  workflow_call:
 
 permissions:
   contents: read
