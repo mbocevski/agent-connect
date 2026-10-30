@@ -20,9 +20,13 @@ issuer=https://token.actions.githubusercontent.com
 
 case "$mode" in
 blobs)
+    shopt -s dotglob nullglob
     n=0
     for f in "$target"/*; do
-        test -f "$f" || continue
+        if [[ ! -f "$f" || -L "$f" || "$(basename "$f")" == .* ]]; then
+            echo "unexpected entry $(basename "$f") in $target" >&2
+            exit 1
+        fi
         case "$f" in
         *.sigstore.json)
             test -f "${f%.sigstore.json}" || {

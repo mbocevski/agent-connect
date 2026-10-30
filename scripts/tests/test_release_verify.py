@@ -95,6 +95,18 @@ def test_a_missing_or_bad_signature_fails(
     assert error in result.stderr
 
 
+@pytest.mark.parametrize("entry", [".hidden", "subdir"])
+def test_an_unexpected_entry_fails(tmp_path: Path, entry: str) -> None:
+    dist = _release(tmp_path, "a.whl")
+    if entry == "subdir":
+        (dist / entry).mkdir()
+    else:
+        (dist / entry).write_bytes(b"x")
+    result = _run(tmp_path, "blobs", str(dist), OWNER_REPO, REF)
+    assert result.returncode != 0
+    assert f"unexpected entry {entry}" in result.stderr
+
+
 def test_a_bundle_without_its_file_fails(tmp_path: Path) -> None:
     dist = _release(tmp_path, "a.whl")
     (dist / "gone.whl.sigstore.json").write_bytes(b"{}")
@@ -156,3 +168,31 @@ def test_release_verify_checks_the_signatures() -> None:
     assert "scripts/verify-signatures.sh image" in body
     assert "refs/tags/v{{ version }}" in body
     assert "gh attestation verify" in body
+    # The identity is the project's, never that of whatever repository a
+    # clone's gh defaults to (a fork's signatures would verify against it).
+    assert "gh repo view" not in body
+    pinned = 'release_repo := env("AC_RELEASE_REPO", "mbocevski/agent-connect")'
+    assert pinned in text.splitlines()
+    assert "{{ release_repo }}" in body
+
+
+def _steps(job: str) -> list[str]:
+    return [str(s) for s in re.split(r"^      - ", job, flags=re.MULTILINE)[1:]]
+
+
+def test_every_job_that_runs_a_script_checks_the_repository_out_first() -> None:
+    """A step that runs something from scripts/ needs the checkout before
+    it: without one it exits 127, and in image-publish that would come after
+    the image is pushed and signed (a half-published release)."""
+    for workflow in sorted((REPO / ".github" / "workflows").glob("*.yml")):
+        text = workflow.read_text(encoding="utf-8")
+        jobs = re.findall(r"^  ([A-Za-z0-9_-]+):\n", text.split("\njobs:\n", 1)[1], re.MULTILINE)
+        for name in jobs:
+            checked_out = False
+            for step in _steps(_job(text, name)):
+                if "actions/checkout@" in step:
+                    checked_out = True
+                if re.search(r"^\s*(run:|-).*\bscripts/", step, re.MULTILINE) or step.startswith(
+                    "run: scripts/"
+                ):
+                    assert checked_out, f"{workflow.name}: {name} runs scripts/ before a checkout"

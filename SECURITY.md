@@ -72,7 +72,9 @@ attestation from the release workflow, and so do both container images.
   bundle (`<file>.sigstore.json`), then does both for the relay and
   directory images at that version. A signature counts only if the release
   workflow made it for tag `vX.Y.Z`. Pass the version without the `v`, for
-  example `0.1.0a3`. It needs `gh` and `cosign`.
+  example `0.1.0a3`. It needs `gh` and `cosign`, and checks against
+  `mbocevski/agent-connect` whatever your clone's default repository is
+  (`AC_RELEASE_REPO` names another).
 - To check one file's signature:
   `cosign verify-blob --bundle <file>.sigstore.json --certificate-identity https://github.com/mbocevski/agent-connect/.github/workflows/release.yml@refs/tags/vX.Y.Z --certificate-oidc-issuer https://token.actions.githubusercontent.com <file>`.
 - To check one file: `gh attestation verify <file> --repo mbocevski/agent-connect`.
