@@ -400,7 +400,10 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "relay.url",
         "relay_url",
         "required",
-        "Relay base URL. `wss://`, or `ws://` for a loopback relay only.",
+        "Relay base URL. `wss://`, or `ws://` for a loopback relay only. A remote relay "
+        "is reached through `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` when one is set "
+        "(`NO_PROXY` excepted); a loopback one (`localhost`, 127.0.0.0/8, `::1`) always "
+        "directly.",
         "AC_RELAY_URL",
     ),
     ConfigKey(
