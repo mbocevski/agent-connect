@@ -84,6 +84,8 @@ if TYPE_CHECKING:
 
 LOG = log.get("a2a")
 FACADE_TOKEN_FILE = "a2a-facade-token"  # noqa: S105 - a file name
+# Where older daemons kept the seen set, in plain SQLite: moved into the
+# encrypted database and deleted on first use.
 SEEN_FILE = "a2a-seen.db"
 MAX_CONTEXT_ENTRY = 64 * 1024  # bytes of JSON; bigger context entries are summarised
 MAX_TASKS = 1024  # local agent tasks kept in memory (a cache of the database's)
@@ -230,10 +232,12 @@ class A2AAdapter:
 
     @property
     def _seen(self) -> Seen:
-        # Opened on first use: the daemon creates the data directory.
+        # Opened on first use, in the daemon's encrypted database (bound by
+        # then), taking over an older daemon's plain file if one is left.
         if self._seen_store is None:
             data_dir = self.options.data_dir
-            self._seen_store = Seen(None if data_dir is None else data_dir / SEEN_FILE)
+            legacy = None if data_dir is None else data_dir / SEEN_FILE
+            self._seen_store = Seen(self._store, legacy)
         return self._seen_store
 
     # -- Adapter protocol ----------------------------------------------------
