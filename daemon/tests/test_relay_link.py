@@ -4,9 +4,11 @@ signed REST client against an in-memory transport."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import random
-from collections.abc import AsyncIterator, Awaitable, Callable
+import threading
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from http import HTTPStatus
 from typing import Any
 
@@ -553,3 +555,141 @@ async def test_rest_signs_again_once_when_a_restarted_relay_says_when(
         with pytest.raises(RelayError) as err:
             await asyncio.wait_for(task, 5)
         assert err.value.code == refusal[0]["code"]
+
+
+# -- proxies: a loopback relay is always reached directly (MAR-299 / SR-30 class)
+
+
+class _Recorder:
+    """A loopback server on a thread: records each connection's first bytes
+    and answers ``answer``."""
+
+    def __init__(self, answer: bytes) -> None:
+        import socket  # noqa: PLC0415
+
+        self._sock = socket.create_server(("127.0.0.1", 0))
+        self._sock.settimeout(0.05)
+        self.port = self._sock.getsockname()[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.received: list[bytes] = []
+        self.got = threading.Event()
+        self._answer, self._open = answer, True
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while self._open:
+            try:
+                conn, _ = self._sock.accept()
+            except TimeoutError:
+                continue
+            with conn:
+                conn.settimeout(2)
+                try:
+                    self.received.append(conn.recv(65536))
+                    self.got.set()
+                    conn.sendall(self._answer)
+                except OSError:
+                    pass
+
+    def close(self) -> list[bytes]:
+        self._open = False
+        self._thread.join(timeout=5)
+        self._sock.close()
+        return self.received
+
+
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+@pytest.fixture
+def proxy(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Recorder]:
+    """Every proxy variable points at a recorder, and nothing bypasses it."""
+    recorder = _Recorder(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n")
+    for var in PROXY_VARS:
+        monkeypatch.setenv(var, recorder.url)
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    yield recorder
+    recorder.close()
+
+
+async def test_rest_to_a_loopback_relay_goes_direct(proxy: _Recorder, rng: random.Random) -> None:
+    body = json.dumps({"group_name": "Ops"}).encode()
+    relay = _Recorder(
+        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+        + f"content-length: {len(body)}\r\nconnection: close\r\n\r\n".encode()
+        + body
+    )
+    try:
+        rest = RelayRest(relay.url, "relay.test", instance(rng), FakeClock())
+        assert await rest.invite_meta("inv1") == {"group_name": "Ops"}
+    finally:
+        got = relay.close()
+    assert len(got) == 1
+    assert got[0].startswith(b"GET /v0/invites/inv1 ")
+    assert proxy.close() == []
+
+
+async def test_rest_to_a_remote_relay_honours_the_proxy(
+    proxy: _Recorder, rng: random.Random
+) -> None:
+    # An operator may need a proxy to reach a relay elsewhere.
+    rest = RelayRest(
+        "http://relay.example.org:8443", "relay.example.org", instance(rng), FakeClock()
+    )
+    with pytest.raises(RelayError):
+        await rest.invite_meta("inv1")
+    (seen,) = proxy.close()
+    assert seen.startswith(b"GET http://relay.example.org:8443/v0/invites/inv1 ")
+
+
+async def test_the_websocket_to_a_loopback_relay_goes_direct(
+    fake_relay: FakeRelay, proxy: _Recorder, rng: random.Random, fake_clock: FakeClock
+) -> None:
+    inst = instance(rng)
+
+    async def script(ws: ServerConnection) -> None:
+        await handshake(ws, inst, b"\x01" * 32, "relay.test")
+        await ws.wait_closed()
+
+    fake_relay.script = script
+
+    async def on_frame(_frame: dict[str, Any]) -> None:
+        return None
+
+    link = RelayLink(
+        f"ws://127.0.0.1:{fake_relay.port}/v0/ws", "relay.test", inst, fake_clock, on_frame
+    )
+    task = asyncio.ensure_future(link.run())
+    try:
+        await asyncio.wait_for(link.wait_connected(), 5)
+    finally:
+        await link.stop()
+        await asyncio.wait_for(task, 5)
+    assert proxy.close() == []
+
+
+async def test_the_websocket_to_a_remote_relay_honours_the_proxy(
+    proxy: _Recorder, rng: random.Random, fake_clock: FakeClock
+) -> None:
+    async def on_frame(_frame: dict[str, Any]) -> None:
+        return None
+
+    link = RelayLink(
+        "ws://relay.example.org:8080/v0/ws",
+        "relay.example.org",
+        instance(rng),
+        fake_clock,
+        on_frame,
+    )
+    task = asyncio.ensure_future(link.run())
+
+    try:
+        assert await asyncio.to_thread(proxy.got.wait, 5)
+    finally:
+        # After the proxy's 502 the link backs off on the fake clock: cancel.
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert proxy.close()[0].startswith(b"CONNECT relay.example.org:8080 ")

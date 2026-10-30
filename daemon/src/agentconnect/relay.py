@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -27,6 +29,26 @@ from agentconnect.clock import Clock, unix_seconds
 from agentconnect.limits import MAX_PAYLOAD_DEPTH, loads
 
 LOG = log.get("agentconnect.relay")
+
+
+def on_loopback(url: str) -> bool:
+    """Whether ``url`` names this host: ``localhost`` or a loopback
+    literal. Such a relay is reached directly, never through a proxy from
+    the environment; a remote relay honours ``HTTP(S)_PROXY`` and
+    ``ALL_PROXY``, which an operator may need."""
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    if host is None:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 
 # The relay's frame limit is 2 MiB of JSON; leave headroom.
 MAX_FRAME = 4 << 20
@@ -114,7 +136,11 @@ class RelayLink:
         while not self._stop.is_set():
             try:
                 async with connect(
-                    self._url, max_size=MAX_FRAME, open_timeout=10, compression=None
+                    self._url,
+                    max_size=MAX_FRAME,
+                    open_timeout=10,
+                    compression=None,
+                    proxy=None if on_loopback(self._url) else True,
                 ) as ws:
                     await self._authenticate(ws)
                     self._ws = ws
@@ -348,7 +374,9 @@ class RelayRest:
         started = time.monotonic()
         try:
             async with httpx.AsyncClient(
-                transport=self._transport, timeout=REQUEST_TIMEOUT
+                transport=self._transport,
+                timeout=REQUEST_TIMEOUT,
+                trust_env=not on_loopback(self._base),
             ) as http:
                 resp = await http.request(method, self._base + path, content=body, headers=headers)
         except httpx.HTTPError as e:

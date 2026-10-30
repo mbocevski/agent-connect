@@ -43,6 +43,13 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   advisories: temporary patches, ignores, their removal and release
   blockers.
 
+### Security
+
+- The daemon reaches a loopback relay (`localhost`, `127.0.0.0/8`, `::1`)
+  directly, REST and WebSocket, whatever `HTTP_PROXY`, `HTTPS_PROXY` or
+  `ALL_PROXY` say. Before, a proxy in the daemon's environment received
+  that traffic. A remote relay still goes through a configured proxy.
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added
