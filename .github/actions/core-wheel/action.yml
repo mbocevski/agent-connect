@@ -59,5 +59,6 @@ runs:
           -e HOME=${{ github.workspace }}/.container-home
           -e CARGO_NET_GIT_FETCH_WITH_CLI=${{ env.CARGO_NET_GIT_FETCH_WITH_CLI }}
           -e CARGO_NET_RETRY=${{ env.CARGO_NET_RETRY }}
+          -e GIT_TRACE=1
           --tmpfs ${{ github.workspace }}/.container-home:exec
           -e RUSTFLAGS=--remap-path-prefix=${{ github.workspace }}=/src
