@@ -31,9 +31,13 @@ change it), on a nightly toolchain with cargo-fuzz. The nightly workflow
 runs one job per crate. The recipe lists the targets with `cargo fuzz
 list`, so a new target is fuzzed without a workflow change, and a test
 (`scripts/tests/test_nightly_fuzz.py`) fails if a fuzz crate is missing
-from the workflow. A crash fails the job and uploads the input from
-`<crate>/fuzz/artifacts/`: add it to the target's corpus as a regression
-case with the fix.
+from the workflow. Every target runs even after one crashes, and the run
+fails at the end, naming each crashed target and the SHA-256 of its
+input. The fuzzer's output and the inputs stay in a temporary directory
+and never reach the log or an upload: the CI log is public and a crash is
+an undisclosed finding (`SECURITY.md`). Reproduce it locally with the same
+command, then add the input to the target's corpus as a regression case
+with the fix.
 
 ## Where tests live
 

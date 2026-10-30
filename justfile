@@ -112,13 +112,42 @@ test-nightly: nightly-mutants nightly-py nightly-relay-load
 nightly-fuzz crate secs="300":
     #!/usr/bin/env bash
     set -euo pipefail
-    cd {{ crate }}
+    crate={{ quote(crate) }}
+    secs={{ quote(secs) }}
+    case "$crate" in
+        core | relay | directory) ;;
+        *) echo "nightly-fuzz: crate must be core, relay or directory" >&2; exit 2 ;;
+    esac
+    case "$secs" in
+        '' | *[!0-9]*) echo "nightly-fuzz: secs must be a whole number" >&2; exit 2 ;;
+    esac
+    cd "$crate"
     targets="$(cargo +nightly fuzz list)"
-    test -n "$targets" || { echo "no fuzz targets in {{ crate }}" >&2; exit 1; }
+    test -n "$targets" || { echo "no fuzz targets in $crate" >&2; exit 1; }
+    cargo +nightly fuzz build
+    # The fuzzer's output and crashing inputs stay on this machine: the CI
+    # log is public, and a crash is an undisclosed finding (SECURITY.md).
+    out="$(mktemp -d)"
+    failed=()
     for t in $targets; do
-        echo "fuzzing {{ crate }}/$t for {{ secs }} s"
-        cargo +nightly fuzz run "$t" -- -max_total_time={{ secs }}
+        echo "fuzzing $crate/$t for $secs s"
+        mkdir "$out/$t"
+        if cargo +nightly fuzz run "$t" -- -max_total_time="$secs" \
+            -artifact_prefix="$out/$t/" >"$out/$t.log" 2>&1; then
+            grep -E '^Done [0-9]+ runs' "$out/$t.log" || true
+        else
+            failed+=("$t")
+            for f in "$out/$t"/*; do
+                test -f "$f" || continue
+                echo "crash in $crate/$t: input sha256 $(sha256sum <"$f" | cut -d' ' -f1)" >&2
+            done
+        fi
     done
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo "fuzz targets that failed in $crate: ${failed[*]} (output and inputs in $out)" >&2
+        exit 1
+    fi
+    rm -rf "$out"
 
 # Mutation testing of the core, every mutant (hours; config in .cargo/mutants.toml)
 nightly-mutants *args:

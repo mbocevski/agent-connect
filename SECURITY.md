@@ -50,6 +50,9 @@ There is no bounty.
   undisclosed finding, the work happens in the private fork that GitHub
   creates for the advisory, and the pull request opens when the fix is ready
   to release.
+- A crash in the nightly fuzz run is handled as an undisclosed finding: the
+  job logs only the target and the input's SHA-256, and a maintainer
+  reproduces it locally.
 - The fix ships in a new preview release. Its `CHANGELOG.md` entry sits under
   `### Security` and names the finding, and the release notes list it under
   "What was fixed", with the findings that remain open.

@@ -112,7 +112,8 @@ jobs:
 
   # Every fuzz target, for a bounded time each (security review SR-40). The
   # recipe lists each crate's targets itself, so a new target is fuzzed
-  # without a change here. A crash fails the job and its input is uploaded.
+  # without a change here. A crash fails the job; the log names the target
+  # and the input's SHA-256 only, and nothing is uploaded (SECURITY.md).
   fuzz:
     name: fuzz (${{ matrix.crate }})
     runs-on: ubuntu-24.04
@@ -131,12 +132,6 @@ jobs:
         with:
           tool: just,cargo-fuzz
       - run: just nightly-fuzz ${{ matrix.crate }} 300
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: failure()
-        with:
-          name: fuzz-artifacts-${{ matrix.crate }}
-          path: ${{ matrix.crate }}/fuzz/artifacts
-          if-no-files-found: ignore
 
   # The relay's load tests: storage budgets and stall resistance (non-gating).
   relay-load:
