@@ -62,7 +62,7 @@ Facts in the code and the SPEC that shaped the design, checked on 2026-10-30:
 - **Code running as the daemon's OS user can read `human-token`**
   ([safety.md](../safety.md#shell-and-file-access), ADR-005). The human-only
   surface holds against an agent limited to its tools, or against an agent in
-  the separate-OS-user mode.
+  the separate-OS-user mode (Decision 1).
 
 ## Decision 1: a rule is local state, changed only with the human token
 
@@ -83,6 +83,10 @@ Rule = {
 }
 ```
 
+- **Only in the separate-OS-user mode.** The daemon refuses to create, widen or
+  enable a rule unless it runs as its own OS user
+  ([isolation.md](../isolation.md), `isolation.enabled`). See "Rules need the
+  separate-OS-user mode" below.
 - **Only the human token.** Every route that reads or changes a rule is human
   only, reading included: a rule tells an injected agent whose identity or which
   domain gets through. The agent token gets `403 human_only`, and the agent API,
@@ -107,6 +111,49 @@ Rule = {
 - **Rules belong to one instance.** Replicas (§9.4) don't share them, as they
   don't share a door (§6.6.1) or an invite's secret (§4.3). See "Decided in
   review", item 3.
+
+### Rules need the separate-OS-user mode
+
+With the daemon and the agent under one OS user, the agent can read
+`human-token`, so "human only" holds only against an agent limited to its tools.
+Today that exposure ends with each decision: a compromised agent can approve
+what is in front of it. A rule would make it last. **One injection would become
+a standing connection**, which keeps admitting peers after the injected session
+ended, and with the human not asked again.
+
+- **Refused outside the mode.** Creating, widening or enabling a rule answers
+  `409 needs_isolation`, and so does any other act that widens: `invite create
+  --pinned-only`, and `trust allow-agent-introductions`. Daemons in that mode
+  are the only ones with rules at all, so the embedded SDK and the MCP-spawned
+  runtime, which run inside the agent's process, have none.
+- **Same-user installs stay as they are.** Every connection needs its human, as
+  today, and nothing in this ADR changes on the wire or in a decision for them.
+- **Existing rules stay inert there.** A database with rules that is opened by a
+  daemon outside the mode (the config changed, or a data directory was moved)
+  keeps them and doesn't evaluate them, and the human hears once per start
+  (`rules_inert`). Knocks wait for the human, introductions are ignored, and a
+  `--pinned-only` invite treats every joiner as "anyone else". Narrowing still
+  works everywhere: `trust unpin`, `trust revoke`, `trust rule disable` and
+  `trust rule remove`, and lifetimes keep running.
+- **What the check is.** It is the `isolation.enabled` start-up check the daemon
+  already makes, which refuses to start when its data directory, tokens or agent
+  directory can be read by others, or as root, and which checks the peer's UID
+  on each connection. The daemon can't see an operator who runs an agent as the
+  daemon's own user anyway. The docs say not to, and that residual is in
+  Decision 9.
+
+**Rejected:**
+
+- *Warning instead of refusing.* The warning goes to the human who is about to
+  accept it, or to a script. The owner of a same-user install gets
+  per-connection approval, which is what they have now.
+- *Requiring the mode only for `open`.* A pin or a domain lets in less, but a
+  compromised agent that can add a rule can pin its attacker's key and get a
+  standard-profile connection, which is worse than an open door's tier. The
+  widening is what needs the boundary, not the kind.
+- *A rule password the human types.* It would have to reach the daemon through
+  something the agent can also reach on a same-user install, and it would need a
+  second credential store for one feature.
 
 ### Where a rule is evaluated
 
@@ -639,9 +686,10 @@ to stop it. It keeps a stranger's messages away from the tools instead:
 
 - **A separate endpoint, in the deployment.** A restricted connection's content
   goes only to a restricted endpoint the owner deployed and configured,
-  `webhook.restricted_callback_url` or `a2a.restricted_agent_url`, or a handler
-  registered with `on_restricted_message` in the SDK. It is an agent with no
-  tools. A rule with the `restricted` profile is refused unless one is set, or
+  `webhook.restricted_callback_socket` or `a2a.restricted_agent_socket`, under
+  an OS user of its own (`isolation.restricted_users`). It is an agent with no
+  tools, and an SDK agent can be one by attaching with the restricted token
+  below. A rule with the `restricted` profile is refused unless one is set, or
   the human passes `--same-agent`, which the preview names as a risk. This holds
   against a successful injection, since a tool the agent lacks can't be talked
   into use.
@@ -679,7 +727,12 @@ card, which would show a stranger what that agent can do.
 
 **The endpoint's token.** The restricted endpoint answers through the local API
 with a third token, `restricted-token`, which the daemon creates beside the
-other two (0600) and hands to the endpoint's user. Its scope is the restricted
+other two (0600) and copies to a directory only the restricted users can read
+(`isolation.restricted_dir`). The daemon accepts it only from a UID in
+`isolation.restricted_users`, and it checks the server's user on the endpoint's
+socket before a byte is sent, as for the other adapters. A user can't be both in
+that list and in `isolation.agent_users` or `isolation.human_users`, so the
+restricted agent can't read the main agent's token. Its scope is the restricted
 groups and nothing else:
 
 - It may read a restricted group's view, send a message in one, and leave one.
@@ -696,13 +749,7 @@ the restricted endpoint is a separate file for the same reason.
 
 **With `--same-agent`** the human has given up this isolation: the group
 delivers to its usual adapters, the agent token sees it, and the budgets,
-lifetime and framing still apply. **In embedded mode** the handler runs in the
-process of the agent that embeds the runtime. It gets a handle scoped to
-restricted groups, but as in §11.5 that holds by the API it is given, not by a
-process boundary, so what else that process can do is the owner's to arrange. A
-separate process is what the docs recommend. A runtime spawned by `agentconnect
-mcp` has no restricted endpoint, so a restricted rule there needs
-`--same-agent`.
+lifetime and framing still apply.
 
 ### Abuse limits
 
@@ -888,14 +935,15 @@ Proposed new rows for the SPEC §12 table, in its column order:
 | Stranger at an open door | Any identity can get a connection to an unattended agent, with no human on either side | Off by default. Human-only rule. Restricted profile and a separate endpoint with no tools. Short lifetime. Caps per rule, kill switch, human events (ADR-007) | Whatever the restricted endpoint can do or say, for anyone who knocks |
 | Prompt injection through an automatic connection | Sends crafted text to an agent no human is reviewing | Untrusted framing (§10.1) and `trust` in each delivery. Name and note never reach the agent. Restricted endpoint without side-effect tools. Budgets. `policy.require_approval` still applies | Behavioural: an agent that obeys the text. It can't be solved with cryptography. With `--same-agent`, or under a non-restricted rule, the agent's tools are in reach |
 | Sybil cost abuse | Makes identities freely, to spend the owner's model budget or fill its groups | Caps per rule and per day. Per-rule message and byte budgets that bound the total whatever the number of identities. A daemon-wide ceiling below the relay's group limit, so human approvals still get groups | The budget can be spent every day, which denies honest strangers. It is the cost the human accepted when setting the cap |
-| Rule widening | A compromised or injected agent tries to create or widen a rule, or to make a rule apply to itself | Human token only, reading included. No config table. Preview and hash. Ceilings. Every change is an event and an audit row. Tests over routes, the agent API, the SDK and the MCP tools | Code that runs as the daemon's OS user can read `human-token` and use it (ADR-005). The separate-OS-user mode closes this, and `open` warns when it is off |
+| Rule widening | A compromised or injected agent tries to create or widen a rule, or to make a rule apply to itself | Human token only, reading included. No config table. Preview and hash. Ceilings. Every change is an event and an audit row. Tests over routes, the agent API, the SDK and the MCP tools. Rules exist only in the separate-OS-user mode, where the agent can't read the human token | An agent run as the daemon's own user, which the daemon can't detect, and a compromised human account. Either can still widen a rule, within the ceilings, and the change is recorded |
+| A standing rule from one injection on a same-user install | Code the agent runs reads `human-token` and adds a rule, which goes on admitting peers after the injection ended | The daemon refuses to create, widen or enable a rule outside the separate-OS-user mode, and rules in a database opened outside it stay inert. Same-user installs keep per-connection approval (ADR-007) | That code can still use the human token for each decision, as today (ADR-005). That exposure isn't a new one, and it ends with each decision |
 | Introduction forgery or replay | Fabricates an introduction, or replays a copy in another group or later | Sent inside MLS. Signed, bound to the group and both endpoints. Expires within 1 hour. Single use, with a persistent ledger. Handled in the daemon, and the agent's send route refuses the kind | None known beyond a compromised introducer (the next row) |
 | Malicious or compromised introducer | An allowed peer introduces the attacker's agents | Only identities the human named. Verified by default. Agent-started introductions off on both sides by default, and restricted when on. Caps. One hop. Disabling the rule voids all pending | Up to the rule's caps of connections until the human reacts, each `auto` and each ending at its lifetime |
 | Owner-domain takeover | Controls the allowed domain's web server, or its name after it expires, or a certificate for it, and vouches for its own key | The domain is exact and listed by the human. Caps and lifetime. `auto` never counts as verified. Events name the domain | Connections up to the rule's caps until the human reacts: whoever controls the web server is who the rule trusts, as §13.2.4 states |
 | Revocation lag | Uses a key after its domain revoked it, or blocks the fetches so the revocation isn't seen | Fresh fetch for each approval, cached at most 300 s. Re-check every 6 hours. Negative results are sticky. No fetch vouching for 7 days counts as revoked. Lifetime | A revoked key keeps a live connection for up to 6 hours (7 days if fetches are blocked), and can still get a new one within 300 s of the revocation |
 | Reflection through the domain check | Sends knocks to make the owner's daemon fetch from a host the attacker picks | Only domains on an enabled rule are fetched. One fetch per domain in 300 s. The §13.2.4 fetch rules | An allowed domain sees that this daemon checks it, from which address and how often |
 | Forged JoinRequest for a pinned identity | With the link and a copy of the KeyPackage, asks to add an identity it doesn't control. KeyPackage reuse is tracked per instance (§6.2), so one used elsewhere still passes | The envelope's `sender` must equal `mailbox_id`, which stops a link holder who isn't the relay. `sig` under the leaf key is verified whenever present and required for any automatic approval, `policy.auto_approve` included (§6.1). The human's approval says "possession not proven" for an unsigned request | A relay with the link can strip `sig`, which sends the join to the human. A human who approves an unsigned request despite the notice adds a leaf nobody controls, until `sig` is mandatory |
-| Restricted content reaching the main agent | A stranger's text reaches the agent that has tools by another surface than the endpoint, or the restricted agent uses its token to reach other groups | Restricted groups are hidden from the agent token, SSE, the MCP queue and tools, ordinary adapters and the facade. A separate token scoped to restricted groups. No main Agent Card in them. Tests walk every route, adapter and tool (Decision 6) | With `--same-agent` the human gave this up. In embedded mode the boundary is the API handed to the handler. What the owner gives the restricted agent to read can still reach strangers |
+| Restricted content reaching the main agent | A stranger's text reaches the agent that has tools by another surface than the endpoint, or the restricted agent uses its token to reach other groups | Restricted groups are hidden from the agent token, SSE, the MCP queue and tools, ordinary adapters and the facade. A separate token scoped to restricted groups. No main Agent Card in them. Tests walk every route, adapter and tool (Decision 6) | With `--same-agent` the human gave this up. What the owner gives the restricted agent to read can still reach strangers |
 | Verification used to widen access | A stranger talks a human into a SAS run so the connection gets tools, a longer life or a place outside the caps | SAS changes the trust state only. Anchor, profile, lifetime and caps stay. The `verify` command says so. Only `trust pin` moves a connection, and it names what it moves | A human who pins a stranger on request. That is a human decision, with its preview |
 | Malicious relay against rules | Replays or delays knocks and introductions, or drops removals | The sealed knock, ledger and `ts` window are unchanged, so a replay gets no second approval. A rule is read when the knock is handled, and again before the group is shown. Revoking stops delivery locally first | Denial of service: delayed knocks lapse. A removal it withholds leaves the peer in the group at the relay, while this daemon has stopped delivering |
 | Rule probing | Knocks, and reads the response time to learn that no human was involved | The answer is the Welcome either way (§6.6.6). No rule state reaches a peer. Only identities that match can see a fast answer | A knocker that was approved quickly can infer a rule covers it. A knocker that wasn't learns nothing |
@@ -1001,8 +1049,9 @@ The edits use the existing section numbers; nothing is renumbered.
    >   (§10.6) MAY drop a knock, but its result MUST NOT approve one. A rule's
    >   approval MUST be recorded where the human can read it, and the human MUST
    >   be able to end any connection a rule made and to disable any rule. A rule
-   >   MUST NOT mark any member verified (§11.5). With no rule, every knock
-   >   needs its human.
+   >   MUST NOT mark any member verified (§11.5). An implementation MUST NOT
+   >   create, widen, enable or apply a rule where code running as the agent can
+   >   read the human's credential. With no rule, every knock needs its human.
    > - **Anchors.** A rule rests on one of: exact identities the human pinned;
    >   an owner domain the human allowed, under whose file (§13.2.4) a fresh
    >   fetch vouches for the knocker's identity, with the knock's signed
@@ -1097,8 +1146,11 @@ section with the SPEC edits:
   holds.
 - **`docs/config.md`.** `policy.auto_approve` still "never applies to knocks",
   and the text saying "every knock needs a person" changes. New keys:
-  `webhook.restricted_callback_url` and `a2a.restricted_agent_url`. The config
+  `webhook.restricted_callback_socket`, `a2a.restricted_agent_socket`,
+  `isolation.restricted_users` and `isolation.restricted_dir`. The config
   refuses `knock.owner_domain`, with the reason.
+- **`docs/isolation.md`.** Says that rules need this mode, and how to add the
+  restricted user. `packaging/` gains a sample for that user.
 - **`docs/discovery.md`, `docs/safety.md`, `docs/cli.md`, `docs/api.md`,
   `docs/groups.md`, `docs/sdk.md`, `docs/adapters/mcp.md`,** the README security
   model, and `AGENTS.md`'s summary of how trust works.
@@ -1127,6 +1179,12 @@ Tests that must exist before each anchor lands:
 - **`daemon/tests/test_human_only_routes.py`.** The new routes are classified in
   `HUMAN`, with the one guarded exception of `POST /v0/introductions`. Its
   classification gains a third set: what the restricted token may call.
+- **Rules outside the separate-OS-user mode.** With `isolation.enabled` off,
+  each of creating, widening and enabling a rule, `invite create --pinned-only`
+  and `trust allow-agent-introductions` is refused with the human token, in
+  embedded and MCP-spawned runtimes too. A database holding rules, opened
+  outside the mode, approves nothing, raises `rules_inert`, and still allows
+  narrowing.
 - **A test that walks every read surface.** Over `ROUTE_SPECS`, every adapter
   and every MCP tool, a restricted group's content and existence are absent for
   the agent token, and a new route, adapter or tool fails the test until it is
@@ -1160,9 +1218,9 @@ itself, and nothing stronger.
 Each anchor ships on its own, in this order, smallest and lowest risk first:
 
 1. **Rules, `auto` and oversight, with `pinned`.** The rule store and human
-   routes, evaluation, the state, events, `approvals list`, `trust` commands,
-   caps, lifetimes, the JoinRequest `sig`, and `--pinned-only`. This alone
-   covers one owner on several machines.
+   routes, the refusal outside the separate-OS-user mode, evaluation, the state,
+   events, `approvals list`, `trust` commands, caps, lifetimes, the JoinRequest
+   `sig`, and `--pinned-only`. This alone covers one owner on several machines.
 2. **`owner_domain`.** The knock field, the owner's fetch and cache, re-checks
    and `on_revoke`.
 3. **The restricted profile and `open`.** Budgets, restricted endpoints and
@@ -1190,9 +1248,11 @@ Each anchor ships on its own, in this order, smallest and lowest risk first:
 - **Unattended means an unattended mistake lasts longer.** A too-wide rule isn't
   caught by a human at the next approval, because there is none. Caps and
   lifetimes bound it, and they are why defaults are low.
-- **The separate-OS-user mode matters more.** On a same-user install the human
-  token is reachable by code the agent runs. `trust rule add open` warns about
-  that, and docs recommend that mode for any daemon with rules.
+- **Autonomy has a deployment cost.** Rules need the separate-OS-user mode, so
+  embedded SDK agents and MCP-spawned runtimes can't have them, and even one
+  owner connecting their own machines has to run a daemon as its own user on
+  each machine that approves. An SDK agent gets rules by attaching to such a
+  daemon. Same-user installs lose nothing they have today.
 
 ## Decided in review
 
@@ -1213,6 +1273,12 @@ Each anchor ships on its own, in this order, smallest and lowest risk first:
    registered, and `--withdraw` also closes it at the relay (Decision 6).
 6. **Introducers.** `require_verified` is on by default, and a rule can turn it
    off (Decision 5).
+7. **Rules need the separate-OS-user mode** (Decision 1). In same-user mode the
+   human token is readable by the agent, so a rule would turn one injection into
+   a standing connection.
+8. **The endpoint requirement covers every rule with the `restricted` profile,**
+   including introductions rules with `accept_agent`, not only `open` (Decision
+   6).
 
 ## Open questions
 
