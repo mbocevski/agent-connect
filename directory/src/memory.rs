@@ -17,9 +17,8 @@ use std::sync::{Mutex, MutexGuard};
 use crate::owner::record_fetch;
 use crate::store::{
     EXPIRED_GRACE_SECS, FEED_TTL_SECS, FeedEntry, GoneKind, ListingRecord, NameState, OwnerCheck,
-    PublishGuard, PublishOutcome, PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome,
-    SEARCH_CANDIDATES, SearchQuery, Store, StoreResult, Tombstone, WithdrawOutcome,
-    WithdrawalRecord,
+    PublishGuard, PublishOutcome, PurgeStats, RevokeOutcome, SEARCH_CANDIDATES, SearchQuery, Store,
+    StoreResult, Tombstone, WithdrawOutcome, WithdrawalRecord,
 };
 
 #[derive(Debug, Default)]
@@ -449,16 +448,15 @@ impl Store for MemoryStore {
     async fn purge(&self, now: u64) -> StoreResult<PurgeStats> {
         let mut st = self.lock();
         let old = |t: u64, ttl: u64| now.saturating_sub(t) >= ttl;
-        let (l0, f0, r0) = (st.listings.len(), st.feed.len(), st.revoked.len());
+        let (l0, f0) = (st.listings.len(), st.feed.len());
         st.listings
             .retain(|_, l| !old(l.token_expires_at, EXPIRED_GRACE_SECS));
         st.feed.retain(|e| !old(e.created_at, FEED_TTL_SECS));
-        st.revoked.retain(|_, t| !old(*t, REVOKED_TOKEN_TTL_SECS));
+        // Revoked token ids are kept (see the Postgres store).
         let gone = |a: usize, b: usize| u64::try_from(a - b).unwrap_or(u64::MAX);
         Ok(PurgeStats {
             expired_listings: gone(l0, st.listings.len()),
             feed: gone(f0, st.feed.len()),
-            revoked_tokens: gone(r0, st.revoked.len()),
         })
     }
 }
