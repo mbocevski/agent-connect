@@ -59,30 +59,60 @@ from agentconnect_sdk.embedded import EmbeddedHost
 
 WAIT = 8.0  # real-time guard for every wait; nothing sleeps
 # Loop turns a wait gives the adapters' event workers once its predicate
-# holds: enough for every healthy adapter, bounded for one that fails.
+# holds: enough for every healthy adapter that does no I/O, bounded for one
+# that fails.
 HANDOVER_TURNS = 100
+# Real-time guard for an adapter that must not fail and is still working on an
+# event after those turns, such as the A2A adapter fetching the agent card over
+# HTTP when the group is joined: the wait is for the handover, not for a count
+# of loop turns, and ends when the daemon says an event was handed over.
+HANDOVER_GUARD = 5.0
 
 
 async def handed_over(nodes: list[Node]) -> None:
     """Let the event workers hand over what was recorded: until no running
-    node has an event an adapter hasn't accepted. If the turns run out, an
-    event worker is stuck: that fails the test, unless the scenario lets
-    the node's adapters fail (``Node.events_may_fail``: an adapter that is
-    down, a held group, a failpoint)."""
-    for _ in range(HANDOVER_TURNS):
-        waiting = [
+    node has an event an adapter hasn't accepted. If an event worker is
+    still stuck after the guard, that fails the test, unless the scenario
+    lets the node's adapters fail (``Node.events_may_fail``: an adapter that
+    is down, a held group, a failpoint)."""
+
+    def waiting() -> list[Node]:
+        return [
             n
             for n in nodes
             if getattr(n.daemon, "running", False) and n.daemon.store.unnotified_events()
         ]
-        if not waiting:
+
+    for _ in range(HANDOVER_TURNS):
+        if not waiting():
             return
         await asyncio.sleep(0)
-    stuck = [n for n in waiting if not n.events_may_fail]
-    if stuck:
-        kinds = sorted({e["type"] for n in stuck for e in n.daemon.store.unnotified_events()})
-        msg = f"an event worker is stuck on {[n.name for n in stuck]}: {kinds}"
-        raise AssertionError(msg)
+
+    def strict() -> list[Node]:
+        return [n for n in waiting() if not n.events_may_fail]
+
+    async def settled() -> None:
+        while True:
+            pulses = [n.daemon._changed for n in nodes if hasattr(n.daemon, "_changed")]
+            for pulse in pulses:  # clear before checking: no pulse is lost
+                pulse.clear()
+            if not strict():
+                return
+            waits = [asyncio.ensure_future(p.wait()) for p in pulses]
+            try:
+                await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waits:
+                    w.cancel()
+
+    try:
+        await asyncio.wait_for(settled(), HANDOVER_GUARD)
+    except TimeoutError:
+        stuck = strict()
+        if stuck:
+            kinds = sorted({e["type"] for n in stuck for e in n.daemon.store.unnotified_events()})
+            msg = f"an event worker is stuck on {[n.name for n in stuck]}: {kinds}"
+            raise AssertionError(msg) from None
 
 
 HOSTS = ("daemon", "embedded")
