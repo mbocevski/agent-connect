@@ -192,6 +192,13 @@ def test_join_limits_default_to_their_bounds_and_may_only_be_lowered(tmp_path: P
         32,
         1024,
     )
+    assert cfg.policy_max_failed_joins_per_invite == 16
+    assert (
+        _load(
+            tmp_path, "[policy]\nmax_failed_joins_per_invite = 2\n"
+        ).policy_max_failed_joins_per_invite
+        == 2
+    )
     cfg = _load(
         tmp_path, "[policy]\nmax_pending_joins_per_invite = 1\njoin_ledger_per_invite = 64\n"
     )
@@ -201,6 +208,8 @@ def test_join_limits_default_to_their_bounds_and_may_only_be_lowered(tmp_path: P
         ("max_pending_joins_per_invite = 0", "1..32"),
         ("join_ledger_per_invite = 1025", "64..1024"),
         ("join_ledger_per_invite = 63", "64..1024"),
+        ("max_failed_joins_per_invite = 0", "1..16"),
+        ("max_failed_joins_per_invite = 17", "1..16"),
     ):
         with pytest.raises(ConfigError, match=match):
             _load(tmp_path, f"[policy]\n{line}\n")

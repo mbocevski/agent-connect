@@ -119,6 +119,11 @@ MAX_JOIN_LEDGER_PER_INVITE = 1024
 # JoinRequests of one invite that may wait for the human at once (as knocks
 # per door, SPEC 6.6.3 step 7).
 MAX_PENDING_JOINS_PER_INVITE = 32
+# JoinRequests of one invite that may fail (a bad MAC, or sent from a mailbox
+# other than the one they name, SPEC 6.2 steps 2 and 3) within the window
+# before the invite drops every request until the window passes.
+MAX_FAILED_JOINS_PER_INVITE = 16
+JOIN_FAILURE_WINDOW_SECS = 600
 # How long a leave waits for a member to commit it (docs/groups.md): at most
 # the relay's 7-day message lifetime, after which the proposal can't arrive.
 MIN_LEAVE_TIMEOUT_SECS = 3600
@@ -264,6 +269,7 @@ class Config:
     policy_audit_max_rows_per_sender: int = DEFAULT_AUDIT_SENDER_ROWS
     policy_max_pending_joins_per_invite: int = MAX_PENDING_JOINS_PER_INVITE
     policy_join_ledger_per_invite: int = MAX_JOIN_LEDGER_PER_INVITE
+    policy_max_failed_joins_per_invite: int = MAX_FAILED_JOINS_PER_INVITE
     policy_transcript_max_rows_per_sender: int = KNOB["transcript_max_rows_per_sender"].default
     policy_transcript_max_group_bytes: int = KNOB["transcript_max_group_bytes"].default
     policy_audit_retention_days: int = DEFAULT_AUDIT_RETENTION_DAYS
@@ -392,6 +398,16 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         f"share is 4 times its `max_uses`, at least {MIN_JOIN_LEDGER_PER_INVITE} and at "
         "most this. Past it, new requests for that invite are dropped and you get an "
         "`invite_flooded` event; other invites are unaffected.",
+    ),
+    ConfigKey(
+        "policy.max_failed_joins_per_invite",
+        "policy_max_failed_joins_per_invite",
+        shown_default(MAX_FAILED_JOINS_PER_INVITE),
+        f"Join requests for one invite that may fail in {JOIN_FAILURE_WINDOW_SECS // 60} "
+        f"minutes (1 to {MAX_FAILED_JOINS_PER_INVITE}): a wrong invite MAC, or a request "
+        "sent from a mailbox other than the one it names. At the limit the invite drops "
+        "every request until the oldest failure is that old, and you get an "
+        "`invite_flooded` event (reason `join_failures`); other invites are unaffected.",
     ),
 )
 
@@ -981,6 +997,7 @@ def _policy(table: Mapping[str, Any]) -> dict[str, Any]:
         ("audit_max_rows_per_sender", 100, DEFAULT_AUDIT_SENDER_ROWS),
         ("max_pending_joins_per_invite", 1, MAX_PENDING_JOINS_PER_INVITE),
         ("join_ledger_per_invite", MIN_JOIN_LEDGER_PER_INVITE, MAX_JOIN_LEDGER_PER_INVITE),
+        ("max_failed_joins_per_invite", 1, MAX_FAILED_JOINS_PER_INVITE),
     ):
         value = _typed(table, key, int, hi)
         if not lo <= value <= hi:

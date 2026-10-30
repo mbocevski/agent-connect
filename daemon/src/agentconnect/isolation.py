@@ -129,6 +129,11 @@ def _lstat(path: Path) -> os.stat_result | None:
         return path.lstat()
     except FileNotFoundError:
         return None
+    except OSError as e:
+        # A link loop (ELOOP) or a directory we may not search: a clean
+        # refusal, not a traceback.
+        msg = f"cannot check {path}: {e.strerror}"
+        raise IsolationError(msg) from None
 
 
 def check_private(path: Path, euid: int, *, directory: bool) -> None:

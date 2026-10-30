@@ -69,7 +69,7 @@ from agentconnect.adapter import (
 )
 from agentconnect.backoff import Backoff
 from agentconnect.clock import Clock, SystemClock, unix_seconds
-from agentconnect.config import Config
+from agentconnect.config import JOIN_FAILURE_WINDOW_SECS, Config
 from agentconnect.failpoints import FailpointError, Failpoints, SimulatedCrash
 from agentconnect.identity import (
     Seeded,
@@ -144,6 +144,7 @@ APPROVAL_TIMEOUT_SECS = 3600  # SPEC §6.2 step 4
 # Join requests claiming one identity that wait per invite (docs/groups.md).
 MAX_PENDING_PER_IDENTITY = 4
 JOIN_IDENTITY_FULL = "join_identity_full"
+JOIN_FAILURES = "join_failures"
 # An instance id as SPEC 3.3 writes it: the 64-bit id, 16 lowercase hex.
 INSTANCE_ID = re.compile(r"^[0-9a-f]{16}$")
 INSTANCE_ID_RULE = "must be an instance id: 16 lowercase hex characters"
@@ -238,6 +239,15 @@ INVITE_FLOOD_WARNING = (
     "dropped. If you didn't expect that many, the link may have leaked: revoke "
     "it with `agentconnect invite revoke <invite_id>`."
 )
+JOIN_FAILURES_WARNING = (
+    "{limit} join requests for this invite failed within {minutes} minutes: a wrong "
+    "invite MAC, or a request sent from a mailbox other than the one it names. The "
+    "invite drops every request until those failures are {minutes} minutes old. "
+    "Someone may be probing it, or forging requests with a leaked link: if you didn't "
+    "expect that, revoke it with `agentconnect invite revoke <invite_id>`."
+)
+# The message of a JoinRequest from another sender (SPEC 6.2 step 3).
+SENDER_MISMATCH = "credential mismatch: sender is not the request's mailbox_id"
 IDENTITY_FLOOD_WARNING = (
     "More than {limit} requests claim identity {identity} on this invite, and new ones are "
     "dropped. Some may be replayed: anyone who saw one of its KeyPackages (in a join "
@@ -851,6 +861,9 @@ class Engine:
         # The inviter's JoinRequest replay ledger (SPEC 6.2, "Replays").
         self._join_capacity = ac.DEFAULT_LEDGER_CAPACITY
         self._join_ledger = self._load_join_ledger()
+        # When each invite's recent failed requests arrived (SPEC 6.2 steps 2
+        # and 3), in memory: a restart starts the window again.
+        self._join_failures: dict[str, deque[int]] = {}
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -3054,16 +3067,8 @@ class Engine:
             # SPEC 4.3 "already used" warning when its join lapses.
             ignore("join_request_invite_used", invite=log.hid(invite_id))
             return
-        try:
-            # SPEC 6.2 step 3: only from the mailbox it names. Anyone with the
-            # link can MAC any KeyPackage, so a request from another sender
-            # is dropped here, before the replay ledger and the approval,
-            # like a failed MAC.
-            verified = self.client.verify_join_request(raw, obj, sender)
-        except (ac.AgentConnectError, ac.CoreError) as e:
-            # The error's kind, not its text, which may quote the request.
-            reason = str(getattr(e, "kind", type(e).__name__))
-            ignore("join_request_rejected", invite=log.hid(invite_id), reason=reason)
+        verified = await self._verify_join(raw, obj, sender, invite, ignore)
+        if verified is None:
             return
         group_id, request_id = str(invite["group_id"]), msg_id
         kp_ref = b64(verified.key_package_ref)
@@ -3226,6 +3231,57 @@ class Engine:
             self._join_ledger.seen(key, kp_ref)
         )
 
+    async def _verify_join(
+        self,
+        raw: bytes,
+        obj: ac.Invite,
+        sender: str,
+        invite: dict[str, Any],
+        ignore: Callable[..., None],
+    ) -> ac.VerifiedJoinRequest | None:
+        """SPEC 6.2 steps 2 and 3 for an open invite's request, or ``None``
+        when it is dropped (``ignore`` records why)."""
+        invite_id = str(invite["invite_id"])
+        if self._join_failures_full(invite_id):
+            # Too many failed requests lately: dropped before any check.
+            ignore("join_request_throttled", invite=log.hid(invite_id))
+            return None
+        try:
+            # Step 3: only from the mailbox it names. Anyone with the link can
+            # MAC any KeyPackage, so a request from another sender is dropped
+            # here, before the replay ledger and the approval, like a failed
+            # MAC.
+            return self.client.verify_join_request(raw, obj, sender)
+        except (ac.AgentConnectError, ac.CoreError) as e:
+            # The error's kind, not its text, which may quote the request.
+            reason = str(getattr(e, "kind", type(e).__name__))
+            ignore("join_request_rejected", invite=log.hid(invite_id), reason=reason)
+            if reason == "authentication" or str(e) == SENDER_MISMATCH:
+                # Step 2: counted toward rate limiting.
+                await self._count_join_failure(str(invite["group_id"]), invite_id)
+            return None
+
+    def _join_failures_full(self, invite_id: str) -> bool:
+        """Whether ``invite_id`` had its limit of failed requests within the
+        window; forgets the older ones."""
+        times = self._join_failures.get(invite_id)
+        if times is None:
+            return False
+        since = self.now() - JOIN_FAILURE_WINDOW_SECS
+        while times and times[0] <= since:
+            times.popleft()
+        if not times:
+            del self._join_failures[invite_id]
+            return False
+        return len(times) >= self.config.policy_max_failed_joins_per_invite
+
+    async def _count_join_failure(self, group_id: str, invite_id: str) -> None:
+        """A failed request for ``invite_id``: at the limit, the human is
+        told (once per invite)."""
+        self._join_failures.setdefault(invite_id, deque()).append(self.now())
+        if self._join_failures_full(invite_id):
+            await self._tell_join_flood(group_id, invite_id, JOIN_FAILURES)
+
     async def _tell_join_flood(
         self,
         group_id: str | None,
@@ -3261,13 +3317,19 @@ class Engine:
                 warning=warning,
             )
             return
+        warning = INVITE_FLOOD_WARNING
+        if reason == JOIN_FAILURES:
+            warning = JOIN_FAILURES_WARNING.format(
+                limit=self.config.policy_max_failed_joins_per_invite,
+                minutes=JOIN_FAILURE_WINDOW_SECS // 60,
+            )
         await self.emit(
             group_id,
             "invite_flooded",
             cause=f"invite_flooded/{invite_id}/{reason}",
             invite_id=invite_id,
             reason=reason,
-            warning=INVITE_FLOOD_WARNING,
+            warning=warning,
         )
 
     def _load_join_ledger(self) -> ac.ReplayLedger:

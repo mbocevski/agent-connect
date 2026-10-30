@@ -29,6 +29,7 @@ from agentconnect.runtime import Options, Runtime
 from agentconnect.runtime import ledger as replay
 from agentconnect.runtime.engine import (
     HUMAN_EVENTS,
+    JOIN_FAILURE_WINDOW_SECS,
     MAX_PENDING_PER_IDENTITY,
     DaemonError,
     Engine,
@@ -286,6 +287,47 @@ async def test_an_approval_an_older_daemon_stored_from_another_sender_is_refused
         owner.engine._approve_join(rid)
     assert (owner.engine.store.approval(rid) or {})["status"] == "expired"
     assert not [r for r in owner.engine.store.outbox() if r.kind == "commit"]
+
+
+def _bad_mac(request: bytes) -> bytes:
+    """``request`` with its MAC broken: what someone without the link sends."""
+    req = json.loads(request)
+    mac = bytearray(unb64(req["mac"]))
+    mac[0] ^= 1
+    return json.dumps({**req, "mac": b64(bytes(mac))}).encode()
+
+
+async def test_failed_requests_past_the_limit_close_the_invite_for_a_while(
+    owner: Owner, rng: random.Random
+) -> None:
+    """SPEC 6.2 steps 2 and 3: a request with a bad MAC, or from a mailbox
+    other than the one it names, counts against its invite. At the limit the
+    invite drops every request until the window passes, and the human is
+    told once (``invite_flooded``, reason ``join_failures``). Another invite
+    is unaffected."""
+    await owner.restart(policy_max_failed_joins_per_invite=3)
+    url, other = await owner.invite(), await owner.invite()
+    bob, carol, mallory = (Joiner(rng, owner.now) for _ in range(3))
+    for _ in range(2):
+        await owner.deliver(_bad_mac(mallory.request(url)), mallory.mailbox)
+    assert owner.flooded() == []
+    await owner.deliver(carol.request(url), mallory.mailbox)  # another sender's request
+    (flood,) = [e["data"] for e in owner.flooded()]
+    assert (flood["invite_id"], flood["reason"]) == (invite_id(url), "join_failures")
+    assert "3 join requests" in flood["warning"]
+    # Closed for the window: a good request is dropped, unverified, and more
+    # failures don't repeat the notice.
+    await owner.deliver(bob.request(url), bob.mailbox)
+    await owner.deliver(_bad_mac(mallory.request(url)), mallory.mailbox)
+    assert owner.engine.join_approvals() == []
+    assert owner.ledger() == 0
+    assert len(owner.flooded()) == 1
+    elsewhere = await owner.deliver(carol.request(other), carol.mailbox)
+    assert [a["request_id"] for a in owner.engine.join_approvals()] == [elsewhere]
+    # Once the failures are older than the window, the invite takes requests.
+    owner.clock.advance(JOIN_FAILURE_WINDOW_SECS)
+    rid = await owner.deliver(bob.request(url), bob.mailbox)
+    assert {a["request_id"] for a in owner.engine.join_approvals()} == {elsewhere, rid}
 
 
 async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(

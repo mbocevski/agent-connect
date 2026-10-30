@@ -97,7 +97,9 @@ is no user boundary to put between them.
     directories contain each other;
   - a user is in both `agent_users` and `human_users`, or the daemon's own
     user is an agent user;
-  - a user or group name doesn't exist.
+  - a user or group name doesn't exist;
+  - one of those paths can't be checked at all, for example because of a
+    link loop or a directory the daemon's user may not search.
 
 ## How the human reaches the human-only commands
 
