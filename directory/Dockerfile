@@ -1,6 +1,9 @@
 # Build from the repository root:  docker build -f directory/Dockerfile -t agentconnect-directory .
 
 FROM rust:1.99.1-bookworm AS build
+# The openmls git dependency is fetched with the git CLI, and network
+# operations are retried (a build stage only: nothing of it is in the image).
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_NET_RETRY=10
 WORKDIR /src
 COPY . .
 # The source revision /metrics reports (agentconnect_directory_build_info); the
