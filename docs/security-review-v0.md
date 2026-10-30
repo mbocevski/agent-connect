@@ -606,7 +606,7 @@ store written the old way.
 | SR-62 | daemon | Any local user who listens on `a2a.facade_port` while the daemon is down gets the facade token from a client's first request (the card fetch), and can then send to the groups as the agent through the real facade. Found after this review, with SR-08 to SR-10. | `a2a_adapter/facade.py` (`Facade`, `LoopbackServer`). Confirmed with a probe on main (c0d0c12). | Fixed in #115: `a2a.facade_socket` with a peer-UID check, required in separate-OS-user mode; the TCP facade keeps the documented risk outside it |
 | SR-38 | daemon | Webhook, SSE and SDK agents receive `a2a.task_cancel` from any member, with no requester check and no guidance in the docs; SPEC §7.2 says the member running the task MUST ignore it. Only the A2A adapter checks. | `adapter.py:438-457`, `docs/adapters/webhook.md:93-105`. By reading. | Open (T-38) |
 | SR-39 | build | Signed releases are never verified by a test, `just release-verify` checks the GitHub attestations but not the cosign bundles, and `release.yml` doesn't require the reproducibility check for the tagged commit. | `.github/workflows/release.yml`, `.github/workflows/repro.yml`, `justfile` (`release-verify`). By reading. | Open (T-39) |
-| SR-40 | tooling | No workflow runs the fuzz targets, nightly included. | `.github/workflows/nightly.yml`. By reading. | Fixed: the nightly workflow fuzzes every target of each crate for five minutes (`just nightly-fuzz`) |
+| SR-40 | tooling | No workflow runs the fuzz targets, nightly included. | `.github/workflows/nightly.yml`. By reading. | Fixed in #147: the nightly workflow fuzzes every target of each crate for five minutes (`just nightly-fuzz`) |
 
 ## Findings: Info
 
@@ -1171,7 +1171,7 @@ One line per open item, ready to file.
 - **T-39 (Low, SR-39):** Release: verify cosign bundles in
   `release-verify`, test it, and require the reproducibility check before
   publishing.
-- **T-40 (Low, SR-40, fixed):** CI: run every fuzz target for a bounded time in
+- **T-40 (Low, SR-40, fixed in #147):** CI: run every fuzz target for a bounded time in
   the nightly workflow.
 - **T-41 (Info, SR-41):** Relay: reject envelope fields SPEC §7.1 doesn't
   give the kind.
