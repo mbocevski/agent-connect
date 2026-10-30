@@ -51,7 +51,7 @@ A pull request runs only the jobs its changed paths can affect. The first job,
 | rust | `core/`, `core-py/`, `relay/`, `directory/` (their fuzz workspaces, tests and Markdown too), `Cargo.toml`, `Cargo.lock`, `deny.toml`, `clippy.toml`, `.cargo/`, `.config/`, `testdata/`, `web/` |
 | python | `daemon/`, `sdk/`, `harness/`, `examples/`, `packaging/`, `pyproject.toml`, `uv.lock`, `licences-py.toml`, `conftest.py`, `testdata/`, `README.md` (the harness runs its quickstart) |
 | images | `demo/`, `integration/`, `compose.test.yaml`, `.dockerignore`, `web/` (the `relay/` and `directory/` Dockerfiles are in rust, which also runs the `image` job) |
-| docs | `docs/`, `styles/`, `changelog.d/`, and Markdown, `LICENSE` and `NOTICE` in the repository root |
+| docs | `docs/`, `styles/`, `changelog.d/`, and Markdown, `LICENSE` and `NOTICE` in the repository root; `docs/cli.md`, `docs/api.md`, `docs/config.md` and `docs/safety.md` also count as python, because their generated sections are checked against the code by a test in the python job |
 | ci | `.github/`, `scripts/`, `justfile`, `rust-toolchain.toml`, `coverage-baseline.json`, and the lint and hook configuration in the root |
 
 A change to the ci group, or to a path no rule places, runs everything. So do
@@ -77,6 +77,17 @@ should have run, skipped because a dependency failed or `changes` itself
 failed) fails it (`python3 scripts/changes.py gate`). Branch protection still
 requires up-to-date branches, so a skipped job never lets a stale branch
 through.
+
+A pull request is classified and gated by the base branch's copy of
+`scripts/changes.py`, which both jobs read with `git show`, never by its own,
+so the change under test cannot decide which checks it faces. An edit to the
+script or its tests is a change to `scripts/` and runs everything; the new
+rules take effect for the next pull request, one PR later. The pull request
+that first adds the script has no base copy, so it runs everything and a
+person reads the script. What this does not cover is an edit to
+`.github/workflows/ci.yml` itself (an `if:` that is always false, a gate step
+that is removed): that file runs from the pull request, so a person has to
+read its diff.
 
 The coverage ratchet needs no filter of its own. `just cov-rust` checks the
 `core`, `relay` and `directory` components and `just cov-py` checks `python`;

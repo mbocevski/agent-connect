@@ -48,10 +48,15 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
         run: |
-          if [ "$EVENT" = pull_request ]; then
+          # A pull request is classified by the base branch's copy of the
+          # script, never its own: otherwise the change under test could
+          # decide which checks it faces. Until the base has the script (the
+          # pull request that adds it) everything runs.
+          if [ "$EVENT" = pull_request ] \
+            && git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"; then
             # --no-renames lists both paths of a rename.
             git diff --no-renames --name-only "origin/$BASE...HEAD" > changed.txt
-            python3 scripts/changes.py classify < changed.txt | tee -a "$GITHUB_OUTPUT"
+            python3 "$RUNNER_TEMP/changes.py" classify < changed.txt | tee -a "$GITHUB_OUTPUT"
           else
             python3 scripts/changes.py classify --all < /dev/null | tee -a "$GITHUB_OUTPUT"
           fi
@@ -263,8 +268,19 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: All required jobs passed
         env:
           NEEDS: ${{ toJSON(needs) }}
           EVENT: ${{ github.event_name }}
-        run: python3 scripts/changes.py gate
+          BASE: ${{ github.base_ref }}
+        run: |
+          # The base branch's gate, for the reason given in `changes`. The
+          # pull request's own copy is used only when the base has none.
+          script=scripts/changes.py
+          if [ "$EVENT" = pull_request ] \
+            && git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"; then
+            script="$RUNNER_TEMP/changes.py"
+          fi
+          python3 "$script" gate

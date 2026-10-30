@@ -1,7 +1,10 @@
 import importlib.util
 import io
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -33,7 +36,9 @@ def ran(*paths: str, everything: bool = False) -> set[str]:
 
 
 def test_docs_only_skips_every_expensive_job() -> None:
-    assert ran("docs/api.md", "docs/MAP.toml", "styles/AgentConnect/Terms.yml", "SPEC.md") == set()
+    assert (
+        ran("docs/groups.md", "docs/MAP.toml", "styles/AgentConnect/Terms.yml", "SPEC.md") == set()
+    )
     assert ran("CHANGELOG.md", "changelog.d/x.fixed.md", "TESTING.md", "LICENSE") == set()
 
 
@@ -78,6 +83,26 @@ def test_a_ci_change_runs_everything() -> None:
         ".pre-commit-config.yaml",
     ):
         assert ran(path) == set(JOBS), path
+
+
+def test_a_pull_request_that_edits_the_classifier_runs_everything() -> None:
+    # Whatever else it touches, and whether it is the script or its tests.
+    assert ran("docs/api.md", "scripts/changes.py") == set(JOBS)
+    assert ran("docs/groups.md", "scripts/tests/test_changes.py") == set(JOBS)
+
+
+def test_generated_reference_docs_run_the_test_that_keeps_them_in_sync() -> None:
+    # A hand edit of a generated section must reach test_gen_reference (python).
+    for path in sorted(ch.GENERATED_DOCS):
+        assert {"python", "licences"} <= ran(path), path
+        assert "rust" not in ran(path), path
+    assert ran("docs/groups.md") == set()
+
+
+def test_the_generated_docs_are_the_ones_gen_reference_writes() -> None:
+    source = (REPO / "scripts/gen_reference.py").read_text(encoding="utf-8")
+    written = set(re.findall(r'Section\("[a-z-]+", "(docs/[a-z-]+\.md)"', source))
+    assert written == set(ch.GENERATED_DOCS)
 
 
 def test_an_unknown_path_runs_everything() -> None:
@@ -279,4 +304,114 @@ def test_changes_exports_every_flag_and_ci_ok_waits_for_it() -> None:
 def test_the_real_gate_input_shape_is_what_the_workflow_feeds_it() -> None:
     text = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "NEEDS: ${{ toJSON(needs) }}" in text
-    assert "python3 scripts/changes.py gate" in text
+    assert re.search(r'python3 "\$script" gate$', text, flags=re.M)
+
+
+def test_both_jobs_run_the_base_branches_copy_of_the_script() -> None:
+    jobs = _jobs((REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    for name in ("changes", "ci-ok"):
+        assert 'git show "origin/$BASE:scripts/changes.py"' in jobs[name], name
+        assert "fetch-depth: 0" in jobs[name], name
+    # The pull request's own copy only ever runs with --all, or as the
+    # fallback when the base has none (the pull request that adds it).
+    assert "python3 scripts/changes.py classify --all" in jobs["changes"]
+    assert re.search(r"python3 scripts/changes\.py classify(?! --all)", jobs["changes"]) is None
+
+
+def _step(job: str, marker: str) -> str:
+    """The `run:` script of the step of `job` that contains `marker`."""
+    text = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    match = re.search(r"^ {8}run: \|\n((?: {10}.*\n|\n)+)", _jobs(text)[job], flags=re.M)
+    assert match is not None
+    assert marker in match.group(1)
+    return "\n".join(line[10:] for line in match.group(1).splitlines())
+
+
+def _sh(cwd: Path, script: str, **env: str) -> subprocess.CompletedProcess[str]:
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(
+        ["bash", "-e", "-c", script],
+        cwd=cwd,
+        env=clean | env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _git(cwd: Path, *args: str) -> None:
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        cwd=cwd,
+        env=clean,
+        check=True,
+        capture_output=True,
+    )
+
+
+FORGED = (
+    "import sys\n"
+    "sys.stdin.read()\n"
+    "for job in ('rust', 'python', 'licences', 'contract', 'platforms', 'image', 'integration'):\n"
+    "    print(f'run_{job}=false')\n"
+)
+
+
+def _pull_request(tmp_path: Path, *, base_has_script: bool, forged: bool) -> dict[str, str]:
+    """Run the workflow's `changes` step on a pull request that edits the script."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "docs").mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "docs" / "groups.md").write_text("base\n", encoding="utf-8")
+    if base_has_script:
+        shutil.copy(REPO / "scripts" / "changes.py", repo / "scripts" / "changes.py")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "switch", "-q", "-c", "pr")
+    script = repo / "scripts" / "changes.py"
+    script.write_text(FORGED if forged else (REPO / "scripts/changes.py").read_text("utf-8"))
+    (repo / "docs" / "groups.md").write_text("edited\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pr")
+    out = tmp_path / "output"
+    result = _sh(
+        repo,
+        _step("changes", "classify"),
+        EVENT="pull_request",
+        BASE="main",
+        RUNNER_TEMP=str(tmp_path),
+        GITHUB_OUTPUT=str(out),
+    )
+    assert result.returncode == 0, result.stderr
+    return dict(line.split("=", 1) for line in out.read_text("utf-8").splitlines())
+
+
+def test_a_forged_classifier_in_the_pull_request_is_not_the_one_that_runs(tmp_path: Path) -> None:
+    flags = _pull_request(tmp_path, base_has_script=True, forged=True)
+    assert {flags[f"run_{job}"] for job in JOBS} == {"true"}
+    assert flags["ci"] == "true"
+
+
+def test_the_pull_request_that_adds_the_script_runs_everything(tmp_path: Path) -> None:
+    flags = _pull_request(tmp_path, base_has_script=False, forged=False)
+    assert {flags[f"run_{job}"] for job in JOBS} == {"true"}
+
+
+def test_a_push_runs_everything(tmp_path: Path) -> None:
+    out = tmp_path / "output"
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy(REPO / "scripts" / "changes.py", repo / "scripts" / "changes.py")
+    result = _sh(
+        repo,
+        _step("changes", "classify"),
+        EVENT="push",
+        BASE="",
+        RUNNER_TEMP=str(tmp_path),
+        GITHUB_OUTPUT=str(out),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "run_rust=true" in out.read_text("utf-8").splitlines()

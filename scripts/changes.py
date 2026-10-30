@@ -18,6 +18,11 @@ to that component, because tests and builds read some of them.
 succeeded or was skipped for a reason the classifier gave. A job skipped
 because a dependency failed, or because `changes` itself failed, is a failure.
 
+CI runs the copy of this script on the base branch, not the pull request's
+own, so a pull request cannot change how it is classified or gated. A change
+to the script is a change to `scripts/`, which runs everything, and the new
+rules apply from the next pull request.
+
 usage: changes.py classify [--all] < paths
        changes.py gate
 """
@@ -107,12 +112,19 @@ JOB_GROUPS: dict[str, frozenset[str]] = {
 # Jobs that only exist on pull requests; on a push they are skipped by `if`.
 PR_ONLY = frozenset({"changelog", "docs", "hygiene"})
 
+# Documents with sections that scripts/gen_reference.py generates from the
+# code. The test that keeps them in sync (scripts/tests/test_gen_reference.py)
+# runs in the python job, so a hand edit of one must run it.
+GENERATED_DOCS = frozenset({"docs/cli.md", "docs/api.md", "docs/config.md", "docs/safety.md"})
+
 
 def groups_of(path: str) -> frozenset[str] | None:
     """The groups a changed path belongs to, or None when no rule places it."""
     path = path.strip().removeprefix("./")
     if not path:
         return frozenset[str]()
+    if path in GENERATED_DOCS:
+        return frozenset({"docs", "python"})
     top, sep, _ = path.partition("/")
     if sep:
         return DIRS.get(top)
