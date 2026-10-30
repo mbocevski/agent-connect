@@ -239,6 +239,10 @@ update-branch pr:
 merge pr:
     scripts/merge.sh {{ pr }}
 
+# Merge PRs in order: update-branch if behind, wait for checks, merge; stops at the first failure
+merge-train +prs:
+    scripts/merge-train.sh {{ prs }}
+
 # Sync .github/rulesets/main.json and required checks to GitHub
 apply-ruleset:
     scripts/apply-ruleset.sh

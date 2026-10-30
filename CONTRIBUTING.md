@@ -35,6 +35,15 @@ Python workspace (`uv sync --all-packages`), and all git hooks via prek.
    ruleset then blocks the merge.
 6. Once CI is green: `just merge <pr-number>`.
 
+To merge several PRs, use `just merge-train <pr-number> [<pr-number>...]`. It
+takes them in order: `just update-branch` if the PR is behind, a wait for its
+checks of up to 90 minutes, then `just merge`. It stops at the first PR with a
+rebase conflict, a failed check, a timeout or a refusal, says which and why,
+pushes nothing for that PR and doesn't start the ones after it. It adds no way
+around a gate. The rebase runs in the worktree that has the PR's branch, or in a
+temporary one under `target/` when none does, so run it where your signing key
+is unlocked, and expect the `pre-push` hook's test run for each PR it rebases.
+
 ## Merge gating
 
 Gates are enforced both locally (hooks and `just merge`) and server-side by
