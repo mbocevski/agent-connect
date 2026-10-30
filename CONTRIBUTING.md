@@ -173,6 +173,13 @@ in the table named above, and tests fail until it has one. The generator is
 Rules, determinism helpers, coverage policy and the flaky-test policy are in
 [`TESTING.md`](TESTING.md).
 
+## Security
+
+Report vulnerabilities privately, as [`SECURITY.md`](SECURITY.md) describes;
+don't open a public issue or pull request for one. The same file sets how
+the project handles known advisories in dependencies and images: temporary
+patches, ignores with an expiry, and which findings block a release.
+
 ## Releases
 
 Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
