@@ -72,7 +72,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   group can write, and one under a directory that isn't the daemon user's
   or root's or that others can write without the sticky bit: an agent user
   who could rename entries there could replace the socket and show the
-  human forged approvals or a forged code (SR-29).
+  human forged approvals or a forged code (SR-29). The start check is
+  stricter: a daemon whose agent directory sits under such a directory
+  (for example Homebrew's user-owned `/usr/local/var` on macOS) now
+  refuses to start. Move the agent directory to a root-owned path such as
+  `/run/agentconnect` or, on macOS,
+  `/Library/Application Support/agentconnect/run`.
 
 ## [0.1.0a3] - 2026-10-30
 
