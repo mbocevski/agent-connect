@@ -22,7 +22,9 @@ clock). ``advance`` is the only way runtime time moves.
 from __future__ import annotations
 
 import asyncio
+import io
 import random
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -113,6 +115,37 @@ async def handed_over(nodes: list[Node]) -> None:
             kinds = sorted({e["type"] for n in stuck for e in n.daemon.store.unnotified_events()})
             msg = f"an event worker is stuck on {[n.name for n in stuck]}: {kinds}"
             raise AssertionError(msg) from None
+
+
+# How long ``Cluster.close`` may run before it says where it is stuck. A
+# teardown that hangs otherwise ends at pytest's per-test timeout with nothing
+# to show which stage waited.
+CLOSE_STALL_SECS = 10.0
+
+
+def _awaiting(coro: Any) -> list[str]:
+    """What a suspended coroutine waits for: each coroutine of its await
+    chain with the line it is at, then the future the chain ends in."""
+    chain: list[str] = []
+    while coro is not None:
+        frame = getattr(coro, "cr_frame", None)
+        if frame is None:
+            chain.append(f"waiting on {coro!r}")
+            break
+        name = getattr(coro, "__qualname__", repr(coro))
+        chain.append(f"{name} at {Path(frame.f_code.co_filename).name}:{frame.f_lineno}")
+        coro = getattr(coro, "cr_await", None)
+    return chain
+
+
+def describe_tasks(loop: asyncio.AbstractEventLoop) -> str:
+    """Every task of ``loop`` with the chain it is suspended in."""
+    out = io.StringIO()
+    for task in sorted(asyncio.all_tasks(loop), key=lambda t: t.get_name()):
+        print(f"--- {task.get_name()}", file=out)
+        for step in _awaiting(task.get_coro()):
+            print(f"    {step}", file=out)
+    return out.getvalue()
 
 
 HOSTS = ("daemon", "embedded")
@@ -667,10 +700,28 @@ class Cluster:
             await asyncio.sleep(0)
 
     async def close(self) -> None:
-        for m in reversed(self.mcps):  # attached sessions first
-            await m.stop()
-        for n in self.nodes:
-            await n.stop()
-            await n.proxy.stop()
-        for p in self._proxies:
-            await p.stop()
+        loop = asyncio.get_running_loop()
+        stage = "starting"
+
+        def stalled() -> None:
+            print(
+                f"\nCluster.close still running after {CLOSE_STALL_SECS:g} s, in: {stage}\n"
+                f"{describe_tasks(loop)}",
+                file=sys.stderr,
+            )
+
+        watchdog = loop.call_later(CLOSE_STALL_SECS, stalled)
+        try:
+            for i, m in enumerate(reversed(self.mcps)):  # attached sessions first
+                stage = f"stopping MCP session {i}"
+                await m.stop()
+            for n in self.nodes:
+                stage = f"stopping node {n.name}"
+                await n.stop()
+                stage = f"stopping the relay proxy of node {n.name}"
+                await n.proxy.stop()
+            for i, p in enumerate(self._proxies):
+                stage = f"stopping proxy {i}"
+                await p.stop()
+        finally:
+            watchdog.cancel()
