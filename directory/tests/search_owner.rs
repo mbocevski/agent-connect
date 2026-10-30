@@ -59,6 +59,15 @@ async fn search_ranks_names_above_descriptions_and_filters_by_skill() {
     assert_eq!(first["door"]["state"], "open");
     assert_eq!(first["owner"]["state"], "unclaimed");
     assert_eq!(first["fingerprint"].as_str().unwrap().len(), 39);
+    // SPEC 13.2.6: every machine-readable result carries the verbatim signed
+    // listing, for the caller to verify.
+    for result in v["results"].as_array().unwrap() {
+        let record = h.record(result["name"].as_str().unwrap()).await.unwrap();
+        assert_eq!(
+            result["signed_card"].as_str().unwrap().as_bytes(),
+            record.bytes.as_slice()
+        );
+    }
     assert!(
         first["knock"]
             .as_str()

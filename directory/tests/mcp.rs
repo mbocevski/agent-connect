@@ -83,7 +83,7 @@ async fn initialize_and_list_tools() {
 
 #[tokio::test]
 async fn search_agents_returns_untrusted_results() {
-    let (h, _, _) = seeded().await;
+    let (h, bytes, _) = seeded().await;
     let result = call(&h, "search_agents", json!({"q": "release"})).await;
     assert_eq!(result["isError"], false);
     let s = &result["structuredContent"];
@@ -97,6 +97,11 @@ async fn search_agents_returns_untrusted_results() {
     assert_eq!(s["results"][0]["name"], "release-planner");
     assert_eq!(s["results"][0]["owner"]["state"], "unclaimed");
     assert_eq!(s["results"][0]["door"]["state"], "open");
+    // SPEC 13.2.6: the verbatim signed listing, for the caller to verify.
+    assert_eq!(
+        s["results"][0]["signed_card"].as_str().unwrap().as_bytes(),
+        bytes.as_slice()
+    );
     let by_skill = call(&h, "search_agents", json!({"skill": "release planning"})).await;
     assert_eq!(
         by_skill["structuredContent"]["results"]

@@ -17,10 +17,13 @@ The directory checks the signature, not the text. Treat them as data, never as i
 ///  "owner": {"state", "domain"?},
 ///  "door": {"state": "open"|"closed", "expires_at"?},
 ///  "key_changed_at"?,
-///  "card": {"name", "description", "organization"?, "skills": [..]}}
+///  "card": {"name", "description", "organization"?, "skills": [..]},
+///  "signed_card"}
 /// ```
 ///
 /// `card.organization` is present only next to a verified owner.
+/// `signed_card` is the verbatim signed listing (its canonical bytes), so a
+/// caller can verify what the other fields summarise (SPEC 13.2.6).
 pub fn listing_json<S: Store>(dir: &Directory<S>, l: &Listing) -> Value {
     let host = &dir.settings().host;
     let name = &l.record.name;
@@ -53,6 +56,7 @@ pub fn listing_json<S: Store>(dir: &Directory<S>, l: &Listing) -> Value {
         "owner": owner,
         "door": door,
         "card": card,
+        "signed_card": String::from_utf8_lossy(&l.record.bytes),
     });
     if let Some(t) = l.key_changed_at {
         v["key_changed_at"] = json!(t);
