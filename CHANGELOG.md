@@ -29,6 +29,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   revision, so a dashboard or alert can tell which build each host runs. The
   release images and binaries carry the revision; other builds say
   `unknown`. No identifiers.
+- The directory's page markup is a documented theming interface for a
+  replacement stylesheet (`AC_DIRECTORY_STYLESHEET`): the class names, data
+  attributes and ids in directory/README.md ("Theming") are stable, and a
+  change to them will be listed here. The method in an API row
+  (`span.method`) has `data-method="GET"` or `"POST"`.
 
 ## [0.1.0a3] - 2026-10-30
 
@@ -38,11 +43,6 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   a connection to it unless its user is the daemon's own (or one of
   `isolation.agent_users` in the separate-OS-user mode), before anything is
   read.
-- The directory's page markup is a documented theming interface for a
-  replacement stylesheet (`AC_DIRECTORY_STYLESHEET`): the class names, data
-  attributes and ids in directory/README.md ("Theming") are stable, and a
-  change to them will be listed here. The method in an API row
-  (`span.method`) has `data-method="GET"` or `"POST"`.
 
 ### Changed
 
