@@ -16,9 +16,9 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use crate::owner::record_fetch;
 use crate::store::{
     EXPIRED_GRACE_SECS, FEED_TTL_SECS, FeedEntry, GoneKind, ListingRecord, NameState, OwnerCheck,
-    OwnerStatus, PublishGuard, PublishOutcome, PurgeStats, REVOKED_TOKEN_TTL_SECS, RevokeOutcome,
-    SEARCH_CANDIDATES, SearchDoc, SearchQuery, Store, StoreError, StoreResult, Tombstone,
-    WithdrawOutcome, WithdrawalRecord,
+    OwnerStatus, PublishGuard, PublishOutcome, PurgeStats, RevokeOutcome, SEARCH_CANDIDATES,
+    SearchDoc, SearchQuery, Store, StoreError, StoreResult, Tombstone, WithdrawOutcome,
+    WithdrawalRecord,
 };
 
 /// A Postgres-backed store.
@@ -780,15 +780,12 @@ impl Store for PgStore {
             .execute(&self.pool)
             .await?
             .rows_affected();
-        let revoked_tokens = sqlx::query("DELETE FROM revoked_tokens WHERE revoked_at <= $1")
-            .bind(before(REVOKED_TOKEN_TTL_SECS))
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
+        // Revoked token ids are never purged: a revocation names only the
+        // token id, so no time is known after which no token with that id
+        // can be valid (SR-23). Each one needs the operator's signature.
         Ok(PurgeStats {
             expired_listings,
             feed,
-            revoked_tokens,
         })
     }
 }

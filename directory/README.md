@@ -345,7 +345,10 @@ notice as a change of key.
 
 Tombstones are kept as long as the name (SPEC §13.2.2), so a withdrawn
 listing's public bytes can't be re-posted, however long ago it was
-withdrawn.
+withdrawn. Revoked token ids are never purged: a revocation names only the
+token id, not the token's expiry, so no time is known after which every
+token with that id has expired. Each one takes the operator's signature, so
+the table grows only as fast as the operator revokes.
 
 ## Verifier
 

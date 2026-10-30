@@ -92,6 +92,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - In the separate-OS-user mode, a link loop on the agent or data directory
   path is refused with the usual start-check error instead of a traceback.
 
+- The directory keeps revoked token ids for good instead of purging them 90
+  days after the revocation arrived: a token with a revoked id but a later
+  validity window could otherwise be published once the id was forgotten
+  (SR-23).
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added

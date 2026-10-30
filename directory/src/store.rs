@@ -18,8 +18,6 @@ use std::future::Future;
 pub const FEED_TTL_SECS: u64 = 30 * 86_400;
 /// How long an expired listing is kept (answering 410) before it is purged.
 pub const EXPIRED_GRACE_SECS: u64 = 30 * 86_400;
-/// How long a revoked token id is kept: the longest token lifetime (90 days).
-pub const REVOKED_TOKEN_TTL_SECS: u64 = 90 * 86_400;
 /// Most candidates a search returns before the directory filters them.
 pub const SEARCH_CANDIDATES: u32 = 200;
 
@@ -348,8 +346,6 @@ pub struct PurgeStats {
     pub expired_listings: u64,
     /// Feed entries older than 30 days.
     pub feed: u64,
-    /// Revoked token ids past every possible token lifetime.
-    pub revoked_tokens: u64,
 }
 
 /// The directory's persistent state. Times are unix seconds from the
@@ -478,9 +474,9 @@ pub trait Store: Send + Sync + 'static {
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<FeedEntry>>> + Send;
 
-    /// Delete old feed entries, revoked token ids past every token lifetime,
-    /// and listings expired for longer than the grace period. Tombstones,
-    /// name marks and owner revocations are kept.
+    /// Delete old feed entries and listings expired for longer than the
+    /// grace period. Tombstones, name marks, owner revocations and revoked
+    /// token ids are kept (a revocation names no expiry, SR-23).
     fn purge(&self, now: u64) -> impl Future<Output = StoreResult<PurgeStats>> + Send;
 }
 

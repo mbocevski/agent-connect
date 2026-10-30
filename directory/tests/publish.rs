@@ -282,6 +282,35 @@ async fn withdrawals_are_checked() {
     assert!(h.record("held").await.is_some());
 }
 
+/// SR-23: a revocation names only the token id, not the token's expiry, so
+/// the directory can't tell when every token with that id has expired. It
+/// keeps the id, however long ago the revocation came: here a token issued
+/// to take effect after 100 days, revoked before it was ever published.
+#[tokio::test]
+async fn a_revoked_token_id_stays_revoked_past_the_longest_token_lifetime() {
+    let h = Harness::new();
+    let id = identity();
+    let mut s = h.spec("later", &id);
+    s.token_issued_at = h.now() + 100 * DAY;
+    s.token_expires_at = h.now() + 180 * DAY;
+    let token = h.build(&s).token;
+    let r = h.post("/v0/revocations", h.revocation(&token)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    h.advance(91 * DAY);
+    h.dir.maintain().await.unwrap();
+    h.advance(10 * DAY);
+    h.dir.maintain().await.unwrap();
+    let mut late = h.spec("later", &id);
+    late.token = Some(token);
+    refused(
+        &h,
+        h.build(&late).bytes,
+        StatusCode::FORBIDDEN,
+        "token_revoked",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn token_revocation_withdraws_the_listing_and_bars_the_token() {
     let h = Harness::new();

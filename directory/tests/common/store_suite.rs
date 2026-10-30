@@ -473,6 +473,15 @@ pub async fn feed_and_purge<S: Store>(s: &S) {
             vec![(id.clone(), 1)]
         );
     }
+    // Revoked token ids are never purged either (SR-23): a revocation names
+    // no expiry, so no purge time is safe.
+    let tok = random_b64(16);
+    s.revoke_token(&tok, "{}", NOW).await.unwrap();
+    s.purge(NOW + 200 * DAY).await.unwrap();
+    assert!(
+        s.token_revoked(&tok).await.unwrap(),
+        "revoked token id purged"
+    );
 }
 
 pub async fn listed_after_pages_by_name<S: Store>(s: &S) {
