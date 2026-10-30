@@ -1,6 +1,6 @@
 # ADR-007: Autonomous connections under standing human rules
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-30
 - **Deciders:** Marko Bocevski
 
