@@ -35,6 +35,7 @@ from agentconnect.isolation import (
     check_agent_dir,
     check_config,
     check_data_dir,
+    check_parents,
     getpeereid,
     peer_credentials,
     resolve_gid,
@@ -286,6 +287,86 @@ def test_the_agent_dirs_parents_must_be_closed(  # noqa: PLR0913, PLR0917
     else:
         with pytest.raises(IsolationError, match=refused) as e:
             check_agent_dir(agent_dir, EUID, GID)
+        assert str(parent) in str(e.value)
+
+
+def test_a_link_in_an_open_directory_is_refused(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The daemon keeps using the configured path, so whoever can write the
+    # directory that holds a link on it can repoint the link later.
+    base = Path(os.path.realpath(short_dir))
+    shared, secure = base / "shared", base / "secure"
+    shared.mkdir(mode=0o700)
+    secure.mkdir(mode=0o700)
+    (shared / "link").symlink_to(secure)
+    agent_dir = shared / "link" / "agent"
+    check_agent_dir(agent_dir, EUID, GID)
+    _with_mode(monkeypatch, shared, 0o777)
+    with pytest.raises(IsolationError, match="its owner only") as e:
+        check_agent_dir(agent_dir, EUID, GID)
+    assert str(shared) in str(e.value)
+
+
+@pytest.mark.parametrize("target", ["../real", "{base}/real"])
+def test_a_link_in_a_root_directory_is_followed(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch, rng: random.Random, target: str
+) -> None:
+    # As /var/run -> ../run: the link's directory is root's and closed, so
+    # the link holds, and the walk goes on along its target.
+    base = Path(os.path.realpath(short_dir))
+    top, real = base / "var", base / "real"
+    top.mkdir(mode=0o700)
+    real.mkdir(mode=0o700)
+    (top / "run").symlink_to(target.format(base=base))
+    agent_dir = top / "run" / "agent"
+    _with_mode(monkeypatch, top, 0o755, 0)
+    check_agent_dir(agent_dir, EUID, GID)
+    assert (real / "agent").is_dir()
+
+    # The target's own chain is checked too.
+    _with_mode(monkeypatch, real, 0o755, _uid(rng))
+    with pytest.raises(IsolationError, match="owned by") as e:
+        check_agent_dir(agent_dir, EUID, GID)
+    assert str(real) in str(e.value)
+
+
+def test_a_link_loop_is_refused(short_dir: Path) -> None:
+    base = Path(os.path.realpath(short_dir))
+    (base / "a").symlink_to(base / "b")
+    (base / "b").symlink_to(base / "a")
+    with pytest.raises(IsolationError, match="too many links"):
+        check_parents(base / "a" / "agent", EUID)
+
+
+def test_a_directory_that_cannot_be_read_is_refused(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = Path(os.path.realpath(short_dir))
+    (base / "link").symlink_to(base)
+
+    def readlink(p: object) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(isolation.os, "readlink", readlink)
+    with pytest.raises(IsolationError, match="cannot check the directories above"):
+        check_parents(base / "link" / "agent", EUID)
+
+
+def test_the_data_dirs_parents_must_be_closed(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Whoever can rename entries above the data directory can swap in
+    # their own keys and tokens.
+    parent = Path(os.path.realpath(short_dir / "up"))
+    parent.mkdir(mode=0o700)
+    data_dir = parent / "data"
+    check_data_dir(data_dir, EUID)
+    check_data_dir(parent / "not" / "yet" / "data", EUID)  # the daemon creates them
+    _with_mode(monkeypatch, parent, 0o757)
+    for d in (data_dir, parent / "not" / "yet" / "data"):
+        with pytest.raises(IsolationError, match="its owner only") as e:
+            check_data_dir(d, EUID)
         assert str(parent) in str(e.value)
 
 

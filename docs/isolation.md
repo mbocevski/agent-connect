@@ -86,10 +86,13 @@ is no user boundary to put between them.
   - the agent directory isn't owned by the daemon's user and
     `isolation.group`, gives others any access, gives the group write, or
     gives the group no access;
-  - a directory above the agent directory (its real path) isn't owned by
-    the daemon's user or root, or its group or others can write it and it
-    isn't sticky: whoever can rename entries there could put their own
-    agent directory in its place;
+  - a directory above the agent directory or the data directory isn't
+    owned by the daemon's user or root, or its group or others can write it
+    and it isn't sticky: whoever can rename entries there could put their
+    own directory in its place. The check walks the configured path one
+    component at a time and follows each link the same way, so it covers
+    the directory holding the link and the link's target (a root-owned
+    link such as `/var/run` -> `/run` passes);
   - `api.socket` is outside the agent directory, or the agent and data
     directories contain each other;
   - a user is in both `agent_users` and `human_users`, or the daemon's own
@@ -224,9 +227,10 @@ In that `config.toml`, set `daemon.data_dir = "/usr/local/var/agentconnect"`,
 `isolation.agent_dir = "/usr/local/var/run/agentconnect"` and
 `isolation.group = "_agentconnect"`. The agent directory isn't under
 `/var/run`, because macOS empties that at boot and the daemon's user can't
-recreate it there. Every directory above it must be root's (or
-`_agentconnect`'s): with Homebrew on an Intel Mac, `/usr/local/var` belongs
-to your user, so pick a root-owned location instead, for example
+recreate it there. Every directory above the agent and data directories
+must be root's (or `_agentconnect`'s): with Homebrew on an Intel Mac,
+`/usr/local/var` belongs to your user, so pick root-owned locations
+instead, for example `/Library/Application Support/agentconnect/data` and
 `/Library/Application Support/agentconnect/run`. Then load the job:
 
 ```sh
