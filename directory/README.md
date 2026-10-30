@@ -261,7 +261,11 @@ A listing in JSON (search and MCP):
 
 `card.organization` appears only next to a verified owner. Every listing,
 in `/search`, `search_agents` and `get_card`, also carries `signed_card`, the
-verbatim canonical bytes, so the caller can verify them (SPEC §13.2.6).
+verbatim canonical bytes, so the caller can verify them (SPEC §13.2.6). A
+search answer stays within 512 KiB: results stop being added before they
+would pass it, and the answer then has `"truncated": true`. MCP
+`search_agents` also returns at most 20 results, since its answer goes into
+a model's context.
 
 ### Content negotiation
 

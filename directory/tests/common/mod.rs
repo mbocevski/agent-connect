@@ -471,3 +471,32 @@ impl Harness {
         self.store().get(name).await.unwrap()
     }
 }
+
+fn leak(x: String) -> &'static str {
+    Box::leak(x.into_boxed_str())
+}
+
+/// Publish `n` listings named `<prefix>-NN`, each as large as a card can be
+/// (long text that JSON escapes, the most skills and tags), for the search
+/// response budget.
+pub async fn seed_large(h: &Harness, prefix: &str, n: usize) {
+    for i in 0..n {
+        let agent = identity();
+        let mut s = h.spec(&format!("{prefix}-{i:02}"), &agent);
+        s.card_name = format!("{prefix} {}", "\"".repeat(70));
+        s.description = format!("{prefix} {}", "\"\\".repeat(240));
+        s.skills = (0..16)
+            .map(|k| {
+                let tags: Vec<&'static str> = (0..8)
+                    .map(|t| leak(format!("t{k}x{t}{}", "q".repeat(26))))
+                    .collect();
+                (
+                    leak(format!("skill-{k:02}-{}", "a".repeat(60))),
+                    leak(format!("Skill {k} {}", "\"".repeat(60))),
+                    Box::leak(tags.into_boxed_slice()) as &'static [&'static str],
+                )
+            })
+            .collect();
+        h.publish(&s).await;
+    }
+}

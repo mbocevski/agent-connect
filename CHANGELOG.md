@@ -107,7 +107,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Every directory search result, from `/search` and the MCP `search_agents`
   tool, carries `signed_card`, the verbatim signed listing, as SPEC §13.2.6
   requires of machine-readable results; before, only `get_card` had it
-  (SR-20).
+  (SR-20). A search answer stays within 512 KiB and says `"truncated":
+  true` when it stopped early, and `search_agents` returns at most 20
+  results.
 
 ## [0.1.0a3] - 2026-10-30
 
