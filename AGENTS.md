@@ -72,6 +72,7 @@ just ci         # exactly what PR CI runs, including coverage gates
 just pr         # push branch, open/refresh PR
 just update-branch <n> # branch behind main: signed local rebase + push (never GitHub's Update branch)
 just merge <n>  # the ONLY way to merge: refuses unless every required check is green
+just merge-train <n>... # in order: update-branch if behind, wait for checks, merge; stops at the first failure
 ```
 
 Testing rules, tiers, coverage thresholds and the harness are in `TESTING.md`.
