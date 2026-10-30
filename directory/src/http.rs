@@ -853,6 +853,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_standard_methods_are_logged_by_name() {
+        use axum::http::Method;
+        for m in [
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+            Method::PATCH,
+            Method::CONNECT,
+            Method::TRACE,
+        ] {
+            assert_eq!(method_label(&m), m.as_str());
+        }
+        let chosen = Method::from_bytes(b"ME-203.0.113.9-alice").unwrap();
+        assert_eq!(method_label(&chosen), "other");
+    }
+
+    #[test]
     fn empty_accept_ranges_are_ignored() {
         assert!(wants_markdown(&accept("text/markdown,, ,")));
         assert!(!wants_markdown(&accept(",,")));
