@@ -119,9 +119,9 @@ MAX_JOIN_LEDGER_PER_INVITE = 1024
 # JoinRequests of one invite that may wait for the human at once (as knocks
 # per door, SPEC 6.6.3 step 7).
 MAX_PENDING_JOINS_PER_INVITE = 32
-# JoinRequests of one invite that may fail (a bad MAC, or sent from a mailbox
-# other than the one they name, SPEC 6.2 steps 2 and 3) within the window
-# before the invite drops every request until the window passes.
+# Failed JoinRequests of one invite (a bad MAC, or sent from a mailbox other
+# than the one they name, SPEC 6.2 steps 2 and 3) within the window that make
+# the daemon tell the human, at most once per window.
 MAX_FAILED_JOINS_PER_INVITE = 16
 JOIN_FAILURE_WINDOW_SECS = 600
 # How long a leave waits for a member to commit it (docs/groups.md): at most
@@ -403,11 +403,11 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         "policy.max_failed_joins_per_invite",
         "policy_max_failed_joins_per_invite",
         shown_default(MAX_FAILED_JOINS_PER_INVITE),
-        f"Join requests for one invite that may fail in {JOIN_FAILURE_WINDOW_SECS // 60} "
-        f"minutes (1 to {MAX_FAILED_JOINS_PER_INVITE}): a wrong invite MAC, or a request "
-        "sent from a mailbox other than the one it names. At the limit the invite drops "
-        "every request until the oldest failure is that old, and you get an "
-        "`invite_flooded` event (reason `join_failures`); other invites are unaffected.",
+        f"Failed join requests for one invite within {JOIN_FAILURE_WINDOW_SECS // 60} "
+        f"minutes that get you an `invite_flooded` event, reason `join_failures` (1 to "
+        f"{MAX_FAILED_JOINS_PER_INVITE}; at most one event per {JOIN_FAILURE_WINDOW_SECS // 60} "
+        "minutes): a wrong invite MAC, or a request sent from a mailbox other than the one "
+        "it names. Failed requests are dropped; the others are never held back for them.",
     ),
 )
 

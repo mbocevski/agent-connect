@@ -707,9 +707,11 @@ with a wrong MAC, or sent from a mailbox other than the one it names (SPEC
 §6.2 steps 2 and 3), is dropped with no audit row (it proves nothing about
 who sent it) but counts against its invite: at
 `policy.max_failed_joins_per_invite` (16) failures within 10 minutes the
-invite drops every request, unchecked, until they are 10 minutes old, and
-raises `invite_flooded` with reason `join_failures` (once per invite, human
-token only). The count is kept in memory, so a restart clears it.
+daemon raises `invite_flooded` with reason `join_failures` (at most once
+every 10 minutes per invite, human token only). Nothing else is dropped
+for it, so whoever knows the invite id can't lock joiners out; the relay
+caps how many requests an invite gets. The count is kept in memory, so a
+restart clears it.
 
 ## Transcript
 

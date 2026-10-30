@@ -297,37 +297,39 @@ def _bad_mac(request: bytes) -> bytes:
     return json.dumps({**req, "mac": b64(bytes(mac))}).encode()
 
 
-async def test_failed_requests_past_the_limit_close_the_invite_for_a_while(
+async def test_failed_requests_are_counted_to_tell_the_human_never_to_drop(
     owner: Owner, rng: random.Random
 ) -> None:
     """SPEC 6.2 steps 2 and 3: a request with a bad MAC, or from a mailbox
-    other than the one it names, counts against its invite. At the limit the
-    invite drops every request until the window passes, and the human is
-    told once (``invite_flooded``, reason ``join_failures``). Another invite
-    is unaffected."""
+    other than the one it names, counts against its invite. At the limit
+    within the window the human is told (``invite_flooded``, reason
+    ``join_failures``), once per window: but nothing is dropped unchecked, so
+    a stranger who knows only the invite id can't lock joiners out."""
     await owner.restart(policy_max_failed_joins_per_invite=3)
-    url, other = await owner.invite(), await owner.invite()
-    bob, carol, mallory = (Joiner(rng, owner.now) for _ in range(3))
+    url = await owner.invite(max_uses=50)
+    carol, stranger = Joiner(rng, owner.now), Joiner(rng, owner.now)
     for _ in range(2):
-        await owner.deliver(_bad_mac(mallory.request(url)), mallory.mailbox)
+        await owner.deliver(_bad_mac(stranger.request(url)), stranger.mailbox)
     assert owner.flooded() == []
-    await owner.deliver(carol.request(url), mallory.mailbox)  # another sender's request
+    await owner.deliver(carol.request(url), stranger.mailbox)  # another sender's request
     (flood,) = [e["data"] for e in owner.flooded()]
     assert (flood["invite_id"], flood["reason"]) == (invite_id(url), "join_failures")
     assert "3 join requests" in flood["warning"]
-    # Closed for the window: a good request is dropped, unverified, and more
-    # failures don't repeat the notice.
-    await owner.deliver(bob.request(url), bob.mailbox)
-    await owner.deliver(_bad_mac(mallory.request(url)), mallory.mailbox)
-    assert owner.engine.join_approvals() == []
-    assert owner.ledger() == 0
+    # The flood goes on: every legitimate request still reaches the human,
+    # and the notice isn't repeated within the window.
+    reached = set()
+    for _ in range(5):
+        await owner.deliver(_bad_mac(stranger.request(url)), stranger.mailbox)
+        bob = Joiner(rng, owner.now)
+        reached.add(await owner.deliver(bob.request(url), bob.mailbox))
+        owner.clock.advance(60)
+    assert reached <= {a["request_id"] for a in owner.engine.join_approvals()}
     assert len(owner.flooded()) == 1
-    elsewhere = await owner.deliver(carol.request(other), carol.mailbox)
-    assert [a["request_id"] for a in owner.engine.join_approvals()] == [elsewhere]
-    # Once the failures are older than the window, the invite takes requests.
+    # A later burst, after the window, is told again.
     owner.clock.advance(JOIN_FAILURE_WINDOW_SECS)
-    rid = await owner.deliver(bob.request(url), bob.mailbox)
-    assert {a["request_id"] for a in owner.engine.join_approvals()} == {elsewhere, rid}
+    for _ in range(3):
+        await owner.deliver(_bad_mac(stranger.request(url)), stranger.mailbox)
+    assert len(owner.flooded()) == 2
 
 
 async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(

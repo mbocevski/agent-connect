@@ -241,10 +241,10 @@ INVITE_FLOOD_WARNING = (
 )
 JOIN_FAILURES_WARNING = (
     "{limit} join requests for this invite failed within {minutes} minutes: a wrong "
-    "invite MAC, or a request sent from a mailbox other than the one it names. The "
-    "invite drops every request until those failures are {minutes} minutes old. "
-    "Someone may be probing it, or forging requests with a leaked link: if you didn't "
-    "expect that, revoke it with `agentconnect invite revoke <invite_id>`."
+    "invite MAC, or a request sent from a mailbox other than the one it names. They "
+    "were dropped; requests that pass the checks still reach you. Someone may be "
+    "probing the invite, or forging requests with a leaked link: if you didn't expect "
+    "that, revoke it with `agentconnect invite revoke <invite_id>`."
 )
 # The message of a JoinRequest from another sender (SPEC 6.2 step 3).
 SENDER_MISMATCH = "credential mismatch: sender is not the request's mailbox_id"
@@ -862,8 +862,10 @@ class Engine:
         self._join_capacity = ac.DEFAULT_LEDGER_CAPACITY
         self._join_ledger = self._load_join_ledger()
         # When each invite's recent failed requests arrived (SPEC 6.2 steps 2
-        # and 3), in memory: a restart starts the window again.
+        # and 3), and when the human was last told of them; in memory, so a
+        # restart starts the window again.
         self._join_failures: dict[str, deque[int]] = {}
+        self._join_failures_told: dict[str, int] = {}
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -3242,10 +3244,6 @@ class Engine:
         """SPEC 6.2 steps 2 and 3 for an open invite's request, or ``None``
         when it is dropped (``ignore`` records why)."""
         invite_id = str(invite["invite_id"])
-        if self._join_failures_full(invite_id):
-            # Too many failed requests lately: dropped before any check.
-            ignore("join_request_throttled", invite=log.hid(invite_id))
-            return None
         try:
             # Step 3: only from the mailbox it names. Anyone with the link can
             # MAC any KeyPackage, so a request from another sender is dropped
@@ -3257,30 +3255,29 @@ class Engine:
             reason = str(getattr(e, "kind", type(e).__name__))
             ignore("join_request_rejected", invite=log.hid(invite_id), reason=reason)
             if reason == "authentication" or str(e) == SENDER_MISMATCH:
-                # Step 2: counted toward rate limiting.
+                # Step 2: counted, to tell the human. Nothing is dropped
+                # unchecked for it: anyone who knows the invite id could
+                # then lock its joiners out, and the relay already caps the
+                # requests an invite gets.
                 await self._count_join_failure(str(invite["group_id"]), invite_id)
             return None
 
-    def _join_failures_full(self, invite_id: str) -> bool:
-        """Whether ``invite_id`` had its limit of failed requests within the
-        window; forgets the older ones."""
-        times = self._join_failures.get(invite_id)
-        if times is None:
-            return False
-        since = self.now() - JOIN_FAILURE_WINDOW_SECS
-        while times and times[0] <= since:
-            times.popleft()
-        if not times:
-            del self._join_failures[invite_id]
-            return False
-        return len(times) >= self.config.policy_max_failed_joins_per_invite
-
     async def _count_join_failure(self, group_id: str, invite_id: str) -> None:
-        """A failed request for ``invite_id``: at the limit, the human is
-        told (once per invite)."""
-        self._join_failures.setdefault(invite_id, deque()).append(self.now())
-        if self._join_failures_full(invite_id):
-            await self._tell_join_flood(group_id, invite_id, JOIN_FAILURES)
+        """A failed request for ``invite_id``. At the limit within the window
+        the human is told, at most once per window, so an attack that comes
+        back after it quieted down is told again."""
+        now = self.now()
+        times = self._join_failures.setdefault(invite_id, deque())
+        times.append(now)
+        while times[0] <= now - JOIN_FAILURE_WINDOW_SECS:
+            times.popleft()
+        if len(times) < self.config.policy_max_failed_joins_per_invite:
+            return
+        told = self._join_failures_told.get(invite_id)
+        if told is not None and now - told < JOIN_FAILURE_WINDOW_SECS:
+            return
+        self._join_failures_told[invite_id] = now
+        await self._tell_join_flood(group_id, invite_id, JOIN_FAILURES)
 
     async def _tell_join_flood(
         self,
@@ -3317,16 +3314,17 @@ class Engine:
                 warning=warning,
             )
             return
-        warning = INVITE_FLOOD_WARNING
+        warning, cause = INVITE_FLOOD_WARNING, f"invite_flooded/{invite_id}/{reason}"
         if reason == JOIN_FAILURES:
             warning = JOIN_FAILURES_WARNING.format(
                 limit=self.config.policy_max_failed_joins_per_invite,
                 minutes=JOIN_FAILURE_WINDOW_SECS // 60,
             )
+            cause += f"/{self.now()}"  # once per window, not once ever
         await self.emit(
             group_id,
             "invite_flooded",
-            cause=f"invite_flooded/{invite_id}/{reason}",
+            cause=cause,
             invite_id=invite_id,
             reason=reason,
             warning=warning,

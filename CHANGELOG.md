@@ -83,9 +83,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 - Failed join requests count against their invite (SPEC §6.2 step 2): a
   wrong invite MAC, or a request sent from a mailbox other than the one it
   names. At `policy.max_failed_joins_per_invite` (new, default 16, 1 to 16)
-  failures within 10 minutes, the invite drops every request until those
-  failures are 10 minutes old, and the human gets `invite_flooded` with
-  reason `join_failures` (SR-26).
+  failures within 10 minutes, the human gets `invite_flooded` with reason
+  `join_failures`, at most once every 10 minutes per invite. Requests that
+  pass the checks are never held back for it, so a stranger who knows only
+  the invite id can't lock joiners out (SR-26).
 
 - In the separate-OS-user mode, a link loop on the agent or data directory
   path is refused with the usual start-check error instead of a traceback.
