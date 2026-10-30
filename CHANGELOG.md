@@ -64,6 +64,10 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   sender its envelope came from, when it is approved or its Add is built,
   and expires if that wasn't the mailbox it names.
 
+- The directory logs a request's method only when it is a standard one
+  (`GET`, `POST`, ...), and any other as `other`: a client could put an
+  address or a name in the method and have it written to the log (SR-21).
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added

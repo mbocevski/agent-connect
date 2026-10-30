@@ -704,6 +704,25 @@ fn class_of(route: &str, req: &Request) -> Class {
     }
 }
 
+/// The method as logged: one of the standard ones, else `other`. A client
+/// may send any token as the method, and it must not write text (an
+/// address, a name) into the logs (SR-21).
+fn method_label(method: &axum::http::Method) -> &'static str {
+    use axum::http::Method;
+    match *method {
+        Method::GET => "GET",
+        Method::HEAD => "HEAD",
+        Method::POST => "POST",
+        Method::PUT => "PUT",
+        Method::DELETE => "DELETE",
+        Method::OPTIONS => "OPTIONS",
+        Method::PATCH => "PATCH",
+        Method::CONNECT => "CONNECT",
+        Method::TRACE => "TRACE",
+        _ => "other",
+    }
+}
+
 /// Rate limit, then add the security headers, then log and count by route
 /// template only.
 async fn guard<S: Store>(State(app): State<Shared<S>>, mut req: Request, next: Next) -> Response {
@@ -712,7 +731,7 @@ async fn guard<S: Store>(State(app): State<Shared<S>>, mut req: Request, next: N
             .get::<MatchedPath>()
             .map(MatchedPath::as_str),
     );
-    let method = req.method().clone();
+    let method = method_label(req.method());
     let (key, from_untrusted_proxy) = client_ip(&req, &app.config);
     if from_untrusted_proxy && !app.warned_untrusted_proxy.swap(true, Ordering::Relaxed) {
         // Never with an address: the peer and the client are not logged.
@@ -753,7 +772,7 @@ async fn guard<S: Store>(State(app): State<Shared<S>>, mut req: Request, next: N
     );
     let status = resp.status().as_u16();
     app.dir.metrics().request(route, status);
-    tracing::info!(method = %method, route, status, "request");
+    tracing::info!(method, route, status, "request");
     resp
 }
 

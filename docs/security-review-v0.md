@@ -586,7 +586,7 @@ store written the old way.
 | SR-18 | relay | Deleted rows stay in the database file: `secure_delete` is off, so acked ciphertext and expired door mappings remain readable on disk. | `sqlite.rs:59-64`. Probe found acked ciphertext in the file after a checkpoint. Confirmed. | Fixed in #73: `secure_delete`, and a truncating WAL checkpoint every minute |
 | SR-19 | relay, web | Invite registration rejects only Cc characters, so bidi controls and zero-width characters in `group_name`, `inviter_name` and `purpose` reach the landing page unaltered (escaped, but reordering what the human reads). The CLI already replaces them. | `relay.rs:374-380`, `landing.rs:29-41`. Probe: U+202E accepted and rendered raw. Confirmed. | Fixed in #71: the three fields must be one-line text (SPEC §4.2, §13.1.2). |
 | SR-20 | directory | `/search` and MCP `search_agents` results omit the verbatim signed listing that SPEC §13.2.6 requires in machine-readable results; only `get_card` has it. | `api.rs:24-61`, `http.rs:273-283`, `mcp.rs:93-110`. Confirmed. | Open (T-20) |
-| SR-21 | directory | The client's HTTP method is logged verbatim at info, so any client can write arbitrary text (an address, a name) into the logs. | `http.rs:682`, `http.rs:714`. Probe: `method=ME-203.0.113.9-alice`. Confirmed. | Open (T-21) |
+| SR-21 | directory | The client's HTTP method is logged verbatim at info, so any client can write arbitrary text (an address, a name) into the logs. | `http.rs:682`, `http.rs:714`. Probe: `method=ME-203.0.113.9-alice`. Confirmed. | Fixed: a standard method is logged as itself, any other as `other` |
 | SR-22 | directory | The `X-Forwarded-For` walk skips every address in the trusted proxy blocks, so a client behind a shared CDN range that is listed as a proxy picks its own key and bypasses the per-address limits. | `http.rs:618-653`, `ratelimit.rs:179-189`. Confirmed with a trusted loopback peer; the CDN case by reading. | Open (T-22) |
 | SR-23 | directory | Revoked token ids are purged 90 days after the directory received the revocation, not after the token's expiry, so a token issued after the revocation time becomes publishable again. | `store.rs:22`, `memory.rs:298`, `memory.rs:456`, `postgres.rs:783`. By reading. | Open (T-23) |
 | SR-24 | directory, daemon | After the operator rotates `DK`, the directory keeps serving listings whose token key it no longer pins; knockers refuse them, and the owner's renewals fail with `unknown_key`, which is retried forever. | `directory.rs:347-360`, `runtime/knocks.py:773`, `runtime/listing.py` (`STOP_RENEWING`). By reading. | Open (T-24) |
@@ -1131,7 +1131,7 @@ One line per open item, ready to file.
   `InviteMeta` strings at registration (SPEC §4.2).
 - **T-20 (Low, SR-20):** Directory: put the verbatim signed listing in
   `/search` and MCP `search_agents` results.
-- **T-21 (Low, SR-21):** Directory: log the HTTP method from a fixed set.
+- **T-21 (Low, SR-21, fixed):** Directory: log the HTTP method from a fixed set.
 - **T-22 (Low, SR-22):** Directory: a trusted-hop count for
   `X-Forwarded-For`, and docs against listing shared CDN ranges.
 - **T-23 (Low, SR-23):** Directory: keep revoked token ids until the
