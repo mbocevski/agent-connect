@@ -325,11 +325,28 @@ async def test_failed_requests_are_counted_to_tell_the_human_never_to_drop(
         owner.clock.advance(60)
     assert reached <= {a["request_id"] for a in owner.engine.join_approvals()}
     assert len(owner.flooded()) == 1
-    # A later burst, after the window, is told again.
+    # A later burst, after a quiet window, is told again.
     owner.clock.advance(JOIN_FAILURE_WINDOW_SECS)
     for _ in range(3):
         await owner.deliver(_bad_mac(stranger.request(url)), stranger.mailbox)
     assert len(owner.flooded()) == 2
+
+
+async def test_a_long_flood_is_told_less_and_less_often(owner: Owner, rng: random.Random) -> None:
+    """One failed request a minute for three hours: notices 10, 20, 40 and
+    80 minutes apart (up to a day), and the daemon keeps only the newest
+    `limit` failure times, however many arrive (a malicious relay can send
+    any number)."""
+    await owner.restart(policy_max_failed_joins_per_invite=3)
+    url = await owner.invite()
+    stranger = Joiner(rng, owner.now)
+    bad = _bad_mac(stranger.request(url))
+    for _ in range(180):
+        await owner.deliver(bad, stranger.mailbox)
+        assert len(owner.engine._join_failures[invite_id(url)]) <= 3
+        owner.clock.advance(60)
+    assert len(owner.flooded()) == 5  # at 2, 12, 32, 72 and 152 minutes
+    assert owner.engine._join_failures_told[invite_id(url)][1] == 16 * JOIN_FAILURE_WINDOW_SECS
 
 
 async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(

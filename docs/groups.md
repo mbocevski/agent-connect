@@ -128,7 +128,8 @@ A leaked link can't flood the human with requests:
 - when `policy.max_failed_joins_per_invite` (16 by default, never more)
   requests for an invite fail within 10 minutes (a wrong MAC, or sent from
   a mailbox other than the one they name), the human gets `invite_flooded`
-  (`reason: join_failures`, at most once every 10 minutes per invite).
+  (`reason: join_failures`; while they go on, each notice waits twice as
+  long as the last, from 10 minutes up to a day).
   Failed requests are dropped; requests that pass the checks still reach
   the human.
 

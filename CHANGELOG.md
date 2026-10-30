@@ -84,7 +84,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   wrong invite MAC, or a request sent from a mailbox other than the one it
   names. At `policy.max_failed_joins_per_invite` (new, default 16, 1 to 16)
   failures within 10 minutes, the human gets `invite_flooded` with reason
-  `join_failures`, at most once every 10 minutes per invite. Requests that
+  `join_failures`; while they go on, each notice waits twice as long as the
+  last, from 10 minutes up to a day. Requests that
   pass the checks are never held back for it, so a stranger who knows only
   the invite id can't lock joiners out (SR-26).
 

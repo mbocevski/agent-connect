@@ -865,7 +865,7 @@ class Engine:
         # and 3), and when the human was last told of them; in memory, so a
         # restart starts the window again.
         self._join_failures: dict[str, deque[int]] = {}
-        self._join_failures_told: dict[str, int] = {}
+        self._join_failures_told: dict[str, tuple[int, int]] = {}
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -3264,19 +3264,25 @@ class Engine:
 
     async def _count_join_failure(self, group_id: str, invite_id: str) -> None:
         """A failed request for ``invite_id``. At the limit within the window
-        the human is told, at most once per window, so an attack that comes
-        back after it quieted down is told again."""
-        now = self.now()
-        times = self._join_failures.setdefault(invite_id, deque())
-        times.append(now)
-        while times[0] <= now - JOIN_FAILURE_WINDOW_SECS:
+        the human is told; while the failures go on, the next notice waits
+        twice as long as the last (from the window up to a day), and a quiet
+        window starts over, so an attack that comes back is told again."""
+        now, limit = self.now(), self.config.policy_max_failed_joins_per_invite
+        # Only the newest `limit` times matter: a full deque whose oldest is
+        # inside the window is the limit reached.
+        times = self._join_failures.setdefault(invite_id, deque(maxlen=limit))
+        while times and times[0] <= now - JOIN_FAILURE_WINDOW_SECS:
             times.popleft()
-        if len(times) < self.config.policy_max_failed_joins_per_invite:
+        if not times:
+            self._join_failures_told.pop(invite_id, None)
+        times.append(now)
+        if len(times) < limit:
             return
         told = self._join_failures_told.get(invite_id)
-        if told is not None and now - told < JOIN_FAILURE_WINDOW_SECS:
+        if told is not None and now - told[0] < told[1]:
             return
-        self._join_failures_told[invite_id] = now
+        interval = JOIN_FAILURE_WINDOW_SECS if told is None else min(2 * told[1], 86_400)
+        self._join_failures_told[invite_id] = (now, interval)
         await self._tell_join_flood(group_id, invite_id, JOIN_FAILURES)
 
     async def _tell_join_flood(

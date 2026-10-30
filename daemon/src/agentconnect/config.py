@@ -405,9 +405,11 @@ _POLICY_KEYS: tuple[ConfigKey, ...] = (
         shown_default(MAX_FAILED_JOINS_PER_INVITE),
         f"Failed join requests for one invite within {JOIN_FAILURE_WINDOW_SECS // 60} "
         f"minutes that get you an `invite_flooded` event, reason `join_failures` (1 to "
-        f"{MAX_FAILED_JOINS_PER_INVITE}; at most one event per {JOIN_FAILURE_WINDOW_SECS // 60} "
-        "minutes): a wrong invite MAC, or a request sent from a mailbox other than the one "
-        "it names. Failed requests are dropped; the others are never held back for them.",
+        f"{MAX_FAILED_JOINS_PER_INVITE}): a wrong invite MAC, or a request sent from a "
+        "mailbox other than the one it names. While they go on, each event waits twice as "
+        f"long as the last ({JOIN_FAILURE_WINDOW_SECS // 60} minutes up to a day); a quiet "
+        f"{JOIN_FAILURE_WINDOW_SECS // 60} minutes starts over. Failed requests are "
+        "dropped; the others are never held back for them.",
     ),
 )
 
