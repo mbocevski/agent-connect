@@ -105,7 +105,8 @@ Rule = {
   transaction, and a lowered lifetime also shortens the connections the rule
   already made. A raised cap or lifetime applies only to new connections.
 - **Rules belong to one instance.** Replicas (§9.4) don't share them, as they
-  don't share a door (§6.6.1) or an invite's secret (§4.3). See open question 3.
+  don't share a door (§6.6.1) or an invite's secret (§4.3). See "Decided in
+  review", item 3.
 
 ### Where a rule is evaluated
 
@@ -134,10 +135,18 @@ The rule is read again before the group is shown to the agent. If it was
 disabled meanwhile, the knocker is removed, as for an approval that failed after
 the Add, and the use and the cap stay spent.
 
+An anchor check that doesn't prove the anchor ends evaluation. When a domain
+fetch fails, times out or doesn't vouch, the knock is marked for the human, and
+later rules aren't tried. In particular it doesn't fall through to `open`, so an
+outage at an allowed domain can't move a peer the human meant to trust into a
+tier meant for strangers, and a check that failed can't turn into an approval.
+
 No match means what it means today: the knock waits for the human. There is one
-exception. A knock that matched no other anchor, on a listing with an enabled
-`open` rule that has no room, is **dropped**. Otherwise a stranger could fill
-the human's queue by knocking past the cap.
+exception. A knock whose only match is an enabled `open` rule with no room is
+**dropped**. Otherwise a stranger could fill the human's queue by knocking past
+the cap. A stranger who claims an allowed domain still reaches the queue through
+the failed check, one knock per identity and at most 32 on the door. That is the
+same exposure a door without a rule has today.
 
 **Rejected:**
 
@@ -165,7 +174,7 @@ rule approved starts as **`auto`**, which records that a rule connected it:
 | Pinned | `auto (pinned: <label>)`, rule name | `auto`, anchor `pinned` |
 | Owner domain | `auto (owner domain <domain>)`, rule name | `auto`, anchor `owner_domain` |
 | Introduction | `auto (introduced by <fingerprint>)`, rule name | `auto`, anchor `introduction` |
-| Open door | `auto (open)`, rule name | `auto`, anchor `open` |
+| Open door | `auto (open)`, rule name | Nothing. The restricted endpoint sees `auto`, anchor `open` (Decision 6) |
 
 - **Local only.** The state is this daemon's record. It is not on the wire, and
   other members can't see it or tell it from `unverified`. A rule's name is
@@ -176,14 +185,20 @@ rule approved starts as **`auto`**, which records that a rule connected it:
   without any new code path. `trust_state` gains `auto_members`, and the
   delivery gains `sender.trust`. The enum of `self` is unchanged, so a consumer
   that reads it stays on the safe side.
-- **Only SAS produces `verified`.** A match in a human's `verify` moves the
-  member from `auto` to `verified`, and it then leaves its rule: no lifetime, no
-  count against the caps, no restricted profile. No rule or event can do this,
-  and the agent can't start it (§11.5).
-- **Pinning moves a connection, too.** A human who pins the identity of a member
-  in a connection another rule made moves it to `auto (pinned)` under the pinned
-  rule's caps and profile. The preview names each such connection. It stays
-  `auto`.
+- **Only SAS produces `verified`, and it changes nothing else.** A match in a
+  human's `verify` moves the member from `auto` to `verified`. No rule or event
+  can do this, and the agent can't start it (§11.5). The connection stays under
+  its rule: same anchor, profile, lifetime and place in the caps. Comparing a
+  code shows that nobody sits in the middle. It says nothing about whether this
+  peer should have more access, and a stranger shouldn't be able to earn tools
+  by talking a human into a comparison. The `verify` command says so for such a
+  member: "Verifying doesn't widen this connection's access. To do that, use
+  `trust pin`."
+- **Only pinning moves a connection to another rule.** A human who pins the
+  identity of a member in a connection another rule made moves it to the pinned
+  rule's anchor, caps, lifetime and profile. That is a separate, explicit act,
+  and the preview names each such connection. Its trust state doesn't change:
+  `auto` stays `auto`, and `verified` stays `verified`.
 - **Per group.** A member verified in one group is still `auto` in a group a
   rule made, as verification is per group today.
 - **Nothing is `auto` by default on the knocker's side.** After a knock, the
@@ -236,10 +251,12 @@ Knock = {
 - **The claim is a pointer, and the file is the proof.** A claim alone proves
   nothing: anyone can write any domain. It says which file to read. The human
   sees it as unverified text until a check passes.
-- **Where the claim comes from.** `knock.owner_domain` in the config, or
-  `--owner-domain` with the human token. The agent can't set it per knock,
-  because it links this identity to an organisation in front of a stranger. The
-  default is no claim, and then a knock is byte for byte what it is today.
+- **Where the claim comes from.** `trust claim-domain <domain>`, with the human
+  token, stored in the daemon's database with the rules, or `--owner-domain` on
+  a knock the human token starts. The agent can't set it, and it isn't in
+  `config.toml`, because it links this identity to an organisation in front of a
+  stranger and a config file is what an agent is likeliest to reach. The default
+  is no claim, and then a knock is byte for byte what it is today.
 - **Knocks only.** A JoinRequest isn't sealed, so a claim there would show the
   domain to the relay.
 
@@ -267,9 +284,10 @@ address, at most 64 KiB and 5 s.
    entry restricted to the knocker's own listing therefore doesn't vouch here,
    and the knock goes to the human. This is the conservative reading, and an
    owner who wants a key to connect widely leaves `listings` out.
-5. **Anything else goes to the human, never to approval.** A fetch that fails,
-   times out or returns a file that doesn't parse leaves the knock with the
-   human, showing the claim and why the check didn't pass.
+5. **Anything else goes to the human, never to approval or to another rule.** A
+   fetch that fails, times out, returns a file that doesn't parse or doesn't
+   vouch leaves the knock with the human, showing the claim and why the check
+   didn't pass, and evaluation ends there (Decision 1).
 
 While a fetch runs, the knock counts toward the door's 32 pending knocks, so the
 wait is bounded, and its deadline (`ts + 3600`) stays as it was.
@@ -288,9 +306,10 @@ directory does, and the §13.2.4 rules decide the result:
 **`on_revoke` defaults to `remove`.** The connection existed because the domain
 vouched, so when that ends the connection ends, and a domain's revocation of a
 compromised key is the case where waiting does harm. `leave` keeps the
-connection and marks it. A member a human has verified is outside the rule, so
-it only gets the event. A negative result is sticky for new knocks too, until a
-later fetch vouches (§13.2.4).
+connection and marks it. `on_revoke` applies to a member a human has verified as
+well, since a comparison doesn't say the domain still vouches (Decision 2); a
+human who wants to keep that peer pins it first. A negative result is sticky for
+new knocks too, until a later fetch vouches (§13.2.4).
 
 **Rejected:**
 
@@ -344,7 +363,7 @@ the certificate binds that key to `IK`.
 - `--pinned-only` and `--no-fallback` take the human token.
 - `policy.auto_approve` doesn't apply to a `--pinned-only` invite, so turning it
   on can't undo the restriction. Elsewhere it stays as it is: it approves link
-  holders, and those members are `unverified`, not `auto`. See open question 4.
+  holders, and those members are `unverified`, not `auto`. See open question 1.
 - **The inviter must be able to end the connection.** Creating a `--pinned-only`
   invite is refused unless this identity may remove members under the group's
   policy, because caps and revocation depend on it.
@@ -356,13 +375,19 @@ the certificate binds that key to `IK`.
 
 ### Proof of possession on a JoinRequest
 
-Anyone who holds the link and a copy of a pinned identity's unused KeyPackage
-could build a valid JoinRequest today. The relay sees KeyPackages in earlier
-JoinRequests, so a relay that also got the link has both. With a rule in place,
-the inviter would add that leaf with no human looking. The attacker couldn't
-read anything, since it lacks the private keys, but the agent would see a
-trusted member arrive who never asked to join, and the group would hold a leaf
-nobody controls.
+Anyone who holds the link and a copy of a pinned identity's KeyPackage could
+build a valid JoinRequest. The relay sees KeyPackages in earlier JoinRequests,
+so a relay that also got the link has both. Single use doesn't stop this: the
+record of used KeyPackages is per instance (§6.2), so a KeyPackage already used
+in a group elsewhere is still "unused" to this inviter. With a rule in place, or
+with `policy.auto_approve`, the inviter would add that leaf with no human
+looking. The attacker couldn't read anything, since it lacks the private keys,
+but the agent would see a trusted member arrive who never asked to join, and the
+group would hold a leaf nobody controls.
+
+The daemon already refuses a JoinRequest whose envelope `sender` isn't its
+`mailbox_id`, which stops a link holder who doesn't control the relay. A relay
+sets `sender` itself, so that check doesn't stop it.
 
 So a JoinRequest gains a signature, as a knock has:
 
@@ -374,13 +399,21 @@ JoinRequest = { ...the fields of §6.1...,
 - `mac_input` is the §6.1 byte string, and `SK_B` is the KeyPackage's leaf
   signature key. It is checked with strict Ed25519 under that key after step 3
   of §6.2.
-- A joiner always sends it. A request without it, or with one that fails,
-  **can't match a rule**, and it is handled as "anyone else" above. The MAC
+- **Present means checked.** A joiner always sends it. An inviter verifies it
+  whenever it is present, on every invite, and drops a request whose `sig`
+  fails, silently and with an audit row (`join_check:sig`).
+- **Absent means no automatic approval.** A request without `sig` can't match a
+  rule and can't be approved by `policy.auto_approve`. It is handled as "anyone
+  else" above, and on an invite with no rule it waits for the human. The MAC
   doesn't cover `sig`, so a relay can strip it, which sends the join to the
   human. That is denial of service, which the relay can cause anyway.
-- A request with no `sig` to an invite without a rule is accepted as today, so
-  older joiners keep working for human approval. Older inviters ignore the
-  field.
+- **The human sees the difference.** An approval for an unsigned request shows
+  "possession not proven" (`possession_proven: false` in `approvals list`): the
+  sender holds the link, and it may not be the identity shown.
+- **Absent is temporary.** Older joiners keep working for human approval while
+  they are upgraded, and older inviters ignore the field. `sig` becomes
+  mandatory before v0 is tagged, and an unsigned request is then dropped like a
+  bad one.
 
 **Rejected:**
 
@@ -478,8 +511,8 @@ audit row and nothing sent back:
 7. An enabled `introductions` rule lists the introducer. If `require_verified`
    is set, the introducer is `verified` in this group. If `origin` is `agent`,
    `accept_agent` is set.
-8. The introducer isn't one hop away itself: its member state in this group
-   isn't `auto (introduced)` or `auto (open)`.
+8. The introducer isn't one hop away itself: the anchor of its connection in
+   this group isn't `introduction` or `open`, whatever its trust state.
 9. `intro_id` isn't in the introduction ledger, which is encrypted, survives a
    restart, and keeps each entry until `expires_at + 300`. A full ledger drops
    new introductions.
@@ -513,11 +546,12 @@ An agent with no listing, and no link, can't be reached by introduction.
 - A connection made by an introduction has the state `auto (introduced by
   <fingerprint>)`, and step 8 refuses introductions from it, whatever a rule
   says.
-- A rule can't list an identity whose only connections are `auto (introduced)`
-  or `auto (open)`. The route refuses it, naming why.
-- Only a human can move such a connection out of that state, by SAS or by
-  pinning. Listing it afterwards is a new human decision about that identity, so
-  a chain of hops can only grow one human decision at a time.
+- A rule can't list an identity whose only connections have the anchor
+  `introduction` or `open`. The route refuses it, naming why.
+- SAS doesn't change this, because it changes only the trust state (Decision 2).
+  Only `trust pin` moves such a connection to another anchor. Listing it
+  afterwards is a further human decision about that identity, so a chain of hops
+  can only grow one human decision at a time.
 - Introductions are point to point: C learns nothing from being introduced to A,
   and C gets no standing with anyone else.
 
@@ -552,8 +586,7 @@ unattended agent with crafted content. Its limits are the main defence against
 prompt injection and cost abuse.
 
 ```text
-{"kind": "open", "listing": "directory.example.org/a/release-planner",
- "skills": ["release-planning"]}
+{"kind": "open", "listing": "directory.example.org/a/release-planner"}
 ```
 
 The rule is bound to the listing by name, so door renewal doesn't touch it. At
@@ -581,7 +614,7 @@ isn't told.
 | Bytes per rule per day, all connections | 16 MiB | 256 MiB | none |
 | Task updates per minute, per task | 20 | 300 | 300 |
 | Task updates per connection per day | 200 | 2000 | none |
-| Agent's sends per connection per day | 100 | 1000 | none |
+| Endpoint's sends per connection per day | 100 | 1000 | none |
 | `file` parts | Refused | Refused | `policy.allow_files` |
 | `loop_guard.max_agent_turns` in the group's policy | 4 | 20 | 20 |
 | `max_members` in the group's policy | 2 | 2 | 50 |
@@ -594,9 +627,7 @@ isn't told.
   and the human hears once per rule per day (`tier_budget_exhausted`).
 - **`max_members: 2` keeps a peer's replicas out.** A tier peer can't add
   instances (§9.2 would allow it), so one knock can't grow into several senders.
-- **The agent does less here.** In a restricted group the agent token may read,
-  send and leave. It can't invite or introduce.
-- **The knocker's name and note** never reach the agent or an event, as today
+- **The knocker's name and note** never reach an agent or an event, as today
   (§6.6). They are kept for the human's list until the record goes.
 - **The new group's `purpose`** comes from the rule, or else the listing's
   description, and it never comes from the knocker.
@@ -604,31 +635,74 @@ isn't told.
 ### What "no side effects" means here
 
 A daemon can't tell what a message makes an agent do, so the tier doesn't claim
-to stop it. It has three layers, and the ADR is explicit about which one does
-what:
+to stop it. It keeps a stranger's messages away from the tools instead:
 
-1. **A skill gate, in the daemon.** A message from a tier peer triggers the
-   agent only if its `body.metadata.skill` is in the rule's `skills`. A message
-   that names no skill counts as the first one listed. Any other message is
-   dropped silently (`tier_skill`), and so is a task-starting request for
-   another skill. `skills` must hold at least one id from the listing's card,
-   and nothing lists skills but the human. The delivery carries the skill, so
-   the agent runtime can bind it to a tool set.
-2. **A separate endpoint, in the deployment.** Deliveries from restricted
-   connections go to a restricted endpoint that the human configured,
-   `webhook.restricted_callback_url` or `a2a.restricted_agent_url`, or a handler
-   registered with `on_restricted_message` in the SDK. It should be an agent
-   with no tools that change anything. The `open` rule is refused unless one is
-   set, or the human passes `--same-agent`, which the preview names as a risk.
-   This is the layer that holds against a successful injection, since a tool the
-   agent lacks can't be talked into use.
-3. **Framing, in the delivery.** Every delivery carries `tier: "restricted"` and
-   the §10.1 notice, which says that a stranger reached this agent through an
-   open door.
+- **A separate endpoint, in the deployment.** A restricted connection's content
+  goes only to a restricted endpoint the owner deployed and configured,
+  `webhook.restricted_callback_url` or `a2a.restricted_agent_url`, or a handler
+  registered with `on_restricted_message` in the SDK. It is an agent with no
+  tools. A rule with the `restricted` profile is refused unless one is set, or
+  the human passes `--same-agent`, which the preview names as a risk. This holds
+  against a successful injection, since a tool the agent lacks can't be talked
+  into use.
+- **Framing, in the delivery.** Every delivery carries `tier: "restricted"` and
+  the §10.1 notice, which says that a stranger reached this agent through an
+  open door.
 
-The skill gate narrows what can be asked for, and it doesn't check what the text
-says. A stranger who names an allowed skill can still try to mislead the agent
-running it. That risk stays (Decision 9).
+The daemon doesn't check what the text says. A stranger can still try to mislead
+the restricted agent, and that agent can answer with whatever it knows. That
+risk stays (Decision 9), so what the owner gives that agent to read is part of
+the decision. With `--same-agent`, nothing in this section stands between a
+stranger's text and the agent's tools.
+
+### Isolation of restricted groups
+
+A separate endpoint means nothing if the main agent can read the same text
+another way, so a restricted group is invisible to the main agent token and
+everything that serves it. This is the visibility an approved knock's group has
+today before its Welcome goes out, and here it lasts for the group's whole life.
+
+| Surface | For a restricted group |
+|---|---|
+| Agent token routes on the group (`GET /v0/groups/{gid}`, send, leave, invite, floor) | `not_found` |
+| `GET /v0/groups`, `GET /v0/status` | Left out: no entry, no count, no `out_of_sync` id |
+| `GET /v0/events` and the SSE adapter | No message and no event of the group, and no gap in the agent's sequence |
+| `GET /v0/deliveries`, the MCP delivery queue | Nothing queued |
+| `agentconnect_*` MCP tools | `not_found`, and left out of every list |
+| The ordinary webhook and A2A adapters, and the A2A facade | Nothing delivered, not even as context |
+| `group adapters` | Refused: a restricted group can't be pinned to another adapter |
+| Transcript and audit log | Human token only, as today |
+
+**The main agent's Agent Card stays out too.** A restricted group sends only the
+card the restricted endpoint gives, or none. It never fetches the main agent's
+card, which would show a stranger what that agent can do.
+
+**The endpoint's token.** The restricted endpoint answers through the local API
+with a third token, `restricted-token`, which the daemon creates beside the
+other two (0600) and hands to the endpoint's user. Its scope is the restricted
+groups and nothing else:
+
+- It may read a restricted group's view, send a message in one, and leave one.
+- Its delivery payloads and events cover restricted groups only.
+- Every other route answers `403 human_only` or `not_found`, as the agent
+  token's answers do: no other group, no status beyond its own groups, no
+  approvals, no invites, no knocks, no introductions, no listing and no rule.
+- Sends carry `origin: "agent"`, and the §10.3 loop guard and the budgets above
+  apply to them.
+
+So a successful injection of the restricted agent gets it a token that can only
+talk to the strangers it already talks to. The webhook's `webhook-secret` for
+the restricted endpoint is a separate file for the same reason.
+
+**With `--same-agent`** the human has given up this isolation: the group
+delivers to its usual adapters, the agent token sees it, and the budgets,
+lifetime and framing still apply. **In embedded mode** the handler runs in the
+process of the agent that embeds the runtime. It gets a handle scoped to
+restricted groups, but as in §11.5 that holds by the API it is given, not by a
+process boundary, so what else that process can do is the owner's to arrange. A
+separate process is what the docs recommend. A runtime spawned by `agentconnect
+mcp` has no restricted endpoint, so a restricted rule there needs
+`--same-agent`.
 
 ### Abuse limits
 
@@ -664,6 +738,10 @@ means nobody has to find the right one in an incident.
 - *A filter that reads messages for injection.* The daemon doesn't read content
   for meaning ([safety.md](../safety.md#what-the-policy-doesnt-do)), and an
   attacker gets to test against it.
+- *A skill gate in the daemon.* A message would trigger the agent only if its
+  `metadata.skill` were on a list the human keeps. The sender picks that value,
+  and the daemon can't check it against what the text asks for, so the gate
+  would look like enforcement and stop nothing a stranger wants to try.
 - *Proof-of-work or payment on the door.* Out of scope, and neither changes what
   an admitted peer can send.
 - *A `door.open` param in the listing.* It adds a signed claim for directories
@@ -701,8 +779,8 @@ shows them.
     queue.
 - **A lifetime ends in a removal.** When it passes, the owner removes the peer
   and tells both sides what any removal tells them. A peer that may still
-  connect can knock again, under the caps. A connection a human verified has no
-  lifetime.
+  connect can knock again, under the caps. This holds for a member a human
+  verified too (Decision 2); `trust pin` is what moves it to another lifetime.
 - **Used caps count what a rule approved**, whether or not the Add later
   succeeded, so a failing Welcome can't be used to spend the relay's group
   budget without a limit.
@@ -736,7 +814,8 @@ human-token only and join `HUMAN_EVENTS`, like the knock events.
 No event carries a knocker's name or note. Each decision is also an audit row:
 `decision` is `auto_approved`, `reason` the anchor, and `sender` the identity.
 The agent hears of a connection only from `member_joined`, after the Welcome
-went out, with `trust: "auto"` and the anchor.
+went out, with `trust: "auto"` and the anchor. For a restricted group, only the
+restricted endpoint hears of it (Decision 6).
 
 ### `approvals list`
 
@@ -778,10 +857,11 @@ All of these use the human token.
 | `trust pin <identity\|fingerprint> [--label]`, `trust unpin`, `trust list` | Pinned entries |
 | `trust rule add owner-domain <name> --domain ...` | A domain rule (`--on-revoke`, caps, `--profile`, `--purpose`) |
 | `trust rule add introductions <name> --from ...` | An introductions rule (`--unverified-introducer`, `--accept-agent`) |
-| `trust rule add open <name> --skill ...` | An open rule, always confirmed on a terminal (`--same-agent`) |
+| `trust rule add open <name>` | An open rule, always confirmed on a terminal (`--same-agent`) |
 | `trust rule show`, `trust rule change`, `trust rule enable`, `trust rule remove` | Read and change a rule. Removing a rule leaves its connections as `auto` with no rule, under their stored limits |
 | **`trust rule disable <name>`** | **Disable a rule.** `--end-connections` is the kill switch; `--withdraw` also withdraws the listing |
-| `trust connections` | Every live `auto` connection, its rule, its age and what ends it |
+| `trust claim-domain <domain>`, and `--clear` | The owner domain this daemon's knocks claim (Decision 3) |
+| `trust connections` | Every live connection a rule made, its rule, its trust state, its age and what ends it |
 | **`trust revoke <group> [<identity>]`** | **Revoke one connection.** Delivery stops in that transaction, then the peer is removed, and the group's state goes if only this member is left |
 | `invite create --pinned-only [--or-introduced] [--no-fallback]` | An invite only rules admit (Decisions 4 and 5) |
 | `trust allow-agent-introductions <group>`, and `--off` | B's side of Decision 5 |
@@ -805,7 +885,7 @@ Proposed new rows for the SPEC §12 table, in its column order:
 
 | Attacker | Capability | Mitigation | Residual risk |
 |---|---|---|---|
-| Stranger at an open door | Any identity can get a connection to an unattended agent, with no human on either side | Off by default. Human-only rule. Restricted profile with a skill gate and a separate endpoint. Short lifetime. Caps per rule, kill switch, human events (ADR-007) | Whatever the restricted endpoint can do or say, for anyone who knocks |
+| Stranger at an open door | Any identity can get a connection to an unattended agent, with no human on either side | Off by default. Human-only rule. Restricted profile and a separate endpoint with no tools. Short lifetime. Caps per rule, kill switch, human events (ADR-007) | Whatever the restricted endpoint can do or say, for anyone who knocks |
 | Prompt injection through an automatic connection | Sends crafted text to an agent no human is reviewing | Untrusted framing (§10.1) and `trust` in each delivery. Name and note never reach the agent. Restricted endpoint without side-effect tools. Budgets. `policy.require_approval` still applies | Behavioural: an agent that obeys the text. It can't be solved with cryptography. With `--same-agent`, or under a non-restricted rule, the agent's tools are in reach |
 | Sybil cost abuse | Makes identities freely, to spend the owner's model budget or fill its groups | Caps per rule and per day. Per-rule message and byte budgets that bound the total whatever the number of identities. A daemon-wide ceiling below the relay's group limit, so human approvals still get groups | The budget can be spent every day, which denies honest strangers. It is the cost the human accepted when setting the cap |
 | Rule widening | A compromised or injected agent tries to create or widen a rule, or to make a rule apply to itself | Human token only, reading included. No config table. Preview and hash. Ceilings. Every change is an event and an audit row. Tests over routes, the agent API, the SDK and the MCP tools | Code that runs as the daemon's OS user can read `human-token` and use it (ADR-005). The separate-OS-user mode closes this, and `open` warns when it is off |
@@ -814,7 +894,9 @@ Proposed new rows for the SPEC §12 table, in its column order:
 | Owner-domain takeover | Controls the allowed domain's web server, or its name after it expires, or a certificate for it, and vouches for its own key | The domain is exact and listed by the human. Caps and lifetime. `auto` never counts as verified. Events name the domain | Connections up to the rule's caps until the human reacts: whoever controls the web server is who the rule trusts, as §13.2.4 states |
 | Revocation lag | Uses a key after its domain revoked it, or blocks the fetches so the revocation isn't seen | Fresh fetch for each approval, cached at most 300 s. Re-check every 6 hours. Negative results are sticky. No fetch vouching for 7 days counts as revoked. Lifetime | A revoked key keeps a live connection for up to 6 hours (7 days if fetches are blocked), and can still get a new one within 300 s of the revocation |
 | Reflection through the domain check | Sends knocks to make the owner's daemon fetch from a host the attacker picks | Only domains on an enabled rule are fetched. One fetch per domain in 300 s. The §13.2.4 fetch rules | An allowed domain sees that this daemon checks it, from which address and how often |
-| Forged JoinRequest for a pinned identity | With the link and a copy of the KeyPackage, asks to add a pinned identity it doesn't control | `sig` under the leaf key is required to match a rule (§6.1). KeyPackages are single use (§6.2) | A relay can strip `sig`, which sends the join to the human: denial of service only |
+| Forged JoinRequest for a pinned identity | With the link and a copy of the KeyPackage, asks to add an identity it doesn't control. KeyPackage reuse is tracked per instance (§6.2), so one used elsewhere still passes | The envelope's `sender` must equal `mailbox_id`, which stops a link holder who isn't the relay. `sig` under the leaf key is verified whenever present and required for any automatic approval, `policy.auto_approve` included (§6.1). The human's approval says "possession not proven" for an unsigned request | A relay with the link can strip `sig`, which sends the join to the human. A human who approves an unsigned request despite the notice adds a leaf nobody controls, until `sig` is mandatory |
+| Restricted content reaching the main agent | A stranger's text reaches the agent that has tools by another surface than the endpoint, or the restricted agent uses its token to reach other groups | Restricted groups are hidden from the agent token, SSE, the MCP queue and tools, ordinary adapters and the facade. A separate token scoped to restricted groups. No main Agent Card in them. Tests walk every route, adapter and tool (Decision 6) | With `--same-agent` the human gave this up. In embedded mode the boundary is the API handed to the handler. What the owner gives the restricted agent to read can still reach strangers |
+| Verification used to widen access | A stranger talks a human into a SAS run so the connection gets tools, a longer life or a place outside the caps | SAS changes the trust state only. Anchor, profile, lifetime and caps stay. The `verify` command says so. Only `trust pin` moves a connection, and it names what it moves | A human who pins a stranger on request. That is a human decision, with its preview |
 | Malicious relay against rules | Replays or delays knocks and introductions, or drops removals | The sealed knock, ledger and `ts` window are unchanged, so a replay gets no second approval. A rule is read when the knock is handled, and again before the group is shown. Revoking stops delivery locally first | Denial of service: delayed knocks lapse. A removal it withholds leaves the peer in the group at the relay, while this daemon has stopped delivering |
 | Rule probing | Knocks, and reads the response time to learn that no human was involved | The answer is the Welcome either way (§6.6.6). No rule state reaches a peer. Only identities that match can see a fast answer | A knocker that was approved quickly can infer a rule covers it. A knocker that wasn't learns nothing |
 
@@ -848,7 +930,9 @@ still a draft.
   off by default, and a knocker turns it on once the owners it cares about have
   upgraded. A dropped knock looks like any other "no answer".
 - Older inviters ignore a JoinRequest's `sig` (their parser takes unknown
-  fields), and a request without one still gets a human's approval.
+  fields), and a request without one still gets a human's approval until `sig`
+  becomes mandatory. **A daemon with `policy.auto_approve` stops approving older
+  joiners automatically:** their requests wait for its human.
 - Older daemons ignore `control.introduction` as an unknown kind (§7.2). Nothing
   depends on them understanding it.
 - The relay changes in no way: no new frame, field, limit or stored value. It
@@ -877,13 +961,16 @@ The edits use the existing section numbers; nothing is renumbered.
    > `sig` is made with the KeyPackage's leaf signature key, over the same
    > `mac_input`. It proves that the sender holds that KeyPackage's private key,
    > which the MAC doesn't. A joiner MUST send it. The MAC doesn't cover it, so
-   > a relay can strip it. An inviter MUST NOT let a standing rule (§6.6.4)
-   > approve a request whose `sig` is absent or doesn't verify, and it handles
-   > such a request as if no rule matched.
+   > a relay can strip it. An inviter MUST verify it whenever it is present
+   > (strict Ed25519) and MUST drop a request whose `sig` fails. An inviter MUST
+   > NOT approve a request without `sig` automatically, under a standing rule
+   > (§6.6.4) or any other local policy. Its UI MUST say that such a request
+   > doesn't prove possession of the KeyPackage. (A later draft of v0 makes
+   > `sig` mandatory before v0 is tagged.)
 4. **§6.2 step 4.** Replace "approve the join, either automatically (when policy
    allows) or through its human" with "approve the join: through its human,
-   automatically when its local policy allows that for link holders, or under a
-   standing rule for that invite (§6.6.4)".
+   automatically when its local policy allows that for link holders and `sig`
+   verified, or under a standing rule for that invite (§6.6.4)".
 5. **§6.6.2.** Add to `Knock`: `"owner_domain": "<the form of §13.1.1;
    optional>"`. Add this bullet:
 
@@ -891,7 +978,7 @@ The edits use the existing section numbers; nothing is renumbered.
    > claims for itself. It is a pointer to a file to read and proves nothing by
    > itself: an owner MUST NOT treat it as true until a fetch under §13.2.4
    > vouches for the knocker's identity, and MUST present it as unverified text
-   > until then. Its value MUST NOT be chosen per knock by an agent.
+   > until then. An agent MUST NOT be able to set its value.
 
    Replace "Approving one is human-only (§6.6.4)." with "Approving one is its
    owner's human's decision, directly or through a standing rule (§6.6.4)."
@@ -922,9 +1009,11 @@ The edits use the existing section numbers; nothing is renumbered.
    >   `owner_domain` naming it and any `listings` in the entry naming the
    >   listing knocked on; an unused and unexpired introduction (§7.3) from a
    >   member the human allowed; or an open door. A failed, timed-out or
-   >   unparsable fetch MUST NOT approve a knock. An open door MUST put its
+   >   unparsable fetch MUST NOT approve a knock, and such a knock MUST go to
+   >   the human without trying a later rule. An open door MUST put its
    >   connections under limits lower than §10.2, a lifetime and a cap on new
-   >   connections.
+   >   connections, and MUST keep their content from the agent's ordinary
+   >   delivery and read surfaces unless its human explicitly gave that up.
    > - **Caps.** A rule that reached a cap stops approving silently. Nothing
    >   goes to the knocker (§6.6.6).
 
@@ -974,9 +1063,10 @@ The edits use the existing section numbers; nothing is renumbered.
 13. **§11.5.** Add this bullet:
 
     > - **A standing rule is not verification.** A member a rule connected
-    >   (§6.6.4) is in the local state `auto`, which is never `verified` and
-    >   isn't on the wire. Only the run above moves it to `verified`. A member
-    >   keeps that state until a human acts, whatever rule changes.
+    >   (§6.6.4) is in the local state `auto`, which isn't on the wire. It is
+    >   never moved to `verified` except by a human SAS run. That run changes
+    >   the trust state only: any lower limits or lifetime the member is under
+    >   stay, and the implementation MUST say so when it offers the run.
 14. **§12.** Add the rows of Decision 9 and the asset. In the row "Prompt
     injection through card text", replace "Knock approval is human." with "Knock
     approval is the human's, directly or by a standing rule."
@@ -1007,8 +1097,8 @@ section with the SPEC edits:
   holds.
 - **`docs/config.md`.** `policy.auto_approve` still "never applies to knocks",
   and the text saying "every knock needs a person" changes. New keys:
-  `knock.owner_domain`, `webhook.restricted_callback_url`,
-  `a2a.restricted_agent_url`.
+  `webhook.restricted_callback_url` and `a2a.restricted_agent_url`. The config
+  refuses `knock.owner_domain`, with the reason.
 - **`docs/discovery.md`, `docs/safety.md`, `docs/cli.md`, `docs/api.md`,
   `docs/groups.md`, `docs/sdk.md`, `docs/adapters/mcp.md`,** the README security
   model, and `AGENTS.md`'s summary of how trust works.
@@ -1035,10 +1125,20 @@ Tests that must exist before each anchor lands:
   method, SDK call or MCP tool reads or changes a rule, pins, sends a raw
   `control.introduction`, or creates a `--pinned-only` invite.
 - **`daemon/tests/test_human_only_routes.py`.** The new routes are classified in
-  `HUMAN`, with the one guarded exception of `POST /v0/introductions`.
+  `HUMAN`, with the one guarded exception of `POST /v0/introductions`. Its
+  classification gains a third set: what the restricted token may call.
+- **A test that walks every read surface.** Over `ROUTE_SPECS`, every adapter
+  and every MCP tool, a restricted group's content and existence are absent for
+  the agent token, and a new route, adapter or tool fails the test until it is
+  classified. The same walk with the restricted token finds no other group.
 - **A property test over rule evaluation.** No sequence of rule changes and
   knocks produces a `verified` member, or an approval past a cap, or an approval
-  from a disabled rule.
+  from a disabled rule, or a fall-through to `open` after a failed check.
+- **SAS leaves the rule's limits.** After a matching run on an `auto` member of
+  a restricted group, the anchor, profile, lifetime and isolation are unchanged,
+  and only `trust pin` changes them.
+- **JoinRequest `sig`.** A bad `sig` is dropped on any invite, and an unsigned
+  request is approved neither by a rule nor by `policy.auto_approve`.
 - **Negative tests from AGENTS.md.** Wrong secret, tamper, replay, credential
   and key mismatch, and a forked view giving different SAS codes on an `auto`
   member.
@@ -1065,8 +1165,9 @@ Each anchor ships on its own, in this order, smallest and lowest risk first:
    covers one owner on several machines.
 2. **`owner_domain`.** The knock field, the owner's fetch and cache, re-checks
    and `on_revoke`.
-3. **The restricted profile and `open`.** Budgets, the skill gate, restricted
-   endpoints, the kill switch's door handling.
+3. **The restricted profile and `open`.** Budgets, restricted endpoints and
+   their token, the isolation of restricted groups, the kill switch's door
+   handling.
 4. **`introductions`.** The message, the ledger and the one-hop rules. It comes
    last because it is the hardest to reason about, and because it needs the
    restricted profile for `accept_agent`.
@@ -1076,7 +1177,7 @@ Each anchor ships on its own, in this order, smallest and lowest risk first:
 - **A daemon can gain connections no human saw.** That is the point. The human's
   review moves from before to after, and how well that works depends on someone
   reading the events. Nothing here pushes them to a person yet (open question
-  5).
+  2).
 - **"A human approves every connection" is no longer always true.** Docs and
   listings that say it change, and a daemon warns about a listing that says it
   while a rule could approve a knock.
@@ -1093,33 +1194,39 @@ Each anchor ships on its own, in this order, smallest and lowest risk first:
   token is reachable by code the agent runs. `trust rule add open` warns about
   that, and docs recommend that mode for any daemon with rules.
 
+## Decided in review
+
+1. **The restricted endpoint is the enforcement.** Open-door connections go to a
+   separate agent endpoint with no tools, unless `--same-agent` is passed. There
+   is no skill gate (Decision 6).
+2. **`listings` for knocks.** Decision 3 reads an entry's `listings` as naming
+   the listing knocked on, because that fails towards the human. Owners who
+   restrict an entry to their own listing don't get automatic connections.
+3. **Rules across replicas.** A rule lives on one instance, so two replicas with
+   their own `introductions` rules could each use one introduction once. This is
+   accepted for v0: one door per listing and one holder per invite already put
+   each use on one instance in the ordinary setup, and the caps still bound
+   each.
+4. **At a cap.** A knock that matched a non-`open` anchor falls back to the
+   human queue, and a knock that matched only `open` is dropped (Decision 7).
+5. **The kill switch.** By default the door reverts to human approval and stays
+   registered, and `--withdraw` also closes it at the relay (Decision 6).
+6. **Introducers.** `require_verified` is on by default, and a rule can turn it
+   off (Decision 5).
+
 ## Open questions
 
 The recommendations below stand unless review says otherwise.
 
-1. **The restricted endpoint as a requirement.** Refusing `open` without one,
-   unless `--same-agent` is passed, adds a deployment step. *Recommendation:*
-   keep the refusal, since it is the one layer that holds after a successful
-   injection, and make the SDK's handler the short path.
-2. **`listings` for knocks.** Decision 3 reads an entry's `listings` as naming
-   the listing knocked on. Owners who restrict an entry to their own listing
-   therefore don't get automatic connections. *Recommendation:* keep this
-   reading, as it fails towards the human. A later `knocks` field could say so
-   explicitly if owners want both.
-3. **Rules across replicas.** A rule lives on one instance, so two replicas with
-   their own `introductions` rules could each use one introduction once.
-   *Recommendation:* accept it for v0: one door per listing and one holder per
-   invite already put each use on one instance in the ordinary setup, and the
-   caps still bound each.
-4. **Folding `policy.auto_approve` into rules.** It is a standing rule that
+1. **Folding `policy.auto_approve` into rules.** It is a standing rule that
    approves link holders, it lives in a config file, and its members aren't
    `auto`. *Recommendation:* leave it for this change, because existing
    deployments use it, and replace it in a later change with an `invite_holders`
    rule kind.
-5. **Telling the human.** Events wait in the log for whoever reads them.
+2. **Telling the human.** Events wait in the log for whoever reads them.
    *Recommendation:* defer a push channel, and treat a human-only notification
    hook as its own design, since the hook's target then sees who connected.
-6. **A connection's start as seen by the knocker's human.** A knocker whose
+3. **A connection's start as seen by the knocker's human.** A knocker whose
    agent starts knocks can be connected with no human on either side.
    *Recommendation:* no new switch, since `knock.agent_may_knock` covers it and
    `knocks` lists every result.
