@@ -124,7 +124,14 @@ A leaked link can't flood the human with requests:
   join_identity_full`, with that `identity`, once per identity), whose
   warning says the requests may be replayed and the identity's own may be
   one of those dropped. An exact copy of a waiting request (the same
-  KeyPackage) is dropped silently.
+  KeyPackage) is dropped silently;
+- when `policy.max_failed_joins_per_invite` (16 by default, never more)
+  requests for an invite fail within 10 minutes (a wrong MAC, or sent from
+  a mailbox other than the one they name), the human gets `invite_flooded`
+  (`reason: join_failures`; while they go on, each notice waits twice as
+  long as the last, from 10 minutes up to a day).
+  Failed requests are dropped; requests that pass the checks still reach
+  the human.
 
 A request is accepted only from the mailbox it names (SPEC §6.2 step 3):
 anyone with the link can wrap a KeyPackage they saw, in a join request or a

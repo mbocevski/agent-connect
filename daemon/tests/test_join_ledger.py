@@ -29,6 +29,7 @@ from agentconnect.runtime import Options, Runtime
 from agentconnect.runtime import ledger as replay
 from agentconnect.runtime.engine import (
     HUMAN_EVENTS,
+    JOIN_FAILURE_WINDOW_SECS,
     MAX_PENDING_PER_IDENTITY,
     DaemonError,
     Engine,
@@ -286,6 +287,66 @@ async def test_an_approval_an_older_daemon_stored_from_another_sender_is_refused
         owner.engine._approve_join(rid)
     assert (owner.engine.store.approval(rid) or {})["status"] == "expired"
     assert not [r for r in owner.engine.store.outbox() if r.kind == "commit"]
+
+
+def _bad_mac(request: bytes) -> bytes:
+    """``request`` with its MAC broken: what someone without the link sends."""
+    req = json.loads(request)
+    mac = bytearray(unb64(req["mac"]))
+    mac[0] ^= 1
+    return json.dumps({**req, "mac": b64(bytes(mac))}).encode()
+
+
+async def test_failed_requests_are_counted_to_tell_the_human_never_to_drop(
+    owner: Owner, rng: random.Random
+) -> None:
+    """SPEC 6.2 steps 2 and 3: a request with a bad MAC, or from a mailbox
+    other than the one it names, counts against its invite. At the limit
+    within the window the human is told (``invite_flooded``, reason
+    ``join_failures``), once per window: but nothing is dropped unchecked, so
+    a stranger who knows only the invite id can't lock joiners out."""
+    await owner.restart(policy_max_failed_joins_per_invite=3)
+    url = await owner.invite(max_uses=50)
+    carol, stranger = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    for _ in range(2):
+        await owner.deliver(_bad_mac(stranger.request(url)), stranger.mailbox)
+    assert owner.flooded() == []
+    await owner.deliver(carol.request(url), stranger.mailbox)  # another sender's request
+    (flood,) = [e["data"] for e in owner.flooded()]
+    assert (flood["invite_id"], flood["reason"]) == (invite_id(url), "join_failures")
+    assert "3 join requests" in flood["warning"]
+    # The flood goes on: every legitimate request still reaches the human,
+    # and the notice isn't repeated within the window.
+    reached = set()
+    for _ in range(5):
+        await owner.deliver(_bad_mac(stranger.request(url)), stranger.mailbox)
+        bob = Joiner(rng, owner.now)
+        reached.add(await owner.deliver(bob.request(url), bob.mailbox))
+        owner.clock.advance(60)
+    assert reached <= {a["request_id"] for a in owner.engine.join_approvals()}
+    assert len(owner.flooded()) == 1
+    # A later burst, after a quiet window, is told again.
+    owner.clock.advance(JOIN_FAILURE_WINDOW_SECS)
+    for _ in range(3):
+        await owner.deliver(_bad_mac(stranger.request(url)), stranger.mailbox)
+    assert len(owner.flooded()) == 2
+
+
+async def test_a_long_flood_is_told_less_and_less_often(owner: Owner, rng: random.Random) -> None:
+    """One failed request a minute for three hours: notices 10, 20, 40 and
+    80 minutes apart (up to a day), and the daemon keeps only the newest
+    `limit` failure times, however many arrive (a malicious relay can send
+    any number)."""
+    await owner.restart(policy_max_failed_joins_per_invite=3)
+    url = await owner.invite()
+    stranger = Joiner(rng, owner.now)
+    bad = _bad_mac(stranger.request(url))
+    for _ in range(180):
+        await owner.deliver(bad, stranger.mailbox)
+        assert len(owner.engine._join_failures[invite_id(url)]) <= 3
+        owner.clock.advance(60)
+    assert len(owner.flooded()) == 5  # at 2, 12, 32, 72 and 152 minutes
+    assert owner.engine._join_failures_told[invite_id(url)][1] == 16 * JOIN_FAILURE_WINDOW_SECS
 
 
 async def test_a_clock_that_jumped_ahead_doesnt_keep_purging_the_ledger(

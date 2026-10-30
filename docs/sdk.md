@@ -178,6 +178,14 @@ any number of requests. Creating an invite fails with `409
 too_many_invites` when the open invites' shares and uses would exceed the
 whole ledger (65536 entries); revoke the invites you no longer need.
 
+A request with a wrong invite MAC, or sent from a mailbox other than the one
+it names, is dropped and counts against its invite: at 16 within 10 minutes
+(`policy.max_failed_joins_per_invite`) the human gets `invite_flooded` with
+reason `join_failures`; while they go on, each notice waits twice as long
+as the last, up to a day. Requests that pass
+the checks are never held back for it. The count is in memory; a restart
+clears it.
+
 ## Attach mode
 
 ```python

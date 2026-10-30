@@ -591,7 +591,7 @@ store written the old way.
 | SR-23 | directory | Revoked token ids are purged 90 days after the directory received the revocation, not after the token's expiry, so a token issued after the revocation time becomes publishable again. | `store.rs:22`, `memory.rs:298`, `memory.rs:456`, `postgres.rs:783`. By reading. | Open (T-23) |
 | SR-24 | directory, daemon | After the operator rotates `DK`, the directory keeps serving listings whose token key it no longer pins; knockers refuse them, and the owner's renewals fail with `unknown_key`, which is retried forever. | `directory.rs:347-360`, `runtime/knocks.py:773`, `runtime/listing.py` (`STOP_RENEWING`). By reading. | Open (T-24) |
 | SR-25 | daemon | The knocker never checks token revocations, so against a malicious directory "rollback is bounded by token revocation" (SPEC §12) does not hold. `docs/discovery.md` already says so. | `runtime/knocks.py:773`. By reading. | Open (T-25) |
-| SR-26 | daemon | A JoinRequest with a failed MAC is not counted toward rate limiting (SPEC §6.2 step 2 MUST); only the relay's per-invite limit applies. | `engine.py:_on_join_request` (around line 1772). By reading. | Open (T-26) |
+| SR-26 | daemon | A JoinRequest with a failed MAC is not counted toward rate limiting (SPEC §6.2 step 2 MUST); only the relay's per-invite limit applies. | `engine.py:_on_join_request` (around line 1772). By reading. | Fixed in #151: a wrong MAC or a request from another sender counts against its invite; at `policy.max_failed_joins_per_invite` (16) within 10 minutes the human gets `invite_flooded` (`join_failures`), backing off from 10 minutes to a day while the failures go on; the daemon keeps only the newest 16 failure times. Nothing else is dropped for it (the relay caps an invite's requests), so the count can't lock joiners out. Test: `daemon/tests/test_join_ledger.py::test_failed_requests_are_counted_to_tell_the_human_never_to_drop` |
 | SR-27 | daemon | The A2A adapter's `a2a-seen.db` is a plain SQLite file (0600) in the data directory, against "there is no unencrypted on-disk mode" (SPEC §12). It holds SHA-256 hashes of `msg_id`s, which the relay also sees. | `a2a_adapter/seen.py:22-30`. By reading. | Open (T-27) |
 | SR-28 | daemon | Unauthenticated connections fill the local API's 64 slots and lock the human out (503) for 10 s at a time. In separate-OS-user mode any listed agent user can do it without a token. | `runtime/api.py:63-70`, `api.py:1552-1558`. Probe: human request 503 while 64 idle connections were held. Confirmed. | Fixed in #61: unfinished connections give way (32, hard 128; 8 and 64 per UID in separate-OS-user mode), quiet ones first after 0.5 s, and a connection whose headers arrived is never closed. Re-probed on c0d0c12: with 64 or 200 idle connections held, on the socket and on TCP, the human's requests are answered at once. Tests: `harness/tests/test_api.py` (`test_half_sent_connections_dont_keep_the_human_out`, `test_a_connection_that_sent_nothing_gives_way_first`, `test_connects_behind_a_whole_request_dont_close_it`, `test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one`) |
 | SR-29 | daemon | `check_agent_dir` accepts a group-writable agent directory (0770, 0730) and doesn't check its parents, so an agent user may be able to replace the socket and show the human forged approvals or a forged code. | `isolation.py:158-180`. Probe: 770 and 730 accepted. Confirmed. | Fixed in #144: the agent directory may not be group-writable, and every directory on its configured path and along each link's target, and above the data directory, must be the daemon user's or root's and closed to others unless sticky |
@@ -644,7 +644,7 @@ there is a negative test (the attack fails).
 |---|---|---|---|---|
 | Honest-but-curious relay | MLS, `PrivateMessage` only | `core/src/group.rs` (`create_group_with_policy`, `process_inner`) | `core/src/group/tests.rs::processing_after_eviction_and_public_messages` | Covered |
 | | Padding buckets | `core/src/padding.rs` (`bucket_for`) | `core/tests/group.rs::padding_hides_length_within_a_bucket`, `::real_ciphertexts_follow_padding_vectors`; `core-py/tests/test_vectors.py::test_padding_vectors` | Covered |
-| Malicious relay without the link | Invite MAC | `core/src/join.rs` (`join_request_mac`), `group.rs` (`verify_join_request`) | `core/tests/group.rs::wrong_invite_secret_fails_mac_and_welcome`, `::relay_cannot_rename_the_joiner`, `::mailbox_must_match_key_package` | Covered; failed MACs aren't rate-limited (SR-26) |
+| Malicious relay without the link | Invite MAC | `core/src/join.rs` (`join_request_mac`), `group.rs` (`verify_join_request`) | `core/tests/group.rs::wrong_invite_secret_fails_mac_and_welcome`, `::relay_cannot_rename_the_joiner`, `::mailbox_must_match_key_package` | Covered; failed MACs are counted per invite and the human is told (SR-26, fixed in #151) |
 | | AEAD-wrapped Welcome | `core/src/invite.rs` (`unwrap_welcome`) | `core/src/invite.rs::welcome_wrap_round_trips_and_rejects_wrong_secret_or_tamper`; `core/tests/group.rs::non_welcome_payload_is_rejected` | Covered |
 | | Welcome content checks (suite, PSK, GroupInfo extensions, KEM and key lengths, meta) | `group.rs` (`join_inner`), `core/src/mls.rs` (`check_welcome_kem_outputs`, `check_tree_keys`) | `core/src/group/tests.rs::welcome_with_a_wrong_length_kem_output_is_rejected`, `::joiner_rejects_a_real_welcome_whose_tree_has_a_short_hpke_key`, `::welcome_with_an_extra_group_info_extension_is_rejected`; `core/tests/group.rs::welcome_meta_must_match_invite_meta` | Covered, except a Welcome in another suite (test gap 1) |
 | | Single-use KeyPackages | `group.rs` (`after_merge`), `core/src/records.rs` | `core/tests/group.rs::replayed_join_request_cannot_re_add_a_departed_member`; `core/src/group/tests.rs::re_add_of_a_used_key_package_is_rejected_by_receivers` | Covered |
@@ -746,7 +746,7 @@ The five crypto negative tests AGENTS.md requires all exist:
 
 ### SPEC claims that don't match
 
-1. §6.2 step 2: a failed MAC isn't counted toward rate limiting (SR-26).
+1. §6.2 step 2: a failed MAC isn't counted toward rate limiting (SR-26, fixed in #151).
 2. §12, at-rest paragraph: "There is no unencrypted on-disk mode" doesn't
    hold for `a2a-seen.db` (SR-27).
 3. §12, at-rest paragraph: "MUST NOT create a new key while either file
@@ -769,7 +769,7 @@ The five crypto negative tests AGENTS.md requires all exist:
 |---|---|
 | One pinned suite, no downgrade | `CS` is the only suite (`core/src/mls.rs`); KeyPackages are checked on their raw bytes before OpenMLS (`precheck_key_package`), Welcomes before staging (`group.rs:841`, `group.rs:875`). There is no negotiation code. Sound; test gap 1. |
 | Credential and key binding | Every leaf carries exactly one extension, `ac_instance_cert`; the certificate's identity must equal the credential and its `sig_key` the leaf key, checked with strict Ed25519 (`identity.rs`, `mls.rs:validate_leaf`). Receivers reject a commit whose update path changes the committer's certificate, and a second leaf with an existing `instance_id` (PR #52 review N1, fixed). Sound. |
-| Invite MAC and PSK binding | HMAC-SHA256 under `join_key` over length-prefixed fields, verified in constant time (`join.rs`); the Welcome is ChaCha20-Poly1305 under `welcome_key` with the invite id in the AAD. No PSK is used and a Welcome with a PSK is refused. Sound; SR-26. |
+| Invite MAC and PSK binding | HMAC-SHA256 under `join_key` over length-prefixed fields, verified in constant time (`join.rs`); the Welcome is ChaCha20-Poly1305 under `welcome_key` with the invite id in the AAD. No PSK is used and a Welcome with a PSK is refused. Sound; SR-26 (fixed in #151). |
 | SAS from `epoch_authenticator` | Derivation matches SPEC §3.5 and the vectors. The derivation is correct but the design is grindable: **SR-01**. |
 | Epoch conflicts | Own commits merge only on `accepted` for their `msg_id` or exact bytes; examined in depth by the PR #48 and #51 reviews. Sound. |
 | Policy on received commits | Every receiver runs `authorize` against the policy in force at the commit's epoch (`group.rs:inspect_commit`, `policy.rs`); examined by the PR #48 and #52 reviews. Sound. |
@@ -1141,7 +1141,7 @@ One line per open item, ready to file.
   unpinned token key as expired; add `unknown_key` to `STOP_RENEWING`.
 - **T-25 (Low, SR-25):** Daemon: check token revocations from the
   withdrawals feed before knocking, or correct the SPEC §12 row.
-- **T-26 (Low, SR-26):** Daemon: count failed-MAC JoinRequests per invite
+- **T-26 (Low, SR-26, fixed in #151):** Daemon: count failed-MAC JoinRequests per invite
   and tell the human past a threshold (SPEC §6.2 step 2).
 - **T-27 (Low, SR-27):** Daemon: move the A2A seen set into the encrypted
   records database.

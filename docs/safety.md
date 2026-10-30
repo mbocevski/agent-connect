@@ -702,7 +702,18 @@ daemon as a whole rather than the invite (human token only, suggesting
 revoking unused invites). Creating an invite is refused (`409
 too_many_invites`) when the open invites would reserve more than the
 ledger holds, so the shares alone can't fill it. A revoked, expired or used
-up invite's entries are forgotten at once, which frees its share.
+up invite's entries are forgotten at once, which frees its share. A request
+with a wrong MAC, or sent from a mailbox other than the one it names (SPEC
+§6.2 steps 2 and 3), is dropped with no audit row (it proves nothing about
+who sent it) but counts against its invite: at
+`policy.max_failed_joins_per_invite` (16) failures within 10 minutes the
+daemon raises `invite_flooded` with reason `join_failures` (human token
+only); while the failures go on, each notice for the invite waits twice as
+long as the last, from 10 minutes up to a day, and 10 quiet minutes start
+over. Nothing else is dropped
+for it, so whoever knows the invite id can't lock joiners out; the relay
+caps how many requests an invite gets. The count is kept in memory, so a
+restart clears it.
 
 ## Transcript
 

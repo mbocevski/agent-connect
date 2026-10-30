@@ -199,6 +199,18 @@ def test_data_dir_and_tokens_must_be_private(short_dir: Path, rng: random.Random
         check_data_dir(link, EUID)
 
 
+def test_a_link_loop_is_refused_cleanly(short_dir: Path) -> None:
+    """A loop on the path makes lstat fail with ELOOP: an IsolationError (a
+    clean exit 2), not a traceback."""
+    base = Path(os.path.realpath(short_dir))
+    (base / "a").symlink_to(base / "b")
+    (base / "b").symlink_to(base / "a")
+    with pytest.raises(IsolationError, match="cannot check"):
+        check_agent_dir(base / "a" / "agent", EUID, GID)
+    with pytest.raises(IsolationError, match="cannot check"):
+        check_data_dir(base / "a" / "data", EUID)
+
+
 def test_agent_dir_permissions(short_dir: Path, rng: random.Random) -> None:
     agent_dir = short_dir / "agent"
     check_agent_dir(agent_dir, EUID, GID)  # created when the parent allows
