@@ -180,19 +180,68 @@ def _steps(job: str) -> list[str]:
     return [str(s) for s in re.split(r"^      - ", job, flags=re.MULTILINE)[1:]]
 
 
+def _code(step: str) -> str:
+    """A step without its comment lines."""
+    return "\n".join(line for line in step.splitlines() if not line.lstrip().startswith("#"))
+
+
+SCRIPT_USE = re.compile(r"(^|[\s;&|(])(\./)?scripts/")
+
+
 def test_every_job_that_runs_a_script_checks_the_repository_out_first() -> None:
-    """A step that runs something from scripts/ needs the checkout before
-    it: without one it exits 127, and in image-publish that would come after
-    the image is pushed and signed (a half-published release)."""
+    """A step that runs something from scripts/, or a local action, needs the
+    checkout before it: without one it exits 127, and in image-publish that
+    would come after the image is pushed and signed (a half-published
+    release)."""
     for workflow in sorted((REPO / ".github" / "workflows").glob("*.yml")):
         text = workflow.read_text(encoding="utf-8")
         jobs = re.findall(r"^  ([A-Za-z0-9_-]+):\n", text.split("\njobs:\n", 1)[1], re.MULTILINE)
         for name in jobs:
             checked_out = False
-            for step in _steps(_job(text, name)):
+            for step in map(_code, _steps(_job(text, name))):
                 if "actions/checkout@" in step:
                     checked_out = True
-                if re.search(r"^\s*(run:|-).*\bscripts/", step, re.MULTILINE) or step.startswith(
-                    "run: scripts/"
-                ):
-                    assert checked_out, f"{workflow.name}: {name} runs scripts/ before a checkout"
+                    continue
+                local = re.search(r"^(name: [^\n]*\n\s*)?uses: \./", step, re.MULTILINE)
+                if local or SCRIPT_USE.search(step):
+                    assert checked_out, f"{workflow.name}: {name} needs a checkout before:\n{step}"
+
+
+def _step_named(job: str, name: str) -> str:
+    (step,) = [s for s in _steps(job) if s.startswith(f"name: {name}\n")]
+    return step
+
+
+def _run_block(step: str) -> str:
+    body = step.split("run: |\n", 1)[1]
+    return "\n".join(line.removeprefix("          ") for line in body.splitlines())
+
+
+def test_only_release_files_reach_the_signing_step(tmp_path: Path) -> None:
+    """`uv build --out-dir dist` leaves a `.gitignore` there, which the sign
+    loop (no dotglob) never signs and the verify step refuses: it goes after
+    the last build, before the checksums, and anything else unexpected fails
+    the build before signing."""
+    build = _job(RELEASE.read_text(encoding="utf-8"), "build")
+    step = _step_named(build, "Only release files in dist")
+    assert build.rindex("--out-dir dist") < build.index(step) < build.index("name: Checksums")
+    script = _run_block(step)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / ".gitignore").write_text("*\n", encoding="utf-8")
+    (dist / "a.whl").write_bytes(b"x")
+    ok = subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=tmp_path, check=False)
+    assert ok.returncode == 0
+    assert sorted(p.name for p in dist.iterdir()) == ["a.whl"]
+    for stray in (".DS_Store", "sub"):
+        (dist / stray).mkdir() if stray == "sub" else (dist / stray).write_bytes(b"x")
+        bad = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", script],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert bad.returncode != 0, stray
+        assert stray in bad.stdout + bad.stderr
+        (dist / stray).rmdir() if stray == "sub" else (dist / stray).unlink()

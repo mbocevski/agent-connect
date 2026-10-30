@@ -142,6 +142,19 @@ jobs:
           done
           uv run --no-project python scripts/check_wheel_hooks.py "$out"/agentconnect_core-*.whl
           ls -l "$out"
+      # Every file in dist/ is signed, attested and published: `uv build`
+      # leaves a .gitignore there, and nothing else may be anything but a
+      # release file.
+      - name: Only release files in dist
+        run: |
+          rm -f dist/.gitignore
+          shopt -s dotglob
+          for f in dist/*; do
+            if [[ ! -f "$f" || -L "$f" || "$(basename "$f")" == .* ]]; then
+              echo "::error::unexpected entry in dist/: $(basename "$f")"
+              exit 1
+            fi
+          done
       - name: Checksums
         run: |
           (cd dist && shasum -a 256 -- * > ../sums.tmp)
