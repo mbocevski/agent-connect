@@ -107,6 +107,10 @@ async fn trace_logs_carry_no_bodies_tokens_or_client_addresses() {
     ports.push(port);
     let (port, _) = request(addr, "GET /a/trace-probe-name HTTP/1.1", b"").await;
     ports.push(port);
+    // A client-chosen method is logged as `other`, never verbatim: it could
+    // carry an address or a name (SR-21).
+    let (port, _) = request(addr, "ME-203.0.113.9-zebra-method /healthz HTTP/1.1", b"").await;
+    ports.push(port);
     let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
         "protocolVersion": "2025-11-25", "capabilities": {},
         "clientInfo": {"name": "zebra-mcp-client", "version": "9.9"}}});
@@ -128,6 +132,9 @@ async fn trace_logs_carry_no_bodies_tokens_or_client_addresses() {
     // The directory's own lines get through.
     assert!(text.contains("route=\"/v0/listings\""), "{text}");
     assert!(text.contains("route=\"/mcp\""), "{text}");
+    assert!(text.contains("method=\"GET\""), "{text}");
+    assert!(text.contains("method=\"other\""), "{text}");
+    assert!(!text.contains("203.0.113.9"), "{text}");
     for target in ["axum", "hyper", "rmcp", "tower", "sqlx"] {
         assert!(!text.contains(target), "{target} logged:\n{text}");
     }

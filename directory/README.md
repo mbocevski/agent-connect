@@ -138,6 +138,8 @@ give the supervisor a longer stop timeout too (`docker stop -t`,
 
 Logs and metrics carry route templates and status codes only: no query
 strings, request bodies, tokens, names, identities, domains or addresses.
+The request log names the method only when it is a standard one; any other
+is logged as `other`, so a client can't write text into the logs.
 `agentconnect_directory_build_info{version,revision}` (always 1) names the
 build: the release (`0.1.0a2`) and the first 12 characters of the source
 commit, `unknown` for a build that wasn't given one.
