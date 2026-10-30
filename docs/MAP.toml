@@ -224,6 +224,11 @@ code = [
 docs = ["SPEC.md", "relay/README.md"]
 
 [[rule]]
+name = "relay-operations"
+code = ["relay/src/backup.rs"]
+docs = ["relay/README.md", "docs/relay-operations.md"]
+
+[[rule]]
 name = "directory-protocol"
 code = ["directory/src/**"]
 docs = ["SPEC.md", "directory/README.md"]

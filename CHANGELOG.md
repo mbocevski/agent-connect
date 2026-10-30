@@ -18,6 +18,12 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `/healthz` too, or its public listener without one.
   `docs/relay-operations.md` has a compose example. Any other argument to
   either binary is now refused (exit 2) instead of ignored.
+- `agentconnect-relay backup <path>`: an online copy of the relay's database
+  to a new 0600 file, under directories only the relay's user (or root) can
+  change, taken by the relay binary in its own container, so no
+  `sqlite3` (which the image lacks) or root-owned `-wal`/`-shm` files are
+  involved. `docs/relay-operations.md` describes backup and restore,
+  including deleting the clean-shutdown marker.
 
 ## [0.1.0a3] - 2026-10-30
 
