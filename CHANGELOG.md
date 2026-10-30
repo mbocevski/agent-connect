@@ -68,6 +68,18 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   (`GET`, `POST`, ...), and any other as `other`: a client could put an
   address or a name in the method and have it written to the log (SR-21).
 
+- In the separate-OS-user mode the daemon refuses an agent directory its
+  group can write, and an agent or data directory under a directory that
+  isn't the daemon user's or root's or that others can write without the
+  sticky bit, on the configured path or along a link's target: an agent
+  user who could rename entries or repoint a link there could replace the
+  socket and show the human forged approvals or a forged code (SR-29). The
+  start check is stricter: a daemon whose agent or data directory sits
+  under such a directory (for example Homebrew's user-owned
+  `/usr/local/var` on macOS) now refuses to start. Move the directory to a root-owned path such as
+  `/run/agentconnect` or, on macOS,
+  `/Library/Application Support/agentconnect/run`.
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added

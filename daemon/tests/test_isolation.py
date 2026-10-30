@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from agentconnect import isolation
 from agentconnect.apiclient import ApiClientError
 from agentconnect.cli import app
 from agentconnect.cli_support import EXIT_REFUSED, EXIT_USAGE, map_api_error
@@ -34,6 +35,7 @@ from agentconnect.isolation import (
     check_agent_dir,
     check_config,
     check_data_dir,
+    check_parents,
     getpeereid,
     peer_credentials,
     resolve_gid,
@@ -220,6 +222,152 @@ def test_agent_dir_permissions(short_dir: Path, rng: random.Random) -> None:
         check_agent_dir(plain, EUID, GID)
     with pytest.raises(IsolationError, match="cannot create"):
         check_agent_dir(short_dir / "no" / "parent", EUID, GID)
+
+
+def _with_mode(
+    monkeypatch: pytest.MonkeyPatch, path: Path, mode: int, uid: int | None = None
+) -> None:
+    """``path``'s lstat reports ``mode`` (and ``uid``): no chmod, so the
+    test never makes anything writable for real."""
+    real = isolation._lstat
+
+    def lstat(p: Path) -> os.stat_result | None:
+        st = real(p)
+        if st is None or Path(p) != path:
+            return st
+        fields = list(st)
+        fields[0] = stat.S_IFMT(st.st_mode) | mode
+        if uid is not None:
+            fields[4] = uid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(isolation, "_lstat", lstat)
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o730])
+def test_a_group_writable_agent_dir_is_refused(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    # An agent user could replace the socket in it and show the human
+    # forged approvals or a forged code (SR-29).
+    agent_dir = short_dir / "agent"
+    check_agent_dir(agent_dir, EUID, GID)
+    _with_mode(monkeypatch, agent_dir, mode)
+    with pytest.raises(IsolationError, match="mode 0750"):
+        check_agent_dir(agent_dir, EUID, GID)
+
+
+@pytest.mark.parametrize(
+    ("mode", "uid", "refused"),
+    [
+        (0o775, None, "its owner only"),  # group-writable, not sticky
+        (0o757, None, "its owner only"),  # other-writable, not sticky
+        (0o1777, None, None),  # sticky, as /tmp
+        (0o755, -1, "owned by"),  # another user's
+        (0o755, 0, None),  # root's
+    ],
+)
+def test_the_agent_dirs_parents_must_be_closed(  # noqa: PLR0913, PLR0917
+    short_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rng: random.Random,
+    mode: int,
+    uid: int | None,
+    refused: str | None,
+) -> None:
+    # Whoever can change entries in a directory above the agent directory
+    # can rename it away and put their own in its place (SR-29).
+    parent = Path(os.path.realpath(short_dir / "up"))
+    parent.mkdir(mode=0o700)
+    agent_dir = parent / "agent"
+    check_agent_dir(agent_dir, EUID, GID)
+    _with_mode(monkeypatch, parent, mode, _uid(rng) if uid == -1 else uid)
+    if refused is None:
+        check_agent_dir(agent_dir, EUID, GID)
+    else:
+        with pytest.raises(IsolationError, match=refused) as e:
+            check_agent_dir(agent_dir, EUID, GID)
+        assert str(parent) in str(e.value)
+
+
+def test_a_link_in_an_open_directory_is_refused(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The daemon keeps using the configured path, so whoever can write the
+    # directory that holds a link on it can repoint the link later.
+    base = Path(os.path.realpath(short_dir))
+    shared, secure = base / "shared", base / "secure"
+    shared.mkdir(mode=0o700)
+    secure.mkdir(mode=0o700)
+    (shared / "link").symlink_to(secure)
+    agent_dir = shared / "link" / "agent"
+    check_agent_dir(agent_dir, EUID, GID)
+    _with_mode(monkeypatch, shared, 0o777)
+    with pytest.raises(IsolationError, match="its owner only") as e:
+        check_agent_dir(agent_dir, EUID, GID)
+    assert str(shared) in str(e.value)
+
+
+@pytest.mark.parametrize("target", ["../real", "{base}/real"])
+def test_a_link_in_a_root_directory_is_followed(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch, rng: random.Random, target: str
+) -> None:
+    # As /var/run -> ../run: the link's directory is root's and closed, so
+    # the link holds, and the walk goes on along its target.
+    base = Path(os.path.realpath(short_dir))
+    top, real = base / "var", base / "real"
+    top.mkdir(mode=0o700)
+    real.mkdir(mode=0o700)
+    (top / "run").symlink_to(target.format(base=base))
+    agent_dir = top / "run" / "agent"
+    _with_mode(monkeypatch, top, 0o755, 0)
+    check_agent_dir(agent_dir, EUID, GID)
+    assert (real / "agent").is_dir()
+
+    # The target's own chain is checked too.
+    _with_mode(monkeypatch, real, 0o755, _uid(rng))
+    with pytest.raises(IsolationError, match="owned by") as e:
+        check_agent_dir(agent_dir, EUID, GID)
+    assert str(real) in str(e.value)
+
+
+def test_a_link_loop_is_refused(short_dir: Path) -> None:
+    base = Path(os.path.realpath(short_dir))
+    (base / "a").symlink_to(base / "b")
+    (base / "b").symlink_to(base / "a")
+    with pytest.raises(IsolationError, match="too many links"):
+        check_parents(base / "a" / "agent", EUID)
+
+
+def test_a_directory_that_cannot_be_read_is_refused(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = Path(os.path.realpath(short_dir))
+    (base / "link").symlink_to(base)
+
+    def readlink(p: object) -> str:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(isolation.os, "readlink", readlink)
+    with pytest.raises(IsolationError, match="cannot check the directories above"):
+        check_parents(base / "link" / "agent", EUID)
+
+
+def test_the_data_dirs_parents_must_be_closed(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Whoever can rename entries above the data directory can swap in
+    # their own keys and tokens.
+    parent = Path(os.path.realpath(short_dir / "up"))
+    parent.mkdir(mode=0o700)
+    data_dir = parent / "data"
+    check_data_dir(data_dir, EUID)
+    check_data_dir(parent / "not" / "yet" / "data", EUID)  # the daemon creates them
+    _with_mode(monkeypatch, parent, 0o757)
+    for d in (data_dir, parent / "not" / "yet" / "data"):
+        with pytest.raises(IsolationError, match="its owner only") as e:
+            check_data_dir(d, EUID)
+        assert str(parent) in str(e.value)
 
 
 def test_setup_checks_that_need_no_filesystem(short_dir: Path, rng: random.Random) -> None:

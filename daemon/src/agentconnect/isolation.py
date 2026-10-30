@@ -149,8 +149,10 @@ def check_private(path: Path, euid: int, *, directory: bool) -> None:
 
 def check_data_dir(data_dir: Path, euid: int) -> None:
     """The data directory and its secret files are private to the daemon's
-    user. A missing directory is fine: the daemon creates it 0700."""
+    user, and so is every directory above it. A missing directory is fine:
+    the daemon creates it 0700."""
     check_private(data_dir, euid, directory=True)
+    check_parents(data_dir, euid, missing_ok=True)
     for name in PRIVATE_FILES:
         check_private(data_dir / name, euid, directory=False)
 
@@ -174,8 +176,80 @@ def check_agent_dir(agent_dir: Path, euid: int, gid: int) -> None:
     if st.st_uid != euid or st.st_gid != gid:
         msg = f"{agent_dir} must be owned by UID {euid} and GID {gid}"
         raise IsolationError(msg)
-    if st.st_mode & 0o007 or not st.st_mode & 0o010:
-        msg = f"{agent_dir} must have mode 0750 or 0710 (group access, none for others)"
+    if st.st_mode & 0o027 or not st.st_mode & 0o010:
+        # Group write would let an agent user replace the socket (SR-29).
+        msg = (
+            f"{agent_dir} must have mode 0750 or 0710 "
+            "(the group may enter, not write; others nothing)"
+        )
+        raise IsolationError(msg)
+    check_parents(agent_dir, euid)
+
+
+_MAX_LINKS = 40  # as the kernel's limit on links in one lookup
+
+
+def check_parents(path: Path, euid: int, *, missing_ok: bool = False) -> None:
+    """Every directory that holds a component of ``path``, on the path as
+    configured and along each link's target, belongs to ``euid`` or root,
+    and only its owner can change entries in it: no group or other write
+    unless it is sticky (the OpenSSH secure-path rule). Whoever could
+    rename entries there, or repoint a link there, could put their own
+    directory in its place (SR-29). With ``missing_ok`` the walk stops at
+    the first missing component (the daemon creates the rest itself)."""
+    links = [0]
+    try:
+        _walk(Path.cwd() / path.parent, euid, path, links, missing_ok=missing_ok)
+    except OSError as e:
+        msg = f"cannot check the directories above {path}: {e.strerror}"
+        raise IsolationError(msg) from None
+
+
+def _walk(at: Path, euid: int, path: Path, links: list[int], *, missing_ok: bool) -> Path | None:
+    """Look up ``at`` one component at a time with lstat, as the kernel
+    does, checking each directory it passes through; follow links the same
+    way. Returns the directory reached, or None when a component is
+    missing and ``missing_ok``."""
+    real = Path(at.anchor)
+    _check_holder(real, euid, path)
+    for name in at.parts[1:]:
+        if name == "..":
+            real = real.parent
+            continue
+        if name == ".":
+            continue
+        entry = real / name
+        st = _lstat(entry)
+        if st is None:
+            if missing_ok:
+                return None
+            msg = f"{entry} is missing"
+            raise IsolationError(msg)
+        if stat.S_ISLNK(st.st_mode):
+            links[0] += 1
+            if links[0] > _MAX_LINKS:
+                msg = f"too many links above {path}"
+                raise IsolationError(msg)
+            target = _walk(real / os.readlink(entry), euid, path, links, missing_ok=missing_ok)
+            if target is None:
+                return None
+            real = target
+        else:
+            real = entry
+            _check_holder(real, euid, path)
+    return real
+
+
+def _check_holder(d: Path, euid: int, path: Path) -> None:
+    st = _lstat(d)
+    if st is None:
+        msg = f"{d} is missing"
+        raise IsolationError(msg)
+    if st.st_uid not in (euid, 0):
+        msg = f"{d} must be owned by UID {euid} or root, as every directory above {path}"
+        raise IsolationError(msg)
+    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+        msg = f"{d} must be writable by its owner only (or sticky), as every directory above {path}"
         raise IsolationError(msg)
 
 
