@@ -47,8 +47,12 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - name: Reproducible build environment
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home" >> "$GITHUB_ENV"
+          {
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)"
+            echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home"
+            # The source revision /metrics reports (build_info).
+            echo "AGENTCONNECT_REVISION=${GITHUB_SHA::12}"
+          } >> "$GITHUB_ENV"
       - name: Relay and directory binaries
         run: |
           cargo build --release --locked -p agentconnect-relay -p agentconnect-directory

@@ -221,6 +221,7 @@ Alert on these:
 | Connections shed for memory | rate of `connections_shed_total` | The read budget is being exceeded. |
 | Errors | rate of `errors_total` by `code` | `rate_limited`, `quota_exceeded`, `over_budget` and `storage_full` show which limit clients are meeting. |
 | Health | `/healthz`, or `agentconnect-relay healthcheck` in the container | The process is up and serving. |
+| Unexpected version | `agentconnect_relay_build_info` with a `version` or `revision` you didn't deploy, or more than one across your relays | An upgrade didn't happen, or happened only on some hosts. |
 
 The storage gauges refresh with the purge, once a minute.
 

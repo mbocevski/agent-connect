@@ -358,7 +358,11 @@ impl Metrics {
     #[must_use]
     #[allow(clippy::too_many_lines, reason = "one call per counter")]
     pub fn render(&self) -> String {
-        let mut out = String::new();
+        let mut out = agentconnect_core::build::metric(
+            "agentconnect_relay_build_info",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("AGENTCONNECT_REVISION"),
+        );
         let mut counter = |name: &str, help: &str, v: &AtomicU64| {
             let _ = writeln!(
                 out,

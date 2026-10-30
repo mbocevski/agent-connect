@@ -3,7 +3,10 @@
 FROM rust:1.99.1-bookworm AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p agentconnect-directory \
+# The source revision /metrics reports (agentconnect_directory_build_info); the
+# release passes it, .git is not in the build context.
+ARG REVISION=unknown
+RUN AGENTCONNECT_REVISION="$REVISION" cargo build --release --locked -p agentconnect-directory \
  && d="lib/$(gcc -dumpmachine)" \
  && mkdir -p "/out/$d" \
  && cp -L "$(gcc -print-file-name=libgcc_s.so.1)" "/out/$d/"

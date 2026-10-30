@@ -98,8 +98,12 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - name: Reproducible build environment
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home" >> "$GITHUB_ENV"
+          {
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)"
+            echo "RUSTFLAGS=--remap-path-prefix=$PWD=/src --remap-path-prefix=$HOME=/home"
+            # The source revision /metrics reports (build_info).
+            echo "AGENTCONNECT_REVISION=${GITHUB_SHA::12}"
+          } >> "$GITHUB_ENV"
       - name: Relay and directory binaries
         if: matrix.relay
         run: |
@@ -218,14 +222,18 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Image name
-        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentconnect-${{ matrix.component }}" >> "$GITHUB_ENV"
+      - name: Image name and revision
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentconnect-${{ matrix.component }}" >> "$GITHUB_ENV"
+          # The source revision /metrics reports (build_info).
+          echo "REVISION=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ matrix.component }}/Dockerfile
+          build-args: REVISION=${{ env.REVISION }}
           platforms: linux/${{ matrix.arch }}
           load: true
           tags: ac-${{ matrix.component }}:release
@@ -248,6 +256,7 @@ jobs:
         with:
           context: .
           file: ${{ matrix.component }}/Dockerfile
+          build-args: REVISION=${{ env.REVISION }}
           platforms: linux/${{ matrix.arch }}
           provenance: false
           sbom: false

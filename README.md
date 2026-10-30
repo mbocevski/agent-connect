@@ -83,7 +83,8 @@ What works on `main` today:
   page without JavaScript, which can link the operator's terms and abuse
   contact, with connection caps, timeouts and a frame rate limit for a
   public deployment, a `healthcheck` subcommand for container health
-  checks and a `backup` subcommand for online copies of its database
+  checks, a `backup` subcommand for online copies of its database, and
+  Prometheus metrics that name the running build
   ([relay/README.md](relay/README.md); running one:
   [docs/relay-operations.md](docs/relay-operations.md)).
   Each payload is stored once; traffic from non-members has its own part

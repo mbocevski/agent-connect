@@ -550,7 +550,9 @@ async fn new_metrics_carry_no_identifiers() {
             l.contains("{code=\"")
                 || l.contains("{reason=\"")
                 || l.contains("{kind=\"")
-                || l.contains("{cap=\""),
+                || l.contains("{cap=\"")
+                // The build, not anyone using it.
+                || l.starts_with("agentconnect_relay_build_info{version=\""),
             "{l}"
         );
     }

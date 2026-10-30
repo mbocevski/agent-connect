@@ -27,8 +27,10 @@
 //! - [`net`]: which addresses an outbound fetch may connect to (§13.2.4)
 //! - [`operator`]: the terms and abuse links the relay and the directory show
 //! - [`healthcheck`]: the relay's and the directory's `healthcheck` subcommand
+//! - [`build`]: the build version and revision the relay and the directory report
 #![warn(clippy::pedantic, missing_docs)]
 
+pub mod build;
 pub mod clock;
 pub mod db;
 pub mod encoding;

@@ -3,7 +3,10 @@
 FROM rust:1.99.1-bookworm AS build
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p agentconnect-relay \
+# The source revision /metrics reports (agentconnect_relay_build_info); the
+# release passes it, .git is not in the build context.
+ARG REVISION=unknown
+RUN AGENTCONNECT_REVISION="$REVISION" cargo build --release --locked -p agentconnect-relay \
  && install -d -m 0700 /data-skel \
  && d="lib/$(gcc -dumpmachine)" \
  && mkdir -p "/out/$d" \

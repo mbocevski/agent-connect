@@ -24,6 +24,11 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `sqlite3` (which the image lacks) or root-owned `-wal`/`-shm` files are
   involved. `docs/relay-operations.md` describes backup and restore,
   including deleting the clean-shutdown marker.
+- `agentconnect_relay_build_info` and `agentconnect_directory_build_info` in
+  `/metrics`: a gauge of 1 labelled with the release version and the source
+  revision, so a dashboard or alert can tell which build each host runs. The
+  release images and binaries carry the revision; other builds say
+  `unknown`. No identifiers.
 
 ## [0.1.0a3] - 2026-10-30
 
