@@ -39,6 +39,52 @@ an undisclosed finding (`SECURITY.md`). Reproduce it locally with the same
 command, then add the input to the target's corpus as a regression case
 with the fix.
 
+## Which CI jobs run when
+
+A pull request runs only the jobs its changed paths can affect. The first job,
+`changes`, lists the paths that differ from the base branch
+(`git diff --no-renames --name-only`, so a rename counts both paths) and
+`scripts/changes.py` places each one in a group:
+
+| Group | Paths |
+|---|---|
+| rust | `core/`, `core-py/`, `relay/`, `directory/` (their fuzz workspaces, tests and Markdown too), `Cargo.toml`, `Cargo.lock`, `deny.toml`, `clippy.toml`, `.cargo/`, `.config/`, `testdata/`, `web/` |
+| python | `daemon/`, `sdk/`, `harness/`, `examples/`, `packaging/`, `pyproject.toml`, `uv.lock`, `licences-py.toml`, `conftest.py`, `testdata/`, `README.md` (the harness runs its quickstart) |
+| images | `demo/`, `integration/`, `compose.test.yaml`, `.dockerignore`, `web/` (the `relay/` and `directory/` Dockerfiles are in rust, which also runs the `image` job) |
+| docs | `docs/`, `styles/`, `changelog.d/`, and Markdown, `LICENSE` and `NOTICE` in the repository root |
+| ci | `.github/`, `scripts/`, `justfile`, `rust-toolchain.toml`, `coverage-baseline.json`, and the lint and hook configuration in the root |
+
+A change to the ci group, or to a path no rule places, runs everything. So do
+pushes to `main`, manual runs, the nightly and the release workflow. `lint`,
+`changelog`, `docs` and `hygiene` always run: they are cheap text checks.
+
+| Job | Runs when the change touches |
+|---|---|
+| `rust` (deny, tests, coverage) | rust |
+| `python` (ty, tests, coverage) | rust or python: the harness tests drive the native module and the relay binary |
+| `licences` | python |
+| `contract` | rust or python |
+| `platforms` (arm64 and macOS) | rust or python |
+| `image` | rust or images: the images build the core |
+| `integration` | rust, python or images |
+
+A docs-only pull request therefore runs `changes`, `lint`, `changelog`, `docs`,
+`hygiene` and `ci-ok`, and nothing else.
+
+`ci-ok` stays the one required check. It passes when every job it waits for
+succeeded or was skipped by `changes`; a skip with no such reason (a job that
+should have run, skipped because a dependency failed or `changes` itself
+failed) fails it (`python3 scripts/changes.py gate`). Branch protection still
+requires up-to-date branches, so a skipped job never lets a stale branch
+through.
+
+The coverage ratchet needs no filter of its own. `just cov-rust` checks the
+`core`, `relay` and `directory` components and `just cov-py` checks `python`;
+`scripts/cov_ratchet.py check` compares only the components it is given, and a
+job that was skipped produces no report. Changing a job's `if:` or the group
+table means changing `scripts/changes.py` and its tests, which compare the
+two.
+
 ## Where tests live
 
 | Kind | Location |
