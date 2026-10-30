@@ -164,7 +164,7 @@ repos:
         always_run: true
         pass_filenames: false
       - id: changelog
-        name: CHANGELOG [Unreleased] updated
+        name: changelog fragment added (changelog.d)
         language: script
         entry: scripts/check-changelog.sh
         stages: [pre-push]

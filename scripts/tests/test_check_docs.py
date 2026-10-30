@@ -444,15 +444,6 @@ def test_parse_map_component_errors(text: str, error: str) -> None:
         check_docs.parse_map(text)
 
 
-def test_added_entries_reads_only_unreleased_added() -> None:
-    text = (
-        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- One\n  continued.\n- Two\n\n"
-        "### Fixed\n\n- Not an addition\n\n## [0.1.0]\n\n### Added\n\n- Released\n"
-    )
-    assert check_docs.added_entries(text) == {"- One continued.", "- Two"}
-    assert check_docs.added_entries("") == set()
-
-
 def test_feature_without_readme_change_fails() -> None:
     commits = [Commit("feat: x", ("cli.py",))]
     v = check_docs.check_readme([CLI_COMP], commits, {"- New"})
@@ -472,9 +463,8 @@ def test_feature_check_passes_when_it_should() -> None:
     assert check_docs.check_readme(comps, [Commit("feat: x", ("harness/a.py",))], entry) is None
 
 
-def add_changelog_entry(repo: Path) -> None:
-    text = CHANGELOG_TEXT.replace("- Old entry.", "- Old entry.\n- A new feature.")
-    commit(repo, "docs: changelog", {"CHANGELOG.md": text})
+def add_changelog_entry(repo: Path, name: str = "new-feature.added.md") -> None:
+    commit(repo, "docs: changelog", {f"changelog.d/{name}": "- A new\n  feature.\n"})
 
 
 def test_main_added_entry_without_readme_fails_and_skip_readme_passes(
@@ -501,10 +491,34 @@ def test_main_added_entry_with_readme_change_passes(repo: Path) -> None:
 def test_main_without_a_new_added_entry_passes(repo: Path) -> None:
     commit(repo, "feat: new flag", {"cli.py": "v2\n", "docs/cli.md": "flag\n"})
     assert check_docs.main(["base"], {}, repo) == 0
-    # An entry under Fixed is not a new feature.
-    fixed = CHANGELOG_TEXT.replace("## [0.1.0]", "### Fixed\n\n- A fix.\n\n## [0.1.0]")
-    commit(repo, "docs: changelog", {"CHANGELOG.md": fixed})
+    # A fragment under Fixed, Changed and the others is not a new feature.
+    for section in ("fixed", "changed", "security", "removed", "deprecated"):
+        add_changelog_entry(repo, f"something.{section}.md")
     assert check_docs.main(["base"], {}, repo) == 0
+
+
+def test_main_an_edit_of_the_changelog_is_not_an_added_entry(repo: Path) -> None:
+    commit(repo, "feat: new flag", {"cli.py": "v2\n", "docs/cli.md": "flag\n"})
+    text = CHANGELOG_TEXT.replace("- Old entry.", "- Old entry.\n- A new feature.")
+    commit(repo, "docs: changelog", {"CHANGELOG.md": text})
+    assert check_docs.main(["base"], {}, repo) == 0
+
+
+def test_main_an_added_fragment_that_the_base_has_is_not_new(repo: Path) -> None:
+    git(repo, "switch", "-q", "base")
+    commit(repo, "docs: earlier fragment", {"changelog.d/older.added.md": "- Older.\n"})
+    git(repo, "switch", "-q", "topic")
+    git(repo, "rebase", "-q", "base")
+    commit(repo, "feat: new flag", {"cli.py": "v2\n", "docs/cli.md": "flag\n"})
+    commit(repo, "docs: edit it", {"changelog.d/older.added.md": "- Older, edited.\n"})
+    assert check_docs.main(["base"], {}, repo) == 0
+
+
+def test_branch_added_entries_are_the_added_fragments_one_line_each(repo: Path) -> None:
+    add_changelog_entry(repo)
+    add_changelog_entry(repo, "fix-it.fixed.md")
+    commit(repo, "docs: not a fragment", {"changelog.d/README.md": "# About\n"})
+    assert check_docs.branch_added_entries("base", repo) == {"- A new feature."}
 
 
 def test_main_added_entry_without_component_code_passes(repo: Path) -> None:

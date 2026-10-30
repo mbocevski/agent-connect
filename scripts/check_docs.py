@@ -9,9 +9,9 @@
   branch.
 * ``[[component]]``: the inventory behind the README's Status section. Each
   component (``name``, ``paths``, ``doc``) has one Status bullet in
-  ``README.md`` marked ``<!-- component: <name> -->``. A branch that adds a
-  ``### Added`` entry to the CHANGELOG and changes a component's paths must
-  also change ``README.md``.
+  ``README.md`` marked ``<!-- component: <name> -->``. A branch that adds an
+  ``added`` changelog fragment (``changelog.d/<slug>.added.md``) and changes a
+  component's paths must also change ``README.md``.
 * ``internal``: globs of source files that are not user-facing.
 
 Structural checks run on every invocation: a component without a Status
@@ -44,7 +44,7 @@ from textwrap import shorten
 REPO = Path(__file__).resolve().parents[1]
 MAP_PATH = Path("docs/MAP.toml")
 README = "README.md"
-CHANGELOG = "CHANGELOG.md"
+ADDED_FRAGMENT = re.compile(r"^changelog\.d/[a-z0-9][a-z0-9-]*\.added\.md$")
 EXEMPT = re.compile(r"^(docs|test|ci|chore|build|style)(\([a-z0-9,-]+\))?!?: ")
 # Separates commits in `git log` output; never appears in a path or subject.
 RECORD = "\x1e"
@@ -239,7 +239,7 @@ def check(rules: Iterable[Rule], commits: Iterable[Commit]) -> list[Violation]:
 def check_readme(
     components: Iterable[Component], commits: Iterable[Commit], entries: Iterable[str]
 ) -> ReadmeViolation | None:
-    """A branch with new CHANGELOG ``Added`` entries that changes a component's
+    """A branch with new ``added`` changelog fragments that changes a component's
     paths in a non-exempt commit must change the README."""
     commits = list(commits)
     entries = tuple(sorted(entries))
@@ -251,36 +251,6 @@ def check_readme(
         return None
     files = tuple(sorted(f for f in code if any(c.covers(f) for c in hit)))
     return ReadmeViolation(tuple(hit), files, entries)
-
-
-def added_entries(changelog: str) -> set[str]:
-    """The entries under ``## [Unreleased]`` / ``### Added`` of a changelog, each
-    as its full text."""
-    out: list[str] = []
-    current: list[str] = []
-    in_added = False
-
-    def flush() -> None:
-        if current:
-            out.append(" ".join(current))
-            current.clear()
-
-    in_unreleased = False
-    for line in changelog.splitlines():
-        if line.startswith("## "):
-            flush()
-            in_unreleased = line.lower().startswith("## [unreleased]")
-            in_added = False
-        elif line.startswith("### "):
-            flush()
-            in_added = in_unreleased and line.strip().lower() == "### added"
-        elif in_added and line.startswith("- "):
-            flush()
-            current.append(line.strip())
-        elif in_added and current and line.strip():
-            current.append(line.strip())
-    flush()
-    return set(out)
 
 
 @dataclass(frozen=True)
@@ -515,16 +485,29 @@ def branch_commits(base: str, repo: Path = REPO) -> list[Commit] | None:
 
 
 def branch_added_entries(base: str, repo: Path = REPO) -> set[str]:
-    """CHANGELOG ``Added`` entries on the branch that the base does not have."""
+    """The ``added`` changelog fragments the branch adds (``changelog.d/*.added.md``
+    that the base lacks), each as its text on one line."""
     mb = merge_base(base, repo)
     if mb is None:
         return set()
-
-    def at(rev: str) -> str:
-        shown = _git(repo, "show", f"{rev}:{CHANGELOG}")
-        return shown.stdout if shown.returncode == 0 else ""
-
-    return added_entries(at("HEAD")) - added_entries(at(mb))
+    names = _git(
+        repo,
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "--diff-filter=A",
+        f"{mb}..HEAD",
+        "--",
+        "changelog.d",
+    )
+    if names.returncode != 0:
+        raise RuntimeError(names.stderr.strip())
+    entries: set[str] = set()
+    for name in names.stdout.splitlines():
+        shown = _git(repo, "show", f"HEAD:{name}")
+        if ADDED_FRAGMENT.match(name) and shown.returncode == 0:
+            entries.add(" ".join(shown.stdout.split()))
+    return entries
 
 
 def report_rules(docs_map: DocsMap, commits: list[Commit]) -> bool:
@@ -551,7 +534,7 @@ def report_readme(docs_map: DocsMap, commits: list[Commit], entries: set[str]) -
         return False
     names = ", ".join(c.name for c in feature.components)
     print(
-        f"error: CHANGELOG has new Added entries and [{names}] changed "
+        f"error: the branch adds an `added` changelog fragment and [{names}] changed "
         f"({', '.join(feature.code)}), but {README} did not; update its Status section.",
         file=sys.stderr,
     )

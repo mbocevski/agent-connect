@@ -19,3 +19,5 @@ allowed-elements = []
 [per-file-ignores]
 # GitHub prefills the PR body with it; it has no title of its own.
 ".github/pull_request_template.md" = ["MD041"]
+# A changelog fragment is one bullet that goes into CHANGELOG.md.
+"changelog.d/*.md" = ["MD041"]

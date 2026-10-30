@@ -202,9 +202,13 @@ _cov-py-run: build-relay-dev
     uv run --all-packages --frozen pytest -q -n auto --cov --cov-report=term-missing --cov-report=json:target/cov/python.json --cov-fail-under={{ cov_python }}
 
 
-# CHANGELOG [Unreleased] must change for user-facing commits
+# A user-facing branch must add a changelog fragment (changelog.d/<slug>.<section>.md); every fragment must be well formed
 changelog-check base="origin/main":
     scripts/check-changelog.sh {{ base }}
+
+# Print the [Unreleased] section as `changelog-cut` would assemble it: CHANGELOG.md's entries, then the fragments
+changelog-preview:
+    @python3 scripts/changelog_fragments.py preview
 
 # Docs must change with the user-facing code they describe (docs/MAP.toml). SKIP_DOCS=true and SKIP_README=true mirror the skip-docs and skip-readme PR labels.
 docs-check base="origin/main":
@@ -251,7 +255,7 @@ merge-train +prs:
 apply-ruleset:
     scripts/apply-ruleset.sh
 
-# Cut CHANGELOG [Unreleased] into a release section, in the release PR (version without the v; date defaults to today, UTC)
+# Cut CHANGELOG [Unreleased] and the changelog.d fragments into a release section, in the release PR (version without the v; date defaults to today, UTC)
 changelog-cut version date="":
     scripts/changelog-cut.sh {{ version }} {{ date }}
 
