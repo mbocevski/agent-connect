@@ -35,7 +35,10 @@ fn a_join_request_seen_before_is_a_replay() {
     let b = peer(2, &clock);
     let inv = day_invite(&a);
     let req = b.client.create_join_request(inv.secret(), "b").unwrap();
-    let verified = a.client.verify_join_request(&req, &inv).unwrap();
+    let verified = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     // Remembered until the invite expires, plus the grace: a replay
     // restarts the approval timeout, so nothing earlier bounds it.
     assert_eq!(
@@ -54,7 +57,10 @@ fn a_join_request_seen_before_is_a_replay() {
     // The same bytes again, under the same or a fresh request id (the
     // relay picks the msg_id), an hour and a half later.
     clock.advance(Duration::from_secs(5400));
-    let again = a.client.verify_join_request(&req, &inv).unwrap();
+    let again = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     for id in [&b"request-1"[..], b"request-2"] {
         let e = again.remember_in(&mut ledger, id).unwrap_err();
         assert_eq!(e, Error::Replayed);
@@ -63,7 +69,10 @@ fn a_join_request_seen_before_is_a_replay() {
     // Another request (a fresh KeyPackage) under a request id seen before
     // is refused too: the id is taken.
     let other = b.client.create_join_request(inv.secret(), "b").unwrap();
-    let other = a.client.verify_join_request(&other, &inv).unwrap();
+    let other = a
+        .client
+        .verify_join_request(&other, &inv, &other.mailbox_id)
+        .unwrap();
     assert_eq!(
         other.remember_in(&mut ledger, b"request-1"),
         Err(Error::Replayed)
@@ -81,7 +90,9 @@ fn a_join_request_seen_before_is_a_replay() {
         verified.forget_after() + 1 - now(&clock),
     ));
     assert_eq!(
-        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        a.client
+            .verify_join_request(&req, &inv, &req.mailbox_id)
+            .unwrap_err(),
         Error::InviteExpired
     );
 }
@@ -95,7 +106,9 @@ fn a_full_join_ledger_refuses_without_evicting() {
     let verified: Vec<_> = (0..3)
         .map(|_| {
             let req = b.client.create_join_request(inv.secret(), "b").unwrap();
-            a.client.verify_join_request(&req, &inv).unwrap()
+            a.client
+                .verify_join_request(&req, &inv, &req.mailbox_id)
+                .unwrap()
         })
         .collect();
     let mut ledger = MemoryLedger::with_capacity(2);

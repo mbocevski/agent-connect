@@ -50,6 +50,17 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `ALL_PROXY` say. Before, a proxy in the daemon's environment received
   that traffic. A remote relay still goes through a configured proxy.
 
+- An inviter accepts a JoinRequest only from the mailbox it names (SPEC
+  §6.2 step 3), and drops one from another sender before it reaches the
+  replay ledger or the human. The invite MAC shows only that the sender
+  holds the link, so a link holder who had seen someone else's unused
+  KeyPackage could have that identity added to the group, as a member
+  nobody controls, under `policy.auto_approve` or past a human who saw a
+  familiar fingerprint. The check holds against link holders, not
+  against a malicious relay, which can name any sender; that needs a
+  JoinRequest signed with the KeyPackage's key, which is planned. `Client.verify_join_request`
+  in the core and its bindings takes the envelope's sender.
+
 ## [0.1.0a3] - 2026-10-30
 
 ### Added

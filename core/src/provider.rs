@@ -1265,7 +1265,7 @@ mod tests {
         let mut ga = a.create_group("g", "p").unwrap();
         let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
         let req = b.create_join_request(inv.secret(), DISPLAY_NAME).unwrap();
-        let v = a.verify_join_request(&req, &inv).unwrap();
+        let v = a.verify_join_request(&req, &inv, &req.mailbox_id).unwrap();
         let out = ga.add_member(&a, &v, &inv, true).unwrap();
         ga.confirm_pending_commit(&a, &out.msg_id).unwrap();
         let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
@@ -1761,7 +1761,7 @@ mod tests {
         let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
         let req = b.create_join_request(inv.secret(), "b").unwrap();
         assert_eq!(rows(bs, "openmls_key_packages"), 1);
-        let v = a.verify_join_request(&req, &inv).unwrap();
+        let v = a.verify_join_request(&req, &inv, &req.mailbox_id).unwrap();
         let out = ga.add_member(&a, &v, &inv, true).unwrap();
         ga.confirm_pending_commit(&a, &out.msg_id).unwrap();
         let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
@@ -1860,7 +1860,7 @@ mod tests {
     ) -> crate::group::Group {
         let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
         let req = b.create_join_request(inv.secret(), "b").unwrap();
-        let v = a.verify_join_request(&req, &inv).unwrap();
+        let v = a.verify_join_request(&req, &inv, &req.mailbox_id).unwrap();
         let out = ga.add_member(a, &v, &inv, true).unwrap();
         ga.confirm_pending_commit(a, &out.msg_id).unwrap();
         let meta = InviteMeta::expected(inv.secret().id(), name, "p");

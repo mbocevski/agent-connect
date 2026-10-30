@@ -44,6 +44,8 @@ use crate::sas::{self, Participant, Sas, SasNonce};
 /// Why an instance whose own leave is pending may not commit: the commit
 /// would carry its own removal.
 pub(crate) const OWN_LEAVE_PENDING: &str = "this instance's own leave is pending";
+/// A JoinRequest from a mailbox other than the one it names (SPEC §6.2 step 3).
+pub(crate) const SENDER_MISMATCH: &str = "sender is not the request's mailbox_id";
 
 /// One instance's MLS state: storage, randomness, its signing key and a
 /// clock. Groups are loaded from and written through to its store.
@@ -591,20 +593,28 @@ impl<S: Store> Client<S> {
     }
 
     /// Inviter side, SPEC §6.2 steps 1–3: the invite is ours and not
-    /// expired, the MAC verifies, and the KeyPackage passes every check
-    /// (ciphersuite, HPKE key lengths, signature, instance certificate,
-    /// capabilities, mailbox id) before it reaches the MLS group.
+    /// expired, the MAC verifies, the request came from the mailbox it
+    /// names, and the KeyPackage passes every check (ciphersuite, HPKE key
+    /// lengths, signature, instance certificate, capabilities, mailbox id)
+    /// before it reaches the MLS group.
+    ///
+    /// `sender` is the envelope's relay-authenticated sender. Anyone with
+    /// the link can MAC any KeyPackage, so without it a link holder could
+    /// present someone else's unused KeyPackage and have that identity
+    /// added as a leaf nobody controls.
     ///
     /// Use limits are the daemon's: a failed MAC must not consume a use.
     ///
     /// # Errors
     ///
     /// [`Error::InviteMismatch`], [`Error::InviteExpired`], [`Error::BadMac`],
-    /// or a KeyPackage validation error.
+    /// [`Error::CredentialMismatch`] (another sender, or a mailbox id that
+    /// isn't the KeyPackage's), or a KeyPackage validation error.
     pub fn verify_join_request(
         &self,
         request: &JoinRequest,
         invite: &Invite,
+        sender: &str,
     ) -> Result<VerifiedJoinRequest> {
         if request.invite_id != *invite.secret().id() {
             return Err(Error::InviteMismatch);
@@ -614,6 +624,9 @@ impl<S: Store> Client<S> {
         }
         if !request.mac_ok(&invite.secret().join_key()) {
             return Err(Error::BadMac);
+        }
+        if request.mailbox_id != sender {
+            return Err(Error::CredentialMismatch(SENDER_MISMATCH));
         }
         let (key_package, kp_ref, info) =
             self.check_peer_key_package(&request.key_package, &request.mailbox_id)?;

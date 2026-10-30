@@ -88,7 +88,10 @@ pub fn join(inviter: &Peer, group: &mut Group, joiner: &Peer) -> (Group, CommitO
         .create_join_request(link.secret(), "joiner")
         .unwrap();
     let req = agentconnect_core::JoinRequest::from_json(&req.to_json().unwrap()).unwrap();
-    let verified = inviter.client.verify_join_request(&req, &inv).unwrap();
+    let verified = inviter
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = group
         .add_member(&inviter.client, &verified, &inv, true)
         .unwrap();

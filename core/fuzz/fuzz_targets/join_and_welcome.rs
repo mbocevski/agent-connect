@@ -59,7 +59,9 @@ fn build() -> State {
     .unwrap();
     let link = InviteLink::parse(&invite.url()).unwrap();
     let request = bob.create_join_request(link.secret(), "joiner").unwrap();
-    let verified = alice.verify_join_request(&request, &invite).unwrap();
+    let verified = alice
+        .verify_join_request(&request, &invite, &request.mailbox_id)
+        .unwrap();
     let out = group.add_member(&alice, &verified, &invite, true).unwrap();
     let welcome = link
         .secret()
@@ -116,7 +118,9 @@ fuzz_target!(|data: &[u8]| {
                 let mut request = s.request.clone();
                 request.key_package = key_package;
                 request.mac = join_request_mac(&s.invite.secret().join_key(), &request.mac_input());
-                let verified = s.alice.verify_join_request(&request, &s.invite);
+                let verified =
+                    s.alice
+                        .verify_join_request(&request, &s.invite, &request.mailbox_id);
                 if request.key_package != s.request.key_package {
                     assert!(verified.is_err(), "a mutated KeyPackage verified");
                 }

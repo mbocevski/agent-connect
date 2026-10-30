@@ -37,7 +37,9 @@ fn join(inviter: &C, group: &mut Group, joiner: &C) -> (Group, CommitOut) {
     )
     .unwrap();
     let req = joiner.create_join_request(inv.secret(), "j").unwrap();
-    let v = inviter.verify_join_request(&req, &inv).unwrap();
+    let v = inviter
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = group.add_member(inviter, &v, &inv, true).unwrap();
     group.confirm_pending_commit(inviter, &out.msg_id).unwrap();
     let meta = InviteMeta::expected(inv.secret().id(), "g", "p");
@@ -148,7 +150,9 @@ fn member_adding_without_invite_permission_is_rejected() {
     let d = client(99, &clock);
     let inv = Invite::create(d.rng(), d.clock(), "r.example", Duration::from_secs(60)).unwrap();
     let req = d.create_join_request(inv.secret(), "d").unwrap();
-    let v = cs[1].verify_join_request(&req, &inv).unwrap();
+    let v = cs[1]
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let bytes = raw_commit!(gs[1], cs[1], |b| b.propose_adds([v.key_package]));
     all_reject(
         &cs,
@@ -175,7 +179,9 @@ fn re_add_of_a_used_key_package_is_rejected_by_receivers() {
     )
     .unwrap();
     let req = d.create_join_request(inv.secret(), "d").unwrap();
-    let v = cs[0].verify_join_request(&req, &inv).unwrap();
+    let v = cs[0]
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let kp = v.key_package.clone();
     let out = gs[0].add_member(&cs[0], &v, &inv, true).unwrap();
     gs[0].confirm_pending_commit(&cs[0], &out.msg_id).unwrap();
@@ -533,7 +539,10 @@ fn grace_window_sender_is_resolved_in_its_own_epoch() {
     )
     .unwrap();
     let req = d.create_join_request(inv.secret(), "d").unwrap();
-    let kp = cs[0].verify_join_request(&req, &inv).unwrap().key_package;
+    let kp = cs[0]
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap()
+        .key_package;
     let ct = gs[2].seal(&cs[2], &inner(&cs[2])).unwrap();
     let bytes = raw_commit!(gs[0], cs[0], |b| b
         .propose_removals([LeafNodeIndex::new(2)])
@@ -763,7 +772,10 @@ fn joiner_rejects_a_real_welcome_whose_tree_has_a_short_hpke_key() {
     let e = client(93, &clock);
     let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
     let req = e.create_join_request(inv.secret(), "e").unwrap();
-    let kp = a.verify_join_request(&req, &inv).unwrap().key_package;
+    let kp = a
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap()
+        .key_package;
     let bundle = ga
         .mls
         .commit_builder()
@@ -872,7 +884,10 @@ fn solo_and_joiner() -> (C, Group, C, Invite, KeyPackage) {
     let e = client(93, &clock);
     let inv = Invite::create(a.rng(), a.clock(), "r.example", Duration::from_secs(60)).unwrap();
     let req = e.create_join_request(inv.secret(), "e").unwrap();
-    let kp = a.verify_join_request(&req, &inv).unwrap().key_package;
+    let kp = a
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap()
+        .key_package;
     (a, ga, e, inv, kp)
 }
 

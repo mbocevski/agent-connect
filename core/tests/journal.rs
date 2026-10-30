@@ -248,7 +248,10 @@ fn a_welcome_survives_a_failure_at_every_step_and_a_restart() {
     let inv = invite(&a);
     let link = InviteLink::parse(&inv.url()).unwrap();
     let req = b.create_join_request(link.secret(), "b").unwrap();
-    let v = a.client.verify_join_request(&req, &inv).unwrap();
+    let v = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = ga.add_member(&a.client, &v, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let welcome = out.welcome.unwrap();
@@ -329,7 +332,10 @@ fn journalled_messages_survive_a_restart_and_are_purged_after_consumption() {
     let inv = invite(&a);
     let link = InviteLink::parse(&inv.url()).unwrap();
     let req = b.create_join_request(link.secret(), "b").unwrap();
-    let v = a.client.verify_join_request(&req, &inv).unwrap();
+    let v = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = ga.add_member(&a.client, &v, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let gid = b

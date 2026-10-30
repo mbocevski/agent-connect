@@ -1,0 +1,35 @@
+{
+  "cases": [
+    {
+      "error": "credential mismatch: sender is not the request's mailbox_id",
+      "kind": "credential_mismatch",
+      "name": "another mailbox sends it",
+      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"k1Po7j73JKHE2ilnNjWm4A\",\"key_package\":\"E5qmzkswLPN8JURKOVl-0LYF5LPgKlCfbF-w2mq0i7GHKidRH5CqE6RR3lWttejgMOjXrlAQGGpBOzXKzooZ0w\",\"mac\":\"Zm_Utsn4Q34NrzDa10w8XAgYFMB1ZQhRFjgZPeMl1Mw\",\"mailbox_id\":\"Da0YQbVndyL3v90g0FU1UX\",\"v\":0}",
+      "sender": "664VrnURv1IKIiyjThflTe"
+    },
+    {
+      "error": "join request MAC verification failed",
+      "kind": "authentication",
+      "name": "a bad MAC is reported first",
+      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"k1Po7j73JKHE2ilnNjWm4A\",\"key_package\":\"E5qmzkswLPN8JURKOVl-0LYF5LPgKlCfbF-w2mq0i7GHKidRH5CqE6RR3lWttejgMOjXrlAQGGpBOzXKzooZ0w\",\"mac\":\"Z2_Utsn4Q34NrzDa10w8XAgYFMB1ZQhRFjgZPeMl1Mw\",\"mailbox_id\":\"Da0YQbVndyL3v90g0FU1UX\",\"v\":0}",
+      "sender": "664VrnURv1IKIiyjThflTe"
+    },
+    {
+      "error": "invalid key package: protocol version",
+      "kind": "malformed",
+      "name": "from its own mailbox it reaches the KeyPackage checks",
+      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"k1Po7j73JKHE2ilnNjWm4A\",\"key_package\":\"E5qmzkswLPN8JURKOVl-0LYF5LPgKlCfbF-w2mq0i7GHKidRH5CqE6RR3lWttejgMOjXrlAQGGpBOzXKzooZ0w\",\"mac\":\"Zm_Utsn4Q34NrzDa10w8XAgYFMB1ZQhRFjgZPeMl1Mw\",\"mailbox_id\":\"Da0YQbVndyL3v90g0FU1UX\",\"v\":0}",
+      "sender": "Da0YQbVndyL3v90g0FU1UX"
+    }
+  ],
+  "description": "SPEC 6.2 step 3: the inviter verifies a JoinRequest against the relay-authenticated sender of its envelope, which must be the request's mailbox_id (anyone with the link can MAC any KeyPackage). The check comes after the MAC (step 2) and before the KeyPackage is parsed, so `key_package` is placeholder bytes. Verify `request` (JoinRequest JSON) at `now` against the invite rebuilt from its parts (invite_id and secret in hex) with `sender`, and expect `error` and `kind`.",
+  "generator": "core/src/vectors.rs (just vectors)",
+  "invite": {
+    "expires_at": 1735776000,
+    "invite_id": "9353e8ee3ef724a1c4da29673635a6e0",
+    "relay_host": "relay.example.org",
+    "secret": "227d16401b39bef06c7e81b475ae96c7c4909c9bc00a4bb1e0c007e3f439659c"
+  },
+  "now": 1735689600,
+  "seed": "a676be59a12d0770093c2bc83e8e06620ee9edda3efeb052fded9d93076438a0"
+}

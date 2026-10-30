@@ -253,25 +253,36 @@ fn wrong_invite_secret_fails_mac_and_welcome() {
     let wrong = InviteSecret::from_parts(*inv.secret().id(), &wrong_secret);
     let req = b.client.create_join_request(&wrong, "b").unwrap();
     assert_eq!(
-        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        a.client
+            .verify_join_request(&req, &inv, &req.mailbox_id)
+            .unwrap_err(),
         Error::BadMac
     );
 
     // Right MAC, but the joiner unwraps with the wrong secret: rejected
     // before MLS touches the KeyPackage, so a retry with the right secret works.
     let req = b.client.create_join_request(inv.secret(), "b").unwrap();
-    let verified = a.client.verify_join_request(&req, &inv).unwrap();
+    let verified = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     assert_eq!(verified.identity(), b.identity.id());
     assert_eq!(verified.display_name(), "b");
     assert_eq!(verified.mailbox_id(), b.client.instance().mailbox_id());
     assert_eq!(verified.instance_id(), b.client.instance().instance_id());
     // The same request verified twice (a replay) has the same ref; another
     // request (fresh KeyPackage) has another.
-    let again = a.client.verify_join_request(&req, &inv).unwrap();
+    let again = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     assert_eq!(again.key_package_ref(), verified.key_package_ref());
     assert!(!verified.key_package_ref().is_empty());
     let other = b.client.create_join_request(inv.secret(), "b").unwrap();
-    let other = a.client.verify_join_request(&other, &inv).unwrap();
+    let other = a
+        .client
+        .verify_join_request(&other, &inv, &other.mailbox_id)
+        .unwrap();
     assert_ne!(other.key_package_ref(), verified.key_package_ref());
     let out = ga.add_member(&a.client, &verified, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
@@ -310,13 +321,17 @@ fn join_request_for_another_invite_or_expired_is_rejected() {
     let other = invite(&a);
     let req = b.client.create_join_request(other.secret(), "b").unwrap();
     assert_eq!(
-        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        a.client
+            .verify_join_request(&req, &inv, &req.mailbox_id)
+            .unwrap_err(),
         Error::InviteMismatch
     );
     let req = b.client.create_join_request(inv.secret(), "b").unwrap();
     clock.advance(Duration::from_secs(3600));
     assert_eq!(
-        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        a.client
+            .verify_join_request(&req, &inv, &req.mailbox_id)
+            .unwrap_err(),
         Error::InviteExpired
     );
     assert_eq!(
@@ -338,7 +353,10 @@ fn replayed_join_request_cannot_re_add_a_departed_member() {
     let inv = invite(&a);
     let link = InviteLink::parse(&inv.url()).unwrap();
     let req = b.client.create_join_request(link.secret(), "b").unwrap();
-    let v = a.client.verify_join_request(&req, &inv).unwrap();
+    let v = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = ga.add_member(&a.client, &v, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let mut gb = b
@@ -360,7 +378,9 @@ fn replayed_join_request_cannot_re_add_a_departed_member() {
 
     // The relay replays B's JoinRequest while the invite still has uses.
     assert_eq!(
-        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        a.client
+            .verify_join_request(&req, &inv, &req.mailbox_id)
+            .unwrap_err(),
         Error::KeyPackageReused
     );
     // A copy verified before the first Add is refused as well.
@@ -380,7 +400,10 @@ fn verified_join_request_survives_a_failed_add() {
     let c = peer(60, &clock);
     let inv = invite(&peers[0]);
     let req = c.client.create_join_request(inv.secret(), "c").unwrap();
-    let v = peers[0].client.verify_join_request(&req, &inv).unwrap();
+    let v = peers[0]
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     groups[0].update(&peers[0].client).unwrap();
     assert_eq!(
         groups[0]
@@ -424,7 +447,9 @@ fn relay_cannot_rename_the_joiner() {
     )
     .unwrap();
     assert_eq!(
-        a.client.verify_join_request(&renamed, &inv).unwrap_err(),
+        a.client
+            .verify_join_request(&renamed, &inv, &renamed.mailbox_id)
+            .unwrap_err(),
         Error::BadMac
     );
     assert_eq!(
@@ -435,7 +460,7 @@ fn relay_cannot_rename_the_joiner() {
     );
     assert_eq!(
         a.client
-            .verify_join_request(&req, &inv)
+            .verify_join_request(&req, &inv, &req.mailbox_id)
             .unwrap()
             .display_name(),
         "bob"
@@ -452,9 +477,50 @@ fn mailbox_must_match_key_package() {
     req.mailbox_id = a.client.instance().mailbox_id();
     req.mac = agentconnect_core::join::join_request_mac(&inv.secret().join_key(), &req.mac_input());
     assert_eq!(
-        a.client.verify_join_request(&req, &inv).unwrap_err(),
+        a.client
+            .verify_join_request(&req, &inv, &req.mailbox_id)
+            .unwrap_err(),
         Error::CredentialMismatch("mailbox_id != key package signature key")
     );
+}
+
+/// SPEC §6.2 step 3: a link holder who saw someone else's unused
+/// KeyPackage (in a request to their own invite) re-MACs it under another
+/// link. Every other check passes, so only the sender check stops the Add
+/// of a leaf nobody controls.
+#[test]
+fn a_request_from_another_mailbox_is_refused() {
+    let clock = clock();
+    let c = peer(1, &clock); // the inviter
+    let v = peer(2, &clock); // whose KeyPackage it is
+    let m = peer(3, &clock); // the link holder
+    let inv_m = invite(&m);
+    let from_v = v.client.create_join_request(inv_m.secret(), "v").unwrap();
+    let inv_c = invite(&c);
+    let mut forged = from_v.clone();
+    forged.invite_id = *inv_c.secret().id();
+    forged.mac =
+        agentconnect_core::join::join_request_mac(&inv_c.secret().join_key(), &forged.mac_input());
+    let m_mailbox = m.client.instance().mailbox_id();
+    assert_eq!(
+        c.client
+            .verify_join_request(&forged, &inv_c, &m_mailbox)
+            .unwrap_err(),
+        Error::CredentialMismatch("sender is not the request's mailbox_id")
+    );
+    // The check comes after the MAC: a request that fails both is a bad MAC.
+    let mut both = forged.clone();
+    both.mac[0] ^= 1;
+    assert_eq!(
+        c.client
+            .verify_join_request(&both, &inv_c, &m_mailbox)
+            .unwrap_err(),
+        Error::BadMac
+    );
+    // From its own mailbox the same KeyPackage verifies.
+    c.client
+        .verify_join_request(&forged, &inv_c, &from_v.mailbox_id)
+        .unwrap();
 }
 
 #[test]
@@ -465,7 +531,10 @@ fn welcome_meta_must_match_invite_meta() {
     let mut ga = a.client.create_group(NAME, PURPOSE).unwrap();
     let inv = invite(&a);
     let req = b.client.create_join_request(inv.secret(), "b").unwrap();
-    let verified = a.client.verify_join_request(&req, &inv).unwrap();
+    let verified = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = ga.add_member(&a.client, &verified, &inv, true).unwrap();
     let wrong_meta = InviteMeta::expected(inv.secret().id(), NAME, "something else");
     assert_eq!(
@@ -550,7 +619,10 @@ fn members_may_not_remove_or_change_policy_locally() {
     let c = peer(40, &clock);
     let inv = invite(&peers[1]);
     let req = c.client.create_join_request(inv.secret(), "c").unwrap();
-    let v = peers[1].client.verify_join_request(&req, &inv).unwrap();
+    let v = peers[1]
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     assert_eq!(
         groups[1]
             .add_member(&peers[1].client, &v, &inv, true)
@@ -1077,7 +1149,10 @@ fn sqlite_store_persists_across_reopen() {
     let inv = invite(&a);
     let link = InviteLink::parse(&inv.url()).unwrap();
     let req = b.create_join_request(link.secret(), "b").unwrap();
-    let v = a.client.verify_join_request(&req, &inv).unwrap();
+    let v = a
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = ga.add_member(&a.client, &v, &inv, true).unwrap();
     ga.confirm_pending_commit(&a.client, &out.msg_id).unwrap();
     let gid = b

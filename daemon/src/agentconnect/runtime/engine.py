@@ -3055,7 +3055,11 @@ class Engine:
             ignore("join_request_invite_used", invite=log.hid(invite_id))
             return
         try:
-            verified = self.client.verify_join_request(raw, obj)
+            # SPEC 6.2 step 3: only from the mailbox it names. Anyone with the
+            # link can MAC any KeyPackage, so a request from another sender
+            # is dropped here, before the replay ledger and the approval,
+            # like a failed MAC.
+            verified = self.client.verify_join_request(raw, obj, sender)
         except (ac.AgentConnectError, ac.CoreError) as e:
             # The error's kind, not its text, which may quote the request.
             reason = str(getattr(e, "kind", type(e).__name__))
@@ -3184,9 +3188,10 @@ class Engine:
         may still be taken: one approval per id and per KeyPackage (an exact
         copy is dropped). Distinct requests that claim one identity all reach
         the human, marked as such, up to :data:`MAX_PENDING_PER_IDENTITY` per
-        invite: anyone who saw one of an identity's KeyPackages can send a
-        request in its name, so the human chooses, and its own can't be
-        crowded out by one other request."""
+        invite: a relay that lies about the sender can deliver a request
+        built from one of an identity's KeyPackages in its name, so the
+        human chooses, and its own can't be crowded out by one other
+        request."""
         if (
             self.store.approval(request_id) is not None
             or self.store.open_approval_for(kp_ref) is not None
@@ -4298,7 +4303,10 @@ class Engine:
             if approval is None or obj is None:
                 msg = "approval or invite no longer available"
                 raise DaemonError("gone", msg)
-            verified = self.client.verify_join_request(unb64(approval["request"]), obj)
+            # The sender was checked against this mailbox when it arrived.
+            verified = self.client.verify_join_request(
+                unb64(approval["request"]), obj, approval["mailbox_id"]
+            )
             return self.client.add_member(gid, verified, obj)
         msg = f"unknown commit intent {t}"
         raise DaemonError("bad_intent", msg)

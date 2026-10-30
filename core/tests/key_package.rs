@@ -150,7 +150,10 @@ fn submit(kp: Vec<u8>, as_instance: &Instance) -> Result<(), Error> {
         mailbox_id,
     };
     req.mac = join_request_mac(&inv.secret().join_key(), &req.mac_input());
-    inviter.client.verify_join_request(&req, &inv).map(|_| ())
+    inviter
+        .client
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .map(|_| ())
 }
 
 fn mallory(seed: u64) -> (Identity, Instance) {

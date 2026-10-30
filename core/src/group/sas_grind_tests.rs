@@ -66,7 +66,9 @@ fn join(owner: &C, g: &mut Group, joiner: &C) -> Group {
     )
     .unwrap();
     let req = joiner.create_join_request(inv.secret(), "j").unwrap();
-    let v = owner.verify_join_request(&req, &inv).unwrap();
+    let v = owner
+        .verify_join_request(&req, &inv, &req.mailbox_id)
+        .unwrap();
     let out = g.add_member(owner, &v, &inv, true).unwrap();
     g.confirm_pending_commit(owner, &out.msg_id).unwrap();
     let meta = InviteMeta::expected(inv.secret().id(), "g", "p");

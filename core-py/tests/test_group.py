@@ -59,7 +59,7 @@ def join(inviter: ac.Client, gid: bytes, joiner: ac.Client) -> dict[str, Any]:
     invite = inviter.create_invite("relay.example", 3600)
     link = ac.parse_invite_url(invite.url)
     request = joiner.create_join_request(link, "joiner")
-    verified = inviter.verify_join_request(request, invite)
+    verified = inviter.verify_join_request(request, invite, joiner.mailbox_id)
     assert verified.mailbox_id == joiner.mailbox_id
     out = inviter.add_member(gid, verified, invite)
     with pytest.raises(ac.AgentConnectError, match="already pending"):
@@ -71,7 +71,7 @@ def join(inviter: ac.Client, gid: bytes, joiner: ac.Client) -> dict[str, Any]:
     with pytest.raises(ac.AgentConnectError, match="key package already used"):
         inviter.add_member(gid, verified, invite)
     with pytest.raises(ac.AgentConnectError, match="key package already used"):
-        inviter.verify_join_request(request, invite)
+        inviter.verify_join_request(request, invite, joiner.mailbox_id)
     welcome = out["welcome"]
     assert isinstance(welcome, bytes)
     assert joiner.join(link, invite_meta(invite), welcome) == gid
@@ -183,7 +183,7 @@ def test_wrong_secret_and_bad_inputs(rng: random.Random) -> None:
     link = ac.parse_invite_url(invite.url.split("&s=")[0] + "&s=" + _b64(wrong))
     request = b.create_join_request(link, "b")
     with pytest.raises(ac.AgentConnectError, match="MAC"):
-        a.verify_join_request(request, invite)
+        a.verify_join_request(request, invite, b.mailbox_id)
     with pytest.raises(ac.AgentConnectError, match="unsupported protocol version"):
         ac.parse_invite_url(invite.url.replace("v=0", "v=1"))
     with pytest.raises(ac.AgentConnectError, match="unknown group"):
@@ -195,7 +195,7 @@ def test_wrong_secret_and_bad_inputs(rng: random.Random) -> None:
     a._set_time_for_testing(invite.expires_at)
     good = b.create_join_request(ac.parse_invite_url(invite.url), "b")
     with pytest.raises(ac.AgentConnectError, match="expired"):
-        a.verify_join_request(good, invite)
+        a.verify_join_request(good, invite, b.mailbox_id)
     a._set_time_for_testing(None)
 
 
@@ -207,18 +207,18 @@ def test_a_join_request_seen_before_is_a_replay(rng: random.Random) -> None:
     invite = a.create_invite("relay.example", 86_400)
     link = ac.parse_invite_url(invite.url)
     request = b.create_join_request(link, "b")
-    first = a.verify_join_request(request, invite)
+    first = a.verify_join_request(request, invite, b.mailbox_id)
     assert first.forget_after == invite.expires_at + ac.LEDGER_GRACE_SECS
     ledger = ac.ReplayLedger(capacity=2)
     first.remember_in(ledger, b"msg-1")  # then the human rejects it
-    again = a.verify_join_request(request, invite)
+    again = a.verify_join_request(request, invite, b.mailbox_id)
     for request_id in (b"msg-1", b"msg-2"):
         with pytest.raises(ac.AgentConnectError) as e:
             again.remember_in(ledger, request_id)
         assert e.value.kind == "replay"
-    other = a.verify_join_request(b.create_join_request(link, "b"), invite)
+    other = a.verify_join_request(b.create_join_request(link, "b"), invite, b.mailbox_id)
     other.remember_in(ledger, b"msg-3")
-    third = a.verify_join_request(b.create_join_request(link, "b"), invite)
+    third = a.verify_join_request(b.create_join_request(link, "b"), invite, b.mailbox_id)
     with pytest.raises(ac.AgentConnectError) as e:
         third.remember_in(ledger, b"msg-4")
     assert e.value.kind == "busy"
@@ -331,7 +331,9 @@ def _join_without_switch(owner: ac.Client, gid: bytes, joiner: ac.Client) -> byt
     stays the one in force."""
     invite = owner.create_invite("relay.example", 3600)
     link = ac.parse_invite_url(invite.url)
-    verified = owner.verify_join_request(joiner.create_join_request(link, "j"), invite)
+    verified = owner.verify_join_request(
+        joiner.create_join_request(link, "j"), invite, joiner.mailbox_id
+    )
     out = owner.add_member(gid, verified, invite, switch_floor=False)
     owner.confirm_pending_commit(gid, out["msg_id"])
     assert joiner.join(link, invite_meta(invite), out["welcome"]) == gid

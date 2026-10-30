@@ -1,9 +1,11 @@
 """SPEC §6.2 "Replays": the inviter remembers every JoinRequest that passed
 its checks, by request id and KeyPackageRef, whatever became of it (decided,
 lapsed or dropped), until its invite expires plus the ledger's grace. A
-malicious relay that re-delivers the envelope, under a fresh ``msg_id`` or
-the same one from another sender, gets nothing: no new approval, no event,
-nothing sent to the joiner, and one audit row with the reason code. The
+malicious relay that re-delivers the envelope under a fresh ``msg_id`` gets
+nothing: no new approval, no event, nothing sent to the joiner, and one
+audit row with the reason code. Under the same ``msg_id`` from another
+sender (past the inbox's deduplication) it is dropped earlier, by the
+sender check (SPEC 6.2 step 3). The
 ledger is persisted, bounded and purged on the current clock. On both hosts.
 """
 
@@ -96,7 +98,7 @@ async def test_a_rejected_request_replayed_is_dropped_silently(
     await redeliver(a, frame, rng, same_msg_id=True)
     assert a.daemon.join_approvals() == []
     assert (a.daemon.store.approval(request["request_id"]) or {})["status"] == "rejected"
-    assert join_audit(a) == ["join_replay", "join_replay"]
+    assert join_audit(a) == ["join_replay"]
     assert_silent(a, [b], approvals=1)
     with pytest.raises(DaemonError):
         a.daemon.approve(request["request_id"])

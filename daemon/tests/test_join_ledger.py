@@ -210,7 +210,9 @@ async def test_a_request_id_or_key_package_taken_is_dropped_past_the_ledger(
     """If the ledger forgot a request while its invite is still open (it
     was purged on a clock that ran ahead), the approvals still hold its id
     and KeyPackage: the request id stays taken, and the KeyPackage of a
-    pending approval gets no second one."""
+    pending approval gets no second one. The same request id redelivered
+    under another sender (past the inbox's deduplication) is dropped by the
+    sender check before it reaches them (SPEC 6.2 step 3)."""
     url = await owner.invite()
     bob, carol = Joiner(rng, owner.now), Joiner(rng, owner.now)
     request = bob.request(url)
@@ -221,8 +223,9 @@ async def test_a_request_id_or_key_package_taken_is_dropped_past_the_ledger(
     owner.engine.store.ledger_purge(owner.now + 30 * 86_400, ledger="join")
     owner.engine._join_ledger = ac.ReplayLedger()
     await owner.deliver(request, b64(rng.randbytes(16)), msg_id=first)
+    assert owner.audit() == []
     await owner.deliver(pending, carol.mailbox)
-    assert owner.audit() == ["join_replay", "join_replay"]
+    assert owner.audit() == ["join_replay"]
     assert len(owner.engine.join_approvals()) == 1
 
 
@@ -324,12 +327,16 @@ async def test_a_stale_key_package_doesnt_crowd_out_the_victims_own_request(
     owner: Owner, rng: random.Random
 ) -> None:
     """Review 52 F2: a link holder sends one of the victim's KeyPackages in
-    its name. The victim's own request still reaches the human, and both
-    say how many requests claim the identity, so the human chooses."""
+    its name. From the holder's own mailbox the sender check drops it
+    (SPEC 6.2 step 3); a relay that lies about the sender gets it past
+    that, and then the victim's own request still reaches the human, and
+    both say how many requests claim the identity, so the human chooses."""
     url, elsewhere = await owner.invite(max_uses=5), await owner.invite()
     victim, attacker = Joiner(rng, owner.now), Joiner(rng, owner.now)
     stale = victim.request(elsewhere)  # stands for one sent to the holder's own invite
-    forged_id = await owner.deliver(_forge(stale, url), attacker.mailbox)
+    await owner.deliver(_forge(stale, url), attacker.mailbox)
+    assert owner.engine.join_approvals() == []
+    forged_id = await owner.deliver(_forge(stale, url), victim.mailbox)
     real_id = await owner.deliver(victim.request(url), victim.mailbox)
     assert owner.audit() == []
     waiting = {w["request_id"]: w for w in owner.engine.join_approvals()}
@@ -343,7 +350,7 @@ async def test_a_stale_key_package_doesnt_crowd_out_the_victims_own_request(
     (left,) = owner.engine.join_approvals()
     assert (left["request_id"], left["identity_requests"]) == (real_id, 1)
     # An exact copy of a waiting request is still dropped.
-    await owner.deliver(_forge(stale, url), attacker.mailbox)
+    await owner.deliver(_forge(stale, url), victim.mailbox)
     assert owner.audit() == ["join_replay"]
 
 
@@ -688,14 +695,16 @@ async def test_replayed_key_packages_that_fill_an_identitys_share_are_named(
     owner: Owner, rng: random.Random
 ) -> None:
     """Review 52 N3: four requests built from the victim's stale KeyPackages
-    fill its share, and its own request is dropped. The human is told
+    fill its share, and its own request is dropped. (A relay that lies
+    about the sender delivers them; from the link holder's own mailbox the
+    sender check drops them first, SPEC 6.2 step 3.) The human is told
     which identity and why (not the generic "the link may have leaked"),
     and the approvals view always has the current count, whatever each
     request's event said when it arrived."""
     url, elsewhere = await owner.invite(max_uses=5), await owner.invite()
-    victim, attacker = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    victim = Joiner(rng, owner.now)
     forged = [
-        await owner.deliver(_forge(victim.request(elsewhere), url), attacker.mailbox)
+        await owner.deliver(_forge(victim.request(elsewhere), url), victim.mailbox)
         for _ in range(MAX_PENDING_PER_IDENTITY)
     ]
     real_id = await owner.deliver(victim.request(url), victim.mailbox)

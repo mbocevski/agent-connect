@@ -60,7 +60,7 @@ def test_journalled_processing_replays_until_consumed(rng: random.Random, tmp_pa
     gid = a.create_group(NAME, PURPOSE)
     invite = a.create_invite("relay.example", 3600)
     link = ac.parse_invite_url(invite.url)
-    verified = a.verify_join_request(b.create_join_request(link, "b"), invite)
+    verified = a.verify_join_request(b.create_join_request(link, "b"), invite, b.mailbox_id)
     out = a.add_member(gid, verified, invite)
     a.confirm_pending_commit(gid, out["msg_id"], key="own/1", context=b"c")
     # The fan-out copy under the same key is the same entry.
