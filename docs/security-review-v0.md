@@ -590,7 +590,7 @@ store written the old way.
 | SR-22 | directory | The `X-Forwarded-For` walk skips every address in the trusted proxy blocks, so a client behind a shared CDN range that is listed as a proxy picks its own key and bypasses the per-address limits. | `http.rs:618-653`, `ratelimit.rs:179-189`. Confirmed with a trusted loopback peer; the CDN case by reading. | Open (T-22) |
 | SR-23 | directory | Revoked token ids are purged 90 days after the directory received the revocation, not after the token's expiry, so a token issued after the revocation time becomes publishable again. | `store.rs:22`, `memory.rs:298`, `memory.rs:456`, `postgres.rs:783`. By reading. | Fixed in #152: revoked token ids are never purged (a revocation names no expiry, and each takes the operator's signature). Test: `directory/tests/publish.rs::a_revoked_token_id_stays_revoked_past_the_longest_token_lifetime` |
 | SR-24 | directory, daemon | After the operator rotates `DK`, the directory keeps serving listings whose token key it no longer pins; knockers refuse them, and the owner's renewals fail with `unknown_key`, which is retried forever. | `directory.rs:347-360`, `runtime/knocks.py:773`, `runtime/listing.py` (`STOP_RENEWING`). By reading. | Open (T-24) |
-| SR-25 | daemon | The knocker never checks token revocations, so against a malicious directory "rollback is bounded by token revocation" (SPEC §12) does not hold. `docs/discovery.md` already says so. | `runtime/knocks.py:773`. By reading. | Fixed: SPEC §12 now says token revocation withdraws a listing only at an honest directory or mirror. A knocker check would read the feed from the same directory, which can omit the revocation, so the claim was corrected rather than a check added |
+| SR-25 | daemon | The knocker never checks token revocations, so against a malicious directory "rollback is bounded by token revocation" (SPEC §12) does not hold. `docs/discovery.md` already says so. | `runtime/knocks.py:773`. By reading. | Fixed in #157: SPEC §12 now says token revocation withdraws a listing only at an honest directory. A knocker check can't help: the malicious operator holds `DK` and is the only one who signs revocations, so even a perfect feed would carry none it didn't want; the claim was corrected rather than a check added |
 | SR-26 | daemon | A JoinRequest with a failed MAC is not counted toward rate limiting (SPEC §6.2 step 2 MUST); only the relay's per-invite limit applies. | `engine.py:_on_join_request` (around line 1772). By reading. | Fixed in #151: a wrong MAC or a request from another sender counts against its invite; at `policy.max_failed_joins_per_invite` (16) within 10 minutes the human gets `invite_flooded` (`join_failures`), backing off from 10 minutes to a day while the failures go on; the daemon keeps only the newest 16 failure times. Nothing else is dropped for it (the relay caps an invite's requests), so the count can't lock joiners out. Test: `daemon/tests/test_join_ledger.py::test_failed_requests_are_counted_to_tell_the_human_never_to_drop` |
 | SR-27 | daemon | The A2A adapter's `a2a-seen.db` is a plain SQLite file (0600) in the data directory, against "there is no unencrypted on-disk mode" (SPEC §12). It holds SHA-256 hashes of `msg_id`s, which the relay also sees. | `a2a_adapter/seen.py:22-30`. By reading. | Open (T-27) |
 | SR-28 | daemon | Unauthenticated connections fill the local API's 64 slots and lock the human out (503) for 10 s at a time. In separate-OS-user mode any listed agent user can do it without a token. | `runtime/api.py:63-70`, `api.py:1552-1558`. Probe: human request 503 while 64 idle connections were held. Confirmed. | Fixed in #61: unfinished connections give way (32, hard 128; 8 and 64 per UID in separate-OS-user mode), quiet ones first after 0.5 s, and a connection whose headers arrived is never closed. Re-probed on c0d0c12: with 64 or 200 idle connections held, on the socket and on TCP, the human's requests are answered at once. Tests: `harness/tests/test_api.py` (`test_half_sent_connections_dont_keep_the_human_out`, `test_a_connection_that_sent_nothing_gives_way_first`, `test_connects_behind_a_whole_request_dont_close_it`, `test_past_the_hard_limit_a_stalled_connection_goes_not_a_fresh_one`) |
@@ -761,7 +761,7 @@ The five crypto negative tests AGENTS.md requires all exist:
    one-line Unicode text, so lookalike display names remain possible.
 7. §12, "Malicious directory operator" row: rollback bounded by token
    revocation holds only at an honest directory or a conforming mirror
-   (SR-25, corrected). ADR-006's copy of the row already leaves it out.
+   (SR-25, fixed in #157). ADR-006's copy of the row already leaves it out.
 
 ## MLS usage
 
@@ -1139,7 +1139,7 @@ One line per open item, ready to file.
   revoked token can't be valid any more.
 - **T-24 (Low, SR-24):** Directory and daemon: treat listings with an
   unpinned token key as expired; add `unknown_key` to `STOP_RENEWING`.
-- **T-25 (Low, SR-25, SPEC row corrected):** Daemon: check token revocations from the
+- **T-25 (Low, SR-25, fixed in #157):** Daemon: check token revocations from the
   withdrawals feed before knocking, or correct the SPEC §12 row.
 - **T-26 (Low, SR-26, fixed in #151):** Daemon: count failed-MAC JoinRequests per invite
   and tell the human past a threshold (SPEC §6.2 step 2).
