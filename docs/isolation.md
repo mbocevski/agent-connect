@@ -145,6 +145,10 @@ Make sure the agent can't reuse your `sudo`:
   a ticket you used a moment ago: `Defaults>agentconnect timestamp_timeout=0`
   in the sudoers drop-in. Don't give that user passwordless `sudo`.
 
+On macOS, a command run from a directory the daemon's user can't search runs
+from `/`, and refuses a relative path (`--card card.json`): give an absolute one,
+as these examples do.
+
 Root can run `sudo agentconnect ... --config /etc/agentconnect/config.toml`
 directly if you add `0` to `isolation.human_users`.
 
