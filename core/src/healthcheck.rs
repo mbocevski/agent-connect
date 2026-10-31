@@ -73,11 +73,32 @@ pub fn probe(addr: SocketAddr, timeout: Duration) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead as _, BufReader};
+    use std::io::{BufRead as _, BufReader, ErrorKind};
     use std::net::TcpListener;
     use std::thread::JoinHandle;
+    use std::time::Instant;
 
     use super::*;
+
+    /// The first connection to `listener`. When none comes it panics, which
+    /// `join` turns into a failed test: a probe that never connects must fail
+    /// its test, not hang it until a mutation run's timeout.
+    fn accept_soon(listener: &TcpListener) -> TcpStream {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    return conn;
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("the probe never connected: {e}"),
+            }
+        }
+    }
 
     /// A server that takes one request and sends `answer`; the request line
     /// it got is what the thread returns. The probe may stop reading before
@@ -86,7 +107,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let thread = std::thread::spawn(move || {
-            let (conn, _) = listener.accept().unwrap();
+            let conn = accept_soon(&listener);
             let mut reader = BufReader::new(conn);
             let mut request_line = String::new();
             reader.read_line(&mut request_line).unwrap();
