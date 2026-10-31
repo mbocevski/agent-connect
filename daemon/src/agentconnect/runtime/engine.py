@@ -638,11 +638,15 @@ def addressed_to_me(  # noqa: PLR0913, PLR0917
     my_instance: str,
     moderator: str | None,
     holder: str | None = None,
+    sender: str | None = None,
 ) -> bool:
     """SPEC §9.3/§9.4: is this instance *triggered* by ``inner``?
 
     ``moderator`` is the effective moderator and ``holder`` the floor
     holder (``agentconnect.runtime.floor``); only ``moderated`` reads them.
+    ``sender`` is the sending identity: in ``free`` mode a member is never
+    triggered by its own identity's messages (a sibling instance's), only
+    when they name it in ``addressee``.
 
     ``body.metadata.instance`` is the sender's word: it is read only after
     the floor has picked this member, so it can narrow who is triggered and
@@ -655,7 +659,8 @@ def addressed_to_me(  # noqa: PLR0913, PLR0917
         # one triggers nobody.
         hit = _str_list(addressee) and me in addressee
     elif floor == "free":
-        hit = True
+        # "All members except the sender", and a member is an identity.
+        hit = sender != me
     elif floor == "mention":
         hit = me in to or (to == ["*"] and inner.get("origin") == "human")
     else:  # moderated: the effective moderator and the floor holder
@@ -2727,6 +2732,7 @@ class Engine:
             self.instance.instance_id_hex,
             moderator,
             holder,
+            sender=identity,
         )
         if inner["kind"] not in TASK_UPDATE_KINDS:
             return hop, addressed, None, None, False

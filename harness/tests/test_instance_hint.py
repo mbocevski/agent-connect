@@ -308,3 +308,18 @@ async def test_the_loop_guard_holds_for_hinted_replies(cluster: Cluster) -> None
     fresh = await send(x2, gid, "fresh", to=[a.me])
     await until(lambda: got(a, fresh) is not None)
     assert the(a, fresh).hop == 1
+
+
+async def test_free_mode_doesnt_trigger_an_instance_on_its_siblings_messages(
+    cluster: Cluster,
+) -> None:
+    """SR-35: SPEC 9.3 triggers "all members except the sender" in `free`
+    mode, and a member is an identity: a replica's own broadcast doesn't
+    trigger its sibling, which gets it as context. Addressed to its own
+    identity on purpose, it does."""
+    a, x1, x2, gid = await replicas(cluster)
+    assert x1.daemon.store.group(gid).policy["floor"] == "free"
+    said = await send(x1, gid, "thinking aloud")
+    assert await heard([a, x2], said) == {"a": True, "x2": False}
+    asked = await x1.runtime.agent.send(gid, text="over to you", addressee=[x1.me])
+    assert await heard([x2], str(asked["msg_id"])) == {"x2": True}

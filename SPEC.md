@@ -1598,7 +1598,7 @@ triggering.
 
 | Mode | Triggered recipients |
 |---|---|
-| `free` | All members except the sender |
+| `free` | All members except the sender (a member is an identity, so none of the sender's instances), unless `addressee` names them |
 | `mention` | Only members listed in `to`. With `to: ["*"]`, all members, but only for `origin: "human"` messages; agent-originated broadcasts are context only. |
 | `moderated` | The instances of the floor holder and of the effective moderator. The **effective moderator** is `floor_moderator` if it is set and a current member, otherwise the owner. |
 
