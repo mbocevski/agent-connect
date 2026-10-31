@@ -23,6 +23,8 @@ import pytest
 from agentconnect.isolation import PeerGate, peer_credentials
 
 NOBODY = 65534
+# The test's own interpreter may be under a home that this user can't enter.
+OTHER_PYTHON = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
 
 pytestmark = [
     pytest.mark.multiuser,
@@ -44,7 +46,7 @@ def test_kernel_reports_the_other_users_uid() -> None:
             srv.bind(str(path))
             path.chmod(0o666)
             srv.listen(1)
-            child = subprocess.Popen([sys.executable, "-I", "-c", CLIENT, str(path)], user=NOBODY)
+            child = subprocess.Popen([OTHER_PYTHON, "-I", "-c", CLIENT, str(path)], user=NOBODY)
             try:
                 conn, _ = srv.accept()
                 with conn:

@@ -297,8 +297,8 @@ baseline to make a failure pass; add tests instead.
 ## Tests that need a second OS user
 
 The separate-OS-user mode (`docs/isolation.md`) is tested in the fast tier
-with an injected peer-credential provider. The one test that connects as a
-real second user (`nobody`) is marked `@pytest.mark.multiuser` and skipped
+with an injected peer-credential provider. The tests that connect as a
+real second user (`nobody`) are marked `@pytest.mark.multiuser` and skipped
 unless it runs as root with `AC_RUN_MULTIUSER=1`:
 `sudo AC_RUN_MULTIUSER=1 uv run --all-packages pytest -m multiuser`.
 
