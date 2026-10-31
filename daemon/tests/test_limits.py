@@ -416,6 +416,20 @@ def test_reconnecting_doesnt_refill_a_senders_drain_exemption() -> None:
     assert budget.take("a", 2, DRAIN_WINDOW_SECS), "an hour on, the exemption is back"
 
 
+def test_a_new_connection_forgets_senders_whose_window_has_passed() -> None:
+    """SR-36: each sender's window is kept only while it can still refuse:
+    a reset (a new connection) drops the ones older than the window, so
+    many one-off senders don't stay in memory for the daemon's lifetime."""
+    budget = DrainBudget(total=10_000)
+    for i in range(500):
+        assert budget.take(f"g/{i}", 2, 0)
+    budget.reset(DRAIN_WINDOW_SECS - 1)
+    assert len(budget._times) == 500
+    assert budget.take("recent", 2, DRAIN_WINDOW_SECS - 1)
+    budget.reset(DRAIN_WINDOW_SECS)
+    assert set(budget._times) == {"recent"}
+
+
 PARTS = json.loads(
     (Path(__file__).resolve().parents[2] / "testdata" / "a2a-parts.json").read_text()
 )

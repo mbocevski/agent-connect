@@ -315,9 +315,16 @@ class DrainBudget:
         self._used = 0
         self._times: dict[str, deque[int]] = {}
 
-    def reset(self) -> None:
-        """A new connection: a new total. Each sender's window carries on."""
+    def reset(self, now: int | None = None) -> None:
+        """A new connection: a new total. Each sender's window carries on;
+        with ``now``, a sender whose newest exempt message is older than the
+        window is forgotten, so one-off senders don't stay in memory."""
         self._used = 0
+        if now is None:
+            return
+        cutoff = now - DRAIN_WINDOW_SECS
+        for sender in [s for s, times in self._times.items() if not times or times[-1] <= cutoff]:
+            del self._times[sender]
 
     def take(self, sender: str, cap: int, now: int) -> bool:
         """Count one exempt message from ``sender`` at ``now`` (Unix

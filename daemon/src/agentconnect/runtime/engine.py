@@ -1070,7 +1070,7 @@ class Engine:
         return self._drain.take(f"{group_id}/{identity}", DRAIN_RATE_MULTIPLE * limit, self.now())
 
     async def _on_connected(self) -> None:
-        self._drain.reset()
+        self._drain.reset(self.now())
         # Anything a failure in this run left unfinished in the journal.
         self._frames.put_nowait({"t": REPLAY_JOURNAL})
         self._outbox_wake.set()
