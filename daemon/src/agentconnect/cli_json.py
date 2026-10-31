@@ -239,6 +239,7 @@ SCHEMAS: dict[str, Any] = {
     },
     "groups show": GROUP_VIEW,
     "approvals list": {
+        "scope": "str",
         "approvals": [
             {
                 "kind": "str",
@@ -404,8 +405,10 @@ NOTES: dict[str, str] = {
         "its `instances`; `self` marks this one."
     ),
     "approvals list": (
-        "`messages` are the messages the safety policy holds: `direction` is `in` "
-        "(from `sender`) or `out` (your agent's)."
+        "`scope` is `human`, or `agent` when only the agent token is at hand (an agent's "
+        "user in the separate-OS-user mode): then the list holds only the agent's own held "
+        "sends, whatever waits for the human. `messages` are the messages the safety policy "
+        "holds: `direction` is `in` (from `sender`) or `out` (your agent's)."
     ),
     "approvals approve": "`status` is `approving`.",
     "approvals approve (knock)": (

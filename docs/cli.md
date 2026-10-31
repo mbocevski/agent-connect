@@ -118,7 +118,11 @@ work on the data directory itself, and only the CLI offers them
   run the human commands as that user:
   `sudo -u agentconnect agentconnect approvals approve <request_id> --config
   /etc/agentconnect/config.toml`. `daemon run` refuses to start (exit 2) when
-  that mode's permission checks fail.
+  that mode's permission checks fail. As an agent's user, a human command
+  fails with `human_only` (exit 3), `approvals list` shows only the agent's
+  own held sends and says so (`scope: agent` in its JSON), and pointing the
+  CLI at the daemon's configuration fails with `token_unreadable` (exit 3):
+  use `AC_DATA_DIR` instead.
 - `verify` is interactive on purpose. It has no `--yes`, and EOF on stdin
   counts as "no answer" (exit 3, nothing changed). It answers for the SAS
   run whose code it showed; "same" is refused once that code is older than
@@ -1246,10 +1250,11 @@ There is no group-wide short code: each pair of members compares its own with `a
 
 ### `approvals list`
 
-`messages` are the messages the safety policy holds: `direction` is `in` (from `sender`) or `out` (your agent's).
+`scope` is `human`, or `agent` when only the agent token is at hand (an agent's user in the separate-OS-user mode): then the list holds only the agent's own held sends, whatever waits for the human. `messages` are the messages the safety policy holds: `direction` is `in` (from `sender`) or `out` (your agent's).
 
 ```text
 {
+  "scope": str,
   "approvals": [{
     "kind": str,
     "request_id": str,

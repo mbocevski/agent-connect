@@ -30,8 +30,17 @@ class ApiClient:
         try:
             self._token = token_file.read_text(encoding="ascii").strip()
         except FileNotFoundError:
+            if human and (config.data_dir / API_TOKEN_FILE).exists():
+                # An agent directory (docs/isolation.md): the daemon is running,
+                # and the human token is deliberately not here.
+                msg = "no human token in this data directory"
+                raise ApiClientError(0, "human_only", msg) from None
             msg = "no API token: is the daemon running?"
             raise ApiClientError(0, "not_running", msg) from None
+        except PermissionError:
+            # The daemon's own data directory, as another OS user.
+            msg = f"this OS user can't read {token_file.parent}"
+            raise ApiClientError(0, "token_unreadable", msg) from None
         if config.api_tcp_port:
             # TLS with the certificate pinned in the data directory.
             self._transport: httpx.BaseTransport = local_tcp_transport(

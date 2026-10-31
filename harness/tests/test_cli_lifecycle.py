@@ -240,7 +240,7 @@ async def test_reject_leaves_the_joiner_out(
     (req,) = listed["approvals"]
     code, rejected = await alice.json("approvals", "reject", req["request_id"])
     assert (code, rejected["status"]) == (0, "rejected")
-    assert (await alice.json("approvals"))[1] == {"approvals": [], "messages": []}
+    assert (await alice.json("approvals"))[1] == {"scope": "human", "approvals": [], "messages": []}
     assert (await bob.json("groups"))[1] == {"groups": []}
 
 
@@ -251,8 +251,8 @@ async def test_verify_cannot_start_without_the_human_token_file(
     alice = await serve(a)
     (a.config.data_dir / "human-token").unlink()
     code, err = await alice.json("verify", gid, input="y\n")
-    assert code == 5  # no human token on disk: the command can't even start
-    assert err["error"]["code"] == "daemon_unreachable"
+    assert code == 3  # no human token on disk: the command can't even start
+    assert err["error"]["code"] == "human_only"
 
 
 async def test_verify_no_leaves_and_reports_the_owner_handover(
