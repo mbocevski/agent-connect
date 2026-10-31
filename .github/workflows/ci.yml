@@ -26,6 +26,56 @@ env:
   CARGO_NET_RETRY: "10"
 
 jobs:
+  # Which jobs the change needs (scripts/changes.py, TESTING.md "Which CI jobs
+  # run when"). Pushes to main and manual runs always run everything. lint,
+  # changelog, docs and hygiene always run: they are cheap text checks.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      run_rust: ${{ steps.classify.outputs.run_rust }}
+      run_python: ${{ steps.classify.outputs.run_python }}
+      run_licences: ${{ steps.classify.outputs.run_licences }}
+      run_contract: ${{ steps.classify.outputs.run_contract }}
+      run_platforms: ${{ steps.classify.outputs.run_platforms }}
+      run_image: ${{ steps.classify.outputs.run_image }}
+      run_integration: ${{ steps.classify.outputs.run_integration }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # No code of the pull request runs here. It is classified by the
+          # base branch's copy of the script, never its own: otherwise the
+          # change under test could decide which checks it faces. Pushes,
+          # manual runs and a base that has no script (the pull request that
+          # adds it) run everything, which is printed inline. Any git error
+          # fails the step; only a clean "the base has no such file" runs
+          # everything.
+          everything() {
+            for job in rust python licences contract platforms image integration; do
+              echo "run_$job=true"
+            done | tee -a "$GITHUB_OUTPUT"
+          }
+          if [ "$EVENT" != pull_request ]; then
+            everything
+            exit 0
+          fi
+          git rev-parse --verify --quiet "origin/$BASE^{commit}" > /dev/null
+          present="$(git ls-tree --name-only "origin/$BASE" -- scripts/changes.py)"
+          if [ -z "$present" ]; then
+            everything
+            exit 0
+          fi
+          git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"
+          # --no-renames lists both paths of a rename.
+          git diff --no-renames --name-only "origin/$BASE...HEAD" > changed.txt
+          python3 "$RUNNER_TEMP/changes.py" classify < changed.txt | tee -a "$GITHUB_OUTPUT"
+
   lint:
     runs-on: ubuntu-24.04
     steps:
@@ -48,6 +98,8 @@ jobs:
       - run: prek run --all-files --show-diff-on-failure
 
   rust:
+    needs: changes
+    if: needs.changes.outputs.run_rust == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,6 +113,8 @@ jobs:
       - run: just cov-rust
 
   python:
+    needs: changes
+    if: needs.changes.outputs.run_python == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -84,6 +138,8 @@ jobs:
 
   # Python dependency licences (licences-py.toml), the counterpart of cargo-deny.
   licences:
+    needs: changes
+    if: needs.changes.outputs.run_licences == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,6 +151,8 @@ jobs:
 
   # Cross-language contract data: testdata/MANIFEST.json vs. the test suites.
   contract:
+    needs: changes
+    if: needs.changes.outputs.run_contract == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,12 +208,16 @@ jobs:
   # they have a track record of staying green and fast (see ADR-001); the same
   # workflow also runs nightly.
   platforms:
+    needs: changes
+    if: needs.changes.outputs.run_platforms == 'true'
     uses: ./.github/workflows/platform-tests.yml
 
   # The relay and directory images must build for both architectures. Each
   # architecture builds on a native runner (no QEMU emulation); nothing is
   # pushed.
   image:
+    needs: changes
+    if: needs.changes.outputs.run_image == 'true'
     name: image (${{ matrix.component }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -195,6 +257,8 @@ jobs:
   # demos and the malicious relay double on the demo image (built here, never
   # pushed). Not part of ci-ok until it has a track record.
   integration:
+    needs: changes
+    if: needs.changes.outputs.run_integration == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -210,16 +274,39 @@ jobs:
       - run: just test-int
 
   # Single required check for merge gating (.github/required-checks.txt).
+  # Passes when every job succeeded or was skipped by `changes` (or, for the
+  # pull-request-only jobs, by the event); a skip caused by a failed dependency
+  # fails it (scripts/changes.py gate).
   ci-ok:
     if: always()
-    needs: [lint, rust, python, licences, contract, changelog, docs, hygiene]
+    needs: [changes, lint, rust, python, licences, contract, changelog, docs, hygiene]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - name: All required jobs passed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
         run: |
-          echo "results: $RESULTS"
-          for r in $RESULTS; do
-            case "$r" in success|skipped) ;; *) exit 1 ;; esac
-          done
+          set -euo pipefail
+          # The base branch's gate, for the reason given in `changes`. When
+          # the base has none, no code of the pull request runs: every job
+          # must have succeeded, with nothing skipped. Pushes run the gate
+          # that is on main.
+          if [ "$EVENT" != pull_request ]; then
+            python3 scripts/changes.py gate
+            exit 0
+          fi
+          git rev-parse --verify --quiet "origin/$BASE^{commit}" > /dev/null
+          present="$(git ls-tree --name-only "origin/$BASE" -- scripts/changes.py)"
+          if [ -n "$present" ]; then
+            git show "origin/$BASE:scripts/changes.py" > "$RUNNER_TEMP/changes.py"
+            python3 "$RUNNER_TEMP/changes.py" gate
+          else
+            echo "the base has no scripts/changes.py: every job must have succeeded"
+            jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+            jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null
+          fi
