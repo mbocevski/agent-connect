@@ -69,6 +69,7 @@ class World:
         self.doors = FakeDoors(clock, log=self.calls)
         self.owner = Owner()
         self.pinned = True  # whether the config still has the directory
+        self.keys: tuple[bytes, ...] | None = None  # the pinned keys, if not dk's
         self.rt = self._runtime()
 
     def config(self) -> Config:
@@ -78,7 +79,9 @@ class World:
             data_dir=self.tmp / "data",
             keystore="file",
             api_socket=self.tmp / "s.sock",
-            directories=(DirectoryConfig(DIR, (self.dk.public_key,), f"https://{DIR}"),)
+            directories=(
+                DirectoryConfig(DIR, self.keys or (self.dk.public_key,), f"https://{DIR}"),
+            )
             if self.pinned
             else (),
         )
@@ -552,6 +555,36 @@ async def test_a_refused_renewal_stops_renewing(world: World, code: str) -> None
     assert len(world.directory.posts) == 2
     await world.at(expiry + 3600)
     assert world.door_rows() == []
+
+
+async def test_unknown_key_for_a_key_still_pinned_here_is_retried(world: World) -> None:
+    """SR-24: `unknown_key` for a token under a key this daemon still pins
+    means the directory lags (a rollback, a rolling deploy): the renewal is
+    reported and retried, and lands once the directory has the key again."""
+    await world.publish()
+    world.directory.faults.fail("POST", "/v0/listings", 403, "unknown_key")
+    await world.at(world.row()["next_renewal_at"])
+    row = world.row()
+    assert row["retry_at"] is not None, "retried, not stopped"
+    (stale,) = world.events("listing_stale")
+    assert (stale["reason"], stale["code"]) == ("publish_failed", "unknown_key")
+    await world.at(int(row["retry_at"]))  # the fault was for one request
+    assert world.events("listing_renewed")
+
+
+async def test_unknown_key_for_a_key_dropped_here_too_stops_renewing(world: World) -> None:
+    """SR-24: once this daemon no longer pins the token's key either (the
+    operator rotated it), `unknown_key` stops renewing, as the SPEC's other
+    refusals do: a new token is needed."""
+    await world.publish()
+    world.keys = (ac.DirectoryKey._generate_for_testing(world.rng.getrandbits(63)).public_key,)
+    await world.restart()
+    world.directory.faults.fail("POST", "/v0/listings", 403, "unknown_key")
+    await world.at(world.row()["next_renewal_at"])
+    row = world.row()
+    assert (row["state"], row["next_renewal_at"]) == ("stale", None)
+    (stale,) = world.events("listing_stale")
+    assert (stale["reason"], stale["code"]) == ("refused", "unknown_key")
 
 
 async def test_the_token_warning_and_expiry(world: World) -> None:

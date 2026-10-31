@@ -107,6 +107,11 @@ impl State {
     }
 }
 
+/// Whether a listing's token key is one of `keys` (or not recorded yet).
+fn pinned(l: &ListingRecord, keys: &[String]) -> bool {
+    l.token_key_id.is_empty() || keys.contains(&l.token_key_id)
+}
+
 /// A [`Store`] in process memory.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
@@ -397,6 +402,7 @@ impl Store for MemoryStore {
         &self,
         after: &str,
         now: u64,
+        keys: &[String],
         limit: u32,
     ) -> StoreResult<Vec<ListingRecord>> {
         Ok(self
@@ -404,10 +410,30 @@ impl Store for MemoryStore {
             .listings
             .range::<str, _>((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
             .map(|(_, l)| l)
-            .filter(|l| l.token_expires_at > now)
+            .filter(|l| l.token_expires_at > now && pinned(l, keys))
             .take(limit as usize)
             .cloned()
             .collect())
+    }
+
+    async fn untagged(&self, limit: u32) -> StoreResult<Vec<ListingRecord>> {
+        Ok(self
+            .lock()
+            .listings
+            .values()
+            .filter(|l| l.token_key_id.is_empty())
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+
+    async fn set_token_key_id(&self, name: &str, sha256: &str, key_id: &str) -> StoreResult<()> {
+        if let Some(l) = self.lock().listings.get_mut(name)
+            && l.sha256 == sha256
+        {
+            key_id.clone_into(&mut l.token_key_id);
+        }
+        Ok(())
     }
 
     async fn search(&self, q: &SearchQuery) -> StoreResult<Vec<ListingRecord>> {
@@ -415,7 +441,7 @@ impl Store for MemoryStore {
         let mut hits: Vec<(f64, &ListingRecord)> = st
             .listings
             .values()
-            .filter(|l| l.token_expires_at > q.now)
+            .filter(|l| l.token_expires_at > q.now && pinned(l, &q.keys))
             .filter(|l| {
                 q.skill
                     .as_ref()
