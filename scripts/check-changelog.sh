@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Require CHANGELOG.md to change on a branch, unless every commit is a
+# Require a new changelog fragment (changelog.d/<slug>.<section>.md, see
+# scripts/changelog_fragments.py) on a branch, unless every commit is a
 # non-user-facing type or SKIP_CHANGELOG=true (CI sets it from the
-# `skip-changelog` PR label).
+# `skip-changelog` PR label). Every fragment in the tree must be well formed,
+# so that the release cut can't fail on one.
 #
 # usage: scripts/check-changelog.sh [base-ref]   (default: origin/main)
 set -euo pipefail
 
 base="${1:-origin/main}"
+here=$(cd "$(dirname "$0")" && pwd)
+
+python3 "$here/changelog_fragments.py" validate
 
 if [[ "${SKIP_CHANGELOG:-false}" == "true" ]]; then
     echo "changelog: skipped (skip-changelog label)"
@@ -37,11 +42,13 @@ if ! grep -Evq "$exempt" <<<"$subjects"; then
     exit 0
 fi
 
-if git diff --name-only "$range" | grep -qx 'CHANGELOG.md'; then
-    echo "changelog: CHANGELOG.md updated"
+fragment='^changelog\.d/[a-z0-9][a-z0-9-]*\.(added|changed|deprecated|removed|fixed|security)\.md$'
+if git diff --name-only --no-renames --diff-filter=A "$range" -- changelog.d | grep -Eq "$fragment"; then
+    echo "changelog: fragment added"
     exit 0
 fi
 
-echo "error: user-facing commits without a CHANGELOG.md entry under [Unreleased]." >&2
-echo "       add an entry (https://keepachangelog.com/en/1.1.0/) or label the PR skip-changelog." >&2
+echo "error: user-facing commits without a changelog fragment." >&2
+echo "       add changelog.d/<slug>.<section>.md with one bullet (see changelog.d/README.md)" >&2
+echo "       or label the PR skip-changelog." >&2
 exit 1

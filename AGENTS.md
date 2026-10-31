@@ -138,23 +138,29 @@ Python. Don't use `pip install` or global venvs.
 - [Conventional Commits](https://www.conventionalcommits.org/):
   `<type>(<scope>): <subject>`. Scopes: `spec`, `core`, `relay`, `directory`, `daemon`,
   `a2a`, `mcp`, `sdk`, `web`, `policy`, `group`, `ci`, `docs`, `deps`.
-- Add every user-visible change to `CHANGELOG.md` under `[Unreleased]`
-  ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)). CI fails if you
-  don't, unless the PR is labelled `skip-changelog`.
+- Add every user-visible change as a fragment file,
+  `changelog.d/<slug>.<section>.md`, with one bullet in it, where `<section>`
+  is `added`, `changed`, `deprecated`, `removed`, `fixed` or `security`
+  ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)). Don't edit
+  `CHANGELOG.md`: fragments are what keeps PRs from conflicting over it, and
+  `just changelog-cut` moves them there in the release PR. CI fails if a
+  user-facing PR has no new fragment, unless it is labelled `skip-changelog`.
+  `changelog.d/README.md` has the format; `just changelog-preview` shows the
+  result.
 - Work on a branch and never push to `main`; the pre-push hook refuses it.
   Merge only with `just merge <pr>` after CI is green. GitHub enforces the
   same rules server-side through the ruleset in `.github/rulesets/main.json`
   (`just apply-ruleset`).
 - Hooks run via `prek`: pre-commit (lint/format, docs), commit-msg (Conventional
-  Commits), pre-push (`just test`, CHANGELOG and docs checks). If a hook fails, fix the
+  Commits), pre-push (`just test`, changelog fragment and docs checks). If a hook fails, fix the
   cause and re-stage. **Never use `--no-verify`.**
 - Docs change with the code they describe. `docs/MAP.toml` maps user-facing
   code to its docs, lists the components behind the README Status section
   (one `<!-- component: name -->` bullet each) and the `internal` source
   files. `scripts/check_docs.py` (pre-push, `just docs-check`, CI `docs`
   job) fails a branch whose non-docs/test/ci/chore/build/style commits change
-  mapped code without touching one of its docs, a new `### Added` CHANGELOG
-  entry with component code but no README change, an unclassified workspace
+  mapped code without touching one of its docs, a new `added` changelog
+  fragment with component code but no README change, an unclassified workspace
   member or source file, and a Status bullet and component that don't match.
   If the docs stay correct, label the PR `skip-docs`; if the README does,
   `skip-readme`.

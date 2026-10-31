@@ -8,8 +8,9 @@
 # [[component]]  The inventory behind the README Status section. Each
 #                component has exactly one Status bullet, marked
 #                `<!-- component: <name> -->`, which links the component's
-#                `doc`. A branch with a new CHANGELOG `### Added` entry that
-#                changes a component's `paths` must also change README.md.
+#                `doc`. A branch with a new `added` changelog fragment
+#                (`changelog.d/<slug>.added.md`) that changes a component's
+#                `paths` must also change README.md.
 #                Escape hatch: the `skip-readme` PR label. `readme = false`
 #                is for parts with no Status bullet (test tooling, spikes).
 #                Every Cargo and uv workspace member needs a component whose

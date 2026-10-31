@@ -23,7 +23,10 @@ Python workspace (`uv sync --all-packages`), and all git hooks via prek.
    The `commit-msg` hook checks the type and scope. Scopes: `spec`, `core`,
    `relay`, `directory`, `daemon`, `a2a`, `mcp`, `sdk`, `web`, `policy`,
    `group`, `ci`, `docs`, `deps`.
-3. Add user-facing changes to `CHANGELOG.md` under `[Unreleased]`.
+3. Add a changelog fragment for a user-facing change:
+   `changelog.d/<slug>.<section>.md` with one bullet (format and sections in
+   [`changelog.d/README.md`](changelog.d/README.md)). Don't edit
+   `CHANGELOG.md`; the release PR assembles the fragments into it.
 4. `just pr` pushes the branch and opens a PR, titled with the first
    commit's subject. Use a Conventional Commit PR title; it becomes the
    squash commit.
@@ -55,7 +58,7 @@ a GitHub ruleset on `main`:
 | Conventional Commit message | `commit-msg` hook |
 | No direct pushes to `main` | `pre-push` hook (`scripts/hooks/no-push-main.sh`) |
 | Fast test tier passes | `pre-push` hook (`just test`) |
-| CHANGELOG updated | `pre-push` hook and the CI `changelog` job (`scripts/check-changelog.sh`) |
+| Changelog fragment added (`changelog.d/`), every fragment well formed | `pre-push` hook and the CI `changelog` job (`scripts/check-changelog.sh`) |
 | Docs changed with mapped code | `pre-push` hook, `just docs-check` and the CI `docs` job (`scripts/check_docs.py`) |
 | Markdown lint, offline link check, prose rules | `pre-commit` hook and the CI `lint` job (rumdl, lychee, Vale) |
 | All required CI checks green, branch up to date, every commit verified on GitHub, title OK | `just merge` (`scripts/merge.sh`) |
@@ -80,8 +83,9 @@ legitimate product name.
 ### Skipping the changelog
 
 Commits whose types are all `docs`, `ci`, `chore`, `test`, `build` or `style`
-don't need a changelog entry. For anything else that genuinely isn't
-user-facing, add the `skip-changelog` label to the PR.
+don't need a changelog fragment. For anything else that genuinely isn't
+user-facing, add the `skip-changelog` label to the PR. The label skips the
+requirement for a fragment, not the check that every fragment is well formed.
 
 Adding or removing a skip label (`skip-changelog`, `skip-docs`, `skip-readme`)
 starts a fresh CI run that reads the current labels and cancels any run still
@@ -121,8 +125,9 @@ the Status section, which links the doc and ends with an invisible marker:
   <!-- component: cli -->
 ```
 
-A branch that adds an entry under `### Added` in the CHANGELOG and changes a
-component's `paths` must also change `README.md`. When the README stays
+A branch that adds an `added` changelog fragment
+(`changelog.d/<slug>.added.md`) and changes a component's `paths` must also
+change `README.md`. When the README stays
 correct, add the `skip-readme` label (CI sets `SKIP_README=true` from it; it
 is separate from `skip-docs`). A part with no Status bullet, such as test
 tooling, sets `readme = false`.
@@ -202,8 +207,11 @@ Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
    files: `uv lock`, `cargo update --workspace`, and `cargo update -p` for
    the path crates in each `*/fuzz/Cargo.lock`. `scripts/check_version.py`
    (in `just test`) fails until the versions all agree.
-2. In the same PR, `just changelog-cut X.Y.Z` turns `[Unreleased]` into
-   `[X.Y.Z] - <today>`. A preview that needs a data reset or a new relay
+2. In the same PR, `just changelog-cut X.Y.Z` turns `[Unreleased]` and the
+   fragments in `changelog.d/` into `[X.Y.Z] - <today>`, with the fragments
+   after the entries already under `[Unreleased]`, and deletes the
+   fragments (`just changelog-preview` shows the result first). A preview
+   that needs a data reset or a new relay
    says so at the top of its section. A `docs/releases/X.Y.Z.md`, when
    present, replaces the CHANGELOG section and the install command in the
    release notes; write one when the section is over GitHub's 125000
