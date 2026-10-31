@@ -136,6 +136,7 @@ def test_real_cli_reference_lists_every_command() -> None:
     human = [c.name for c in gen.walk_cli() if c.human]
     assert human == [
         "verify",
+        "stay",
         "remove",
         "audit",
         "transcript",
