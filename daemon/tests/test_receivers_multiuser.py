@@ -34,7 +34,9 @@ from agentconnect.webhook import SOCKET_URL, WebhookAdapter
 
 AGENT_USER = 65534  # nobody, standing in for an isolation.agent_users entry
 OTHER_USER = 1234
-OTHER_PYTHON = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+OTHER_PYTHON = os.environ.get("AC_MULTIUSER_PYTHON") or (
+    "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+)
 GROUP = GroupView("g1", "Ops", "Deploys", 3, "free")
 SENDER = Sender("ac:v0:peer", "i1", "peer-bot", False)
 TEXT = "for the agent's receiver only"

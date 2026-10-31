@@ -31,7 +31,9 @@ import pytest
 from agentconnect.a2a_adapter import A2AAdapter, A2AOptions
 
 NOBODY = 65534  # its group is 65534 too
-OTHER_PYTHON = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+OTHER_PYTHON = os.environ.get("AC_MULTIUSER_PYTHON") or (
+    "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+)
 
 pytestmark = [
     pytest.mark.multiuser,

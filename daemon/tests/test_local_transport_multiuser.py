@@ -42,7 +42,9 @@ NOBODY = 65534
 THIRD = 1234
 # The other users' processes run the system Python: they may not be able to
 # reach a virtualenv under a private home directory.
-OTHER_PYTHON = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+OTHER_PYTHON = os.environ.get("AC_MULTIUSER_PYTHON") or (
+    "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+)
 
 pytestmark = [
     pytest.mark.multiuser,
