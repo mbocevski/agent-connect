@@ -247,6 +247,10 @@ async def test_a_second_session_attaches_and_takes_over(cluster: Cluster) -> Non
     (msg,) = (await second.client.ok("agentconnect_wait", {"timeout_s": 300}))["messages"]
     assert msg["text"].endswith("for alice")
     assert (await alice.client.ok("agentconnect_wait", {"timeout_s": 0}))["messages"] == []
+    # The ack of that result is sent by a task of its own once the result is
+    # written, so the client can read the result first. It has to reach the
+    # owner before the owner goes, or the message is rightly returned again.
+    await asyncio.wait_for(_until(lambda: second.acks_settled), WAIT)
 
     # The owner's session ends: the attached one takes the directory over.
     await alice.stop()
@@ -256,6 +260,48 @@ async def test_a_second_session_attaches_and_takes_over(cluster: Cluster) -> Non
     assert [g["group_id"] for g in listed["groups"]] == [gid]
     (msg,) = (await second.client.ok("agentconnect_wait", {"timeout_s": 300}))["messages"]
     assert msg["msg_id"] == sent["msg_id"]
+
+
+async def test_a_message_whose_ack_missed_the_owner_is_returned_again_after_the_takeover(
+    cluster: Cluster, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At least once: the owner goes before the ack of a written result
+    reaches it. The message was never acknowledged, so the session that takes
+    the directory over returns it again, once, and the next message after it."""
+    alice, bob, gid = await joined_pair(cluster)
+    second = await cluster.mcp("alice-2", data_dir=alice.data_dir)
+    assert second.mode == "attach"
+    session = second.server.session
+    release = asyncio.Event()
+    real_ack = session._ack
+
+    async def held(batch: Any) -> bool:
+        await release.wait()
+        return await real_ack(batch)
+
+    monkeypatch.setattr(session, "_ack", held)
+
+    first = await bob.client.ok("agentconnect_send", {"group": gid, "text": "for alice"})
+    (msg,) = (await second.client.ok("agentconnect_wait", {"timeout_s": 300}))["messages"]
+    assert msg["msg_id"] == first["msg_id"]
+
+    await alice.stop()  # the ack is still waiting to be sent
+    release.set()  # and goes to an owner that is gone
+    await asyncio.wait_for(_until(lambda: not session._acking), WAIT)
+    assert not second.acks_settled, "the failed ack is kept for a retry"
+
+    sent = await bob.client.ok("agentconnect_send", {"group": gid, "text": "still there?"})
+    seen: list[str] = []
+
+    async def collect() -> None:
+        while sent["msg_id"] not in seen:
+            got = (await second.client.ok("agentconnect_wait", {"timeout_s": 300}))["messages"]
+            seen.extend(m["msg_id"] for m in got)
+
+    await asyncio.wait_for(collect(), WAIT)
+    assert second.mode == "host"
+    assert seen.count(first["msg_id"]) == 1, "offered again, once"
+    assert seen.index(first["msg_id"]) < seen.index(sent["msg_id"])
 
 
 async def test_attaches_to_a_running_daemon(cluster: Cluster) -> None:

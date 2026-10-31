@@ -232,6 +232,16 @@ class McpInstance:
         return self.host.queue
 
     @property
+    def acks_settled(self) -> bool:
+        """Every result this server has written has been acknowledged to the
+        runtime that holds the messages: no batch waits to be written, none
+        is being acknowledged, and none failed and waits for a retry. The
+        ack runs in a task of its own after the result is written, so a
+        client that has read the result can still be ahead of it."""
+        session = self.server.session
+        return not (session.awaiting_write() or session._acking or session._unacked)
+
+    @property
     def data_dir(self) -> Path:
         return self.config.data_dir
 
