@@ -2915,19 +2915,22 @@ class Engine:
         the messages it replies to, at most 2^32 - 1 (SPEC 7.2: a u32).
 
         "Replies to" is the received messages named in ``reply_to`` (their
-        ``msg_id``s) when the agent says; otherwise the last message that
+        ``msg_id``s) when the agent says, and always the last message that
         triggered this instance in the group (0 before any, so a fresh agent
-        message has hop 1). A ``control.resume`` resets that to 0.
+        message has hop 1): naming an older message, a human's at hop 0 say,
+        can't lower it, or two agents could talk forever under
+        ``max_agent_turns`` (SR-33). A ``control.resume`` resets the trigger
+        to 0.
 
         Also returns the ``msg_id``s replied to, for the inner ``reply_to``.
         """
         refs: list[str] = [str(r) for r in (reply_to or [])][:MAX_REPLY_TO]
         hops = self.store.inbox_hops(group_id, refs)
-        if hops:
-            return min(int(max(hops)) + 1, U32_MAX), refs
         last = self.store.kv_get(f"trigger_msg/{group_id}") or ""
         hop = int(self.store.kv_get(f"trigger_hop/{group_id}") or "0") + 1
-        if not refs and last != "":
+        if hops:
+            hop = max(hop, int(max(hops)) + 1)
+        elif not refs and last != "":
             refs = [last]
         return min(hop, U32_MAX), refs
 

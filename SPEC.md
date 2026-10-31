@@ -1870,6 +1870,9 @@ reference daemon raises `send_failed`).
   names those messages' `msg_id`s in `reply_to` (§7.2). When the agent
   doesn't say what it replies to, it replies to the last message that
   triggered its instance in the group (a fresh agent message has hop 1).
+  Either way the `hop` MUST be at least one more than the `hop` of the last
+  message that triggered its instance since the last `control.resume`:
+  naming an older message, such as a human's at hop 0, doesn't lower it.
 - A receiver that knows any message named in `reply_to` (because it sent
   or received it) MUST treat the message's `hop` as at least one more than
   the largest of their hops (at most 2^32 − 1) for the loop guard, whatever

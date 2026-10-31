@@ -598,7 +598,7 @@ store written the old way.
 | SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Fixed: the adapter's client in #108, the facade's push client in #113 (`trust_env=False`, no redirects) |
 | SR-31 | daemon | Facade push-notification URLs are not screened, so the facade token holder can make the daemon POST task updates to any address. | `a2a_adapter/facade.py:346`. By reading; later confirmed with a probe. | Fixed in #117: push URLs must be `http`/`https` to a literal loopback address, checked when set and before each send |
 | SR-32 | daemon | `GET /v0/status` with the agent token counts a group hidden from the agent (an approved knock before the knocker joins) and lists its id in `out_of_sync`. | `engine.py:3616-3628`, `runtime/agent.py:58-63`, `api.py:1426-1427`. Confirmed. | Fixed in #161: for the agent, status counts no hidden group (groups, `out_of_sync`, queues, pending joins) and an event stream for one is `404 not_found`. Test: `harness/tests/test_headless.py::test_the_agent_doesnt_see_a_hidden_group_in_its_status_or_streams` |
-| SR-33 | daemon | The agent's `reply_to` choice resets the loop-guard hop: two agents that keep naming the human's first message never reach `max_agent_turns`. | `engine.py:1672-1691`, `engine.py:1518-1524`, `mcp/tools.py:283-288`. Probe: eight replies at hop 1, no pause. Confirmed. | Open (T-33) |
+| SR-33 | daemon | The agent's `reply_to` choice resets the loop-guard hop: two agents that keep naming the human's first message never reach `max_agent_turns`. | `engine.py:1672-1691`, `engine.py:1518-1524`, `mcp/tools.py:283-288`. Probe: eight replies at hop 1, no pause. Confirmed. | Fixed in #163: an agent's hop is at least its last trigger's hop + 1 since the last resume, whatever `reply_to` names (SPEC §10.3). Test: `harness/tests/test_loop_guard.py::test_naming_the_humans_message_does_not_reset_the_hop` |
 | SR-34 | daemon | `close_requested` carries the owner's 200-character reason to the agent while `require_verified` still holds deliveries, and the agent may then leave, though SPEC §7.3 makes that the human's decision. | `engine.py:1427-1436`, `engine.py:146-157`. Confirmed. | Open (T-34) |
 | SR-35 | daemon | In `free` mode a replica is triggered by its sibling's messages, although SPEC §9.3 triggers "all members except the sender" and a member is an identity. | `engine.py:414-415`. Confirmed. | Open (T-35) |
 | SR-36 | daemon | The reconnect-drain exemption from the rates resets on every connection, and the relay decides when the drain ends, so a relay colluding with a member bypasses the §10.2 rates. | `relay.py:114-115`, `relay.py:190-199`, `engine.py:763-773`. By reading. | Open (T-36) |
@@ -1155,7 +1155,7 @@ One line per open item, ready to file.
   configs off.
 - **T-32 (Low, SR-32, fixed in #161):** Daemon: filter hidden groups from the agent's
   status, pending counts and SSE group checks.
-- **T-33 (Low, SR-33):** Daemon: an agent's hop is at least its last
+- **T-33 (Low, SR-33, fixed in #163):** Daemon: an agent's hop is at least its last
   trigger's hop + 1 until a resume, whatever `reply_to` names.
 - **T-34 (Low, SR-34):** Daemon: make `close_requested` a human event, or
   hold its reason behind the verification gate.
