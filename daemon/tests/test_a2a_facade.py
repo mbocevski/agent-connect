@@ -203,6 +203,36 @@ async def test_task_events_and_a_closing_message(setup: Any) -> None:
     assert final.metadata["sender"] == PEER
 
 
+async def test_a_member_addressed_request_takes_only_that_members_reply(setup: Any) -> None:
+    """SR-37: a request on a member's path (`/g/<gid>/m/<X>/`) goes to X
+    alone; in a `free` group every member reads it, but a reply from anyone
+    else can't stand in for X's."""
+    adapter, group, _client = setup
+    card = AgentCard(name="x")
+    card.supported_interfaces.add(
+        url=adapter.facade.url(GID, PEER), protocol_binding="JSONRPC", protocol_version="1.0"
+    )
+    http = httpx.AsyncClient(headers={"Authorization": f"Bearer {adapter.facade_token}"})
+    member = ClientFactory(ClientConfig(httpx_client=http)).create(card)
+    running = asyncio.ensure_future(collect(member.send_message(user("just you"))))
+    (sent,) = await group.wait_for(1)
+    assert sent["to"] == [PEER]
+    await answer(
+        adapter,
+        reply(
+            "sent-1",
+            "a2a.message",
+            convert.to_json(convert.agent_text("not you", GID)),
+            sender="ac:v0:other",
+        ),
+        reply("sent-1", "a2a.message", convert.to_json(convert.agent_text("me", GID)), n=1),
+    )
+    (event,) = await asyncio.wait_for(running, 5)
+    assert event.message.parts[0].text == "me"
+    assert event.message.metadata["sender"] == PEER
+    await http.aclose()
+
+
 async def test_a_task_is_bound_to_the_instance_that_answered(
     setup: Any, rng: random.Random
 ) -> None:

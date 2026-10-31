@@ -188,6 +188,12 @@ class BridgeExecutor(AgentExecutor):
             async with asyncio.timeout(self._facade.adapter.options.reply_timeout):
                 while True:
                     d = await replies.get()
+                    if self._member is not None and d.sender.identity != self._member:
+                        # A request on a member's path takes only that
+                        # member's replies: in a `free` group everyone reads
+                        # it, and another member's answer can't stand in
+                        # for the member the client asked (SR-37).
+                        continue
                     if bound is not None and (
                         d.sender.identity != bound.responder
                         or d.sender.instance_id != bound.instance
