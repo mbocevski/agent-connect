@@ -169,5 +169,7 @@ jobs:
       - name: Logs
         if: ${{ !cancelled() }}
         run: |
+          (cd / && sudo -n -u "$AC_USER" "$AC_BIN" version) || true
+          sudo -n -u "$AC_USER" "$AC_BIN" version || true
           sudo tail -n 60 /usr/local/var/log/agentconnect/agentconnectd.log || true
           tail -n 20 "$RUNNER_TEMP/relay.log" || true
