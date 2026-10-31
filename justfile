@@ -128,7 +128,12 @@ nightly-fuzz crate secs="300":
     cd "$crate"
     targets="$(cargo +nightly fuzz list)"
     test -n "$targets" || { echo "no fuzz targets in $crate" >&2; exit 1; }
-    cargo +nightly fuzz build
+    # cargo-fuzz builds for the triple it was itself built for, and the release
+    # binary that CI installs is a musl build, whose target is not installed
+    # and which the address sanitizer can't link statically: name the host.
+    host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+    test -n "$host" || { echo "nightly-fuzz: no host triple from rustc" >&2; exit 1; }
+    cargo +nightly fuzz build --target "$host"
     # The fuzzer's output and crashing inputs stay on this machine: the CI
     # log is public, and a crash is an undisclosed finding (SECURITY.md).
     out="$(mktemp -d)"
@@ -136,7 +141,7 @@ nightly-fuzz crate secs="300":
     for t in $targets; do
         echo "fuzzing $crate/$t for $secs s"
         mkdir "$out/$t"
-        if cargo +nightly fuzz run "$t" -- -max_total_time="$secs" \
+        if cargo +nightly fuzz run --target "$host" "$t" -- -max_total_time="$secs" \
             -artifact_prefix="$out/$t/" >"$out/$t.log" 2>&1; then
             grep -E '^Done [0-9]+ runs' "$out/$t.log" || true
         else
