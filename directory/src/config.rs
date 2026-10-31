@@ -304,8 +304,9 @@ fn connection_limit(name: &str, v: Option<String>, default: usize) -> Result<usi
         .ok_or_else(|| format!("{name} must be 1 to {MAX_CONNECTION_LIMIT}: {v}"))
 }
 
-/// `AC_DIRECTORY_TRUSTED_HOPS`: 1 to 8, default 1.
-fn trusted_hops(v: Option<String>) -> Result<usize, String> {
+/// `AC_DIRECTORY_TRUSTED_HOPS`: 1 to 8, default 1. The refusal doesn't echo
+/// the value.
+fn hop_count(v: Option<String>) -> Result<usize, String> {
     match v.filter(|v| !v.is_empty()) {
         None => Ok(1),
         Some(v) => v
@@ -313,7 +314,7 @@ fn trusted_hops(v: Option<String>) -> Result<usize, String> {
             .parse::<usize>()
             .ok()
             .filter(|n| (1..=8).contains(n))
-            .ok_or_else(|| format!("AC_DIRECTORY_TRUSTED_HOPS must be 1 to 8: {v}")),
+            .ok_or_else(|| "AC_DIRECTORY_TRUSTED_HOPS must be 1 to 8".to_owned()),
     }
 }
 
@@ -436,7 +437,7 @@ impl Config {
             token_keys,
             client_ip_header,
             trusted_proxies,
-            trusted_hops: trusted_hops(get("AC_DIRECTORY_TRUSTED_HOPS"))?,
+            trusted_hops: hop_count(get("AC_DIRECTORY_TRUSTED_HOPS"))?,
             stylesheet: get("AC_DIRECTORY_STYLESHEET")
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from),
