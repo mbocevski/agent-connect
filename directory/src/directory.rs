@@ -316,6 +316,20 @@ impl<S: Store> Directory<S> {
         format!("{}/a/{name}", self.settings.host)
     }
 
+    /// Whether a stored listing's token is under a key this directory pins
+    /// now. After the operator rotates `DK`, knockers refuse a listing under
+    /// the retired key, so it counts as expired (SR-24).
+    fn token_pinned(&self, record: &ListingRecord) -> bool {
+        let Ok(listing) = self.verifier.listing(&record.bytes) else {
+            return false;
+        };
+        let key_id = b64(&listing.token().key_id);
+        self.verifier
+            .token_keys()
+            .iter()
+            .any(|k| k.key_id == key_id)
+    }
+
     fn view(record: ListingRecord, now: u64) -> Option<Listing> {
         let card = Card::parse(&record.bytes).ok()?;
         let owner = owner_state(record.owner_domain.as_deref(), &record.owner, now);
@@ -356,6 +370,12 @@ impl<S: Store> Directory<S> {
                     at: r.token_expires_at,
                 });
             }
+            if !self.token_pinned(&r) {
+                return Ok(Lookup::Gone {
+                    reason: GoneReason::TokenExpired,
+                    at: now,
+                });
+            }
             return Ok(Self::view(r, now).map_or(Lookup::Missing, |l| Lookup::Found(Box::new(l))));
         }
         Ok(
@@ -393,6 +413,7 @@ impl<S: Store> Directory<S> {
         let found = self.store.search(&q).await.map_err(|e| internal(&e))?;
         Ok(found
             .into_iter()
+            .filter(|r| self.token_pinned(r))
             .filter_map(|r| Self::view(r, now))
             .filter(|l| l.owner != OwnerState::Failed)
             .take(SEARCH_LIMIT)
@@ -422,6 +443,7 @@ impl<S: Store> Directory<S> {
             let full = page.len() == self.page as usize;
             out.extend(
                 page.into_iter()
+                    .filter(|r| self.token_pinned(r))
                     .filter_map(|r| Self::view(r, now))
                     .filter(|l| l.owner != OwnerState::Failed),
             );

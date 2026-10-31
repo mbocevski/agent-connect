@@ -529,7 +529,7 @@ async def test_failing_renewals_keep_at_most_three_doors_and_report_stale_once(
     assert world.events("listing_renewed")
 
 
-@pytest.mark.parametrize("code", ["token_revoked", "name_held", "bad_token"])
+@pytest.mark.parametrize("code", ["token_revoked", "name_held", "bad_token", "unknown_key"])
 async def test_a_refused_renewal_stops_renewing(world: World, code: str) -> None:
     await world.publish()
     first = world.listed()

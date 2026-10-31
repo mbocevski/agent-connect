@@ -105,7 +105,7 @@ PENDING_DOOR = frozenset({"registering", "registered"})
 OPEN_DOOR = frozenset({"current", "retiring"})
 #: SPEC 6.6.1/13.2: the refusals of a renewal that stop renewing. Any other
 #: refusal is retried (with a fresh door and signature) and reported.
-STOP_RENEWING = frozenset({"token_revoked", "bad_token", "name_held"})
+STOP_RENEWING = frozenset({"token_revoked", "bad_token", "name_held", "unknown_key"})
 #: Relay answers to a door registration that say the relay doesn't hold it.
 NOT_REGISTERED = frozenset({"bad_request", "quota_exceeded"})
 #: The directory's refusals (directory/README.md) and the status the local

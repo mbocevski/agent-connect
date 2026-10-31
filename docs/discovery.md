@@ -156,8 +156,9 @@ token's expiry. The runtime keeps the listing reachable on its own:
 - **A renewal that fails** is retried with the same bytes. After an hour of
   failures the listing is `stale` and you get a `listing_stale` event
   (`reason: publish_failed`), once per episode; the old door keeps working
-  until it expires. Only `token_revoked`, `bad_token` and `name_held` stop
-  renewing (`reason: refused`). Any other refusal (`stale_ts`, `bad_door`,
+  until it expires. Only `token_revoked`, `bad_token`, `name_held` and
+  `unknown_key` (the operator rotated its token key: ask it for a new
+  token) stop renewing (`reason: refused`). Any other refusal (`stale_ts`, `bad_door`,
   `wrong_relay`, ...) is reported at once (`reason: publish_failed`, with
   the `code`) and retried with a fresh door and signature. A door that
   expires before a renewal lands raises `reason: door_expired`, and a

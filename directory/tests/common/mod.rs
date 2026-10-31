@@ -252,11 +252,22 @@ impl Harness {
         if let Some(t) = now {
             clock.set(std::time::UNIX_EPOCH + Duration::from_secs(t));
         }
-        let fetcher = Arc::new(FakeFetcher::default());
         let verifier = CoreVerifier::new(host, keys).unwrap();
+        Self::verified_by(host, relay, Arc::new(verifier), clock, f)
+    }
+
+    /// A directory for `host` and `relay` checking with `verifier`.
+    pub fn verified_by(
+        host: &str,
+        relay: &str,
+        verifier: Arc<dyn agentconnect_directory::verify::Verifier>,
+        clock: Arc<FakeClock>,
+        f: impl FnOnce(Directory<MemoryStore>) -> Directory<MemoryStore>,
+    ) -> Self {
+        let fetcher = Arc::new(FakeFetcher::default());
         let dir = Directory::new(
             MemoryStore::new(),
-            Arc::new(verifier),
+            verifier,
             fetcher.clone(),
             clock.clone(),
             Settings {
