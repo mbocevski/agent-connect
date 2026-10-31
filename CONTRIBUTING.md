@@ -40,7 +40,8 @@ Python workspace (`uv sync --all-packages`), and all git hooks via prek.
 
 To merge several PRs, use `just merge-train <pr-number> [<pr-number>...]`. It
 takes them in order: `just update-branch` if the PR is behind, a wait for its
-checks of up to 90 minutes, then `just merge`. It stops at the first PR with a
+checks of up to 90 minutes (only the newest run of each workflow counts, so a run
+that a newer one replaced doesn't stop it), then `just merge`. It stops at the first PR with a
 rebase conflict, a failed check, a timeout or a refusal, says which and why,
 pushes nothing for that PR and doesn't start the ones after it. It adds no way
 around a gate. The rebase runs in the worktree that has the PR's branch, or in a
