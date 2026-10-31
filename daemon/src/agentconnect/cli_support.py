@@ -312,6 +312,17 @@ def connect(path: Path | None, *, human: bool = False) -> ApiClient:
     return ApiClient(load(path), human=human)
 
 
+def connect_preferring_human(path: Path | None) -> ApiClient:
+    """The human token when this user can read it, else the agent token: for
+    an operation either may run whose answer is the human's when it can be
+    (leaving after the owner's close, SPEC 7.3)."""
+    config = load(path)
+    try:
+        return ApiClient(config, human=True)
+    except (ApiClientError, OSError):
+        return ApiClient(config)
+
+
 def pause(seconds: float) -> None:
     """Wait between polls (a seam: tests replace it)."""
     time.sleep(seconds)

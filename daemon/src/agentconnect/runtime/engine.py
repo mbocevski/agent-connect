@@ -212,6 +212,10 @@ HUMAN_EVENTS = (
             "message_failed",
             "invite_flooded",
             "join_ledger_full",
+            # SPEC 7.3: leaving is the human's decision. The agent gets the
+            # close itself, through the delivery gates (require_verified
+            # included), never its reason ahead of them (SR-34).
+            "close_requested",
         }
     )
     | KNOCK_OWNER_EVENTS
@@ -2468,7 +2472,9 @@ class Engine:
                 self._defer(self._delivery_wake.set)
             if delivery.kind == "control.close":
                 # SPEC 7.3: the owner asks everyone to leave. Leaving is the
-                # human's decision; the daemon never leaves on its own.
+                # human's decision; the daemon never leaves on its own, and
+                # until the human answers the agent may not either (SR-34).
+                self.store.kv_set(f"close_pending/{group_id}", msg_id)
                 reason = delivery.body.get("reason")
                 await self.emit(
                     group_id,
@@ -5302,7 +5308,22 @@ class Engine:
         return self.groups.transfer_to(group_id, identity, keep_admin=keep_admin)
 
     async def leave(self, group_id: str) -> str:
-        return await self.groups.leave(group_id)
+        status = await self.groups.leave(group_id)
+        self.store.kv_set(f"close_pending/{group_id}", "")
+        return status
+
+    def close_pending(self, group_id: str) -> bool:
+        """Whether the owner's close (SPEC 7.3) waits for the human's answer
+        in this group: until then the agent may not leave it."""
+        return bool(self.store.kv_get(f"close_pending/{group_id}"))
+
+    def stay(self, group_id: str) -> None:
+        """**Human-only.** The human's answer to the owner's close: it stays
+        in the group, and the agent may leave on its own judgement again."""
+        group = self.store.group(group_id)
+        if group is None or group.status != "active":
+            raise DaemonError("not_found", "no such active group")
+        self.store.kv_set(f"close_pending/{group_id}", "")
 
     def mark_verified(
         self, group_id: str, identity: str, verified: bool = True, run: str | None = None

@@ -57,6 +57,7 @@ from agentconnect.cli_support import (
     Sas,
     clean,
     connect,
+    connect_preferring_human,
     emit_json,
     events_after,
     group_view,
@@ -1565,11 +1566,15 @@ def _report_mismatch(api: ApiClient, gid: str, info: dict[str, Any], as_json: bo
 # -- talking ---------------------------------------------------------------------------------
 
 
-@app.command(cls=IdArgsCommand)
+@app.command(
+    cls=IdArgsCommand,
+    help="Leave a group. The owner must hand over ownership first. Uses the human token "
+    "when you can read it (after the owner asked everyone to leave, leaving is the "
+    "human's answer), else the agent token, which is refused then (`human_decides`).",
+)
 def leave(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
-    """Leave a group. The owner must hand over ownership first."""
     with guard(as_json):
-        api = connect(config)
+        api = connect_preferring_human(config)
         gid = resolve_group(api, group)
         state = api.request("POST", f"/v0/groups/{gid}/leave")["status"]
         if as_json:
@@ -1578,6 +1583,22 @@ def leave(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> Non
             typer.echo("Left the group.")
         else:
             typer.echo("Leaving: the proposal is sent; the other members complete it.")
+
+
+@app.command(
+    cls=IdArgsCommand,
+    help="Answer the owner's request to close a group by staying in it: your agent may "
+    f"leave on its own again (it can't while the request waits). {HUMAN_ONLY_HELP}",
+)
+def stay(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    with guard(as_json):
+        api = connect(config, human=True)
+        gid = resolve_group(api, group)
+        state = api.request("POST", f"/v0/groups/{gid}/stay")["status"]
+        if as_json:
+            emit_json({"group_id": gid, "status": state})
+        else:
+            typer.echo("Staying in the group.")
 
 
 @app.command(cls=IdArgsCommand)

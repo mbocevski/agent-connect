@@ -620,3 +620,28 @@ async def test_every_agent_route_answers_a_hidden_group_as_an_unknown_one(
         absent = await answer(method, path.format(gid=unknown, **fill), body)
         assert hidden == absent, f"{method} {path}: {hidden!r} != {absent!r}"
     await h.close()
+
+
+async def test_after_a_close_the_agent_token_cant_leave_until_the_human_answers(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    """SR-34 over the API: `409 human_decides` for the agent token's leave
+    while the owner's close waits; `POST /v0/groups/{gid}/stay` is the
+    human's answer (`403 human_only` for the agent token)."""
+    alice, bob, gid = await pair(cluster, sockdir)
+    alice.daemon.send_message(gid, {"reason": "done"}, kind="control.close", origin="human")
+    await bob.node.wait(lambda: bob.node.daemon.close_pending(gid))
+    agent = {"authorization": f"Bearer {api_token(bob.server, 'agent')}"}
+    human = {"authorization": f"Bearer {api_token(bob.server, 'human')}"}
+    async with httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(uds=str(bob.server.address)), base_url="http://x"
+    ) as c:
+        resp = await c.post(f"/v0/groups/{gid}/leave", headers=agent)
+        assert (resp.status_code, resp.json()["code"]) == (409, "human_decides")
+        resp = await c.post(f"/v0/groups/{gid}/stay", headers=agent)
+        assert (resp.status_code, resp.json()["code"]) == (403, "human_only")
+        resp = await c.post(f"/v0/groups/{gid}/stay", headers=human)
+        assert (resp.status_code, resp.json()) == (200, {"status": "staying"})
+        resp = await c.post(f"/v0/groups/{gid}/leave", headers=agent)
+        assert resp.status_code == 200
+    await bob.close()

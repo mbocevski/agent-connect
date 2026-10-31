@@ -134,6 +134,10 @@ class Fake:
         monkeypatch.setattr(
             cli, "connect", lambda _c, human=False: FakeApi(human, self.routes, self.calls)
         )
+        # This user can read the human token here.
+        monkeypatch.setattr(
+            cli, "connect_preferring_human", lambda _c: FakeApi(True, self.routes, self.calls)
+        )
         monkeypatch.setattr(cli_support, "pause", self.pauses.append)
 
     def run(self, *args: str, input: str | None = None) -> Any:
@@ -846,6 +850,37 @@ def test_leave(fake: Fake) -> None:
     assert "Leaving" in fake.run("leave", GID).stdout
     fake.routes[f"POST /v0/groups/{GID}/leave"] = ApiClientError(403, "forbidden", "transfer first")
     assert fake.run("leave", GID).exit_code == 3
+
+
+def test_stay(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/stay"] = [{"status": "staying"}, {"status": "staying"}]
+    assert fake.json("stay", GID) == (0, {"group_id": GID, "status": "staying"})
+    assert conforms(fake.json("stay", GID)[1], SCHEMAS["stay"])
+    fake.routes[f"POST /v0/groups/{GID}/stay"] = {"status": "staying"}
+    assert "Staying" in fake.run("stay", GID).stdout
+    # Staying is the human's answer to the owner's close: the human token.
+    assert {human for human, _ in fake.posts("/stay")} == {True}
+
+
+def test_leave_uses_the_human_token_when_it_can_be_read(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/leave"] = {"status": "leaving"}
+    assert fake.run("leave", GID).exit_code == 0
+    assert {human for human, _ in fake.posts("/leave")} == {True}
+
+
+def test_connect_preferring_human_falls_back_to_the_agent_token(
+    tmp_path: Path, rng: random.Random
+) -> None:
+    """Without the human token (an agent user), the agent token is used."""
+    agent, human = (rng.randbytes(16).hex() for _ in range(2))
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "api-token").write_text(agent, encoding="ascii")
+    config = tmp_path / "config.toml"
+    config.write_text(f'[daemon]\ndata_dir = "{data}"\n', encoding="utf-8")
+    assert cli_support.connect_preferring_human(config)._token == agent
+    (data / "human-token").write_text(human, encoding="ascii")
+    assert cli_support.connect_preferring_human(config)._token == human
 
 
 def test_send_with_recipients_and_hint(fake: Fake) -> None:

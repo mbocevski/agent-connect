@@ -578,8 +578,19 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "_leave",
         "Leave a group: the daemon sends `control.leave` and a leave proposal, and another "
         "member commits it. `status` is `leaving`, or `left` for a sole member. The owner's "
-        "last instance must hand over ownership first (`403 forbidden`).",
+        "last instance must hand over ownership first (`403 forbidden`). After the owner's "
+        "`control.close` (a `close_requested` event) the human decides: until it stays or "
+        "leaves, the agent token gets `409 human_decides`.",
         response={"status": "str"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/stay",
+        "_stay",
+        "Answer the owner's `control.close` (a `close_requested` event) by staying in the "
+        "group. The agent may leave on its own judgement again.",
+        response={"status": "str"},
+        human=True,
     ),
     RouteSpec(
         "GET",
@@ -995,7 +1006,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "the knocks your listing received (`knock_received`, `knock_approved`, "
         "`knock_rejected`, `knock_expired`, `knock_approval_failed`), "
         "`invite_flooded` (one of your invites gets more join requests than it can hold), "
-        "`join_ledger_full` (the join ledger itself is full) and where the group's "
+        "`join_ledger_full` (the join ledger itself is full), `close_requested` (the "
+        "owner asks everyone to leave: the human decides, and the agent gets the close "
+        "itself through the delivery gates) and where the group's "
         "deliveries stand (`adapter_unavailable`, `adapter_available`, "
         "`delivery_stalled`, `delivery_resumed`). "
         "With "
@@ -1196,6 +1209,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     ),
     (409, "invite_not_open", "The invite was used up, revoked or never open."),
     (409, "not_moderated", "Floor grant: the group's floor isn't `moderated`."),
+    (
+        409,
+        "human_decides",
+        "Leave with the agent token: the owner asked everyone to leave and the human "
+        "hasn't answered (`stay` or leave).",
+    ),
     (
         409,
         "group_full",
@@ -1567,7 +1586,11 @@ class ApiServer:
         return {"msg_id": msg_id, "status": status}
 
     async def _leave(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return await self.agent.leave(p["gid"])
+        return await self.agent.leave(p["gid"], human=p.get(SCOPE) == "human")
+
+    async def _stay(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        self.daemon.stay(p["gid"])
+        return {"status": "staying"}
 
     async def _approve(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         purpose = b.get("purpose")

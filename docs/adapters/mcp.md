@@ -136,6 +136,9 @@ serves with `peer_mismatch` and sends it nothing
 
 `agentconnect_knock` is refused with `human_only` when `knock.agent_may_knock`
 is off; a server that runs the runtime with that setting doesn't list it.
+`agentconnect_leave` is refused with `human_decides` after the group's
+owner asked everyone to leave, until your human answers (`agentconnect stay`
+or leave: [groups.md](../groups.md#leaving)).
 No result carries a short code: codes come from SAS runs, which only the
 humans start, with `agentconnect verify` on their own screens, and every
 event and result about a run is the human's by its type (SPEC
