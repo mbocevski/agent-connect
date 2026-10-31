@@ -1792,9 +1792,11 @@ per-sender rate, and the identity cap keeps replicas from multiplying an
 identity's budget. Ceremony messages (§11.2) don't count against these
 rates; they have a budget of their own (§11.3). Messages received in the reconnect
 drain (§8.2) are exempt from the per-minute rates, since they queued while
-the member was away (an implementation SHOULD still bound the exemption;
-the reference daemon allows 1000 per connection, and per identity twice its
-per-sender rate, so one peer's queued messages can't use up the exemption); the
+the member was away (an implementation SHOULD still bound the exemption,
+per identity across connections too, since the relay decides when a drain
+starts and ends; the reference daemon allows 1000 per connection, and per
+identity twice its per-sender rate in any hour, so one peer's queued
+messages can't use up the exemption and reconnecting doesn't renew it); the
 size, kind and part
 limits always apply. Allowed A2A part kinds are `text` and
 `data`. A part carries exactly one content member (`text`, `data`, or a

@@ -1062,11 +1062,12 @@ class Engine:
     def _drain_exempt(self, group_id: str, identity: str) -> bool:
         """Whether the frame being handled is part of the reconnect drain and
         still within the drain's budget: :data:`MAX_DRAIN_EXEMPT` for this
-        connection, and twice the per-sender rate for each identity."""
+        connection, and twice the per-sender rate for each identity in any
+        hour, however many times the relay reconnects (SR-36)."""
         if not self._drain_frame:
             return False
         limit = self.safety.settings(group_id).limits(identity).sender_per_minute
-        return self._drain.take(f"{group_id}/{identity}", DRAIN_RATE_MULTIPLE * limit)
+        return self._drain.take(f"{group_id}/{identity}", DRAIN_RATE_MULTIPLE * limit, self.now())
 
     async def _on_connected(self) -> None:
         self._drain.reset()
