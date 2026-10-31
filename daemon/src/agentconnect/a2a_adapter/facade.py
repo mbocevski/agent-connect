@@ -176,7 +176,7 @@ class BridgeExecutor(AgentExecutor):
                 event_queue, context, TaskState.TASK_STATE_FAILED, f"not sent: {code}"
             )
             return
-        self._facade.waiters[msg_id] = replies
+        self._facade.wait(msg_id, replies, self._member)
         task_mode = context.current_task is not None
         try:
             if isinstance(msg_id, SendReceipt) and msg_id.held:
@@ -212,7 +212,7 @@ class BridgeExecutor(AgentExecutor):
                 await self._start_task(context, event_queue)
             await self._status(event_queue, context, TaskState.TASK_STATE_FAILED, "no reply")
         finally:
-            self._facade.waiters.pop(msg_id, None)
+            self._facade.unwait(msg_id)
 
     async def _wait_for_human(
         self, context: RequestContext, queue: EventQueue, receipt: SendReceipt
@@ -431,6 +431,8 @@ class Facade:
         self._http = httpx.AsyncClient(timeout=10.0, trust_env=False, follow_redirects=False)
         # msg_id sent by the facade -> the request waiting for replies to it
         self.waiters: dict[str, asyncio.Queue[Delivery]] = {}
+        # msg_id of a request on a member's path -> the member it asked
+        self.members: dict[str, str] = {}
         # facade task id -> its peer side
         self.bound: dict[str, Bound] = {}
         # hold id of a held facade send -> the human's decision, once it comes
@@ -512,16 +514,32 @@ class Facade:
         if not future.done():
             future.set_result(outcome)
 
+    def wait(self, msg_id: str, replies: asyncio.Queue[Delivery], member: str | None) -> None:
+        """Route replies to the request ``msg_id`` to ``replies``; only
+        ``member``'s, for a request on a member's path."""
+        self.waiters[msg_id] = replies
+        if member is not None:
+            self.members[msg_id] = member
+
+    def unwait(self, msg_id: str) -> None:
+        self.waiters.pop(msg_id, None)
+        self.members.pop(msg_id, None)
+
     def route_reply(self, d: Delivery) -> bool:
         """Hand a reply to the facade request it answers; False if none. Only
         a member the request asked (SPEC 9.3) answers it: every member reads
         the request, and an answer from anyone else is context, so it can't
-        stand in for the member the client asked, nor bind its task."""
+        stand in for the member the client asked, nor bind its task. A
+        request on a member's path takes only that member's replies, in every
+        floor mode (SR-37); another member's goes on as any other message."""
         refs = d.inner.get("reply_to")
         if not isinstance(refs, list):
             return False
         for ref in refs:
             queue = self.waiters.get(ref) if isinstance(ref, str) else None
+            member = self.members.get(ref) if isinstance(ref, str) else None
+            if member is not None and d.sender.identity != member:
+                continue
             if queue is not None and self.adapter.asked(d, ref):
                 queue.put_nowait(d)
                 return True
