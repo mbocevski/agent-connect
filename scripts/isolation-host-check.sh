@@ -63,11 +63,12 @@ expect_refused() {
     if [[ "$code" != 0 && "$out" == *"$text"* ]]; then
         pass "$label"
     else
-        fail "$label (exit $code, expected '$text'): ${out:0:300}"
+        fail "$label (exit $code, expected '$text'): ${out: -1500}"
     fi
 }
 
-work="$(mktemp -d)"
+# Not TMPDIR: on macOS that is under a directory only root can enter.
+work="$(mktemp -d /tmp/ac-check.XXXXXX)"
 chmod 0755 "$work"
 peer_pid=""
 cleanup() {
