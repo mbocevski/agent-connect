@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agentconnect = "agentconnect.cli:app"
+agentconnect = "agentconnect.entry:main"
 
 [tool.uv.sources]
 agentconnect-core = { workspace = true }
