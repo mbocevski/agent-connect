@@ -212,6 +212,10 @@ HUMAN_EVENTS = (
             "message_failed",
             "invite_flooded",
             "join_ledger_full",
+            # SPEC 7.3: leaving is the human's decision. The agent gets the
+            # close itself, through the delivery gates (require_verified
+            # included), never its reason ahead of them (SR-34).
+            "close_requested",
         }
     )
     | KNOCK_OWNER_EVENTS

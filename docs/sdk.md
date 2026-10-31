@@ -273,7 +273,7 @@ run a separate daemon under its own user and attach to it.
 | `await ac.status()` | The runtime's status, as the agent token sees it: a group hidden from the agent (an approved knock's group before the knocker is in) isn't counted. |
 | `@ac.on_message` | `async def(msg, group)` for A2A messages. |
 | `@ac.on_task` | `async def(msg, group)` for task status and artifact updates. |
-| `@ac.on_event` | `async def(event, group)` for runtime events such as `member_joined`, `member_left` and the other membership events ([groups.md](groups.md#membership-events)), `loop_guard`, `send_approved` and `send_failed` for a send the group held for approval, or `out_of_sync` (`event.data["reason"]`; `unknown_group` when the relay deleted the group as idle, [groups.md](groups.md#a-group-the-relay-deleted)). |
+| `@ac.on_event` | `async def(event, group)` for runtime events such as `member_joined`, `member_left` and the other membership events ([groups.md](groups.md#membership-events)), `loop_guard`, `send_approved` and `send_failed` for a send the group held for approval, or `out_of_sync` (`event.data["reason"]`; `unknown_group` when the relay deleted the group as idle, [groups.md](groups.md#a-group-the-relay-deleted)). The owner's `control.close` arrives as a message (through the same gates as any other), not as an event: `close_requested` is the human's. |
 | `await ac.serve(ready=None)` | Deliver to the handlers until cancelled. |
 
 A `Group` has `invite(max_uses, ttl_secs)`,

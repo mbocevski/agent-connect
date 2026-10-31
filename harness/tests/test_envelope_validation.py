@@ -56,6 +56,27 @@ async def test_a_malformed_commit_envelope_is_dropped_unprocessed(
     assert b.adapter.of_type("out_of_sync")[0].data["reason"] == "commit_dropped"
 
 
+def human_events(node: Node, kind: str) -> list[dict[str, Any]]:
+    return [e["data"] for e in node.daemon.store.events(limit=10_000) if e["type"] == kind]
+
+
+async def test_a_close_reason_waits_for_verification_like_the_close(group: GroupFixture) -> None:
+    """SR-34: with `require_verified`, deliveries wait until the human has
+    verified everyone; the owner's close reason waits with them. The
+    human is prompted at once."""
+    (a, b), gid = await group(2)
+    a.daemon.set_policy(gid, require_verified=True)
+    await a.idle()
+    await b.wait(lambda: bool(cached(b, gid).policy.get("require_verified")))
+    a.daemon.send_message(gid, {"reason": "leave now"}, kind="control.close", origin="human")
+    await b.wait(lambda: bool(human_events(b, "close_requested")))
+    await b.idle()
+    assert not b.adapter.of_type("close_requested")
+    assert not [d for d in b.adapter.deliveries if d.kind == "control.close"]
+    agent_events = (await b.runtime.agent.events())["events"]
+    assert "close_requested" not in [e["type"] for e in agent_events]
+
+
 def cached(node: Node, gid: str) -> GroupRow:
     g = node.daemon.store.group(gid)
     assert g is not None
@@ -238,10 +259,13 @@ async def test_control_close_prompts_the_human_and_never_leaves(group: GroupFixt
         gid, {"reason": "not mine to close"}, kind="control.close", origin="human"
     )
     a.daemon.send_message(gid, {"reason": "done here"}, kind="control.close", origin="human")
-    await c.adapter.wait_for(lambda: bool(c.adapter.of_type("close_requested")))
-    (event,) = c.adapter.of_type("close_requested")
-    assert event.data == {"sender": a.me, "reason": "done here"}
+    # The prompt is the human's (SR-34): the agent gets the close itself,
+    # through the delivery gates, never the event.
+    await c.wait(lambda: bool(human_events(c, "close_requested")))
+    (event,) = human_events(c, "close_requested")
+    assert event == {"sender": a.me, "reason": "done here"}
     await c.adapter.wait_for(lambda: any(d.kind == "control.close" for d in c.adapter.deliveries))
+    assert not c.adapter.of_type("close_requested")
     await c.idle()
     assert [d.body for d in c.adapter.deliveries if d.kind == "control.close"] == [
         {"reason": "done here"}
