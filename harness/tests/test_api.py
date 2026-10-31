@@ -794,14 +794,9 @@ async def listener(
     return api.server, connect, "ac", plain
 
 
-@pytest.mark.parametrize("n", [12, 24, 40, 60])
-@pytest.mark.parametrize("over", ["unix", "tcp"])
-async def test_requests_that_arrive_together_all_get_through(
-    cluster: Cluster, sockdir: Path, over: str, n: int
-) -> None:
-    """Whole requests that arrive together, as an SDK's parallel calls do,
-    are all answered: a connection whose headers arrived never gives way,
-    and the server reads what has arrived before it closes anything."""
+async def _arrive_together(cluster: Cluster, sockdir: Path, over: str, n: int) -> list[bytes]:
+    """Open ``n`` connections, then send a whole request on each at once;
+    the status each one was answered with."""
     server, _connect, host, secure = await listener(cluster, sockdir, over)
     token = api_token(server, "agent")
     socks = []
@@ -810,12 +805,40 @@ async def test_requests_that_arrive_together_all_get_through(
             socks.append(await secure())
         for s in socks:  # blocking: all of them are in before the loop runs
             s.sendall(whole_request(host, token))
-        statuses = await asyncio.gather(*(status_of(s) for s in socks))
-        assert statuses == [b"200"] * n
+        return list(await asyncio.gather(*(status_of(s) for s in socks)))
     finally:
         for s in socks:
             s.close()
         await server.stop()
+
+
+@pytest.mark.parametrize("n", [12, 24, 40, 60])
+@pytest.mark.parametrize("over", ["unix", "tcp"])
+async def test_requests_that_arrive_together_all_get_through(
+    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch, over: str, n: int
+) -> None:
+    """Whole requests that arrive together, as an SDK's parallel calls do,
+    are all answered: a connection whose headers arrived never gives way,
+    and the server reads what has arrived before it closes anything.
+
+    Opening ``n`` connections (a TLS handshake each, on TCP) takes real time,
+    and on a busy host longer than EVICT_AFTER; a connection that has sent
+    nothing for that long may give way past the limit, which is not what
+    this is about. So the delay is pinned out of reach."""
+    monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 3600.0)
+    assert await _arrive_together(cluster, sockdir, over, n) == [b"200"] * n
+
+
+@pytest.mark.parametrize("over", ["unix", "tcp"])
+async def test_quiet_connections_past_the_limit_give_way_once_they_have_waited(
+    cluster: Cluster, sockdir: Path, monkeypatch: pytest.MonkeyPatch, over: str
+) -> None:
+    """What the pin above guards against, made certain instead of left to a
+    slow host: with no delay to wait for, the connections that sent nothing
+    while later ones connected past the limit are closed."""
+    monkeypatch.setattr("agentconnect.runtime.api.EVICT_AFTER", 0)
+    statuses = await _arrive_together(cluster, sockdir, over, MAX_PENDING + 8)
+    assert statuses.count(b"200") < len(statuses)
 
 
 @pytest.mark.parametrize("burst", [MAX_PENDING - 1, MAX_PENDING, 40])
