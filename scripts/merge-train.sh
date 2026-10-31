@@ -130,6 +130,24 @@ update_branch() {
     remove_temp_worktree
 }
 
+# The PR's checks without those of a superseded run, one that a newer run of the
+# same workflow has replaced on this head: a cancelled one says nothing, and a pass
+# in one doesn't count for the commits now being tested. Prints nothing if the
+# runs can't be read, which the caller treats as pending.
+current_checks() {
+    local listed runs
+    # gh exits non-zero while checks are pending, and on a network error.
+    listed="$(gh pr checks "$pr" --json name,bucket,link 2>/dev/null || true)"
+    runs="$(gh run list --commit "$head" --limit 100 --json databaseId,workflowName 2>/dev/null)" || return 1
+    jq -c --argjson runs "$runs" '
+        ($runs | group_by(.workflowName) | map(max_by(.databaseId).databaseId)) as $newest
+        | ($runs | map(.databaseId)) as $known
+        | map(select(
+            (((.link // "") | capture("/actions/runs/(?<id>[0-9]+)") | .id | tonumber)? // null) as $id
+            | ($id == null) or ($known | index($id) | not) or ($newest | index($id) != null)
+        ))' <<<"$listed" 2>/dev/null
+}
+
 # Polls until every check has finished, every required one passed and nothing
 # failed. Right after a push GitHub may still show the old head, or only some
 # of the new one's checks, so green alone isn't enough.
@@ -142,8 +160,7 @@ wait_for_checks() {
             elif [[ "$rebased" == 0 ]]; then
                 stop "head moved to ${head:0:12} during the wait; someone else pushed to it"
             fi
-            # gh exits non-zero while checks are pending, and on a network error.
-            checks="$(gh pr checks "$pr" --json name,bucket 2>/dev/null || true)"
+            checks="$(current_checks || true)"
             if [[ "$rebased" == 0 ]] && jq -e 'type == "array"' <<<"$checks" >/dev/null 2>&1; then
                 failed="$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' <<<"$checks")"
                 [[ -z "$failed" ]] || stop "failed checks: $failed"
