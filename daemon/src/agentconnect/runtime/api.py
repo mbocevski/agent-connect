@@ -47,7 +47,15 @@ from typing import Any, cast
 
 from agentconnect import log
 from agentconnect.api_tls import ensure_certificate, server_context
-from agentconnect.cli_json import APPROVAL, HELD, KNOCK_INSPECT, KNOCK_SUMMARY, KNOCKS, LISTING
+from agentconnect.cli_json import (
+    APPROVAL,
+    HELD,
+    KNOCK_INSPECT,
+    KNOCK_SUMMARY,
+    KNOCKS,
+    LISTING,
+)
+from agentconnect.cli_json import RULE as _RULE
 from agentconnect.clock import Clock, SystemClock
 from agentconnect.deliveries import DeliveryQueue
 from agentconnect.isolation import PeerGate
@@ -349,6 +357,16 @@ _LISTING_REQUEST: dict[str, Any] = {
     "card": "object",
     "token": "object",
     "owner_domain?": Opt("str"),
+}
+
+_RULE_REQUEST: dict[str, Any] = {
+    "action": "str",
+    "name": "str",
+    "kind?": "str",
+    "caps?": "object",
+    "profile?": "str",
+    "purpose?": Opt("str"),
+    "fields?": "object",
 }
 
 ROUTE_SPECS: tuple[RouteSpec, ...] = (
@@ -860,6 +878,67 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "the group (SPEC 11.5). `run` names the run, when there is one.",
         request={"run?": Opt("str")},
         response={"status": "str"},
+        human=True,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/trust/rules",
+        "_rules",
+        "The standing rules (ADR-007), with their kinds, caps and fields. Human only, reads "
+        "too: a rule says whose identity or which domain gets through.",
+        response={"rules": [_RULE]},
+        human=True,
+    ),
+    RouteSpec(
+        "GET",
+        "/v0/trust/rules/{name}",
+        "_rule",
+        "One standing rule.",
+        response=_RULE,
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/trust/rules/preview",
+        "_rule_preview",
+        "What a change to a rule would do (`action`: `create`, `change` or `enable`), and "
+        "the `hash` that commits it. Changes nothing. A change that widens a rule answers "
+        "`409 needs_isolation` outside the separate-OS-user mode ([isolation.md](isolation.md)).",
+        request=_RULE_REQUEST,
+        response={
+            "action": "str",
+            "name": "str",
+            "before": Opt("object"),
+            "after": "object",
+            "widens": "bool",
+            "hash": "str",
+        },
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/trust/rules",
+        "_rule_commit",
+        "Commit a previewed change: the same body plus its `hash`. `409 stale_preview` if the "
+        "rule or the change differs from what was shown. Raises `rule_changed`.",
+        request={**_RULE_REQUEST, "hash": "str"},
+        response=_RULE,
+        human=True,
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/trust/rules/{name}/disable",
+        "_rule_disable",
+        "Stop a rule at once. Takes no preview, and works outside the separate-OS-user mode.",
+        response=_RULE,
+        human=True,
+    ),
+    RouteSpec(
+        "DELETE",
+        "/v0/trust/rules/{name}",
+        "_rule_remove",
+        "Remove a rule. Works outside the separate-OS-user mode.",
+        response={"name": "str", "status": "str"},
         human=True,
     ),
     RouteSpec(
@@ -1646,6 +1725,24 @@ class ApiServer:
                 p["gid"], run if isinstance(run, str) else None
             )
         }
+
+    async def _rules(self, _p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.rules.list()
+
+    async def _rule(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return self.daemon.rules.get(p["name"])
+
+    async def _rule_preview(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        return self.daemon.rules.preview(b)
+
+    async def _rule_commit(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
+        return await self.daemon.rules.commit(b)
+
+    async def _rule_disable(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return await self.daemon.rules.disable(p["name"])
+
+    async def _rule_remove(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        return await self.daemon.rules.remove(p["name"])
 
     async def _listing_preview(self, _p: dict[str, str], b: dict[str, Any]) -> Any:
         return await self.daemon.listings.preview(b)

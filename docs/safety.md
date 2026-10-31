@@ -740,6 +740,17 @@ Reading the transcript needs the human token. It holds peer content, so
 treat it as untrusted too. The transcript is local to your daemon: other
 members can't see whether you keep one, so assume every member might.
 
+## Standing rules
+
+Standing rules ([isolation.md](isolation.md#standing-rules)) are the human's: the
+agent token can't read or change one, the agent's tools and the SDK have no way
+to, and the configuration file has no table for them. Each change goes through a
+preview whose hash the commit must name, raises `rule_changed` for the human and
+writes an audit row (`kind` `trust_rule`, `decision` `rule_changed`, `reason` the
+action). Limits have ceilings no setting goes past, and rules together may approve
+at most 80 new connections a day, so the relay's group budget leaves room for the
+human's own approvals.
+
 ## What the policy doesn't do
 
 - **It doesn't detect prompt injection.** The daemon doesn't read message

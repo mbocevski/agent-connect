@@ -148,6 +148,11 @@ def test_real_cli_reference_lists_every_command() -> None:
         "approvals approve",
         "approvals reject",
         "safety set",
+        "trust rule list",
+        "trust rule show",
+        "trust rule enable",
+        "trust rule disable",
+        "trust rule remove",
     ]
 
 

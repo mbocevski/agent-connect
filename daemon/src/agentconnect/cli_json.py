@@ -173,6 +173,23 @@ SAFETY: dict[str, Any] = {"group_id": "str", "settings": "object", "overrides": 
 
 # Label (the command, plus a qualifier where one command has several
 # outcomes) to the shape of its stdout with ``--json``.
+RULE: dict[str, Any] = {
+    "name": "str",
+    "kind": "str",
+    "enabled": "bool",
+    "created_at": "int",
+    "changed_at": "int",
+    "caps": {
+        "new_per_hour": "int",
+        "new_per_day": "int",
+        "open_at_once": "int",
+        "lifetime_secs": Opt("int"),
+    },
+    "profile": "str",
+    "purpose": Opt("str"),
+    "fields": "object",
+}
+
 SCHEMAS: dict[str, Any] = {
     "group create": {"group_id": "str", "name": "str", "purpose": "str"},
     "group policy": {"group_id": "str", "status": "str", "changes": "object"},
@@ -362,6 +379,11 @@ SCHEMAS: dict[str, Any] = {
         "forced": "bool",
     },
     "listing status": {"listing": Opt(LISTING)},
+    "trust rule list": {"rules": [RULE]},
+    "trust rule show": RULE,
+    "trust rule enable": RULE,
+    "trust rule disable": RULE,
+    "trust rule remove": {"name": "str", "status": "str"},
     "knock (joined)": {
         "status": "str",
         "knock_id": "str",
