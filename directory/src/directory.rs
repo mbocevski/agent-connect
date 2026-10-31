@@ -316,18 +316,22 @@ impl<S: Store> Directory<S> {
         format!("{}/a/{name}", self.settings.host)
     }
 
-    /// Whether a stored listing's token is under a key this directory pins
-    /// now. After the operator rotates `DK`, knockers refuse a listing under
-    /// the retired key, so it counts as expired (SR-24).
-    fn token_pinned(&self, record: &ListingRecord) -> bool {
-        let Ok(listing) = self.verifier.listing(&record.bytes) else {
-            return false;
-        };
-        let key_id = b64(&listing.token().key_id);
+    /// The token key ids this directory pins now.
+    fn pinned_key_ids(&self) -> Vec<String> {
         self.verifier
             .token_keys()
-            .iter()
-            .any(|k| k.key_id == key_id)
+            .into_iter()
+            .map(|k| k.key_id)
+            .collect()
+    }
+
+    /// Whether a stored listing's token is under a key this directory pins
+    /// now, by its recorded key id (nothing is re-read or re-verified).
+    /// After the operator rotates `DK`, knockers refuse a listing under the
+    /// retired key, so it counts as expired (SR-24). One stored before the
+    /// key id was recorded counts as pinned until maintenance records it.
+    fn token_pinned(&self, record: &ListingRecord) -> bool {
+        record.token_key_id.is_empty() || self.pinned_key_ids().contains(&record.token_key_id)
     }
 
     fn view(record: ListingRecord, now: u64) -> Option<Listing> {
@@ -409,11 +413,11 @@ impl<S: Store> Directory<S> {
             text: text.and_then(|t| clean(t, MAX_QUERY_CHARS)),
             skill: skill.and_then(|s| clean(s, 80)).map(|s| s.to_lowercase()),
             now,
+            keys: self.pinned_key_ids(),
         };
         let found = self.store.search(&q).await.map_err(|e| internal(&e))?;
         Ok(found
             .into_iter()
-            .filter(|r| self.token_pinned(r))
             .filter_map(|r| Self::view(r, now))
             .filter(|l| l.owner != OwnerState::Failed)
             .take(SEARCH_LIMIT)
@@ -430,10 +434,11 @@ impl<S: Store> Directory<S> {
         let now = self.now();
         let mut out = Vec::new();
         let mut after = String::new();
+        let keys = self.pinned_key_ids();
         while out.len() < limit {
             let page = self
                 .store
-                .listed_after(&after, now, self.page)
+                .listed_after(&after, now, &keys, self.page)
                 .await
                 .map_err(|e| internal(&e))?;
             let Some(last) = page.last() else {
@@ -443,7 +448,6 @@ impl<S: Store> Directory<S> {
             let full = page.len() == self.page as usize;
             out.extend(
                 page.into_iter()
-                    .filter(|r| self.token_pinned(r))
                     .filter_map(|r| Self::view(r, now))
                     .filter(|l| l.owner != OwnerState::Failed),
             );
@@ -547,6 +551,7 @@ impl<S: Store> Directory<S> {
             owner: OwnerStatus::PENDING,
             door_expires_at: p.door.as_ref().map(|d| d.expires_at),
             token_expires_at: token.grant.expires_at,
+            token_key_id: b64(&token.key_id),
             published_at: now,
             key_changed_at: None,
             bytes: bytes.to_vec(),
@@ -985,6 +990,30 @@ impl<S: Store> Directory<S> {
             .await
             .map_err(|e| internal(&e))?;
         self.recheck_due().await?;
+        self.record_token_keys().await?;
+        Ok(())
+    }
+
+    /// Record the token key id of listings stored before it was recorded,
+    /// up to [`CHECKS_PER_PASS`] a pass: each is read once, here, never on a
+    /// request (SR-24).
+    async fn record_token_keys(&self) -> Result<(), DirError> {
+        let rows = self
+            .store
+            .untagged(CHECKS_PER_PASS)
+            .await
+            .map_err(|e| internal(&e))?;
+        for r in rows {
+            // Unreadable bytes can't be under a pinned key.
+            let key_id = self
+                .verifier
+                .listing(&r.bytes)
+                .map_or_else(|_| "unreadable".to_owned(), |l| b64(&l.token().key_id));
+            self.store
+                .set_token_key_id(&r.name, &r.sha256, &key_id)
+                .await
+                .map_err(|e| internal(&e))?;
+        }
         Ok(())
     }
 }

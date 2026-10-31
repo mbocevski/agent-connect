@@ -16,6 +16,8 @@ use agentconnect_directory::store::{
 use super::{DAY, identity_id, random_b64};
 
 pub const NOW: u64 = 1_735_689_600;
+/// The token key id fixtures carry, and the one the queries pin.
+pub const KEY: &str = "pinned-key";
 
 pub fn record(name: &str, identity: &str, seq: u64) -> ListingRecord {
     let bytes = format!(
@@ -32,6 +34,7 @@ pub fn record(name: &str, identity: &str, seq: u64) -> ListingRecord {
         owner: OwnerStatus::PENDING,
         door_expires_at: Some(NOW + DAY),
         token_expires_at: NOW + 90 * DAY,
+        token_key_id: KEY.to_owned(),
         published_at: NOW,
         key_changed_at: None,
         sha256: agentconnect_core::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
@@ -406,6 +409,7 @@ pub async fn search_ranking_and_filters<S: Store>(s: &S) {
         text: text.map(str::to_owned),
         skill: skill.map(str::to_owned),
         now: NOW,
+        keys: vec![KEY.to_owned()],
     };
     let names = |v: Vec<ListingRecord>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
     assert_eq!(
@@ -490,16 +494,17 @@ pub async fn listed_after_pages_by_name<S: Store>(s: &S) {
         put(s, &record(name, &id, 1)).await;
     }
     let names = |v: Vec<ListingRecord>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
+    let keys = [KEY.to_owned()];
     assert_eq!(
-        names(s.listed_after("", NOW, 2).await.unwrap()),
+        names(s.listed_after("", NOW, &keys, 2).await.unwrap()),
         ["a-one", "b-two"]
     );
     assert_eq!(
-        names(s.listed_after("b-two", NOW, 2).await.unwrap()),
+        names(s.listed_after("b-two", NOW, &keys, 2).await.unwrap()),
         ["c-three"]
     );
     assert!(
-        s.listed_after("", NOW + 91 * DAY, 10)
+        s.listed_after("", NOW + 91 * DAY, &keys, 10)
             .await
             .unwrap()
             .is_empty()
@@ -518,4 +523,46 @@ pub async fn run<S: Store, F: std::future::Future<Output = S>>(make: impl Fn() -
     search_ranking_and_filters(&make().await).await;
     feed_and_purge(&make().await).await;
     listed_after_pages_by_name(&make().await).await;
+    retired_token_keys(&make().await).await;
+}
+
+/// SR-24: the queries leave out a listing under a token key that isn't
+/// pinned, keep one whose key isn't recorded yet, and maintenance records
+/// it for the version stored.
+pub async fn retired_token_keys<S: Store>(s: &S) {
+    let id = identity_id();
+    let mut retired = record("retired", &id, 1);
+    retired.token_key_id = "old-key".to_owned();
+    let mut untagged = record("untagged", &id, 1);
+    untagged.token_key_id = String::new();
+    for r in [&record("current", &id, 1), &retired, &untagged] {
+        put(s, r).await;
+    }
+    let keys = [KEY.to_owned()];
+    let names = |v: Vec<ListingRecord>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
+    assert_eq!(
+        names(s.listed_after("", NOW, &keys, 10).await.unwrap()),
+        ["current", "untagged"]
+    );
+    let q = SearchQuery {
+        text: None,
+        skill: None,
+        now: NOW,
+        keys: keys.to_vec(),
+    };
+    assert_eq!(names(s.search(&q).await.unwrap()), ["current", "untagged"]);
+    assert_eq!(names(s.untagged(10).await.unwrap()), ["untagged"]);
+    // Another version's sha256 records nothing; the stored one's does.
+    s.set_token_key_id("untagged", "not-the-sha", KEY)
+        .await
+        .unwrap();
+    assert_eq!(names(s.untagged(10).await.unwrap()), ["untagged"]);
+    s.set_token_key_id("untagged", &untagged.sha256, "old-key")
+        .await
+        .unwrap();
+    assert!(s.untagged(10).await.unwrap().is_empty());
+    assert_eq!(
+        names(s.listed_after("", NOW, &keys, 10).await.unwrap()),
+        ["current"]
+    );
 }

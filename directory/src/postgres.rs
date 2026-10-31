@@ -41,7 +41,7 @@ macro_rules! columns {
         "name, identity, seq, token_id, owner_domain, owner_latest, owner_checked_at, \
          owner_verified_at, owner_negative, owner_negative_at, door_expires_at, token_expires_at, \
          published_at, key_changed_at, \
-         bytes, sha256, search_title, search_skills, search_description, skill_keys"
+         bytes, sha256, search_title, search_skills, search_description, skill_keys, token_key_id"
     };
 }
 
@@ -77,6 +77,7 @@ fn record(row: &PgRow) -> StoreResult<ListingRecord> {
             .try_get::<Option<i64>, _>("door_expires_at")?
             .map(u64_of),
         token_expires_at: u64_of(row.try_get("token_expires_at")?),
+        token_key_id: row.try_get("token_key_id")?,
         published_at: u64_of(row.try_get("published_at")?),
         key_changed_at: row.try_get::<Option<i64>, _>("key_changed_at")?.map(u64_of),
         bytes: row.try_get("bytes")?,
@@ -439,7 +440,7 @@ impl Store for PgStore {
             columns!(),
             ") VALUES \
              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
-             $19, $20) \
+             $19, $20, $21) \
              ON CONFLICT (name) DO UPDATE SET identity = EXCLUDED.identity, seq = EXCLUDED.seq, \
              token_id = EXCLUDED.token_id, owner_domain = EXCLUDED.owner_domain, \
              owner_latest = EXCLUDED.owner_latest, owner_checked_at = EXCLUDED.owner_checked_at, \
@@ -451,7 +452,8 @@ impl Store for PgStore {
              key_changed_at = EXCLUDED.key_changed_at, bytes = EXCLUDED.bytes, \
              sha256 = EXCLUDED.sha256, search_title = EXCLUDED.search_title, \
              search_skills = EXCLUDED.search_skills, \
-             search_description = EXCLUDED.search_description, skill_keys = EXCLUDED.skill_keys"
+             search_description = EXCLUDED.search_description, skill_keys = EXCLUDED.skill_keys, \
+             token_key_id = EXCLUDED.token_key_id"
         ))
         .bind(&r.name)
         .bind(&r.identity)
@@ -473,6 +475,7 @@ impl Store for PgStore {
         .bind(&r.search.skills)
         .bind(&r.search.description)
         .bind(&r.search.skill_keys)
+        .bind(&r.token_key_id)
         .execute(&mut *tx)
         .await?;
         if let Some((issued_at, identity)) = &guard.high_water {
@@ -694,21 +697,48 @@ impl Store for PgStore {
         &self,
         after: &str,
         now: u64,
+        keys: &[String],
         limit: u32,
     ) -> StoreResult<Vec<ListingRecord>> {
         sqlx::query(concat!(
             "SELECT ",
             columns!(),
-            " FROM listings WHERE name > $1 AND token_expires_at > $2 ORDER BY name LIMIT $3"
+            " FROM listings WHERE name > $1 AND token_expires_at > $2 \
+             AND (token_key_id = '' OR token_key_id = ANY($4)) ORDER BY name LIMIT $3"
         ))
         .bind(after)
         .bind(i64_of(now))
+        .bind(i64::from(limit))
+        .bind(keys)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(record)
+        .collect()
+    }
+
+    async fn untagged(&self, limit: u32) -> StoreResult<Vec<ListingRecord>> {
+        sqlx::query(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM listings WHERE token_key_id = '' ORDER BY name LIMIT $1"
+        ))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?
         .iter()
         .map(record)
         .collect()
+    }
+
+    async fn set_token_key_id(&self, name: &str, sha256: &str, key_id: &str) -> StoreResult<()> {
+        sqlx::query("UPDATE listings SET token_key_id = $3 WHERE name = $1 AND sha256 = $2")
+            .bind(name)
+            .bind(sha256)
+            .bind(key_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn search(&self, q: &SearchQuery) -> StoreResult<Vec<ListingRecord>> {
@@ -720,12 +750,14 @@ impl Store for PgStore {
                     " FROM listings, websearch_to_tsquery('english', $1) query \
                      WHERE search_vec @@ query AND token_expires_at > $2 \
                      AND ($3::text IS NULL OR $3 = ANY(skill_keys)) \
+                     AND (token_key_id = '' OR token_key_id = ANY($5)) \
                      ORDER BY ts_rank(search_vec, query) DESC, name LIMIT $4"
                 ))
                 .bind(text)
                 .bind(i64_of(q.now))
                 .bind(&q.skill)
                 .bind(i64::from(SEARCH_CANDIDATES))
+                .bind(&q.keys)
                 .fetch_all(&self.pool)
                 .await?
             }
@@ -734,11 +766,13 @@ impl Store for PgStore {
                     "SELECT ",
                     columns!(),
                     " FROM listings WHERE token_expires_at > $1 \
-                     AND ($2::text IS NULL OR $2 = ANY(skill_keys)) ORDER BY name LIMIT $3"
+                     AND ($2::text IS NULL OR $2 = ANY(skill_keys)) \
+                     AND (token_key_id = '' OR token_key_id = ANY($4)) ORDER BY name LIMIT $3"
                 ))
                 .bind(i64_of(q.now))
                 .bind(&q.skill)
                 .bind(i64::from(SEARCH_CANDIDATES))
+                .bind(&q.keys)
                 .fetch_all(&self.pool)
                 .await?
             }

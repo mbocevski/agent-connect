@@ -157,6 +157,11 @@ pub struct ListingRecord {
     pub door_expires_at: Option<u64>,
     /// The embedded token's `expires_at`.
     pub token_expires_at: u64,
+    /// The embedded token's `key_id` (base64url), so a listing under a key
+    /// the directory no longer pins can be left out without re-reading it
+    /// (SR-24). Empty for a row stored before this was recorded, until
+    /// maintenance fills it in.
+    pub token_key_id: String,
     /// Unix seconds when this version was published.
     pub published_at: u64,
     /// Unix seconds when the name last changed identity, for the 30-day
@@ -337,6 +342,9 @@ pub struct SearchQuery {
     pub skill: Option<String>,
     /// Unix seconds; listings whose token has expired are left out.
     pub now: u64,
+    /// The pinned token key ids: a listing under another key is left out
+    /// (one not recorded yet is kept until maintenance fills it in).
+    pub keys: Vec<String>,
 }
 
 /// Rows removed by [`Store::purge`].
@@ -451,13 +459,26 @@ pub trait Store: Send + Sync + 'static {
         now: u64,
     ) -> impl Future<Output = StoreResult<Vec<ListingRecord>>> + Send;
 
-    /// Unexpired listings with a name after `after`, by name.
+    /// Unexpired listings with a name after `after`, by name, leaving out
+    /// those under a token key not in `keys` (as [`SearchQuery::keys`]).
     fn listed_after(
         &self,
         after: &str,
         now: u64,
+        keys: &[String],
         limit: u32,
     ) -> impl Future<Output = StoreResult<Vec<ListingRecord>>> + Send;
+
+    /// Up to `limit` listings whose token key id isn't recorded yet.
+    fn untagged(&self, limit: u32) -> impl Future<Output = StoreResult<Vec<ListingRecord>>> + Send;
+
+    /// Record the token key id of `name`'s stored version `sha256`.
+    fn set_token_key_id(
+        &self,
+        name: &str,
+        sha256: &str,
+        key_id: &str,
+    ) -> impl Future<Output = StoreResult<()>> + Send;
 
     /// Listings matching the query, best first, at most
     /// [`SEARCH_CANDIDATES`]. With no text, by name. Listings whose token

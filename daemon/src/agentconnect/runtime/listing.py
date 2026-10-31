@@ -18,7 +18,8 @@ and :meth:`publish`); everything after it runs without anyone:
   a renewal can't change what the human approved. The old door stays
   registered until it expires. A renewal that keeps failing for an hour,
   or a door that expires before a renewal lands, raises ``listing_stale``.
-  Only ``token_revoked``, ``bad_token`` and ``name_held`` stop renewing.
+  Only ``token_revoked``, ``bad_token``, ``name_held`` and ``unknown_key``
+  (once this daemon no longer pins the token's key either) stop renewing.
 * **Withdraw.** Either token may withdraw (it only reduces exposure, SPEC
   13.2.3): every door is closed at the relay first, the keys are deleted at
   once, then the signed withdrawal goes to the directory.
@@ -104,7 +105,8 @@ FORCEABLE = frozenset({"withdrawing", "withdraw_failed"})
 PENDING_DOOR = frozenset({"registering", "registered"})
 OPEN_DOOR = frozenset({"current", "retiring"})
 #: SPEC 6.6.1/13.2: the refusals of a renewal that stop renewing. Any other
-#: refusal is retried (with a fresh door and signature) and reported.
+#: refusal is retried (with a fresh door and signature) and reported, and so
+#: is ``unknown_key`` while this daemon still pins the token's key.
 STOP_RENEWING = frozenset({"token_revoked", "bad_token", "name_held", "unknown_key"})
 #: Relay answers to a door registration that say the relay doesn't hold it.
 NOT_REGISTERED = frozenset({"bad_request", "quota_exceeded"})
@@ -717,7 +719,10 @@ class ListingManager:
         put back as it was. A renewal stops only for the SPEC's reasons;
         otherwise it is tried again with a fresh door and signature."""
         LOG.warning("listing_refused", code=e.code)
-        if row["state"] != "publishing" and e.code not in STOP_RENEWING:
+        stops = e.code in STOP_RENEWING and not (
+            e.code == "unknown_key" and self._key_still_pinned(row)
+        )
+        if row["state"] != "publishing" and not stops:
             await self._discard_pending(row, door)
             await self._retry_later(row, e.code, report=True)
             return "retrying"
@@ -735,6 +740,20 @@ class ListingManager:
         if status is None:
             raise ApiError(502, "directory", message)
         raise ApiError(status, e.code, message)
+
+    def _key_still_pinned(self, row: dict[str, Any]) -> bool:
+        """Whether this daemon still pins the key the listing's token is
+        under. Then the directory's ``unknown_key`` is it lagging behind (a
+        rollback, a rolling deploy, one misconfigured instance), and the
+        renewal is retried; once this daemon drops the key too, the operator
+        rotated it and a new token is needed (SR-24)."""
+        entry = self._engine.config.directory(str(row["directory"]))
+        try:
+            key_id = str(json.loads(row["token"])["key_id"])
+        except (TypeError, ValueError, KeyError):
+            return False
+        pinned = {b64(hashlib.sha256(k).digest()[:16]) for k in (entry.keys if entry else ())}
+        return key_id in pinned
 
     async def _published(
         self, row: dict[str, Any], door: dict[str, Any], answer: dict[str, Any]
