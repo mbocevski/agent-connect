@@ -36,7 +36,7 @@ from typing import Annotated, Any
 import typer
 
 import agentconnect_core
-from agentconnect import __version__, cli_support, log, provision
+from agentconnect import __version__, cli_support, entry, log, provision
 from agentconnect import daemon as daemon_host
 from agentconnect.apiclient import ApiClient, ApiClientError
 from agentconnect.cli_support import (
@@ -134,7 +134,18 @@ app.add_typer(groups_app, name="groups")
 app.add_typer(approvals_app, name="approvals")
 app.add_typer(safety_app, name="safety")
 
-ConfigOpt = Annotated[Path | None, typer.Option("--config", help="Path of config.toml.")]
+
+def absolute_path(value: Path | None) -> Path | None:
+    """Every path option's callback: a relative path means nothing once the
+    process has left a working directory it can't search (:mod:`agentconnect.entry`)."""
+    if entry.refused_relative(value):
+        raise typer.BadParameter(entry.CANT_SEARCH)
+    return value
+
+
+ConfigOpt = Annotated[
+    Path | None, typer.Option("--config", help="Path of config.toml.", callback=absolute_path)
+]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Machine-readable output.")]
 YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation.")]
 
@@ -239,20 +250,28 @@ def mcp_run(  # noqa: PLR0913, PLR0917
         ),
     ] = None,
     data_dir: Annotated[
-        Path | None, typer.Option("--data-dir", help="Another data directory instead.")
+        Path | None,
+        typer.Option("--data-dir", help="Another data directory instead.", callback=absolute_path),
     ] = None,
     relay: Annotated[
         str | None, typer.Option("--relay", help="The relay's wss:// URL (AC_RELAY_URL).")
     ] = None,
     config: Annotated[
         Path | None,
-        typer.Option("--config", help="A config.toml for this agent (none is read by default)."),
+        typer.Option(
+            "--config",
+            help="A config.toml for this agent (none is read by default).",
+            callback=absolute_path,
+        ),
     ] = None,
     display_name: Annotated[
         str | None, typer.Option("--display-name", help="What peers see (default: the name).")
     ] = None,
     log_file: Annotated[
-        Path | None, typer.Option("--log-file", help="Append the logs here instead of stderr.")
+        Path | None,
+        typer.Option(
+            "--log-file", help="Append the logs here instead of stderr.", callback=absolute_path
+        ),
     ] = None,
 ) -> None:
     """Run the MCP server on stdin and stdout (an agent tool starts it).
@@ -319,7 +338,11 @@ def _provision[T](call: Callable[[], T]) -> T:
 def identity_export(
     out: Annotated[
         Path,
-        typer.Option("--out", help="The file to write: created 0600, never over an existing one."),
+        typer.Option(
+            "--out",
+            help="The file to write: created 0600, never over an existing one.",
+            callback=absolute_path,
+        ),
     ],
     config: ConfigOpt = None,
     as_json: JsonOpt = False,
@@ -351,7 +374,9 @@ def identity_export(
     f"not a replica. Stop any runtime on it first. {LOCAL_ONLY_HELP}",
 )
 def identity_import(
-    file: Annotated[Path, typer.Argument(help="The file `identity export` wrote.")],
+    file: Annotated[
+        Path, typer.Argument(help="The file `identity export` wrote.", callback=absolute_path)
+    ],
     code: Annotated[
         str | None,
         typer.Option(
@@ -1943,11 +1968,18 @@ def listing_publish(  # noqa: PLR0913, PLR0917
         str, typer.Option("--directory", help="The directory host, from your [[directory]].")
     ],
     card: Annotated[
-        Path | None, typer.Option("--card", help="The card file (default: listing.card_file).")
+        Path | None,
+        typer.Option(
+            "--card", help="The card file (default: listing.card_file).", callback=absolute_path
+        ),
     ] = None,
     token: Annotated[
         Path | None,
-        typer.Option("--token", help="The operator's token file (default: listing.token_file)."),
+        typer.Option(
+            "--token",
+            help="The operator's token file (default: listing.token_file).",
+            callback=absolute_path,
+        ),
     ] = None,
     owner_domain: Annotated[
         str | None,

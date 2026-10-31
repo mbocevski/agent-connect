@@ -122,7 +122,8 @@ work on the data directory itself, and only the CLI offers them
   fails with `human_only` (exit 3), `approvals list` shows only the agent's
   own held sends and says so (`scope: agent` in its JSON), and pointing the
   CLI at the daemon's configuration fails with `token_unreadable` (exit 3):
-  use `AC_DATA_DIR` instead.
+  use `AC_DATA_DIR` instead. On macOS, a command run from a directory its user
+  can't search runs from `/` and refuses a relative path (exit 2).
 - `verify` is interactive on purpose. It has no `--yes`, and EOF on stdin
   counts as "no answer" (exit 3, nothing changed). It answers for the SAS
   run whose code it showed; "same" is refused once that code is older than
