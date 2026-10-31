@@ -240,9 +240,9 @@ build:
     uv build --all-packages --sdist --wheel --out-dir dist
     uv run --no-project python scripts/check_wheel_hooks.py dist/agentconnect_core-*.whl
 
-# Push branch and open/refresh its PR
-pr:
-    scripts/pr.sh
+# Push branch and open/refresh its PR, with labels: just pr skip-changelog
+pr *labels:
+    scripts/pr.sh {{ labels }}
 
 # Rebase a PR branch onto main, re-sign every commit and push (run from its checkout)
 update-branch pr:

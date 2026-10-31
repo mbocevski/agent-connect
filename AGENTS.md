@@ -69,7 +69,7 @@ just cov-baseline # refresh the baseline (in the PR that raises coverage)
 just docs-check # docs changed with the code they describe (docs/MAP.toml)
 just licences   # Python dependency licences vs licences-py.toml (also run by `just lint`)
 just ci         # exactly what PR CI runs, including coverage gates
-just pr         # push branch, open/refresh PR
+just pr [label…] # push branch, open/refresh PR, with labels: just pr skip-changelog
 just update-branch <n> # branch behind main: signed local rebase + push (never GitHub's Update branch)
 just merge <n>  # the ONLY way to merge: refuses unless every required check is green
 just merge-train <n>... # in order: update-branch if behind, wait for checks, merge; stops at the first failure
