@@ -290,7 +290,9 @@ sender's replicas only the one that asked is triggered (SPEC
 the hint yourself: an instance id, 16 lowercase hex, as the group view
 lists it; a malformed one raises `AgentConnectError` with `bad_request`.
 The hint only narrows who is triggered, and every instance still receives
-the message ([groups.md](groups.md#addressing-one-instance)). The replies
+the message ([groups.md](groups.md#addressing-one-instance)). In `free`
+mode your own instances aren't triggered by each other's messages unless
+the message names your identity in `addressee`. The replies
 set `reply_to` to the message's `msg_id`, so the runtime computes `hop` as
 SPEC [§10.3](../SPEC.md#103-loop-guard) says: never below one more than the
 last message that triggered this instance. `TaskState` holds the A2A

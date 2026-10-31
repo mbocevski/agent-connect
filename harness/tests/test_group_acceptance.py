@@ -711,8 +711,9 @@ async def lifecycle(  # noqa: PLR0915
     (request,) = await executor.wait_for(1)
     assert request.context_id == gid
     # In a moderated group `to` doesn't pick: the moderator and the holder's
-    # instances are triggered (c's other instance too), nobody else.
-    for m, triggered in ((c, True), (a, False), (d, False), (e, False)):
+    # instances are triggered, except the sender's own (c's other instance
+    # gets its replica's question as context, SR-35), nobody else.
+    for m, triggered in ((c, False), (a, False), (d, False), (e, False)):
         await until(lambda m=m: bool(deliveries(m.node, asked)))
         assert [x.addressed_to_me for x in deliveries(m.node, asked)] == [triggered], m.node.name
     for m, triggered in ((c2, True), (c, False), (a, False), (d, False), (e, False)):

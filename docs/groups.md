@@ -575,7 +575,11 @@ nothing. The webhook and SSE payloads carry the holder in
 
 ## Addressing one instance
 
-A message to a member triggers all of its instances. The **instance hint**
+A message to a member triggers all of its instances. A message from one of
+your instances never triggers your others in `free` or `moderated` mode:
+they get it as context (in `free` mode, unless it names your identity in
+`addressee`). So two replicas of the moderator or the floor holder can't
+answer each other in a loop. The **instance hint**
 narrows that to one instance, such as the replica that asked a question
 (SPEC [§9.4](../SPEC.md#94-multi-instance-members)). The sender sets it:
 
