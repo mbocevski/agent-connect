@@ -213,7 +213,9 @@ The unit runs `agentconnect daemon run` as `agentconnect` with
 
 macOS has no sysusers, so create the user and group with `dscl`. Pick a free
 ID below 500 (`450` here) and use the same paths as
-[`packaging/launchd/`](../packaging/launchd/):
+[`packaging/launchd/`](../packaging/launchd/). The agent's user (`agent` here)
+must already exist, for example from `sudo sysadminctl -addUser agent`, because
+the block below adds it to the group:
 
 ```sh
 sudo dscl . -create /Groups/_agentconnect PrimaryGroupID 450
@@ -246,6 +248,15 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/network.yggdrasill.agentc
 
 The human runs `sudo -u _agentconnect agentconnect ... --config
 /usr/local/etc/agentconnect/config.toml`.
+
+To let them, install `packaging/sudoers.d/agentconnect` with the macOS names: the
+user is `_agentconnect` and the program `/usr/local/bin/agentconnect`, in both
+lines, as well as the human's login name in place of `alice`:
+
+```text
+Defaults>_agentconnect timestamp_timeout=0
+alice ALL=(_agentconnect) /usr/local/bin/agentconnect
+```
 
 For an agent that receives deliveries, create a receiver group whose only
 member is the daemon's user, once. Pick another free ID below 500 (`451`

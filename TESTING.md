@@ -300,7 +300,10 @@ The separate-OS-user mode (`docs/isolation.md`) is tested in the fast tier
 with an injected peer-credential provider. The tests that connect as a
 real second user (`nobody`) are marked `@pytest.mark.multiuser` and skipped
 unless it runs as root with `AC_RUN_MULTIUSER=1`:
-`sudo AC_RUN_MULTIUSER=1 uv run --all-packages pytest -m multiuser`.
+`sudo AC_RUN_MULTIUSER=1 uv run --all-packages pytest -m multiuser`. The other
+user runs `/usr/bin/python3`, or the interpreter `AC_MULTIUSER_PYTHON` names,
+which it must be able to enter and run. The `isolation-hosts` workflow runs them
+on macOS, with the checks of `scripts/isolation-host-check.sh`.
 
 ## Benchmarks
 

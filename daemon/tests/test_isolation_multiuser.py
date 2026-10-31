@@ -24,7 +24,9 @@ from agentconnect.isolation import PeerGate, peer_credentials
 
 NOBODY = 65534
 # The test's own interpreter may be under a home that this user can't enter.
-OTHER_PYTHON = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+OTHER_PYTHON = os.environ.get("AC_MULTIUSER_PYTHON") or (
+    "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
+)
 
 pytestmark = [
     pytest.mark.multiuser,

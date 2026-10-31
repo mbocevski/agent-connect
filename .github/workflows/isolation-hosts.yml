@@ -1,0 +1,175 @@
+# The separate-OS-user mode (docs/isolation.md) on a real macOS host: the
+# launchd job and the users as the docs set them up, the boundary between those
+# users, sudo's tickets, and the tests that need root and a second OS user.
+# A hosted runner is the disposable host: it has passwordless sudo, and it is
+# thrown away after the run. Not a required check.
+name: isolation-hosts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/isolation-hosts.yml
+      - scripts/isolation-host-check.sh
+      - packaging/**
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_FROZEN: "1"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_NET_RETRY: "10"
+  # The paths of packaging/launchd/ and docs/isolation.md.
+  AC_USER: _agentconnect
+  AC_CONFIG_FILE: /usr/local/etc/agentconnect/config.toml
+  AC_BIN: /usr/local/bin/agentconnect
+  AC_VENV: /usr/local/agentconnect
+  RELAY_ADDR: 127.0.0.1:8787
+
+jobs:
+  macos:
+    name: macos (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            data: /usr/local/var/agentconnect
+            run: /usr/local/var/run/agentconnect
+          # Homebrew owns /usr/local/var on an Intel Mac, so the docs say to
+          # pick root-owned locations, and the daemon refuses the others.
+          - os: macos-15-intel
+            data: /Library/Application Support/agentconnect/data
+            run: /Library/Application Support/agentconnect/run
+    env:
+      AC_DATA: ${{ matrix.data }}
+      AC_RUN: ${{ matrix.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Build the wheels and a relay
+        run: |
+          uv build --package agentconnect-core --wheel --out-dir dist
+          uv build --package agentconnect-cli --wheel --out-dir dist
+          cargo build --quiet --locked -p agentconnect-relay
+          uv sync --all-packages
+
+      - name: Install outside home directories
+        # The daemon's user can't enter the runner's home, so neither the
+        # program nor its Python can be there. --no-deps: both wheels are here,
+        # and an index's core of the same version may be older.
+        run: |
+          sudo install -d -m 0755 "$AC_VENV" /usr/local/bin
+          sudo env "UV_PYTHON_INSTALL_DIR=$AC_VENV/python" "$(command -v uv)" venv \
+            --python 3.13 --python-preference only-managed --no-cache "$AC_VENV/venv"
+          uv export --package agentconnect-cli --no-emit-workspace --no-hashes -o requirements.txt -q
+          sudo env "PATH=$PATH" uv pip install --python "$AC_VENV/venv/bin/python" -q -r requirements.txt
+          sudo env "PATH=$PATH" uv pip install --python "$AC_VENV/venv/bin/python" -q --no-deps dist/*.whl
+          sudo chmod -R go+rX "$AC_VENV"
+          sudo ln -sf "$AC_VENV/venv/bin/agentconnect" "$AC_BIN"
+          "$AC_BIN" version
+
+      - name: Create the test users
+        env:
+          HUMAN_PASSWORD_FILE: ${{ runner.temp }}/human-password
+        run: |
+          password="$(openssl rand -hex 16)"
+          echo "::add-mask::$password"
+          printf '%s' "$password" >"$HUMAN_PASSWORD_FILE"
+          echo "HUMAN_PASSWORD_FILE=$HUMAN_PASSWORD_FILE" >>"$GITHUB_ENV"
+          for name in agent stranger peer; do
+            sudo sysadminctl -addUser "$name" -password "$(openssl rand -hex 16)" 2>/dev/null
+            sudo createhomedir -c -u "$name" >/dev/null
+          done
+          sudo sysadminctl -addUser alice -password "$password" 2>/dev/null
+          sudo createhomedir -c -u alice >/dev/null
+
+      - name: The daemon's user and directories (docs/isolation.md)
+        run: |
+          sudo dscl . -create /Groups/_agentconnect PrimaryGroupID 450
+          sudo dscl . -create /Users/_agentconnect UniqueID 450
+          sudo dscl . -create /Users/_agentconnect PrimaryGroupID 450
+          sudo dscl . -create /Users/_agentconnect UserShell /usr/bin/false
+          sudo dscl . -create /Users/_agentconnect NFSHomeDirectory "$AC_DATA"
+          sudo dseditgroup -o edit -a agent -t user _agentconnect
+          sudo install -d -m 0700 -o _agentconnect -g _agentconnect "$AC_DATA"
+          sudo install -d -m 0750 -o _agentconnect -g _agentconnect "$AC_RUN"
+          sudo install -d -m 0750 -o _agentconnect -g _agentconnect /usr/local/var/log/agentconnect
+          sudo install -d -m 0755 /usr/local/etc/agentconnect
+          sudo install -m 0640 -g _agentconnect packaging/config.toml /usr/local/etc/agentconnect/config.toml
+          # Only for the check: a user in the group who isn't on the list.
+          sudo dseditgroup -o edit -a stranger -t user _agentconnect
+
+      - name: The configuration (docs/isolation.md)
+        run: |
+          sudo sed -i '' \
+            -e "s|^data_dir = .*|data_dir = \"$AC_DATA\"|" \
+            -e "s|^agent_dir = .*|agent_dir = \"$AC_RUN\"|" \
+            -e 's|^group = .*|group = "_agentconnect"|' \
+            -e 's|^agent_users = .*|agent_users = ["agent"]|' \
+            -e "s|^url = .*|url = \"ws://$RELAY_ADDR\"|" \
+            "$AC_CONFIG_FILE"
+
+      - name: The sudoers rule for the human
+        run: |
+          sed \
+            -e 's/>agentconnect/>_agentconnect/' \
+            -e 's/(agentconnect)/(_agentconnect)/' \
+            -e "s|/usr/bin/agentconnect|$AC_BIN|" \
+            packaging/sudoers.d/agentconnect >"$RUNNER_TEMP/sudoers-agentconnect"
+          cat "$RUNNER_TEMP/sudoers-agentconnect"
+          sudo visudo -cf "$RUNNER_TEMP/sudoers-agentconnect"
+          sudo install -d -m 0755 /etc/sudoers.d
+          sudo install -m 0440 -o root -g wheel "$RUNNER_TEMP/sudoers-agentconnect" /etc/sudoers.d/agentconnect
+
+      - name: Start a relay on loopback
+        run: |
+          AC_RELAY_ADDR="$RELAY_ADDR" AC_RELAY_HOST="$RELAY_ADDR" AC_RELAY_DB=sqlite::memory: \
+            nohup target/debug/agentconnect-relay >"$RUNNER_TEMP/relay.log" 2>&1 &
+
+      - name: Load the launchd job (docs/isolation.md)
+        run: |
+          sudo install -m 0644 packaging/launchd/network.yggdrasill.agentconnectd.plist /Library/LaunchDaemons/
+          sudo launchctl bootstrap system /Library/LaunchDaemons/network.yggdrasill.agentconnectd.plist
+          for _ in $(seq 1 30); do
+            sudo test -S "$AC_RUN/agentconnectd.sock" && break
+            sleep 2
+          done
+          sudo launchctl print system/network.yggdrasill.agentconnectd | grep -E 'state =|pid =|last exit' || true
+          sudo ls -la "$AC_RUN"
+          sudo test -S "$AC_RUN/agentconnectd.sock"
+
+      - name: Check the boundary and sudo's tickets
+        if: ${{ !cancelled() }}
+        run: |
+          sudo env \
+            "CHECK_DAEMON_USER=$AC_USER" "CHECK_CONFIG=$AC_CONFIG_FILE" "CHECK_DATA_DIR=$AC_DATA" \
+            "CHECK_AGENT_DIR=$AC_RUN" "CHECK_BIN=$AC_BIN" "CHECK_RELAY_URL=ws://$RELAY_ADDR" \
+            CHECK_AGENT=agent CHECK_STRANGER=stranger CHECK_PEER=peer CHECK_HUMAN=alice \
+            "CHECK_HUMAN_PASSWORD=$(cat "$HUMAN_PASSWORD_FILE")" \
+            scripts/isolation-host-check.sh
+
+      - name: The tests that need root and a second OS user
+        if: ${{ !cancelled() }}
+        # /usr/bin/python3 is a shim that takes too long as another user, and
+        # the venv is under the runner's home: use the installed Python.
+        run: >-
+          sudo env "PATH=$PATH" AC_RUN_MULTIUSER=1 UV_FROZEN=1 "AC_MULTIUSER_PYTHON=$AC_VENV/venv/bin/python"
+          uv run --all-packages pytest -m multiuser -q -n0 -rs
+
+      - name: Logs
+        if: ${{ !cancelled() }}
+        run: |
+          (cd / && sudo -n -u "$AC_USER" "$AC_BIN" version) || true
+          sudo -n -u "$AC_USER" "$AC_BIN" version || true
+          sudo tail -n 60 /usr/local/var/log/agentconnect/agentconnectd.log || true
+          tail -n 20 "$RUNNER_TEMP/relay.log" || true
