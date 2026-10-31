@@ -84,6 +84,8 @@ if TYPE_CHECKING:
 
 LOG = log.get("a2a")
 FACADE_TOKEN_FILE = "a2a-facade-token"  # noqa: S105 - a file name
+# Where older daemons kept the seen set, in plain SQLite: moved into the
+# encrypted database and deleted on first use.
 SEEN_FILE = "a2a-seen.db"
 MAX_CONTEXT_ENTRY = 64 * 1024  # bytes of JSON; bigger context entries are summarised
 MAX_TASKS = 1024  # local agent tasks kept in memory (a cache of the database's)
@@ -188,8 +190,13 @@ class A2AAdapter:
 
     def bind_store(self, store: Store) -> None:
         """The daemon's database: the local agent's tasks are kept there,
-        so a follow-up or a cancel after a restart still finds its task."""
+        so a follow-up or a cancel after a restart still finds its task, and
+        so is the seen set. An older daemon's plain seen file is taken over
+        here, at start, rather than inside the first delivery."""
         self._store = store
+        data_dir = self.options.data_dir
+        legacy = None if data_dir is None else data_dir / SEEN_FILE
+        self._seen_store = Seen(store, legacy)
 
     def bind_clock(self, clock: Clock) -> None:
         """The runtime's clock, which stamps the task map's entries."""
@@ -230,10 +237,10 @@ class A2AAdapter:
 
     @property
     def _seen(self) -> Seen:
-        # Opened on first use: the daemon creates the data directory.
+        # In the daemon's encrypted database once it is bound (bind_store);
+        # in memory without it (unit use).
         if self._seen_store is None:
-            data_dir = self.options.data_dir
-            self._seen_store = Seen(None if data_dir is None else data_dir / SEEN_FILE)
+            self._seen_store = Seen(self._store)
         return self._seen_store
 
     # -- Adapter protocol ----------------------------------------------------

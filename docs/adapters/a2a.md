@@ -388,8 +388,11 @@ and rate limits apply to them.
 The daemon hands deliveries and events to the adapter at least once
 (ADR-004). The adapter records every message it has handled, by its sender
 and `msg_id` (a `msg_id` is its sender's, so another member can't reuse one
-to hide a message), and every `event_id`, as SHA-256 hashes in `a2a-seen.db` in the data directory (0600, the most
-recent 50,000), and skips repeats, so the agent never sees a message twice.
+to hide a message), and every `event_id`, as SHA-256 hashes in the daemon's
+encrypted database (the most recent 50,000), and skips repeats, so the
+agent never sees a message twice. An older daemon's plain `a2a-seen.db` in
+the data directory is moved into the database and deleted the first time
+the adapter needs it.
 If the daemon stops after the agent accepted a message but before the
 adapter recorded it, the agent can get it again with the same `messageId`.
 
@@ -404,9 +407,9 @@ Deliveries are in order within each group, and groups don't wait for each
 other: while the agent is unreachable, later deliveries in that group wait,
 and other groups' calls go on.
 
-Stopping the daemon cancels calls to the agent that are still running,
-stops the facade and closes `a2a-seen.db`, even if the daemon is
-interrupted again while the adapter closes.
+Stopping the daemon cancels calls to the agent that are still running and
+stops the facade, even if the daemon is interrupted again while the adapter
+closes.
 
 ## Limits
 

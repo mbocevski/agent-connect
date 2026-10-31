@@ -42,6 +42,7 @@ from agentconnect.adapter import Delivery, DeliveryResult, Event, GroupView, Sen
 from agentconnect.isolation import PeerCred
 from agentconnect.runtime.engine import DaemonError
 from agentconnect.schemas import normalize
+from agentconnect.store import Store
 from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor, ScriptedExecutor
 
 GID = "Z3JvdXA"
@@ -112,8 +113,10 @@ async def hello() -> AsyncIterator[AgentServer]:
     await agent.stop()
 
 
-async def started(options: A2AOptions) -> tuple[A2AAdapter, Sent]:
+async def started(options: A2AOptions, store: Store | None = None) -> tuple[A2AAdapter, Sent]:
     adapter = A2AAdapter(options)
+    if store is not None:
+        adapter.bind_store(store)
     sent = Sent()
     await adapter.on_outbound(sent)
     return adapter, sent
@@ -127,16 +130,20 @@ def received(agent: AgentServer) -> list[Any]:
 
 async def test_redelivery_never_reaches_the_agent_twice(hello: AgentServer, tmp_path: Path) -> None:
     options = A2AOptions(local_agent_url=hello.url, data_dir=tmp_path)
-    adapter, sent = await started(options)
+    store = Store(tmp_path / "daemon.db", secrets.token_bytes(32))
+    adapter, sent = await started(options, store)
     d = delivery("m1", text("hi"))
     assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.ACK
     await sent.wait_for(1)
     assert await adapter.deliver(view(), d.sender, d.to, d) is DeliveryResult.ACK
     await adapter.aclose()
-    # Still deduplicated after a restart: the record is on disk.
-    again, sent2 = await started(options)
+    # Still deduplicated after a restart: the record is in the daemon's
+    # encrypted database, and no plain file is written (SPEC 12).
+    again, sent2 = await started(options, store)
     assert await again.deliver(view(), d.sender, d.to, d) is DeliveryResult.ACK
     await again.aclose()
+    assert not (tmp_path / adapter_module.SEEN_FILE).exists()
+    store.close()
     assert len(received(hello)) == 1
     assert sent2.calls == []
     # The agent's messageId comes from the sender and msg_id, for its own dedup.
@@ -381,13 +388,108 @@ def test_seen_prunes_old_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(seen_module, "LIMIT", 5)
     monkeypatch.setattr(seen_module, "PRUNE_EVERY", 5)
-    store = Seen(tmp_path / "seen.db")
+    db = Store(tmp_path / "daemon.db", secrets.token_bytes(32))
+    seen = Seen(db)
     for i in range(10):
-        store.add("m", str(i))
-    assert not store.has("m", "0")
-    assert store.has("m", "9")
-    assert (tmp_path / "seen.db").stat().st_mode & 0o077 == 0
-    store.close()
+        seen.add("m", str(i))
+    assert not seen.has("m", "0")
+    assert seen.has("m", "9")
+    # The count carries on after a restart, so pruning keeps the newest.
+    again = Seen(db)
+    for i in range(10, 15):
+        again.add("m", str(i))
+    assert not again.has("m", "9")
+    assert again.has("m", "14")
+    db.close()
+    # Without the daemon's database (unit use) it lives in memory only.
+    memory = Seen(None)
+    memory.add("m", "x")
+    assert memory.has("m", "x")
+    assert not list(tmp_path.glob("*seen*"))
+
+
+def _legacy_seen(path: Path, n: int) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE seen (h TEXT PRIMARY KEY, n INTEGER)")
+    old.executemany(
+        "INSERT INTO seen VALUES (?, ?)", ((Seen._h("m", str(i)), i + 1) for i in range(n))
+    )
+    old.commit()
+    old.close()
+
+
+def test_a_full_old_seen_file_imports_in_one_transaction_at_adapter_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full file (50,000 rows) moves in one transaction when the store is
+    bound, not row by row inside the first delivery: that stalled the event
+    loop for minutes. The directory name has a `#`, which a raw `file:` URI
+    would cut short."""
+    data = tmp_path / "data#dir"
+    legacy = data / adapter_module.SEEN_FILE
+    _legacy_seen(legacy, 50_000)
+    db = Store(tmp_path / "daemon.db", secrets.token_bytes(32))
+    depths: list[int] = []
+    add = db.a2a_seen_add
+
+    def counted(h: str, n: int) -> None:
+        depths.append(db._depth)
+        add(h, n)
+
+    monkeypatch.setattr(db, "a2a_seen_add", counted)
+    adapter = A2AAdapter(A2AOptions(data_dir=data))
+    adapter.bind_store(db)
+    assert not legacy.exists(), "imported when the store is bound"
+    assert len(depths) == 50_000
+    assert set(depths) == {1}, "every row inside one transaction"
+    seen = adapter._seen
+    assert seen.has("m", "0")
+    assert seen.has("m", "49999")
+    assert not (tmp_path / "data").exists(), "no file opened beside the data dir"
+    db.close()
+
+
+def test_an_unreadable_old_seen_file_is_deleted_all_the_same(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentconnect.a2a_adapter import seen as seen_module  # noqa: PLC0415
+
+    legacy = tmp_path / adapter_module.SEEN_FILE
+    legacy.write_bytes(b"not a database")
+    db = Store(tmp_path / "daemon.db", secrets.token_bytes(32))
+    seen = Seen(db, legacy)
+    assert not seen.has("m", "anything")
+    assert not legacy.exists()
+    db.close()
+    # In memory it keeps the newest LIMIT too.
+    monkeypatch.setattr(seen_module, "LIMIT", 2)
+    memory = Seen(None)
+    for key in ("a", "b", "c"):
+        memory.add("m", key)
+    assert (memory.has("m", "a"), memory.has("m", "c")) == (False, True)
+
+
+def test_an_old_plain_seen_file_moves_into_the_encrypted_database(tmp_path: Path) -> None:
+    """Older daemons kept the seen set in a plain SQLite file: its hashes
+    move into the encrypted database and the file is deleted."""
+    import sqlite3  # noqa: PLC0415
+
+    legacy = tmp_path / adapter_module.SEEN_FILE
+    old = sqlite3.connect(legacy)
+    old.execute("CREATE TABLE seen (h TEXT PRIMARY KEY, n INTEGER)")
+    old.execute("INSERT INTO seen VALUES (?, 1)", (Seen._h("m", "before"),))
+    old.commit()
+    old.close()
+    db = Store(tmp_path / "daemon.db", secrets.token_bytes(32))
+    seen = Seen(db, legacy)
+    assert seen.has("m", "before")
+    assert not seen.has("m", "other")
+    assert not legacy.exists()
+    assert not list(tmp_path.glob(f"{adapter_module.SEEN_FILE}*"))
+    db.close()
 
 
 async def test_the_agent_going_away_after_its_card_is_a_retry(tmp_path: Path) -> None:

@@ -344,6 +344,11 @@ CREATE TABLE IF NOT EXISTS a2a_agent_tasks (
 CREATE INDEX IF NOT EXISTS a2a_agent_tasks_at ON a2a_agent_tasks (at);
 CREATE INDEX IF NOT EXISTS a2a_agent_tasks_peer
     ON a2a_agent_tasks (group_id, requester, instance, at);
+CREATE TABLE IF NOT EXISTS a2a_seen (
+    h TEXT PRIMARY KEY,
+    n INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS a2a_seen_n ON a2a_seen (n);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -2725,6 +2730,22 @@ class Store:
             "AND requester = ? AND instance = ? ORDER BY at DESC, rowid DESC LIMIT ?)",
             (group_id, requester, instance, group_id, requester, instance, keep),
         )
+
+    def a2a_seen_has(self, h: str) -> bool:
+        """Whether the A2A adapter already handled the key hashed to ``h``."""
+        return self._one("SELECT 1 FROM a2a_seen WHERE h = ?", h) is not None
+
+    def a2a_seen_last(self) -> int:
+        """The newest A2A seen entry's number (0 when there is none)."""
+        row = self._one("SELECT COALESCE(MAX(n), 0) FROM a2a_seen")
+        return int(row[0]) if row is not None else 0
+
+    def a2a_seen_add(self, h: str, n: int) -> None:
+        self._db.execute("INSERT OR IGNORE INTO a2a_seen (h, n) VALUES (?, ?)", (h, n))
+
+    def a2a_seen_prune(self, upto: int) -> None:
+        """Forget the A2A seen entries numbered ``upto`` or lower."""
+        self._db.execute("DELETE FROM a2a_seen WHERE n <= ?", (upto,))
 
     def a2a_task(self, task_id: str) -> tuple[str, str, str, str] | None:
         row = self._one(
