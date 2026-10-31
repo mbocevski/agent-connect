@@ -24,8 +24,6 @@ env:
   # The paths of packaging/launchd/ and docs/isolation.md.
   AC_USER: _agentconnect
   AC_CONFIG_FILE: /usr/local/etc/agentconnect/config.toml
-  AC_DATA: /usr/local/var/agentconnect
-  AC_RUN: /usr/local/var/run/agentconnect
   AC_BIN: /usr/local/bin/agentconnect
   AC_VENV: /usr/local/agentconnect
   RELAY_ADDR: 127.0.0.1:8787
@@ -38,7 +36,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-15-intel]
+        include:
+          - os: macos-15
+            data: /usr/local/var/agentconnect
+            run: /usr/local/var/run/agentconnect
+          # Homebrew owns /usr/local/var on an Intel Mac, so the docs say to
+          # pick root-owned locations, and the daemon refuses the others.
+          - os: macos-15-intel
+            data: /Library/Application Support/agentconnect/data
+            run: /Library/Application Support/agentconnect/run
+    env:
+      AC_DATA: ${{ matrix.data }}
+      AC_RUN: ${{ matrix.run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -90,22 +99,21 @@ jobs:
           sudo dscl . -create /Users/_agentconnect UniqueID 450
           sudo dscl . -create /Users/_agentconnect PrimaryGroupID 450
           sudo dscl . -create /Users/_agentconnect UserShell /usr/bin/false
-          sudo dscl . -create /Users/_agentconnect NFSHomeDirectory /usr/local/var/agentconnect
+          sudo dscl . -create /Users/_agentconnect NFSHomeDirectory "$AC_DATA"
           sudo dseditgroup -o edit -a agent -t user _agentconnect
-          sudo install -d -m 0700 -o _agentconnect -g _agentconnect /usr/local/var/agentconnect
-          sudo install -d -m 0750 -o _agentconnect -g _agentconnect /usr/local/var/run/agentconnect
+          sudo install -d -m 0700 -o _agentconnect -g _agentconnect "$AC_DATA"
+          sudo install -d -m 0750 -o _agentconnect -g _agentconnect "$AC_RUN"
           sudo install -d -m 0750 -o _agentconnect -g _agentconnect /usr/local/var/log/agentconnect
           sudo install -d -m 0755 /usr/local/etc/agentconnect
           sudo install -m 0640 -g _agentconnect packaging/config.toml /usr/local/etc/agentconnect/config.toml
           # Only for the check: a user in the group who isn't on the list.
           sudo dseditgroup -o edit -a stranger -t user _agentconnect
-          ls -ld /usr/local /usr/local/var /usr/local/var/run
 
       - name: The configuration (docs/isolation.md)
         run: |
           sudo sed -i '' \
-            -e 's|^data_dir = .*|data_dir = "/usr/local/var/agentconnect"|' \
-            -e 's|^agent_dir = .*|agent_dir = "/usr/local/var/run/agentconnect"|' \
+            -e "s|^data_dir = .*|data_dir = \"$AC_DATA\"|" \
+            -e "s|^agent_dir = .*|agent_dir = \"$AC_RUN\"|" \
             -e 's|^group = .*|group = "_agentconnect"|' \
             -e 's|^agent_users = .*|agent_users = ["agent"]|' \
             -e "s|^url = .*|url = \"ws://$RELAY_ADDR\"|" \
@@ -152,7 +160,11 @@ jobs:
 
       - name: The tests that need root and a second OS user
         if: ${{ !cancelled() }}
-        run: sudo env "PATH=$PATH" AC_RUN_MULTIUSER=1 UV_FROZEN=1 uv run --all-packages pytest -m multiuser -q -n0 -rs
+        # /usr/bin/python3 is a shim that takes too long as another user, and
+        # the venv is under the runner's home: use the installed Python.
+        run: >-
+          sudo env "PATH=$PATH" AC_RUN_MULTIUSER=1 UV_FROZEN=1 "AC_MULTIUSER_PYTHON=$AC_VENV/venv/bin/python"
+          uv run --all-packages pytest -m multiuser -q -n0 -rs
 
       - name: Logs
         if: ${{ !cancelled() }}
