@@ -73,19 +73,41 @@ pub fn probe(addr: SocketAddr, timeout: Duration) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead as _, BufReader};
+    use std::io::{BufRead as _, BufReader, ErrorKind};
     use std::net::TcpListener;
     use std::thread::JoinHandle;
+    use std::time::Instant;
 
     use super::*;
 
+    /// The first connection to `listener`. When none comes it panics, which
+    /// `join` turns into a failed test: a probe that never connects must fail
+    /// its test, not hang it until a mutation run's timeout.
+    fn accept_soon(listener: &TcpListener) -> TcpStream {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    return conn;
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("the probe never connected: {e}"),
+            }
+        }
+    }
+
     /// A server that takes one request and sends `answer`; the request line
-    /// it got is what the thread returns.
-    fn server(answer: &'static [u8]) -> (SocketAddr, JoinHandle<String>) {
+    /// it got is what the thread returns. The probe may stop reading before
+    /// the end of a long answer, so a failed write is not an error here.
+    fn server(answer: impl AsRef<[u8]> + Send + 'static) -> (SocketAddr, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let thread = std::thread::spawn(move || {
-            let (conn, _) = listener.accept().unwrap();
+            let conn = accept_soon(&listener);
             let mut reader = BufReader::new(conn);
             let mut request_line = String::new();
             reader.read_line(&mut request_line).unwrap();
@@ -93,7 +115,7 @@ mod tests {
             while reader.read_line(&mut line).unwrap() > 2 {
                 line.clear();
             }
-            reader.get_mut().write_all(answer).unwrap();
+            let _ = reader.get_mut().write_all(answer.as_ref());
             request_line
         });
         (addr, thread)
@@ -107,6 +129,39 @@ mod tests {
         let (addr, thread) = server(OK);
         assert_eq!(probe(addr, TIMEOUT), Ok(()));
         assert_eq!(thread.join().unwrap(), "GET /healthz HTTP/1.1\r\n");
+    }
+
+    /// A `200` answer in which `"status":"ok"` comes after `pad` bytes of
+    /// other JSON.
+    fn padded(pad: usize) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n\
+             {{\"note\":\"{}\",\"status\":\"ok\"}}",
+            "x".repeat(pad)
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn an_answer_longer_than_a_kilobyte_is_read_to_its_ok() {
+        for pad in [2_000, 4_096, 30_000] {
+            let (addr, thread) = server(padded(pad));
+            assert_eq!(probe(addr, TIMEOUT), Ok(()), "{pad} bytes of padding");
+            thread.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn the_answer_is_read_up_to_its_cap_and_no_further() {
+        let cap = usize::try_from(MAX_ANSWER).unwrap();
+        // The ok ends just inside the cap, and just outside it.
+        let (addr, thread) = server(padded(cap - 200));
+        assert_eq!(probe(addr, TIMEOUT), Ok(()));
+        thread.join().unwrap();
+        let (addr, thread) = server(padded(cap + 100));
+        let err = probe(addr, TIMEOUT).unwrap_err();
+        assert!(err.contains("didn't say ok"), "{err}");
+        thread.join().unwrap();
     }
 
     #[test]
@@ -145,8 +200,10 @@ mod tests {
         let any4: SocketAddr = "0.0.0.0:9091".parse().unwrap();
         let any6: SocketAddr = "[::]:9091".parse().unwrap();
         let set: SocketAddr = "192.0.2.7:9091".parse().unwrap();
+        let set6: SocketAddr = "[2001:db8::7]:9091".parse().unwrap();
         assert_eq!(target(any4), "127.0.0.1:9091".parse().unwrap());
         assert_eq!(target(any6), "[::1]:9091".parse().unwrap());
         assert_eq!(target(set), set);
+        assert_eq!(target(set6), set6, "a set IPv6 address is probed as it is");
     }
 }
