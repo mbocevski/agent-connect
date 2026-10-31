@@ -597,7 +597,7 @@ store written the old way.
 | SR-29 | daemon | `check_agent_dir` accepts a group-writable agent directory (0770, 0730) and doesn't check its parents, so an agent user may be able to replace the socket and show the human forged approvals or a forged code. | `isolation.py:158-180`. Probe: 770 and 730 accepted. Confirmed. | Fixed in #144: the agent directory may not be group-writable, and every directory on its configured path and along each link's target, and above the data directory, must be the daemon user's or root's and closed to others unless sticky |
 | SR-30 | daemon | The A2A local-agent client and the facade's push client honour `HTTP_PROXY` and `ALL_PROXY` for loopback URLs, sending peer messages and `local_agent_token` to a proxy in the daemon's environment. | `a2a_adapter/adapter.py:212`, `a2a_adapter/facade.py:357`. Confirmed with the same client setup. | Fixed: the adapter's client in #108, the facade's push client in #113 (`trust_env=False`, no redirects) |
 | SR-31 | daemon | Facade push-notification URLs are not screened, so the facade token holder can make the daemon POST task updates to any address. | `a2a_adapter/facade.py:346`. By reading; later confirmed with a probe. | Fixed in #117: push URLs must be `http`/`https` to a literal loopback address, checked when set and before each send |
-| SR-32 | daemon | `GET /v0/status` with the agent token counts a group hidden from the agent (an approved knock before the knocker joins) and lists its id in `out_of_sync`. | `engine.py:3616-3628`, `runtime/agent.py:58-63`, `api.py:1426-1427`. Confirmed. | Open (T-32) |
+| SR-32 | daemon | `GET /v0/status` with the agent token counts a group hidden from the agent (an approved knock before the knocker joins) and lists its id in `out_of_sync`. | `engine.py:3616-3628`, `runtime/agent.py:58-63`, `api.py:1426-1427`. Confirmed. | Fixed in #161: for the agent, status counts no hidden group (groups, `out_of_sync`, queues, pending joins) and an event stream for one is `404 not_found`. Test: `harness/tests/test_headless.py::test_the_agent_doesnt_see_a_hidden_group_in_its_status_or_streams` |
 | SR-33 | daemon | The agent's `reply_to` choice resets the loop-guard hop: two agents that keep naming the human's first message never reach `max_agent_turns`. | `engine.py:1672-1691`, `engine.py:1518-1524`, `mcp/tools.py:283-288`. Probe: eight replies at hop 1, no pause. Confirmed. | Open (T-33) |
 | SR-34 | daemon | `close_requested` carries the owner's 200-character reason to the agent while `require_verified` still holds deliveries, and the agent may then leave, though SPEC §7.3 makes that the human's decision. | `engine.py:1427-1436`, `engine.py:146-157`. Confirmed. | Open (T-34) |
 | SR-35 | daemon | In `free` mode a replica is triggered by its sibling's messages, although SPEC §9.3 triggers "all members except the sender" and a member is an identity. | `engine.py:414-415`. Confirmed. | Open (T-35) |
@@ -1153,7 +1153,7 @@ One line per open item, ready to file.
   A2A adapter and facade HTTP clients.
 - **T-31 (Low, SR-31, fixed in #117):** Daemon: screen facade push URLs, or turn push
   configs off.
-- **T-32 (Low, SR-32):** Daemon: filter hidden groups from the agent's
+- **T-32 (Low, SR-32, fixed in #161):** Daemon: filter hidden groups from the agent's
   status, pending counts and SSE group checks.
 - **T-33 (Low, SR-33):** Daemon: an agent's hop is at least its last
   trigger's hop + 1 until a resume, whatever `reply_to` names.

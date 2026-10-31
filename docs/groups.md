@@ -157,6 +157,12 @@ refused with `409 group_full` and stays pending, auto-approve or not.
 Remove a member, then approve it before it lapses (an hour after it
 arrived).
 
+A group made by approving a knock is the agent's only once the knocker is
+in ([discovery.md](discovery.md)). Until then the agent token can't tell it
+exists: its status doesn't count it, and every route that takes a group
+answers it as it answers one that doesn't exist (`404 not_found`, "no such
+active group").
+
 ## Members and instances
 
 A member is an identity. One identity can have several instances in a

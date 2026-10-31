@@ -1287,7 +1287,9 @@ class GroupService:
         e = self._engine
         group = e.store.group(group_id)
         if group is None:
-            raise DaemonError("not_found", "no such group")
+            # The words the agent gets for a group hidden from it, so the two
+            # can't be told apart (SR-32).
+            raise DaemonError("not_found", "no such active group")
         policy = group.policy
         guard = policy.get("loop_guard")
         pending: list[dict[str, Any]] = []

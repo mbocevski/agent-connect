@@ -295,7 +295,7 @@ Token: `api` routes accept either token. The routes marked human refuse the api 
 
 ### `GET /v0/status`
 
-Daemon status: identity, relay connection, queue sizes. With the agent token, `held_messages` counts only the agent's own held sends.
+Daemon status: identity, relay connection, queue sizes. With the agent token, `held_messages` counts only the agent's own held sends, and nothing counts a group hidden from the agent (an approved knock's group before the knocker is in).
 
 Accepts the api token or the human token.
 

@@ -541,3 +541,82 @@ async def test_sse_resume_past_the_retention_window_gets_a_gap_event(
     await asyncio.gather(task, return_exceptions=True)
     await resumed.aclose()
     await bob.close()
+
+
+async def test_the_agent_doesnt_see_a_hidden_group_in_its_status_or_streams(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    """SR-32: an approved knock's group is hidden from the agent until the
+    knocker is in (docs/discovery.md). The agent's status doesn't count it
+    or list it as out of sync, and an event stream for it is `404
+    not_found`, as for a group that doesn't exist. The human sees it."""
+    h = await headless(cluster, "hide", sockdir, mode="sse")
+    gid = h.node.daemon.create_group("Knocked", "")
+    await h.node.idle()
+    h.node.daemon.store.update_group(gid, hidden=True, out_of_sync=True)
+    agent = await h.sdk.status()
+    assert (agent["groups"], agent["out_of_sync"]) == (0, [])
+    human = h.node.daemon.status()
+    assert (human["groups"], human["out_of_sync"]) == (1, [gid])
+    token = api_token(h.server, "agent")
+
+    async def stream_status(group: str) -> bytes:
+        reader, writer = await asyncio.open_unix_connection(str(h.server.address))
+        writer.write(
+            f"GET /v0/events?group={group} HTTP/1.1\r\nhost: localhost\r\n".encode()
+            + b"accept: text/event-stream\r\n"
+            + f"authorization: Bearer {token}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), WAIT)
+        writer.close()
+        return line
+
+    assert (await stream_status(gid)).startswith(b"HTTP/1.1 404")
+    assert (await stream_status("nosuchgroup")).startswith(b"HTTP/1.1 404")
+    await h.close()
+
+
+async def test_every_agent_route_answers_a_hidden_group_as_an_unknown_one(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    """SR-32: every agent-token route that takes a group answers a group
+    hidden from the agent byte for byte as it answers one that doesn't
+    exist, so the agent can't tell an approved knock's group is there."""
+    from agentconnect.runtime.api import ROUTE_SPECS  # noqa: PLC0415
+
+    h = await headless(cluster, "hide3", sockdir, mode="sse")
+    gid = h.node.daemon.create_group("Knocked", "")
+    await h.node.idle()
+    h.node.daemon.store.update_group(gid, hidden=True)
+    unknown = "Z3JvdXAtdW5rbm93bi14eXo"
+    token = api_token(h.server, "agent")
+
+    async def answer(method: str, path: str, body: bytes) -> bytes:
+        reader, writer = await asyncio.open_unix_connection(str(h.server.address))
+        writer.write(
+            f"{method} {path} HTTP/1.1\r\nhost: localhost\r\n".encode()
+            + f"authorization: Bearer {token}\r\ncontent-type: application/json\r\n".encode()
+            + f"content-length: {len(body)}\r\nconnection: close\r\n\r\n".encode()
+            + body
+        )
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(), WAIT)
+        writer.close()
+        status, _, rest = raw.partition(b"\r\n")
+        return status + b"\n" + rest.partition(b"\r\n\r\n")[2]
+
+    # Human routes too: with the agent token they must not tell either.
+    routes = [
+        (spec.method, spec.path, b"{}" if spec.request is not None else b"")
+        for spec in ROUTE_SPECS
+        if "{gid}" in spec.path
+    ]
+    routes += [("GET", "/v0/events?group={gid}", b""), ("GET", "/v0/deliveries?group={gid}", b"")]
+    assert len(routes) > 20
+    for method, path, body in routes:
+        fill = {"identity": "ac:v0:x", "run": "r1"}
+        hidden = await answer(method, path.format(gid=gid, **fill), body)
+        absent = await answer(method, path.format(gid=unknown, **fill), body)
+        assert hidden == absent, f"{method} {path}: {hidden!r} != {absent!r}"
+    await h.close()
