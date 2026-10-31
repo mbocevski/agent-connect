@@ -128,3 +128,32 @@ async def test_a_hop_below_the_referenced_messages_is_raised(group: GroupFixture
     # b knows its own message had hop 1, so this is at least hop 2 > 1.
     assert (last(b).hop, last(b).addressed_to_me) == (2, False)
     await b.adapter.wait_for(lambda: bool(b.adapter.of_type("loop_guard")))
+
+
+async def test_naming_the_humans_message_does_not_reset_the_hop(group: GroupFixture) -> None:
+    """SR-33: each human speaks once; then each agent keeps naming the other
+    human's message in `reply_to` (hop 0), which would give every reply hop
+    1 forever. An agent's hop is at least one more than the last message
+    that triggered it, whatever `reply_to` names, so the two still reach
+    `max_agent_turns` and the group pauses."""
+    (a, b), gid = await group(2)
+    a.daemon.set_policy(gid, loop_guard={"max_agent_turns": 3})
+    await a.idle()
+    await b.wait(lambda: max_turns(b, gid) == 3)
+    a.daemon.send_message(gid, {"text": "from a's human"}, origin="human")
+    await b.wait_texts(gid, 1)
+    human_a = last(b)
+    b.daemon.send_message(gid, {"text": "from b's human"}, origin="human")
+    await a.wait_texts(gid, 1)
+    human_b = last(a)
+    assert human_a.hop == human_b.hop == 0
+    hops = []
+    for turn in range(2):
+        await reply(a, gid, human_b, f"a{turn}")
+        await b.wait_texts(gid, 2 + turn)
+        hops.append(last(b).hop)
+        await reply(b, gid, human_a, f"b{turn}")
+        await a.wait_texts(gid, 2 + turn)
+        hops.append(last(a).hop)
+    assert hops == [1, 2, 3, 4]
+    await a.adapter.wait_for(lambda: bool(a.adapter.of_type("loop_guard")))
