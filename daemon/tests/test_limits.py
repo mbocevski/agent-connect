@@ -14,6 +14,7 @@ import pytest
 
 from agentconnect.clock import FakeClock
 from agentconnect.limits import (
+    DRAIN_WINDOW_SECS,
     GROUP_PER_MINUTE,
     MAX_DEPTH,
     MAX_MESSAGE_BYTES,
@@ -393,12 +394,40 @@ def test_unrequested_task_updates_get_the_message_rate_in_windows_of_their_own(
 
 def test_the_drain_exemption_is_bounded_per_sender_and_in_all() -> None:
     budget = DrainBudget(total=5)
-    assert [budget.take("a", 2) for _ in range(3)] == [True, True, False]
-    assert [budget.take("b", 2) for _ in range(2)] == [True, True]
-    assert budget.take("c", 2)
-    assert not budget.take("c", 2), "the connection total is spent"
+    assert [budget.take("a", 2, 0) for _ in range(3)] == [True, True, False]
+    assert [budget.take("b", 2, 0) for _ in range(2)] == [True, True]
+    assert budget.take("c", 2, 0)
+    assert not budget.take("c", 2, 0), "the connection total is spent"
     budget.reset()
-    assert budget.take("a", 2), "a new connection starts afresh"
+    assert budget.take("c", 2, 0), "a new connection has a new total"
+
+
+def test_reconnecting_doesnt_refill_a_senders_drain_exemption() -> None:
+    """SR-36: the relay decides when a drain ends and a connection starts,
+    so a relay colluding with a member could reconnect over and over to give
+    it a fresh exemption each time. A sender's exempt messages are counted
+    across connections, over DRAIN_WINDOW_SECS."""
+    budget = DrainBudget(total=100)
+    assert [budget.take("a", 2, 0) for _ in range(3)] == [True, True, False]
+    for t in (10, 600, DRAIN_WINDOW_SECS - 1):
+        budget.reset()
+        assert not budget.take("a", 2, t), t
+    budget.reset()
+    assert budget.take("a", 2, DRAIN_WINDOW_SECS), "an hour on, the exemption is back"
+
+
+def test_a_new_connection_forgets_senders_whose_window_has_passed() -> None:
+    """SR-36: each sender's window is kept only while it can still refuse:
+    a reset (a new connection) drops the ones older than the window, so
+    many one-off senders don't stay in memory for the daemon's lifetime."""
+    budget = DrainBudget(total=10_000)
+    for i in range(500):
+        assert budget.take(f"g/{i}", 2, 0)
+    budget.reset(DRAIN_WINDOW_SECS - 1)
+    assert len(budget._times) == 500
+    assert budget.take("recent", 2, DRAIN_WINDOW_SECS - 1)
+    budget.reset(DRAIN_WINDOW_SECS)
+    assert set(budget._times) == {"recent"}
 
 
 PARTS = json.loads(

@@ -101,7 +101,10 @@ one identity are separate instances (SPEC
 - **Restart.** On start, the runtime first finishes whatever a crash left in
   its processing journal ([ADR-004](adr/004-processing-journal.md)), then
   resends its own pending commit, then drains its outbox and its relay
-  mailbox. A crash loses nothing that was journalled or queued.
+  mailbox. A crash loses nothing that was journalled or queued. What queued
+  at the relay while it was away skips the per-minute rates, within a
+  per-sender budget that reconnecting doesn't renew
+  ([safety.md](safety.md)).
 - **Reachable only while it runs.** An embedded agent is online while its
   process runs. While it is stopped, the relay keeps its messages, commits,
   Welcomes and join requests for up to 7 days, and the agent catches up when

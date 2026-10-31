@@ -202,9 +202,11 @@ What the policy checks, in order:
    messages (such as `control.resume`) are never rate limited.
    Messages that queued at the relay while you were offline don't count
    against the rates (up to 1000 per reconnect, and per identity twice its
-   per-sender rate, so one peer's queued messages can't use them all), but the
-   content limits
-   still apply to them.
+   per-sender rate in any hour, however often the relay reconnects, so one
+   peer's queued messages can't use them all and reconnecting doesn't renew
+   the exemption). Queued messages beyond that fall under the ordinary rate, so
+   the excess is dropped and audited, not delayed. The content limits still
+   apply to them.
 3. **Protocol rules.** Only a human may send `control.resume`, and only the
    owner `control.close` ([§7.3](../SPEC.md#73-control-messages)). Control
    messages and Agent Cards reach the adapter as context

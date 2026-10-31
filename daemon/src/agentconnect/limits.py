@@ -297,29 +297,48 @@ def content_problem(  # noqa: PLR0911
 
 
 MAX_DRAIN_EXEMPT = 1000  # rate-exempt messages per reconnect drain, all senders
-DRAIN_RATE_MULTIPLE = 2  # ...and per identity: 2 x its sender_per_minute
+DRAIN_RATE_MULTIPLE = 2  # ...and per identity: 2 x its sender_per_minute...
+DRAIN_WINDOW_SECS = 3600  # ...in any hour, however many drains
 
 
 class DrainBudget:
     """How many messages of a reconnect drain (SPEC 8.2/10.2) skip the rates:
     at most ``total`` per connection, and per sender at most what
-    :meth:`take` is given, so one peer's queued messages can't use up the
-    exemption."""
+    :meth:`take` is given within :data:`DRAIN_WINDOW_SECS`, across
+    connections. The relay decides when a drain starts and ends, so a relay
+    colluding with a member must not get it a fresh exemption by
+    reconnecting (SR-36); one peer's queued messages can't use up the
+    exemption either."""
 
     def __init__(self, total: int = MAX_DRAIN_EXEMPT) -> None:
         self._total = total
-        self._used: dict[str, int] = {}
+        self._used = 0
+        self._times: dict[str, deque[int]] = {}
 
-    def reset(self) -> None:
-        """A new connection: a new drain."""
-        self._used.clear()
+    def reset(self, now: int | None = None) -> None:
+        """A new connection: a new total. Each sender's window carries on;
+        with ``now``, a sender whose newest exempt message is older than the
+        window is forgotten, so one-off senders don't stay in memory."""
+        self._used = 0
+        if now is None:
+            return
+        cutoff = now - DRAIN_WINDOW_SECS
+        for sender in [s for s, times in self._times.items() if not times or times[-1] <= cutoff]:
+            del self._times[sender]
 
-    def take(self, sender: str, cap: int) -> bool:
-        """Count one exempt message from ``sender``; False when it is over
-        ``cap`` for that sender or the connection's total is spent."""
-        if sum(self._used.values()) >= self._total or self._used.get(sender, 0) >= cap:
+    def take(self, sender: str, cap: int, now: int) -> bool:
+        """Count one exempt message from ``sender`` at ``now`` (Unix
+        seconds); False when ``sender`` had ``cap`` within the window or the
+        connection's total is spent."""
+        times = self._times.setdefault(sender, deque())
+        while times and times[0] <= now - DRAIN_WINDOW_SECS:
+            times.popleft()
+        if self._used >= self._total or len(times) >= cap:
+            if not times:
+                del self._times[sender]
             return False
-        self._used[sender] = self._used.get(sender, 0) + 1
+        times.append(now)
+        self._used += 1
         return True
 
 
