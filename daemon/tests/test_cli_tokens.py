@@ -110,7 +110,22 @@ def test_approvals_list_uses_the_agent_token_where_the_human_one_isnt(
     result = runner.invoke(cli.app, ["approvals", "list", "--json"])
     assert result.exit_code == 0, result.output
     assert tokens == [True, False]
-    assert json.loads(result.stdout) == {"approvals": [], "messages": []}
+    assert json.loads(result.stdout) == {"scope": "agent", "approvals": [], "messages": []}
+
+
+def test_approvals_list_says_when_it_shows_only_the_agents_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def connect(_path: Path | None, *, human: bool = False) -> ListOnly:
+        if human:
+            raise ApiClientError(0, "human_only", "no human token in this data directory")
+        return ListOnly(human)
+
+    monkeypatch.setattr(cli, "connect", connect)
+    out = runner.invoke(cli.app, ["approvals", "list"]).stdout
+    assert "agent token: your own held sends only" in out
+    # An empty list here says nothing about what waits for the human.
+    assert "No pending" not in out
 
 
 def test_approvals_list_prefers_the_human_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,8 +136,15 @@ def test_approvals_list_prefers_the_human_token(monkeypatch: pytest.MonkeyPatch)
         return ListOnly(human)
 
     monkeypatch.setattr(cli, "connect", connect)
-    assert runner.invoke(cli.app, ["approvals", "list"]).exit_code == 0
+    result = runner.invoke(cli.app, ["approvals", "list"])
+    assert result.exit_code == 0
     assert tokens == [True]
+    assert "No pending" in result.stdout
+    assert "agent token" not in result.stdout
+    assert (
+        json.loads(runner.invoke(cli.app, ["approvals", "list", "--json"]).stdout)["scope"]
+        == "human"
+    )
 
 
 def test_approvals_list_doesnt_hide_a_stopped_daemon(monkeypatch: pytest.MonkeyPatch) -> None:

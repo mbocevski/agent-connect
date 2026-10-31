@@ -277,7 +277,8 @@ as an agent user fails: the agent directory has no human token, the agent
 token gets `human_only`, and the human token, should an agent get hold of
 it, gets `peer_refused` from any user but the daemon's and the
 `human_users`. The CLI says `human_only` in that case, and `approvals list`
-falls back to the agent token, which shows only the agent's own held sends.
+falls back to the agent token, which shows only the agent's own held sends,
+and says so (`scope: agent` in its JSON).
 An agent user that points the CLI at the daemon's own configuration can't read
 its data directory, and gets `token_unreadable`: it sets `AC_DATA_DIR` instead.
 

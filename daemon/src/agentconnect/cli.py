@@ -1070,6 +1070,7 @@ def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """List pending join requests with the joiner's name and fingerprint, knocks on
     your listing, and the messages the safety policy holds (`require_approval`)."""
     with guard(as_json):
+        scope = "human"
         try:
             api = connect(config, human=True)
         except ApiClientError as e:
@@ -1078,13 +1079,19 @@ def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
             if e.code != "human_only":
                 raise
             api = connect(config)
+            scope = "agent"
         listed = api.request("GET", "/v0/approvals")
         views = [_approval_view(api, a) for a in listed["approvals"]]
         held = list(listed.get("messages", []))
         if as_json:
-            emit_json({"approvals": views, "messages": held})
+            emit_json({"scope": scope, "approvals": views, "messages": held})
             return
-        if not views:
+        if scope == "agent":
+            # Not "no pending join requests": this token can't know.
+            typer.echo(
+                "(agent token: your own held sends only; join requests and knocks are the human's)"
+            )
+        elif not views:
             typer.echo("No pending join requests or knocks.")
         for v in views:
             _print_approval(v)
