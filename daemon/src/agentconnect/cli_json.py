@@ -334,6 +334,7 @@ SCHEMAS: dict[str, Any] = {
         ),
     },
     "leave": {"group_id": "str", "status": "str"},
+    "stay": {"group_id": "str", "status": "str"},
     "send": {"msg_id": "str", "group_id": "str", "hint": Opt("str")},
     "listing publish": {
         "directory": "str",
@@ -437,6 +438,7 @@ NOTES: dict[str, str] = {
         "(SPEC 11)."
     ),
     "leave": "`status` is `left` or `leaving`.",
+    "stay": "`status` is `staying`.",
     "listing publish": (
         "`state` is `published`. `owner_state` is what the directory reported, for "
         "information only. A directory that didn't answer is `publish_retrying` (exit 1): "

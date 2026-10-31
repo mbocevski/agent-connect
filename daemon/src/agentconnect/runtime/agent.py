@@ -155,8 +155,15 @@ class AgentApi:
         )
         return {"msg_id": msg_id, "status": status}
 
-    async def leave(self, group_id: str) -> dict[str, Any]:
-        return {"status": await self._engine.leave(self._visible(group_id))}
+    async def leave(self, group_id: str, *, human: bool = False) -> dict[str, Any]:
+        """Leave a group. While the owner's close waits for the human's
+        answer (SPEC 7.3), only the human may: the agent's leave is ``409
+        human_decides`` until the human stays or leaves."""
+        group_id = self._visible(group_id)
+        if not human and self._engine.close_pending(group_id):
+            msg = "the owner asked everyone to leave: your human decides whether to"
+            raise DaemonError("human_decides", msg)
+        return {"status": await self._engine.leave(group_id)}
 
     async def approvals(self) -> dict[str, Any]:
         """No join requests and no held peer messages (their sender, msg_id

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from agentconnect.runtime.engine import _envelope_problem
+from agentconnect.runtime.engine import DaemonError, _envelope_problem
 from agentconnect.store import GroupRow
 from agentconnect_harness.cluster import Cluster, Node
 from agentconnect_harness.proxy import RelayProxy
@@ -271,3 +271,29 @@ async def test_control_close_prompts_the_human_and_never_leaves(group: GroupFixt
         {"reason": "done here"}
     ]
     assert cached(c, gid).status == "active"
+
+
+async def test_the_agent_cant_leave_while_a_close_waits_for_the_human(
+    group: GroupFixture,
+) -> None:
+    """SR-34, SPEC 7.3: after the owner's close the human decides. Until it
+    answers, the agent's leave is `409 human_decides`; once the human
+    chooses to stay, the agent may leave on its own judgement again. With
+    no close pending an agent may always leave."""
+    (a, b, c), gid = await group(3)
+    a.daemon.send_message(gid, {"reason": "wrapping up"}, kind="control.close", origin="human")
+    await b.wait(lambda: bool(human_events(b, "close_requested")))
+    with pytest.raises(DaemonError) as info:
+        await b.runtime.agent.leave(gid)
+    assert info.value.code == "human_decides"
+    assert cached(b, gid).status == "active"
+    b.daemon.stay(gid)
+    assert (await b.runtime.agent.leave(gid))["status"] in ("leaving", "left")
+    # c never got an answer from its human, but its human may leave for it,
+    # and an agent with no close pending leaves as before.
+    await c.wait(lambda: bool(human_events(c, "close_requested")))
+    assert c.daemon.close_pending(gid)
+    other = a.daemon.create_group("Other", "")
+    await a.idle()
+    with pytest.raises(DaemonError):
+        c.daemon.stay(other)

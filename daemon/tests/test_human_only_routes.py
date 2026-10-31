@@ -29,6 +29,8 @@ HUMAN = {
     "POST /v0/approvals/messages/{hid}/reject",
     "POST /v0/approvals/{rid}/approve",
     "POST /v0/approvals/{rid}/reject",
+    # SPEC 7.3: answering the owner's close is the human's.
+    "POST /v0/groups/{gid}/stay",
     "POST /v0/groups/{gid}/members/{identity}/verify",
     "POST /v0/groups/{gid}/members/{identity}/sas",
     "GET /v0/groups/{gid}/sas/runs/{run}",

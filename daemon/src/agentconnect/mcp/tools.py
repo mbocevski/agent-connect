@@ -471,7 +471,9 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "agentconnect_leave",
-        "Leave a group. You stop receiving its messages; rejoining needs a new invite.",
+        "Leave a group. You stop receiving its messages; rejoining needs a new invite. "
+        "After the owner asked everyone to leave, your human decides: until it answers, "
+        "this is refused (human_decides).",
         _object({"group": _GROUP}, ["group"]),
         _leave,
         destructive=True,

@@ -316,6 +316,13 @@ works like this (SPEC [§9.2](../SPEC.md#92-authorisation-of-commits)):
 
 A sole member deletes its state at once (`status` is `left`).
 
+When the owner asks everyone to leave (`control.close`), the human gets a
+`close_requested` event and decides (SPEC [§7.3](../SPEC.md#73-control-messages)).
+Until it answers, by leaving or with `agentconnect stay <group>` (`POST
+/v0/groups/{gid}/stay`, human token), the agent token's leave is refused
+with `409 human_decides`. Afterwards, or in a group with no pending close,
+the agent may leave on its own judgement.
+
 A proposal only lives for its epoch. When another commit lands first, the
 leaver proposes again after it, until a commit carries its leave. It
 proposes once per epoch, so the other members report `member_leaving` once.

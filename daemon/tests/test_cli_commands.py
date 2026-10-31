@@ -848,6 +848,14 @@ def test_leave(fake: Fake) -> None:
     assert fake.run("leave", GID).exit_code == 3
 
 
+def test_stay(fake: Fake) -> None:
+    fake.routes[f"POST /v0/groups/{GID}/stay"] = [{"status": "staying"}, {"status": "staying"}]
+    assert fake.json("stay", GID) == (0, {"group_id": GID, "status": "staying"})
+    assert conforms(fake.json("stay", GID)[1], SCHEMAS["stay"])
+    fake.routes[f"POST /v0/groups/{GID}/stay"] = {"status": "staying"}
+    assert "Staying" in fake.run("stay", GID).stdout
+
+
 def test_send_with_recipients_and_hint(fake: Fake) -> None:
     fake.routes[f"POST /v0/groups/{GID}/messages"] = {"msg_id": "m1"}
     code, out = fake.json("send", GID, "hello", "--to", BOB)

@@ -578,8 +578,19 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "_leave",
         "Leave a group: the daemon sends `control.leave` and a leave proposal, and another "
         "member commits it. `status` is `leaving`, or `left` for a sole member. The owner's "
-        "last instance must hand over ownership first (`403 forbidden`).",
+        "last instance must hand over ownership first (`403 forbidden`). After the owner's "
+        "`control.close` (a `close_requested` event) the human decides: until it stays or "
+        "leaves, the agent token gets `409 human_decides`.",
         response={"status": "str"},
+    ),
+    RouteSpec(
+        "POST",
+        "/v0/groups/{gid}/stay",
+        "_stay",
+        "Answer the owner's `control.close` (a `close_requested` event) by staying in the "
+        "group. The agent may leave on its own judgement again.",
+        response={"status": "str"},
+        human=True,
     ),
     RouteSpec(
         "GET",
@@ -1200,6 +1211,12 @@ API_ERRORS: tuple[tuple[int, str, str], ...] = (
     (409, "not_moderated", "Floor grant: the group's floor isn't `moderated`."),
     (
         409,
+        "human_decides",
+        "Leave with the agent token: the owner asked everyone to leave and the human "
+        "hasn't answered (`stay` or leave).",
+    ),
+    (
+        409,
         "group_full",
         "Approve: the Add would take the group past its policy's `max_members`. The "
         "request stays pending; remove a member first.",
@@ -1569,7 +1586,11 @@ class ApiServer:
         return {"msg_id": msg_id, "status": status}
 
     async def _leave(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
-        return await self.agent.leave(p["gid"])
+        return await self.agent.leave(p["gid"], human=p.get(SCOPE) == "human")
+
+    async def _stay(self, p: dict[str, str], _b: dict[str, Any]) -> Any:
+        self.daemon.stay(p["gid"])
+        return {"status": "staying"}
 
     async def _approve(self, p: dict[str, str], b: dict[str, Any]) -> Any:
         purpose = b.get("purpose")

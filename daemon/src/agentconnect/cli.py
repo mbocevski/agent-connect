@@ -1581,6 +1581,20 @@ def leave(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> Non
 
 
 @app.command(cls=IdArgsCommand)
+def stay(group: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    """Answer the owner's request to close a group by staying in it: your agent
+    may leave on its own again (it can't while the request waits)."""
+    with guard(as_json):
+        api = connect(config)
+        gid = resolve_group(api, group)
+        state = api.request("POST", f"/v0/groups/{gid}/stay")["status"]
+        if as_json:
+            emit_json({"group_id": gid, "status": state})
+        else:
+            typer.echo("Staying in the group.")
+
+
+@app.command(cls=IdArgsCommand)
 def send(  # noqa: PLR0913, PLR0917
     group: str,
     text: str,

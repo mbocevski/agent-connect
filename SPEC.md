@@ -926,7 +926,9 @@ Inner = {
   operator gave its adapters: the reference daemon sends it empty, once,
   right after joining (§8.3, "Limits").
 - `control.close`: a receiver MUST NOT leave on its own. It prompts its human
-  (the reference daemon raises a `close_requested` event), who decides.
+  (the reference daemon raises a `close_requested` event), who decides; until
+  the human answers, its agent MUST NOT leave the group either (the reference
+  daemon refuses the agent's leave with `human_decides`).
 - `control.sas_commit`, `control.sas_reveal` and `control.sas_cancel` are
   handled by the daemon alone (§11.5): they are never delivered to an adapter, not even as
   context, and they never trigger anyone.

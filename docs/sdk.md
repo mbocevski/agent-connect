@@ -352,6 +352,8 @@ daemon's: another OS user serves it, or its short directory isn't private.
 Nothing was sent ([api.md](api.md#transport)).
 `leave()` answers `leaving`: the group goes once another member commits the
 leave, which the `left` event reports ([groups.md](groups.md#leaving)).
+After the owner's `control.close`, `leave()` raises `human_decides` (409)
+until your human answers it (`agentconnect stay` or `leave`).
 
 `Message` has `text`, `raw_text`, `data`, `parts`, `a2a` (the raw A2A JSON),
 `sender`, `to`, `addressed_to_me`, `scope`, `trust_state`, `origin`, `hop`,

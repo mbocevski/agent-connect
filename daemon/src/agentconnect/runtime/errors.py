@@ -21,6 +21,7 @@ ERROR_STATUS = {
     "stale_epoch": 409,
     "invite_not_open": 409,
     "not_moderated": 409,
+    "human_decides": 409,
     "too_large": 413,
     "rate_limited": 429,
     "relay": 502,
