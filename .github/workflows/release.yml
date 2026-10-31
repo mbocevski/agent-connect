@@ -66,9 +66,12 @@ jobs:
 
   # One build per platform. Each signs and attests its own artifacts, so a
   # platform's job can be rerun alone. The pure-Python packages and the sdists
-  # are built once, on x86_64 Linux.
+  # are built once, on x86_64 Linux. They wait for the version check, which
+  # refuses a tag that carries a .devN version, so that nothing is signed or
+  # attested (and logged in Rekor, which is public) for one.
   build:
     name: build (${{ matrix.target }})
+    needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
