@@ -31,6 +31,10 @@ pub enum Error {
     /// The JoinRequest MAC doesn't verify (SPEC §6.2).
     #[error("join request MAC verification failed")]
     BadMac,
+    /// The JoinRequest has a `sig` that doesn't verify under the KeyPackage's
+    /// leaf key (SPEC §6.1).
+    #[error("join request signature verification failed")]
+    BadJoinSignature,
     /// The wrapped Welcome doesn't decrypt under `welcome_key` (SPEC §6.4).
     #[error("wrapped Welcome failed authentication")]
     WelcomeAuth,
@@ -335,7 +339,9 @@ impl Error {
             Self::KeyPackageReused => K::KeyPackageReused,
             Self::CredentialMismatch(_) => K::CredentialMismatch,
             Self::HpkeKeyLength | Self::KemOutputLength => K::KeyLength,
-            Self::WelcomeAuth | Self::BadMac | Self::ExportAuth => K::Authentication,
+            Self::WelcomeAuth | Self::BadMac | Self::BadJoinSignature | Self::ExportAuth => {
+                K::Authentication
+            }
             Self::InviteExpired => K::Expired,
             Self::KnockWelcome(_) => K::WelcomeMismatch,
             Self::Replayed => K::Replay,
@@ -439,6 +445,7 @@ mod tests {
             (Error::CredentialMismatch("x"), K::CredentialMismatch),
             (Error::HpkeKeyLength, K::KeyLength),
             (Error::WelcomeAuth, K::Authentication),
+            (Error::BadJoinSignature, K::Authentication),
             (Error::ExportAuth, K::Authentication),
             (Error::InviteExpired, K::Expired),
             (Error::Malformed("x"), K::Malformed),

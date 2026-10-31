@@ -713,6 +713,7 @@ Response:
     "display_name_verified": bool,
     "fingerprint": str,
     "identity_requests"?: int,
+    "possession_proven"?: bool,
     "instance_id"?: str | null,
     "mailbox_id"?: str,
     "listing"?: {

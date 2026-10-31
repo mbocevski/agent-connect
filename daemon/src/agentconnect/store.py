@@ -218,7 +218,8 @@ CREATE TABLE IF NOT EXISTS approvals (
     received_at INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     kp_ref TEXT,
-    instance_id TEXT
+    instance_id TEXT,
+    possession_proven INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS joins (
     invite_id TEXT PRIMARY KEY,
@@ -815,6 +816,14 @@ class Store:
         member_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('members')")}
         if "verified_epoch" not in member_columns:
             self._db.execute("ALTER TABLE members ADD COLUMN verified_epoch INTEGER")
+        approval_columns = {
+            r[0] for r in self._all("SELECT name FROM pragma_table_info('approvals')")
+        }
+        if "possession_proven" not in approval_columns:
+            # A request from before this was recorded proved nothing we know of.
+            self._db.execute(
+                "ALTER TABLE approvals ADD COLUMN possession_proven INTEGER NOT NULL DEFAULT 0"
+            )
         invite_columns = {r[0] for r in self._all("SELECT name FROM pragma_table_info('invites')")}
         if "replica" not in invite_columns:
             self._db.execute("ALTER TABLE invites ADD COLUMN replica INTEGER NOT NULL DEFAULT 0")
@@ -2174,12 +2183,13 @@ class Store:
     def add_approval(self, row: dict[str, Any]) -> bool:
         cur = self._db.execute(
             "INSERT OR IGNORE INTO approvals (request_id, invite_id, group_id, request, identity, "
-            "display_name, mailbox_id, received_at, kp_ref, instance_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "display_name, mailbox_id, received_at, kp_ref, instance_id, possession_proven) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 *(row[k] for k in self._APPROVAL_KEYS[:8]),
                 row.get("kp_ref"),
                 row.get("instance_id"),
+                int(bool(row.get("possession_proven"))),
             ],
         )
         return cur.rowcount == 1
@@ -2195,6 +2205,7 @@ class Store:
         "received_at",
         "status",
         "instance_id",
+        "possession_proven",
     )
 
     def approval(self, request_id: str) -> dict[str, Any] | None:

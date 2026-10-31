@@ -989,6 +989,7 @@ def _approval_view(api: ApiClient, a: dict[str, Any]) -> dict[str, Any]:
         "fingerprint": a["fingerprint"],
         "received_at": a["received_at"],
         "identity_requests": int(a.get("identity_requests", 1)),
+        "possession_proven": bool(a.get("possession_proven", False)),
         "instance_id": a.get("instance_id"),
         "mailbox_id": a.get("mailbox_id", ""),
     }
@@ -1035,6 +1036,13 @@ def _print_approval(v: dict[str, Any], *, as_json: bool = False) -> None:
     _say(f"  fingerprint  {v['fingerprint']}", as_json=as_json)
     instance = v.get("instance_id") or "unknown (a request from before this was recorded)"
     _say(f"  instance     {instance}, mailbox {v.get('mailbox_id') or '?'}", as_json=as_json)
+    if not v["possession_proven"]:
+        _say(
+            "  NOTE         possession not proven: this request has no signature from its "
+            "KeyPackage's key, so the sender holds the link and may not be this identity. It "
+            "may be from an older client: ask the person.",
+            as_json=as_json,
+        )
     if v["identity_requests"] > 1:
         _say(
             f"  NOTE         {v['identity_requests']} requests claim this identity. Anyone who "

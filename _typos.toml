@@ -9,6 +9,7 @@ extend-exclude = [
     "testdata/instance-cert.json",
     "testdata/invite-kdf.json",
     "testdata/invite-urls.json",
+    "testdata/join-requests.json",
     "testdata/padding-vectors.json",
     "testdata/sas-commit-reveal.json",
     "testdata/listings.json",

@@ -118,6 +118,8 @@ def rewrapped(seen_request: bytes, url: str, name: str = "replica") -> bytes:
     """What a holder of ``url`` builds from a KeyPackage it saw elsewhere."""
     link = ac.parse_invite_url(url)
     seen = json.loads(seen_request)
+    # Without ``sig``: the holder has the link, not the KeyPackage's key (SPEC 6.1).
+    seen.pop("sig", None)
     kp = unb64(seen["key_package"])
     mac = ac.join_request_mac(link.invite_id, link.secret_bytes(), kp, seen["mailbox_id"], name)
     forged = {**seen, "invite_id": link.invite_id_b64, "display_name": name, "mac": b64(mac)}

@@ -146,6 +146,15 @@ prints "N requests claim this identity". Each approval, and its
 `pending_approval` event, also carries the joiner's `instance_id` and
 `mailbox_id`, which tell two requests of one identity apart
 (`instance_id` is null for a request stored by an older daemon).
+
+A joiner also signs its request with its KeyPackage's key (SPEC §6.1), so that
+holding the link and a copy of a KeyPackage isn't enough to speak for an
+identity. A request whose signature fails is dropped, with an audit row
+(`join_check:sig`). One with no signature, from an older client or because a
+relay stripped it, still reaches you with `possession_proven: false` and the
+note "possession not proven": `policy.auto_approve` doesn't approve it, and you
+should ask the person before you do.
+
 `pending_approval` carries the count when that request arrived; an earlier request's event isn't sent
 again when another arrives, so the approvals view is the one to go by. Ask
 the person which one is theirs, when they sent it and under which name,

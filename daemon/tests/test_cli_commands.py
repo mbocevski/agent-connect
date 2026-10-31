@@ -547,6 +547,19 @@ def test_requests_that_claim_one_identity_say_so(fake: Fake) -> None:
     assert [a["identity_requests"] for a in data["approvals"]] == [2, 2]
 
 
+def test_an_unsigned_request_says_possession_isnt_proven(fake: Fake) -> None:
+    proven = {**APPROVAL, "request_id": "r1", "possession_proven": True}
+    fake.routes["GET /v0/approvals"] = {"approvals": [proven]}
+    assert "possession not proven" not in fake.run("approvals").stdout
+    code, data = fake.json("approvals", "list")
+    assert (code, data["approvals"][0]["possession_proven"]) == (0, True)
+    unproven = {**proven, "possession_proven": False}
+    fake.routes["GET /v0/approvals"] = {"approvals": [unproven]}
+    assert "possession not proven" in fake.run("approvals").stdout
+    code, data = fake.json("approvals", "list")
+    assert (code, data["approvals"][0]["possession_proven"]) == (0, False)
+
+
 def test_approve_uses_the_human_token_and_confirms(fake: Fake) -> None:
     fake.routes["GET /v0/approvals"] = {"approvals": [APPROVAL]}
     fake.routes["POST /v0/approvals/r1/approve"] = {"status": "approving"}

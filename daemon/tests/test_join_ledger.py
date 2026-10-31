@@ -439,6 +439,8 @@ def _forge(seen_request: bytes, url: str, name: str = "bob") -> bytes:
     seen = json.loads(seen_request)
     kp = unb64(seen["key_package"])
     mac = ac.join_request_mac(link.invite_id, link.secret_bytes(), kp, seen["mailbox_id"], name)
+    # Without ``sig``: it holds the link, not the KeyPackage's key (SPEC 6.1).
+    seen.pop("sig", None)
     forged = {**seen, "invite_id": link.invite_id_b64, "display_name": name, "mac": b64(mac)}
     return json.dumps(forged, sort_keys=True, separators=(",", ":")).encode()
 
@@ -460,6 +462,9 @@ async def test_a_stale_key_package_doesnt_crowd_out_the_victims_own_request(
     real_id = await owner.deliver(victim.request(url), victim.mailbox)
     assert owner.audit() == []
     waiting = {w["request_id"]: w for w in owner.engine.join_approvals()}
+    # The human can tell them apart: only the victim's own proves it.
+    assert waiting[forged_id]["possession_proven"] is False
+    assert waiting[real_id]["possession_proven"] is True
     assert set(waiting) == {forged_id, real_id}
     assert {w["identity_requests"] for w in waiting.values()} == {2}
     events = [
@@ -645,6 +650,7 @@ async def test_the_same_key_package_under_a_new_name_and_mac_is_a_replay(
     owner.engine.reject(approval["request_id"])
     link = ac.parse_invite_url(url)
     body = json.loads(request)
+    del body["sig"]  # it holds the link, not the KeyPackage's key (SPEC 6.1)
     body["display_name"] = "bob, again"
     body["mac"] = b64(
         ac.join_request_mac(
@@ -849,3 +855,79 @@ async def test_replayed_key_packages_that_fill_an_identitys_share_are_named(
     assert {w["identity_requests"] for w in owner.engine.join_approvals()} == {3}
     again = await owner.deliver(victim.request(url), victim.mailbox)
     assert again in [w["request_id"] for w in owner.engine.join_approvals()]
+
+
+def unsigned(request: bytes) -> bytes:
+    """What a relay can do to a request: the MAC doesn't cover ``sig``."""
+    body = json.loads(request)
+    del body["sig"]
+    return json.dumps(body).encode()
+
+
+def bad_signature(request: bytes) -> bytes:
+    body = json.loads(request)
+    sig = bytearray(unb64(body["sig"]))
+    sig[0] ^= 1
+    return json.dumps({**body, "sig": b64(bytes(sig))}).encode()
+
+
+async def test_a_signed_request_shows_possession_proven(owner: Owner, rng: random.Random) -> None:
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    await owner.deliver(bob.request(url), bob.mailbox)
+    (approval,) = owner.engine.join_approvals()
+    assert approval["possession_proven"] is True
+
+
+async def test_an_unsigned_request_waits_and_says_possession_isnt_proven(
+    owner: Owner, rng: random.Random
+) -> None:
+    """SPEC 6.1: the sender holds the link, and may not be the identity shown."""
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    await owner.deliver(unsigned(bob.request(url)), bob.mailbox)
+    (approval,) = owner.engine.join_approvals()
+    assert approval["possession_proven"] is False
+    await owner.restart()
+    (approval,) = owner.engine.join_approvals()
+    assert approval["possession_proven"] is False
+
+
+async def test_a_bad_signature_is_dropped_with_an_audit_row(
+    owner: Owner, rng: random.Random
+) -> None:
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    request = bob.request(url)
+    await owner.deliver(bad_signature(request), bob.mailbox)
+    assert owner.engine.join_approvals() == []
+    assert owner.audit() == ["join_check:sig"]
+    assert owner.ledger() == 0
+    events = [e["type"] for e in owner.engine.store.events(limit=100)]
+    assert "pending_approval" not in events
+    # It took nothing: the honest request still gets through.
+    await owner.deliver(request, bob.mailbox)
+    assert len(owner.engine.join_approvals()) == 1
+
+
+async def test_auto_approve_takes_only_a_signed_request(owner: Owner, rng: random.Random) -> None:
+    await owner.restart(auto_approve=True)
+    url = await owner.invite()
+    bob, mallory = Joiner(rng, owner.now), Joiner(rng, owner.now)
+    await owner.deliver(unsigned(mallory.request(url)), mallory.mailbox)
+    (waiting,) = owner.engine.join_approvals()
+    assert waiting["possession_proven"] is False
+    await owner.deliver(bob.request(url), bob.mailbox)
+    assert [a["request_id"] for a in owner.engine.join_approvals()] == [waiting["request_id"]]
+    assert [a["identity"] for a in owner.engine.store.approvals("approving")] == [
+        bob.client.identity
+    ]
+
+
+async def test_auto_approve_doesnt_take_a_bad_signature(owner: Owner, rng: random.Random) -> None:
+    await owner.restart(auto_approve=True)
+    url = await owner.invite()
+    bob = Joiner(rng, owner.now)
+    await owner.deliver(bad_signature(bob.request(url)), bob.mailbox)
+    assert owner.engine.store.approvals("approving") == []
+    assert owner.audit() == ["join_check:sig"]

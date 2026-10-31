@@ -483,7 +483,8 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
         "auto_approve",
         "`false`",
         "Approve JoinRequests without asking a human. Leave it off unless every "
-        "holder of your invite links is trusted. It never applies to knocks: every "
+        "holder of your invite links is trusted. It approves only a request that proves "
+        "it holds its KeyPackage (SPEC 6.1). It never applies to knocks: every "
         "knock needs a person (SPEC 6.6.4), and no setting changes that.",
     ),
     *_POLICY_KEYS,

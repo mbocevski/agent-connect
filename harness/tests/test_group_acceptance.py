@@ -388,6 +388,8 @@ def forged_request(stale: dict[str, Any], url: str, name: str) -> bytes:
     request = json.loads(unb64(stale["env"]["ct"]))
     kp = unb64(request["key_package"])
     mac = ac.join_request_mac(link.invite_id, link.secret_bytes(), kp, request["mailbox_id"], name)
+    # Without ``sig``: the holder has the link, not the KeyPackage's key.
+    request.pop("sig", None)
     request |= {"invite_id": link.invite_id_b64, "display_name": name, "mac": b64(mac)}
     return json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
 

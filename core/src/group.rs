@@ -245,9 +245,18 @@ pub struct VerifiedJoinRequest {
     key_package_ref: Vec<u8>,
     forget_after: u64,
     info: LeafInfo,
+    possession_proven: bool,
 }
 
 impl VerifiedJoinRequest {
+    /// Whether the request carried a `sig` that verified under the
+    /// KeyPackage's leaf key. Without it the sender is known only to hold the
+    /// link: it must not be approved automatically (SPEC §6.1).
+    #[must_use]
+    pub fn possession_proven(&self) -> bool {
+        self.possession_proven
+    }
+
     /// The `KeyPackageRef` (RFC 9420 §5.2) of the joiner's KeyPackage: the
     /// same request replayed under another `msg_id` has the same ref.
     #[must_use]
@@ -587,8 +596,10 @@ impl<S: Store> Client<S> {
             key_package,
             mailbox_id,
             mac: [0; 32],
+            sig: None,
         };
         request.mac = join_request_mac(&invite.join_key(), &request.mac_input());
+        request.sig = Some(self.instance.sign(&request.signing_input()));
         Ok(request)
     }
 
@@ -609,7 +620,9 @@ impl<S: Store> Client<S> {
     ///
     /// [`Error::InviteMismatch`], [`Error::InviteExpired`], [`Error::BadMac`],
     /// [`Error::CredentialMismatch`] (another sender, or a mailbox id that
-    /// isn't the KeyPackage's), or a KeyPackage validation error.
+    /// isn't the KeyPackage's), a KeyPackage validation error, or
+    /// [`Error::BadJoinSignature`] for a `sig` that doesn't verify. A request
+    /// with no `sig` passes, with `possession_proven` false.
     pub fn verify_join_request(
         &self,
         request: &JoinRequest,
@@ -630,7 +643,14 @@ impl<S: Store> Client<S> {
         }
         let (key_package, kp_ref, info) =
             self.check_peer_key_package(&request.key_package, &request.mailbox_id)?;
+        let sig_key: [u8; 32] = info
+            .sig_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::BadJoinSignature)?;
+        let possession_proven = request.verify_signature(&sig_key)?;
         Ok(VerifiedJoinRequest {
+            possession_proven,
             invite_id: request.invite_id,
             display_name: request.display_name.clone(),
             mailbox_id: request.mailbox_id.clone(),
