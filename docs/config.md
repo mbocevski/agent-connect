@@ -69,6 +69,9 @@ with the reason: publishing a listing is always a person's decision
 too; its keys can only shorten a limit or narrow roles
 ([groups.md](groups.md)).
 
+Standing rules aren't configuration: `[trust]` and `[rules]` stop the start. A rule
+is changed only with the human token ([isolation.md](isolation.md#standing-rules)).
+
 ## Several adapters
 
 A group delivers its messages and events to every adapter in
