@@ -9,4 +9,4 @@ for Python 3.12 and later.
 It is a dependency of the daemon and CLI, `agentconnect-cli`, and of the SDK,
 `agentconnect-sdk`; install one of those rather than this package. The
 protocol and the project are at
-[github.com/mbocevski/agent-connect](https://github.com/mbocevski/agent-connect/blob/v0.1.0a3/README.md).
+[github.com/mbocevski/agent-connect](https://github.com/mbocevski/agent-connect/blob/v0.1.0a4/README.md).

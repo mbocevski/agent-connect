@@ -8,6 +8,8 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
 
 ## [Unreleased]
 
+## [0.1.0a4] - 2026-10-31
+
 ### Added
 
 - `agentconnect-relay healthcheck` and `agentconnect-directory healthcheck`:
@@ -42,6 +44,21 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   verify a release, and how the project handles known dependency
   advisories: temporary patches, ignores, their removal and release
   blockers.
+- Changelog entries are fragments: a pull request adds one file,
+  `changelog.d/<slug>.<section>.md`, instead of editing `[Unreleased]` in
+  `CHANGELOG.md`, so pull requests no longer conflict over the changelog.
+  `just changelog-cut` assembles the fragments after the entries already
+  under `[Unreleased]` and deletes them, and `just changelog-preview` prints
+  the result. The `changelog` check and the README rule of the docs check
+  read fragments. See `changelog.d/README.md`.
+
+### Fixed
+
+- The CLI in the separate-OS-user mode. A human-only command run as an agent's
+  user now says it needs the human token, not "cannot reach the daemon", and an
+  agent's user pointed at the daemon's own configuration gets an error naming
+  `AC_DATA_DIR`, not a Python traceback. `approvals list` works with the agent
+  token there, as its reference says.
 
 ### Security
 
@@ -49,7 +66,6 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   directly, REST and WebSocket, whatever `HTTP_PROXY`, `HTTPS_PROXY` or
   `ALL_PROXY` say. Before, a proxy in the daemon's environment received
   that traffic. A remote relay still goes through a configured proxy.
-
 - An inviter accepts a JoinRequest only from the mailbox it names (SPEC
   §6.2 step 3), and drops one from another sender before it reaches the
   replay ledger or the human. The invite MAC shows only that the sender
@@ -63,11 +79,9 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   approval stored by an older daemon is checked the same way, by the
   sender its envelope came from, when it is approved or its Add is built,
   and expires if that wasn't the mailbox it names.
-
 - The directory logs a request's method only when it is a standard one
   (`GET`, `POST`, ...), and any other as `other`: a client could put an
   address or a name in the method and have it written to the log (SR-21).
-
 - In the separate-OS-user mode the daemon refuses an agent directory its
   group can write, and an agent or data directory under a directory that
   isn't the daemon user's or root's or that others can write without the
@@ -79,7 +93,6 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   `/usr/local/var` on macOS) now refuses to start. Move the directory to a root-owned path such as
   `/run/agentconnect` or, on macOS,
   `/Library/Application Support/agentconnect/run`.
-
 - Failed join requests count against their invite (SPEC §6.2 step 2): a
   wrong invite MAC, or a request sent from a mailbox other than the one it
   names. At `policy.max_failed_joins_per_invite` (new, default 16, 1 to 16)
@@ -88,28 +101,72 @@ The wire protocol is versioned separately (see `SPEC.md` §13).
   last, from 10 minutes up to a day. Requests that
   pass the checks are never held back for it, so a stranger who knows only
   the invite id can't lock joiners out (SR-26).
-
 - In the separate-OS-user mode, a link loop on the agent or data directory
   path is refused with the usual start-check error instead of a traceback.
-
 - The directory keeps revoked token ids for good instead of purging them 90
   days after the revocation arrived: a token with a revoked id but a later
   validity window could otherwise be published once the id was forgotten
   (SR-23).
-
 - `just release-verify` also checks every release file's cosign bundle and
   both images' cosign signatures, and accepts only a signature the release
   workflow made for that tag (it now needs `cosign`). The release workflow
   verifies each signature right after making it, and publishes nothing
   until the reproducibility check passes for the commit it releases
   (SR-39).
-
 - Every directory search result, from `/search` and the MCP `search_agents`
   tool, carries `signed_card`, the verbatim signed listing, as SPEC §13.2.6
   requires of machine-readable results; before, only `get_card` had it
   (SR-20). A search answer stays within 512 KiB and says `"truncated":
   true` when it stopped early, and `search_agents` returns at most 20
   results.
+- The A2A adapter keeps its record of handled messages (SHA-256 hashes of
+  `msg_id`s and `event_id`s) in the daemon's encrypted database instead of
+  a plain `a2a-seen.db` in the data directory, as SPEC §12 requires; an
+  existing file is moved into the database and deleted (SR-27).
+- With the agent token, `GET /v0/status` (and the MCP status tool) no
+  longer counts a group hidden from the agent, an approved knock's group
+  before the knocker is in, in `groups`, `out_of_sync`, the queue sizes
+  or the pending joins, and every route that takes a group, event streams
+  included, answers such a group exactly as one that doesn't exist
+  (`404 not_found`, "no such active group") (SR-32).
+- `close_requested` (the owner's `control.close`, with its reason) is a
+  human event: the agent token no longer sees it, and the agent gets the
+  close itself through the delivery gates, so with `require_verified` the
+  owner's reason waits until the human has verified everyone. Until the
+  human answers, by leaving or with the new `agentconnect stay` (`POST
+  /v0/groups/{gid}/stay`), the agent token's leave is refused with `409
+  human_decides`: leaving stays the human's decision (SPEC §7.3) (SR-34).
+- The directory believes at most `AC_DIRECTORY_TRUSTED_HOPS` (new, default
+  1) entries of the client-address header, from the right. A client whose
+  own address was inside a listed proxy block (a shared CDN range) could
+  prepend addresses and pick its rate-limit bucket. Behind a chain of your
+  own proxies, set it to their number; behind a CDN, keep it at 1 and let
+  your proxy take the address from the CDN's own header (directory README,
+  "Behind a CDN"; the relay docs say the same for `AC_RELAY_PROXY_HOPS`)
+  (SR-22).
+- In `free` and `moderated` mode an instance is no longer triggered by a
+  message from another instance of its own identity (a replica's), which it
+  gets as context (in `free` mode, unless the message names the identity in
+  `addressee`): SPEC §9.3 triggers all members except the sender, and a
+  member is an identity. Two replicas of the moderator or the floor holder
+  can no longer answer each other until the loop guard stops them (SR-35).
+- After the operator rotates its token key (`AC_DIRECTORY_TOKEN_KEYS`), the
+  directory treats a stored listing whose token is under a key it no longer
+  pins as expired (`410 Gone`, out of search and the index) instead of
+  serving one knockers refuse. It records each listing's token key at
+  publish (a schema migration adds the column; maintenance fills it in for
+  existing listings), so nothing is re-verified on a request. A daemon whose
+  renewal is refused with `unknown_key` retries while it still pins the
+  token's key (the directory lags) and stops, telling its human
+  (`listing_stale`, `reason: refused`), once it doesn't either (SR-24).
+- An agent message's `hop` is at least one more than the last message
+  that triggered its instance since the last `control.resume`, whatever
+  `reply_to` names. Two agents that kept naming a human's message (hop 0)
+  sent hop 1 forever and never reached `loop_guard.max_agent_turns`
+  (SR-33).
+- The locked `pyasn1` (a dependency of `pyasn1-modules`, which the Python
+  packages pull in) is 0.6.5, which fixes CVE-2026-119194, CVE-2026-119195,
+  CVE-2026-119196 and CVE-2026-119197 in 0.6.4. Reinstall to pick it up.
 
 ## [0.1.0a3] - 2026-10-30
 
