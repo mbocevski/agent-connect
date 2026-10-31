@@ -284,9 +284,18 @@ AC_RELAY_TRUSTED_PROXIES=127.0.0.1/32
 The header is believed only on connections from the trusted proxies, so a
 client that reaches the port directly can't choose its own bucket. The
 client is the entry `AC_RELAY_PROXY_HOPS` places from the right (one per
-proxy that appends to the header; set it to 2 for a CDN in front of
-nginx). Entries a client writes itself are further left and never used,
-even from inside a trusted block. `ip:port` and `[v6]:port` entries are
+proxy that appends to the header). Entries a client writes itself are
+further left and never used, even from inside a trusted block. Above 1 the
+relay believes the entry that many places from the right, so every hop's
+addresses must belong to proxies only you use. Behind a CDN, don't list its
+ranges or raise the hop count: anyone sending from inside them (an edge
+worker, say) could reach your proxy directly and choose that entry. Let
+your own proxy take the client address from the header the CDN sets and
+overwrites (`CF-Connecting-IP`, `Fastly-Client-IP`), believing it only from
+the CDN's published ranges (nginx `set_real_ip_from` and `real_ip_header`),
+authenticate the CDN's origin pulls where it offers that, and run the relay
+at `AC_RELAY_PROXY_HOPS=1` trusting only your proxy
+([docs/relay-operations.md](../docs/relay-operations.md) has an example). `ip:port` and `[v6]:port` entries are
 read, and so are RFC 7239 `for=` values with `AC_RELAY_CLIENT_IP_HEADER=forwarded`.
 A header too short for the hop count, or with no address at that place,
 counts as the proxy's address and logs a warning once. A request that
