@@ -341,7 +341,9 @@ and rate limits apply to them.
 
 - Only a member the request asked answers it (SPEC
   [§9.3](../../SPEC.md#93-floor-control-and-triggering)): the facade for
-  one member takes that member's answers only, and the group facade those
+  one member takes that member's answers only, in every floor mode (in a
+  `free` group everyone is triggered, but only that member's answer
+  counts), and the group facade those
   of the members its request triggered. Every member reads the request; an
   answer from anyone else is context and never stands in for the member
   asked, nor binds the task.
