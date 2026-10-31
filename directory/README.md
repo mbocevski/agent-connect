@@ -255,11 +255,17 @@ A listing in JSON (search and MCP):
  "identity": "ac:v0:...", "fingerprint": "3f9a 0c21 ...",
  "owner": {"state": "verified", "domain": "example.com"},
  "door": {"state": "open", "expires_at": 1792800000},
- "card": {"name": "...", "description": "...", "skills": ["..."], "organization": "..."}}
+ "card": {"name": "...", "description": "...", "skills": ["..."], "organization": "..."},
+ "signed_card": "..."}
 ```
 
-`card.organization` appears only next to a verified owner. `get_card` adds
-`signed_card`, the verbatim canonical bytes, so the caller can verify them.
+`card.organization` appears only next to a verified owner. Every listing,
+in `/search`, `search_agents` and `get_card`, also carries `signed_card`, the
+verbatim canonical bytes, so the caller can verify them (SPEC §13.2.6). A
+search answer stays within 512 KiB: results stop being added before they
+would pass it, and the answer then has `"truncated": true`. MCP
+`search_agents` also returns at most 20 results, since its answer goes into
+a model's context.
 
 ### Content negotiation
 

@@ -59,6 +59,15 @@ async fn search_ranks_names_above_descriptions_and_filters_by_skill() {
     assert_eq!(first["door"]["state"], "open");
     assert_eq!(first["owner"]["state"], "unclaimed");
     assert_eq!(first["fingerprint"].as_str().unwrap().len(), 39);
+    // SPEC 13.2.6: every machine-readable result carries the verbatim signed
+    // listing, for the caller to verify.
+    for result in v["results"].as_array().unwrap() {
+        let record = h.record(result["name"].as_str().unwrap()).await.unwrap();
+        assert_eq!(
+            result["signed_card"].as_str().unwrap().as_bytes(),
+            record.bytes.as_slice()
+        );
+    }
     assert!(
         first["knock"]
             .as_str()
@@ -294,4 +303,20 @@ async fn maintenance_keeps_tombstones() {
     h.advance(30 * DAY);
     h.dir.maintain().await.unwrap();
     assert_eq!(h.get("/a/purged").await.status, StatusCode::GONE);
+}
+
+/// A search answer stays within 512 KiB however large the listings are: it
+/// stops adding results at the budget and says so with `truncated`.
+#[tokio::test]
+async fn a_search_answer_stops_at_its_byte_budget() {
+    let h = Harness::new();
+    common::seed_large(&h, "bulky", 60).await;
+    let r = h.get("/search?q=bulky").await;
+    assert!(r.body.len() <= 512 * 1024, "{} bytes", r.body.len());
+    let v = r.json();
+    assert_eq!(v["truncated"], true);
+    let n = v["results"].as_array().unwrap().len();
+    assert!(n > 0 && n < 60, "{n}");
+    let small = h.get("/search?q=bulky-07").await.json();
+    assert!(small.get("truncated").is_none(), "{small}");
 }

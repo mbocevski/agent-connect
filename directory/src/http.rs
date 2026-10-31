@@ -26,7 +26,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::api::{UNTRUSTED_NOTICE, listing_json};
+use crate::api::{UNTRUSTED_NOTICE, search_results};
 use crate::directory::{DirError, Directory, Lookup, valid_name};
 use crate::metrics::template;
 use crate::ratelimit::Class;
@@ -285,8 +285,12 @@ async fn search<S: Store>(State(app): State<Shared<S>>, Query(p): Query<SearchPa
     let q = p.home();
     match app.dir.search(q.q, q.skill).await {
         Ok(found) => {
-            let results: Vec<_> = found.iter().map(|l| listing_json(&app.dir, l)).collect();
-            let body = json!({"untrusted": true, "notice": UNTRUSTED_NOTICE, "results": results});
+            let (results, truncated) = search_results(&app.dir, &found, usize::MAX, false);
+            let mut body =
+                json!({"untrusted": true, "notice": UNTRUSTED_NOTICE, "results": results});
+            if truncated {
+                body["truncated"] = json!(true);
+            }
             respond(StatusCode::OK, JSON_TYPE, CACHE_PUBLIC, body.to_string())
         }
         Err(e) => error_json(e),

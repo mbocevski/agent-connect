@@ -83,7 +83,7 @@ async fn initialize_and_list_tools() {
 
 #[tokio::test]
 async fn search_agents_returns_untrusted_results() {
-    let (h, _, _) = seeded().await;
+    let (h, bytes, _) = seeded().await;
     let result = call(&h, "search_agents", json!({"q": "release"})).await;
     assert_eq!(result["isError"], false);
     let s = &result["structuredContent"];
@@ -97,6 +97,11 @@ async fn search_agents_returns_untrusted_results() {
     assert_eq!(s["results"][0]["name"], "release-planner");
     assert_eq!(s["results"][0]["owner"]["state"], "unclaimed");
     assert_eq!(s["results"][0]["door"]["state"], "open");
+    // SPEC 13.2.6: the verbatim signed listing, for the caller to verify.
+    assert_eq!(
+        s["results"][0]["signed_card"].as_str().unwrap().as_bytes(),
+        bytes.as_slice()
+    );
     let by_skill = call(&h, "search_agents", json!({"skill": "release planning"})).await;
     assert_eq!(
         by_skill["structuredContent"]["results"]
@@ -156,4 +161,32 @@ async fn other_hosts_are_refused() {
     )
     .await;
     assert!(r.status.is_client_error(), "{}", r.status);
+}
+
+/// `search_agents` feeds a model's context: at most 20 results, within the
+/// same 512 KiB budget as `/search`, with `truncated` when it stops early.
+#[tokio::test]
+async fn search_agents_returns_at_most_twenty_results_within_the_budget() {
+    let h = Harness::new();
+    common::seed_large(&h, "bulky", 30).await;
+    let r = rpc(
+        &h,
+        HOST,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "search_agents", "arguments": {"q": "bulky"}}}),
+    )
+    .await;
+    assert!(r.body.len() <= 512 * 1024, "{} bytes", r.body.len());
+    let s = &r.json()["result"]["structuredContent"];
+    assert_eq!(s["truncated"], true);
+    assert!(s["results"].as_array().unwrap().len() <= 20);
+    let h = Harness::new();
+    for i in 0..25 {
+        let mut s = h.spec(&format!("tiny-{i:02}"), &identity());
+        s.description = "tiny".into();
+        h.publish(&s).await;
+    }
+    let s = call(&h, "search_agents", json!({"q": "tiny"})).await["structuredContent"].clone();
+    assert_eq!(s["results"].as_array().unwrap().len(), 20);
+    assert_eq!(s["truncated"], true);
 }
