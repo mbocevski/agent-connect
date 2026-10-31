@@ -5425,9 +5425,19 @@ class Engine:
 
     def status(self, *, human: bool = True) -> dict[str, Any]:
         """The runtime's status. ``pending_approvals`` counts knocks only for
-        the human (the agent doesn't learn of incoming knocks)."""
+        the human (the agent doesn't learn of incoming knocks). For the agent
+        nothing counts a group hidden from it (an approved knock's group
+        before the knocker is in): not the groups, ``out_of_sync``, the
+        queues or the pending joins."""
         groups = self.store.groups()
         pending = self.approvals() if human else self.join_approvals()
+        outbox, inbox = self.store.outbox(), self.store.pending_deliveries()
+        if not human:
+            hidden = {g.group_id for g in groups if g.hidden}
+            groups = [g for g in groups if g.group_id not in hidden]
+            pending = [a for a in pending if a.get("group_id") not in hidden]
+            outbox = [r for r in outbox if r.group_id not in hidden]
+            inbox = [r for r in inbox if r.group_id not in hidden]
         return {
             "identity": self.me,
             "fingerprint": self.identity.fingerprint,
@@ -5437,8 +5447,8 @@ class Engine:
             "keystore": self.keystore.kind,
             "groups": len([g for g in groups if g.status == "active"]),
             "out_of_sync": [g.group_id for g in groups if g.out_of_sync],
-            "outbox_queued": len(self.store.outbox()),
-            "inbox_pending": len(self.store.pending_deliveries()),
+            "outbox_queued": len(outbox),
+            "inbox_pending": len(inbox),
             "pending_approvals": len(pending),
             "held_messages": len(self.held_messages()),
         }

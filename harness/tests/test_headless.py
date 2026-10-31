@@ -541,3 +541,37 @@ async def test_sse_resume_past_the_retention_window_gets_a_gap_event(
     await asyncio.gather(task, return_exceptions=True)
     await resumed.aclose()
     await bob.close()
+
+
+async def test_the_agent_doesnt_see_a_hidden_group_in_its_status_or_streams(
+    cluster: Cluster, sockdir: Path
+) -> None:
+    """SR-32: an approved knock's group is hidden from the agent until the
+    knocker is in (docs/discovery.md). The agent's status doesn't count it
+    or list it as out of sync, and an event stream for it is `404
+    not_found`, as for a group that doesn't exist. The human sees it."""
+    h = await headless(cluster, "hide", sockdir, mode="sse")
+    gid = h.node.daemon.create_group("Knocked", "")
+    await h.node.idle()
+    h.node.daemon.store.update_group(gid, hidden=True, out_of_sync=True)
+    agent = await h.sdk.status()
+    assert (agent["groups"], agent["out_of_sync"]) == (0, [])
+    human = h.node.daemon.status()
+    assert (human["groups"], human["out_of_sync"]) == (1, [gid])
+    token = api_token(h.server, "agent")
+
+    async def stream_status(group: str) -> bytes:
+        reader, writer = await asyncio.open_unix_connection(str(h.server.address))
+        writer.write(
+            f"GET /v0/events?group={group} HTTP/1.1\r\nhost: localhost\r\n".encode()
+            + b"accept: text/event-stream\r\n"
+            + f"authorization: Bearer {token}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), WAIT)
+        writer.close()
+        return line
+
+    assert (await stream_status(gid)).startswith(b"HTTP/1.1 404")
+    assert (await stream_status("nosuchgroup")).startswith(b"HTTP/1.1 404")
+    await h.close()

@@ -357,7 +357,9 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
         "/v0/status",
         "_status",
         "Daemon status: identity, relay connection, queue sizes. With the agent token, "
-        "`held_messages` counts only the agent's own held sends.",
+        "`held_messages` counts only the agent's own held sends, and nothing counts a "
+        "group hidden from the agent (an approved knock's group before the knocker is "
+        "in).",
         response={
             "identity": "str",
             "fingerprint": "str",
@@ -1681,7 +1683,11 @@ class ApiServer:
         hub = self.daemon.adapters.get("sse")
         if not isinstance(hub, SseAdapter):
             raise ApiError(409, "no_sse_adapter", 'add "sse" to daemon.adapters')
-        if group is not None and self.daemon.store.group(group) is None:
+        if group is not None and (
+            self.daemon.store.group(group) is None
+            or (p.get(SCOPE) != "human" and self.daemon.hidden_from_agent(group))
+        ):
+            # A group hidden from the agent doesn't exist for it (SR-32).
             raise ApiError(404, "not_found", "no such group")
         peer = self.gate.peer_uid()
         if peer is not None and sum(s.peer == peer for s in self._streams) >= (
