@@ -63,7 +63,7 @@ expect_refused() {
     if [[ "$code" != 0 && "$out" == *"$text"* ]]; then
         pass "$label"
     else
-        fail "$label (exit $code, expected '$text'): ${out: -1500}"
+        fail "$label (exit $code, expected '$text'): $(tail -c 1500 <<<"$out")"
     fi
 }
 
@@ -140,8 +140,9 @@ fi
 tickets="$(tr -d '\r\000' <<<"$tickets")"
 echo "$tickets"
 expect_line() {
-    # Not anchored at the start: the pty can echo a control character there.
-    if grep -q "$1\$" <<<"$tickets"; then pass "$2"; else fail "$2 (no line '$1')"; fi
+    # The pty can echo control characters before a line, but the name must be whole:
+    # with_password must not match root_with_password.
+    if grep -qE "(^|[^a-z_])$1\$" <<<"$tickets"; then pass "$2"; else fail "$2 (no line '$1')"; fi
 }
 expect_line "no_ticket: refused" "with no ticket, the daemon's user needs the password"
 expect_line "with_password: allowed" "the password works for the daemon's user"
