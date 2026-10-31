@@ -185,6 +185,10 @@ pub struct Config {
     /// `AC_DIRECTORY_TRUSTED_PROXIES`: comma-separated address blocks of the
     /// reverse proxies whose client-address header is believed.
     pub trusted_proxies: Vec<Cidr>,
+    /// `AC_DIRECTORY_TRUSTED_HOPS`: how many proxies stand in front of the
+    /// directory, the connecting one included (1 to 8, default 1). At most
+    /// this many entries of the client-address header are believed.
+    pub trusted_hops: usize,
     /// `AC_DIRECTORY_STYLESHEET`: a CSS file served instead of the default
     /// stylesheet.
     pub stylesheet: Option<PathBuf>,
@@ -298,6 +302,20 @@ fn connection_limit(name: &str, v: Option<String>, default: usize) -> Result<usi
         .ok()
         .filter(|n| (1..=MAX_CONNECTION_LIMIT).contains(n))
         .ok_or_else(|| format!("{name} must be 1 to {MAX_CONNECTION_LIMIT}: {v}"))
+}
+
+/// `AC_DIRECTORY_TRUSTED_HOPS`: 1 to 8, default 1. The refusal doesn't echo
+/// the value.
+fn hop_count(v: Option<String>) -> Result<usize, String> {
+    match v.filter(|v| !v.is_empty()) {
+        None => Ok(1),
+        Some(v) => v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=8).contains(n))
+            .ok_or_else(|| "AC_DIRECTORY_TRUSTED_HOPS must be 1 to 8".to_owned()),
+    }
 }
 
 /// `AC_DIRECTORY_SHUTDOWN_GRACE_SECS`: whole seconds, 1 to
@@ -419,6 +437,7 @@ impl Config {
             token_keys,
             client_ip_header,
             trusted_proxies,
+            trusted_hops: hop_count(get("AC_DIRECTORY_TRUSTED_HOPS"))?,
             stylesheet: get("AC_DIRECTORY_STYLESHEET")
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from),
@@ -472,6 +491,7 @@ mod tests {
         assert_eq!(c.token_keys, ["k"]);
         assert!(c.client_ip_header.is_none());
         assert_eq!(c.trusted_proxies, Vec::new());
+        assert_eq!(c.trusted_hops, 1);
         assert!(!c.db_insecure);
         assert!(c.stylesheet.is_none());
         assert!(c.font_dir.is_none());
@@ -505,6 +525,7 @@ mod tests {
             ("AC_DIRECTORY_TOKEN_KEYS", "a,b"),
             ("AC_DIRECTORY_CLIENT_IP_HEADER", "X-Forwarded-For"),
             ("AC_DIRECTORY_TRUSTED_PROXIES", "10.0.0.0/8, ::1"),
+            ("AC_DIRECTORY_TRUSTED_HOPS", "2"),
             ("AC_DIRECTORY_STYLESHEET", "/etc/directory/site.css"),
             ("AC_DIRECTORY_FONT_DIR", "/etc/directory/fonts"),
             ("AC_DIRECTORY_METRICS_ADDR", "127.0.0.1:9100"),
@@ -516,6 +537,7 @@ mod tests {
         assert_eq!(c.token_keys, ["a", "b"]);
         assert_eq!(c.client_ip_header.as_deref(), Some("x-forwarded-for"));
         assert_eq!(c.trusted_proxies.len(), 2);
+        assert_eq!(c.trusted_hops, 2);
         assert!(c.db_insecure);
         assert_eq!(c.stylesheet, Some(PathBuf::from("/etc/directory/site.css")));
         assert_eq!(c.font_dir, Some(PathBuf::from("/etc/directory/fonts")));
@@ -571,6 +593,9 @@ mod tests {
                 RELAYS,
                 ("AC_DIRECTORY_METRICS_ADDR", "nope"),
             ],
+            vec![DB, KEYS, HOST, RELAYS, ("AC_DIRECTORY_TRUSTED_HOPS", "0")],
+            vec![DB, KEYS, HOST, RELAYS, ("AC_DIRECTORY_TRUSTED_HOPS", "9")],
+            vec![DB, KEYS, HOST, RELAYS, ("AC_DIRECTORY_TRUSTED_HOPS", "two")],
             vec![
                 DB,
                 KEYS,

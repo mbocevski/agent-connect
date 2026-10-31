@@ -155,12 +155,26 @@ server {
 - `X-Forwarded-For $remote_addr` replaces whatever the client sent with the
   address nginx saw, so the header has one entry and
   `AC_RELAY_PROXY_HOPS=1` is right.
-- With a CDN or load balancer in front of nginx, use
-  `$proxy_add_x_forwarded_for` so each proxy appends, and set
-  `AC_RELAY_PROXY_HOPS` to the number of proxies that append (2 for a CDN
-  plus nginx). The relay reads the entry that many places from the right
-  and never one a client wrote itself. `AC_RELAY_CLIENT_IP_HEADER=forwarded`
-  reads RFC 7239 `Forwarded` headers instead.
+- Behind a chain of your own proxies (a load balancer in front of nginx),
+  use `$proxy_add_x_forwarded_for` so each proxy appends, and set
+  `AC_RELAY_PROXY_HOPS` to the number of proxies that append. The relay
+  reads the entry that many places from the right and never one a client
+  wrote itself; above 1, every hop's addresses must belong to proxies only
+  you use. `AC_RELAY_CLIENT_IP_HEADER=forwarded` reads RFC 7239
+  `Forwarded` headers instead.
+- Behind a CDN, don't list its ranges or raise the hop count: anyone
+  sending from inside them (an edge worker, say) could reach nginx directly
+  and choose the entry the relay believes. Let nginx take the client
+  address from the header the CDN sets and overwrites, believing it only
+  from the CDN's published ranges, authenticate the CDN's origin pulls
+  where it offers that, and keep `AC_RELAY_PROXY_HOPS=1`:
+
+  ```nginx
+  set_real_ip_from 203.0.113.0/24;   # the CDN's published ranges, nothing else
+  real_ip_header CF-Connecting-IP;   # or Fastly-Client-IP, as your CDN sets it
+  # and in the location: proxy_set_header X-Forwarded-For $remote_addr;
+  ```
+
 - `proxy_read_timeout` must be longer than the relay's ping interval
   (`AC_RELAY_PING_INTERVAL_SECS`, 30 s), or the proxy closes quiet
   WebSockets.
@@ -332,8 +346,8 @@ connection limits (`AC_DIRECTORY_HEADER_TIMEOUT_SECS`,
 `AC_DIRECTORY_MAX_CONNECTIONS_PER_SOURCE`),
 which default to the relay's. Two points for a directory behind a reverse
 proxy: set `AC_DIRECTORY_CLIENT_IP_HEADER` and
-`AC_DIRECTORY_TRUSTED_PROXIES`, or the proxy is one source held to 8
-connections; and keep the proxy's upstream keep-alive timeout below
+`AC_DIRECTORY_TRUSTED_PROXIES` (behind a CDN, as in the directory README's
+"Behind a CDN"), or the proxy is one source held to 8 connections; and keep the proxy's upstream keep-alive timeout below
 `AC_DIRECTORY_IDLE_TIMEOUT_SECS` (75 s).
 
 The relay can't read messages, so an abuse report can't be checked against

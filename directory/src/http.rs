@@ -67,6 +67,10 @@ pub struct HttpConfig {
     pub client_ip_header: Option<HeaderName>,
     /// Proxies whose client-address header is believed.
     pub trusted_proxies: Vec<crate::config::Cidr>,
+    /// How many proxies stand in front of the directory, the connecting one
+    /// included: at most this many header entries are walked, from the
+    /// right (0 counts as 1).
+    pub trusted_hops: usize,
     /// Serve `/metrics` on this router (false when it has its own
     /// listener).
     pub hide_metrics: bool,
@@ -645,8 +649,9 @@ async fn fallback<S: Store>(State(app): State<Shared<S>>, headers: HeaderMap) ->
     )
 }
 
-/// The client address used for rate limiting: the trusted proxy header's
-/// last value if configured, else the TCP peer. Also whether the request
+/// The client address used for rate limiting: from the trusted proxy
+/// header if configured (at most `trusted_hops` entries from the right),
+/// else the TCP peer. Also whether the request
 /// names a client (the header, `X-Forwarded-For` or `Forwarded`) while its
 /// peer is outside the trusted proxies, which suggests a proxy that isn't
 /// listed.
@@ -667,8 +672,11 @@ fn client_ip(req: &Request, config: &HttpConfig) -> (Option<IpAddr>, bool) {
         return (peer, peer.is_some() && names_a_client);
     }
     // Walk the chain from the right (each proxy appends the address it saw),
-    // skipping trusted proxies; the first untrusted hop is the client. An
-    // entry that doesn't parse ends the walk at the last trusted hop.
+    // skipping trusted proxies; the first untrusted hop is the client. At
+    // most `trusted_hops` entries are believed: past them every entry is
+    // the client's own say, so a client inside a trusted block (a shared CDN
+    // range) can't pick its key (SR-22). An entry that doesn't parse ends
+    // the walk at the last trusted hop.
     let hops: Vec<&str> = req
         .headers()
         .get_all(name)
@@ -677,7 +685,7 @@ fn client_ip(req: &Request, config: &HttpConfig) -> (Option<IpAddr>, bool) {
         .flat_map(|v| v.split(','))
         .collect();
     let mut key = peer;
-    for hop in hops.iter().rev() {
+    for hop in hops.iter().rev().take(config.trusted_hops.max(1)) {
         let Ok(ip) = hop.trim().parse::<IpAddr>() else {
             break;
         };
