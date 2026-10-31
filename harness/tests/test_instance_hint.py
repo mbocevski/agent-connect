@@ -323,3 +323,24 @@ async def test_free_mode_doesnt_trigger_an_instance_on_its_siblings_messages(
     assert await heard([a, x2], said) == {"a": True, "x2": False}
     asked = await x1.runtime.agent.send(gid, text="over to you", addressee=[x1.me])
     assert await heard([x2], str(asked["msg_id"])) == {"x2": True}
+
+
+async def test_moderated_mode_doesnt_trigger_an_instance_on_its_siblings_messages(
+    cluster: Cluster,
+) -> None:
+    """SR-35, moderated: when the effective moderator (or the floor holder)
+    has replicas, one replica's broadcast doesn't trigger its sibling, so
+    the two can't ping-pong until the loop guard stops them."""
+    a, x1, x2, gid = await replicas(cluster)
+    a.daemon.change_policy(gid, {"floor": "moderated", "floor_moderator": x1.me})
+    await until(
+        lambda: all(
+            n.daemon.store.group(gid).policy.get("floor") == "moderated"
+            and n.daemon.store.group(gid).policy.get("floor_moderator") == x1.me
+            for n in (x1, x2)
+        )
+    )
+    said = await send(x1, gid, "the moderator's replica thinks aloud")
+    assert await heard([a, x2], said) == {"a": False, "x2": False}
+    # So x2 has nothing that triggered it to answer: no ping-pong.
+    assert not x2.adapter.of_type("loop_guard")

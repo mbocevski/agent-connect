@@ -644,9 +644,9 @@ def addressed_to_me(  # noqa: PLR0913, PLR0917
 
     ``moderator`` is the effective moderator and ``holder`` the floor
     holder (``agentconnect.runtime.floor``); only ``moderated`` reads them.
-    ``sender`` is the sending identity: in ``free`` mode a member is never
-    triggered by its own identity's messages (a sibling instance's), only
-    when they name it in ``addressee``.
+    ``sender`` is the sending identity: in ``free`` and ``moderated`` mode a
+    member is never triggered by its own identity's messages (a sibling
+    instance's); in ``free`` mode only when they name it in ``addressee``.
 
     ``body.metadata.instance`` is the sender's word: it is read only after
     the floor has picked this member, so it can narrow who is triggered and
@@ -663,8 +663,9 @@ def addressed_to_me(  # noqa: PLR0913, PLR0917
         hit = sender != me
     elif floor == "mention":
         hit = me in to or (to == ["*"] and inner.get("origin") == "human")
-    else:  # moderated: the effective moderator and the floor holder
-        hit = me in (moderator, holder)
+    else:  # moderated: the effective moderator and the floor holder,
+        # except the sender's own instances (SR-35)
+        hit = me in (moderator, holder) and sender != me
     if not hit:
         return False
     body = inner.get("body")
