@@ -69,18 +69,27 @@ needs_just = pytest.mark.skipif(JUST is None, reason="needs just")
 # its input and writing it under -artifact_prefix as libFuzzer does.
 FAKE_CARGO = """#!/bin/sh
 echo "$*" >>"$FAKE_LOG"
-case "$3" in
+sub="$3"
+shift 3
+case "$sub" in
 list) printf 'boom\\nfine\\n' ;;
 build) ;;
 run)
+    [ "$1" = --target ] && shift 2
     for a in "$@"; do case "$a" in -artifact_prefix=*) prefix="${a#-artifact_prefix=}" ;; esac; done
-    if [ "$4" = boom ]; then
+    if [ "$1" = boom ]; then
         printf 'SECRET-INPUT' >"${prefix}crash-1"
         echo "Base64: SECRET-INPUT" >&2
         exit 77
     fi
     echo "Done 5 runs in 1 second(s)" ;;
 esac
+"""
+
+# Stands in for `rustc +nightly -vV`.
+HOST = "x86_64-unknown-linux-gnu"
+FAKE_RUSTC = f"""#!/bin/sh
+printf 'rustc 1.0.0-nightly\\nhost: {HOST}\\nrelease: 1.0.0-nightly\\n'
 """
 
 
@@ -90,6 +99,9 @@ def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     cargo = bin_dir / "cargo"
     cargo.write_text(FAKE_CARGO, encoding="utf-8")
     cargo.chmod(0o700)
+    rustc = bin_dir / "rustc"
+    rustc.write_text(FAKE_RUSTC, encoding="utf-8")
+    rustc.chmod(0o700)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -132,9 +144,23 @@ def test_every_target_runs_and_a_crash_is_named_by_its_hash_only(tmp_path: Path)
     result = _run(tmp_path, "core", "3")
     assert result.returncode == 1
     calls = (tmp_path / "calls").read_text(encoding="utf-8")
-    assert "fuzz run fine -- -max_total_time=3" in calls, "a crash doesn't stop the run"
+    assert f"fuzz run --target {HOST} fine -- -max_total_time=3" in calls, (
+        "a crash doesn't stop the run"
+    )
     digest = hashlib.sha256(b"SECRET-INPUT").hexdigest()
     assert f"crash in core/boom: input sha256 {digest}" in result.stderr
     assert "fuzz targets that failed in core: boom" in result.stderr
     assert "Done 5 runs" in result.stdout
     assert "SECRET" not in result.stdout + result.stderr
+
+
+@needs_just
+def test_every_build_and_run_names_the_host_triple(tmp_path: Path) -> None:
+    # cargo-fuzz builds for the triple it was built for otherwise, and the musl
+    # binary CI installs has no installed target and no static-libc sanitizer.
+    _run(tmp_path, "core", "3")
+    calls = (tmp_path / "calls").read_text(encoding="utf-8").splitlines()
+    fuzzing = [c for c in calls if c.startswith("+nightly fuzz") and not c.endswith(" list")]
+    assert any(c.startswith("+nightly fuzz build") for c in fuzzing)
+    assert any(c.startswith("+nightly fuzz run") for c in fuzzing)
+    assert all(f"--target {HOST}" in c for c in fuzzing), fuzzing
