@@ -57,7 +57,7 @@ signing = [
 
 [[package]]
 name = "agentconnect-cli"
-version = "0.1.0a4"
+version = "0.1.0a5.dev0"
 source = { editable = "daemon" }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server", "signing"] },
@@ -90,7 +90,7 @@ requires-dist = [
 
 [[package]]
 name = "agentconnect-core"
-version = "0.1.0a4"
+version = "0.1.0a5.dev0"
 source = { editable = "core-py" }
 
 [[package]]
@@ -118,7 +118,7 @@ requires-dist = [
 
 [[package]]
 name = "agentconnect-sdk"
-version = "0.1.0a4"
+version = "0.1.0a5.dev0"
 source = { editable = "sdk/python" }
 dependencies = [
     { name = "agentconnect-cli" },

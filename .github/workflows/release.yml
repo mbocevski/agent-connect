@@ -30,7 +30,9 @@ env:
 jobs:
   # The version every job uses: the tag without its `v`, or on a dry run the
   # version in the packages. scripts/check_version.py fails unless every
-  # package, the Rust workspace and the README's install command agree.
+  # package, the Rust workspace and the README's install command agree, and
+  # `--release` refuses a `.devN` version: `main` carries one between
+  # releases, so a release PR sets the final version first (set_version.py).
   version:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -43,14 +45,14 @@ jobs:
       - id: v
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version=$(python3 scripts/check_version.py "${GITHUB_REF_NAME#v}")
+            version=$(python3 scripts/check_version.py --release "${GITHUB_REF_NAME#v}")
             if [[ -z "$(scripts/changelog-section.sh "$version" | tr -d '[:space:]')" ]]; then
               echo "::error::CHANGELOG.md has no [$version] section"
               exit 1
             fi
             publish=true
           else
-            version=$(python3 scripts/check_version.py)
+            version=$(python3 scripts/check_version.py --release)
             publish=false
           fi
           prerelease=false
@@ -64,9 +66,12 @@ jobs:
 
   # One build per platform. Each signs and attests its own artifacts, so a
   # platform's job can be rerun alone. The pure-Python packages and the sdists
-  # are built once, on x86_64 Linux.
+  # are built once, on x86_64 Linux. They wait for the version check, which
+  # refuses a tag that carries a .devN version, so that nothing is signed or
+  # attested (and logged in Rekor, which is public) for one.
   build:
     name: build (${{ matrix.target }})
+    needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:

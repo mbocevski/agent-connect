@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agentconnect-core"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5.dev.0"
 dependencies = [
  "base64ct",
  "ed25519-dalek 3.0.0",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "agentconnect-directory"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5.dev.0"
 dependencies = [
  "agentconnect-core",
  "axum",

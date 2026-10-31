@@ -39,6 +39,12 @@ jobs:
       # openmls, so the nightly issue says the patch can go.
       - name: Fixed OpenMLS provider on crates.io
         run: uv run --no-project python scripts/check_cargo_patch.py upstream
+      # Fails when main still carries a version that is already tagged: after
+      # a release, a PR moves main on to the next .devN version.
+      - name: Main moved on after the last release
+        run: |
+          git fetch --force --tags origin
+          python3 scripts/check_version.py --post-release
 
   # New CVEs against unchanged images: build the amd64 images from main and
   # scan them with Trivy (the same check as the PR `image` job).
