@@ -16,6 +16,7 @@ import stat
 import tempfile
 import types
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, override
 
@@ -52,6 +53,7 @@ from agentconnect.a2a_adapter.serve import LoopbackServer
 from agentconnect.adapter import Delivery, Event, GroupView, Sender
 from agentconnect.isolation import PeerCred
 from agentconnect.runtime.engine import DaemonError
+from agentconnect_harness.a2a_agents import AgentServer, HelloWorldExecutor
 
 GID = "Z3JvdXA"
 OTHER = "b3RoZXI"
@@ -231,6 +233,52 @@ async def test_a_member_addressed_request_takes_only_that_members_reply(setup: A
     assert event.message.parts[0].text == "me"
     assert event.message.metadata["sender"] == PEER
     await http.aclose()
+
+
+async def test_another_members_reply_to_a_member_request_is_context(tmp_path: Path) -> None:
+    """SR-37: the facade doesn't take another member's reply to a request
+    on a member's path, so the adapter handles it as any other message: the
+    local agent gets it as context, not nothing."""
+    agent = AgentServer(HelloWorldExecutor(), "hello")
+    await agent.start()
+    options = A2AOptions(
+        facade_port=0, data_dir=tmp_path, local_agent_url=agent.url, context_messages=3
+    )
+    adapter = A2AAdapter(options)
+    group = Group()
+    await adapter.on_outbound(group)
+    assert adapter.facade is not None
+    card = AgentCard(name="x")
+    card.supported_interfaces.add(
+        url=adapter.facade.url(GID, PEER), protocol_binding="JSONRPC", protocol_version="1.0"
+    )
+    http = httpx.AsyncClient(headers={"Authorization": f"Bearer {adapter.facade_token}"})
+    member = ClientFactory(ClientConfig(httpx_client=http)).create(card)
+    running = asyncio.ensure_future(collect(member.send_message(user("just you"))))
+    try:
+        await group.wait_for(1)
+        other = "ac:v0:other"
+        body = convert.to_json(convert.agent_text("not you", GID))
+        stray = replace(reply("sent-1", "a2a.message", body, other), addressed_to_me=False)
+        await answer(adapter, stray)
+        body = convert.to_json(convert.agent_text("now you", GID))
+        await answer(adapter, reply(None, "a2a.message", body, other))
+        await group.wait_for(2)  # the local agent answered
+        executor = agent.executor
+        assert isinstance(executor, HelloWorldExecutor)
+        meta = convert.to_json(executor.received[0].message)["metadata"]
+        assert [m["msg_id"] for m in meta.get("context_messages", [])] == [stray.msg_id]
+        body = convert.to_json(convert.agent_text("me", GID))
+        await answer(adapter, reply("sent-1", "a2a.message", body, n=1))
+        (event,) = await asyncio.wait_for(running, 5)
+        assert event.message.parts[0].text == "me"
+    finally:
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+        await http.aclose()
+        await adapter.aclose()
+        await agent.stop()
 
 
 async def test_a_task_is_bound_to_the_instance_that_answered(
