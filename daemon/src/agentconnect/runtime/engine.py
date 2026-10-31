@@ -251,6 +251,8 @@ JOIN_FAILURES_WARNING = (
     "that, revoke it with `agentconnect invite revoke <invite_id>`."
 )
 # The message of a JoinRequest from another sender (SPEC 6.2 step 3).
+# The core's error for a JoinRequest's ``sig`` that doesn't verify (SPEC 6.1).
+BAD_JOIN_SIGNATURE = "join request signature verification failed"
 SENDER_MISMATCH = "credential mismatch: sender is not the request's mailbox_id"
 IDENTITY_FLOOD_WARNING = (
     "More than {limit} requests claim identity {identity} on this invite, and new ones are "
@@ -3086,7 +3088,7 @@ class Engine:
             # SPEC 4.3 "already used" warning when its join lapses.
             ignore("join_request_invite_used", invite=log.hid(invite_id))
             return
-        verified = await self._verify_join(raw, obj, sender, invite, ignore)
+        verified = await self._verify_join(raw, obj, sender, invite, ignore, msg_id=msg_id)
         if verified is None:
             return
         group_id, request_id = str(invite["group_id"]), msg_id
@@ -3159,6 +3161,7 @@ class Engine:
                     "received_at": self.now(),
                     "kp_ref": kp_ref,
                     "instance_id": instance_hex(verified.instance_id),
+                    "possession_proven": verified.possession_proven,
                 }
             )
             await self.emit(
@@ -3171,13 +3174,19 @@ class Engine:
                 display_name=verified.display_name,
                 display_name_verified=False,
                 identity_requests=self._identity_requests(invite_id, verified.identity),
+                possession_proven=verified.possession_proven,
             )
-            if self.config.auto_approve and not (invite["replica"] and invite["instance"] is None):
+            if (
+                self.config.auto_approve
+                and verified.possession_proven
+                and not (invite["replica"] and invite["instance"] is None)
+            ):
                 # Joins only: nothing approves a knock but the human (SPEC
                 # 6.6.4), nor a request on an unpinned replica invite, where
                 # every request claims this identity and only the instance
-                # tells them apart. In this transaction, so a failure once it
-                # commits can't leave the approval pending until it lapses.
+                # tells them apart, nor one that doesn't prove it holds its
+                # KeyPackage (SPEC 6.1). In this transaction, so a failure once
+                # it commits can't leave the approval pending until it lapses.
                 self._auto_approve(request_id, group_id)
             return "held"
 
@@ -3250,13 +3259,15 @@ class Engine:
             self._join_ledger.seen(key, kp_ref)
         )
 
-    async def _verify_join(
+    async def _verify_join(  # noqa: PLR0913
         self,
         raw: bytes,
         obj: ac.Invite,
         sender: str,
         invite: dict[str, Any],
         ignore: Callable[..., None],
+        *,
+        msg_id: str,
     ) -> ac.VerifiedJoinRequest | None:
         """SPEC 6.2 steps 2 and 3 for an open invite's request, or ``None``
         when it is dropped (``ignore`` records why)."""
@@ -3271,6 +3282,17 @@ class Engine:
             # The error's kind, not its text, which may quote the request.
             reason = str(getattr(e, "kind", type(e).__name__))
             ignore("join_request_rejected", invite=log.hid(invite_id), reason=reason)
+            if str(e) == BAD_JOIN_SIGNATURE:
+                self.safety.audit(
+                    str(invite["group_id"]),
+                    "in",
+                    sender=f"mailbox:{sender}",
+                    msg_id=msg_id,
+                    kind="join_request",
+                    size=len(raw),
+                    decision=Verdict.DROP,
+                    reason="join_check:sig",
+                )
             if reason == "authentication" or str(e) == SENDER_MISMATCH:
                 # Step 2: counted, to tell the human. Nothing is dropped
                 # unchecked for it: anyone who knows the invite id could
@@ -4963,6 +4985,7 @@ class Engine:
                 }
                 | {
                     "kind": "join",
+                    "possession_proven": bool(a["possession_proven"]),
                     "display_name_verified": False,
                     "fingerprint": ac.fingerprint(ac_identity_key(a["identity"])),
                     # Requests that claim this identity on this invite, this

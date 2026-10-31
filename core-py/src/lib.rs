@@ -506,6 +506,13 @@ impl VerifiedJoinRequest {
         PyBytes::new(py, &self.key_package_ref)
     }
 
+    /// Whether the request's `sig` verified under the KeyPackage's leaf key.
+    /// Without it, it must not be approved automatically (SPEC 6.1).
+    #[getter]
+    fn possession_proven(&self) -> bool {
+        self.inner.possession_proven()
+    }
+
     #[getter]
     fn identity(&self) -> String {
         self.identity.clone()

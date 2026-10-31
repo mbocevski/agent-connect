@@ -243,6 +243,7 @@ Other labels:
 | `agentconnect/v0/listing-withdraw` | Prefix of a `Withdrawal` signature input, signed by `IK` (§13.2) |
 | `agentconnect/v0/listing-token` | Prefix of a `ListingToken` signature input, signed by the directory operator's `DK` (§13.2) |
 | `agentconnect/v0/listing-token-revoke` | Prefix of a `TokenRevocation` signature input, signed by `DK` (§13.2) |
+| `agentconnect/v0/join-request-sig` | Prefix of a JoinRequest's signature input, signed by the joiner's `SK` (§6.1) |
 | `agentconnect/v0/identity-export` | AAD of an identity export, which provisions a replica (§9.4) |
 
 Every signature by an identity key `IK` is an instance certificate (§3.3),
@@ -369,7 +370,8 @@ JoinRequest = {
   "display_name": "<≤ 80 chars>",
   "key_package": "<b64url MLS KeyPackage, v0 suite, with ac_instance_cert>",
   "mailbox_id": "<B's mailbox>",
-  "mac": "<b64url HMAC-SHA256(join_key, mac_input)>"
+  "mac": "<b64url HMAC-SHA256(join_key, mac_input)>",
+  "sig": "<b64url Ed25519(SK_B, "agentconnect/v0/join-request-sig" || mac_input)>"
 }
 ```
 
@@ -387,6 +389,15 @@ mac_input = "agentconnect/v0/join-request"
 
 The label is not length-prefixed. `testdata/invite-kdf.json` gives
 `mac_input` and `mac` for sample inputs.
+
+`sig` is made with the KeyPackage's leaf signature key, over the same
+`mac_input`. It proves that the sender holds that KeyPackage's private key,
+which the MAC doesn't. A joiner MUST send it. The MAC doesn't cover it, so a
+relay can strip it. An inviter MUST verify it whenever it is present (strict
+Ed25519) and MUST drop a request whose `sig` fails. An inviter MUST NOT approve
+a request without `sig` automatically. Its UI MUST say that such a request
+doesn't prove possession of the KeyPackage. (A later draft of v0 makes `sig`
+mandatory before v0 is tagged.) `testdata/join-requests.json` gives vectors.
 
 `display_name` is at most 80 characters of one-line text (§13.1.2: no
 control, format, separator, private-use, unassigned or ignorable character
@@ -421,8 +432,8 @@ The inviter instance A MUST:
    carry KeyPackage extensions and MUST NOT be a last-resort KeyPackage.
    It MUST also be **unused** (see "KeyPackage reuse" below).
 4. Drop the request silently if it is a replay ("Replays" below). Otherwise
-   approve the join, either automatically (when policy allows) or through its
-   human. Approval MUST time out after 1 hour by default, and a timeout
+   approve the join: through its human, or automatically when its local policy
+   allows that for link holders and `sig` verified (§6.1). Approval MUST time out after 1 hour by default, and a timeout
    rejects the join. The rejection is silent: nothing is sent to the joiner
    (a rejection message would tell a link thief its request was seen), whose
    pending join lapses with its invite (§6.1).

@@ -148,6 +148,7 @@ fn submit(kp: Vec<u8>, as_instance: &Instance) -> Result<(), Error> {
         mac: [0; 32],
         key_package: kp,
         mailbox_id,
+        sig: None,
     };
     req.mac = join_request_mac(&inv.secret().join_key(), &req.mac_input());
     inviter

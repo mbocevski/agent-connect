@@ -1480,6 +1480,7 @@ fn owner_file_vectors() {
 /// is parsed, so the KeyPackage here is placeholder bytes and every case is
 /// computed from the seed.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn join_request_vectors() {
     use std::sync::Arc;
 
@@ -1502,6 +1503,7 @@ fn join_request_vectors() {
         key_package: rng.array::<64>().unwrap().to_vec(),
         mailbox_id: mailbox_id(&rng.array::<32>().unwrap()),
         mac: [0; 32],
+        sig: None,
     };
     req.mac = join_request_mac(&invite.secret().join_key(), &req.mac_input());
     let mut bad_mac = req.clone();
@@ -1551,7 +1553,7 @@ fn join_request_vectors() {
             .starts_with("invalid key package")
     );
     let mut v = header(
-        "SPEC 6.2 step 3: the inviter verifies a JoinRequest against the relay-authenticated sender of its envelope, which must be the request's mailbox_id (anyone with the link can MAC any KeyPackage). The check comes after the MAC (step 2) and before the KeyPackage is parsed, so `key_package` is placeholder bytes. Verify `request` (JoinRequest JSON) at `now` against the invite rebuilt from its parts (invite_id and secret in hex) with `sender`, and expect `error` and `kind`.",
+        "SPEC 6.2 step 3: the inviter verifies a JoinRequest against the relay-authenticated sender of its envelope, which must be the request's mailbox_id (anyone with the link can MAC any KeyPackage). The check comes after the MAC (step 2) and before the KeyPackage is parsed, so `key_package` is placeholder bytes. Verify `request` (JoinRequest JSON) at `now` against the invite rebuilt from its parts (invite_id and secret in hex) with `sender`, and expect `error` and `kind`. `signatures` is SPEC 6.1's `sig`: Ed25519 under `sig_key` over `signing_input` (\"agentconnect/v0/join-request-sig\" then the MAC's input); check each case's `sig` over the input recomputed from its fields, and expect `valid`. `unsigned` has no `sig`, which proves nothing and isn't an error.",
         &seed,
     );
     v["now"] = json!(now);
@@ -1562,6 +1564,59 @@ fn join_request_vectors() {
         "expires_at": invite.expires_at(),
     });
     v["cases"] = cases.into();
+    // SPEC 6.1, `sig`. The instance keys derive from the seed and Ed25519 is
+    // deterministic, so these recompute. The KeyPackage is the placeholder
+    // above: its own checks come first, and core/tests/join_request_sig.rs
+    // runs the whole order with real ones.
+    let signer = Identity::from_secret_bytes(&rng.array().unwrap())
+        .create_instance(&rng, &*clock)
+        .unwrap();
+    let other_signer = Identity::from_secret_bytes(&rng.array().unwrap())
+        .create_instance(&rng, &*clock)
+        .unwrap();
+    let sig = signer.sign(&req.signing_input());
+    let with_sig = |r: &JoinRequest, sig: [u8; 64]| {
+        let mut r = r.clone();
+        r.sig = Some(sig);
+        r
+    };
+    let mut renamed = req.clone();
+    renamed.display_name = "Mallory".to_owned();
+    renamed.mac = join_request_mac(&invite.secret().join_key(), &renamed.mac_input());
+    let sig_cases = [
+        ("signed by the KeyPackage's key", with_sig(&req, sig), true),
+        (
+            "signed by another key",
+            with_sig(&req, other_signer.sign(&req.signing_input())),
+            false,
+        ),
+        (
+            "a changed field under a new MAC",
+            with_sig(&renamed, sig),
+            false,
+        ),
+        (
+            "the signature of another request's input",
+            with_sig(&req, signer.sign(&renamed.signing_input())),
+            false,
+        ),
+    ];
+    v["signatures"] = json!({
+        "sig_key": hex(&signer.public_key()),
+        "signing_input": hex(&req.signing_input()),
+        "cases": sig_cases
+            .iter()
+            .map(|(name, r, valid)| {
+                assert_eq!(r.verify_signature(&signer.public_key()).is_ok(), *valid, "{name}");
+                json!({
+                    "name": name,
+                    "request": s(&r.to_json().unwrap()),
+                    "valid": valid,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "unsigned": s(&req.to_json().unwrap()),
+    });
     check_or_write(name, &v);
 }
 

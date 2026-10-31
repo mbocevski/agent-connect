@@ -499,6 +499,8 @@ fn a_request_from_another_mailbox_is_refused() {
     let inv_c = invite(&c);
     let mut forged = from_v.clone();
     forged.invite_id = *inv_c.secret().id();
+    // The holder can't sign: it has the link, not the KeyPackage's key.
+    forged.sig = None;
     forged.mac =
         agentconnect_core::join::join_request_mac(&inv_c.secret().join_key(), &forged.mac_input());
     let m_mailbox = m.client.instance().mailbox_id();
@@ -517,10 +519,13 @@ fn a_request_from_another_mailbox_is_refused() {
             .unwrap_err(),
         Error::BadMac
     );
-    // From its own mailbox the same KeyPackage verifies.
-    c.client
+    // A relay can name the KeyPackage's own mailbox as the sender: the same
+    // KeyPackage then verifies, and proves nothing about who sent it.
+    let verified = c
+        .client
         .verify_join_request(&forged, &inv_c, &from_v.mailbox_id)
         .unwrap();
+    assert!(!verified.possession_proven());
 }
 
 #[test]

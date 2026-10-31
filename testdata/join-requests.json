@@ -4,32 +4,59 @@
       "error": "credential mismatch: sender is not the request's mailbox_id",
       "kind": "credential_mismatch",
       "name": "another mailbox sends it",
-      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"k1Po7j73JKHE2ilnNjWm4A\",\"key_package\":\"E5qmzkswLPN8JURKOVl-0LYF5LPgKlCfbF-w2mq0i7GHKidRH5CqE6RR3lWttejgMOjXrlAQGGpBOzXKzooZ0w\",\"mac\":\"Zm_Utsn4Q34NrzDa10w8XAgYFMB1ZQhRFjgZPeMl1Mw\",\"mailbox_id\":\"Da0YQbVndyL3v90g0FU1UX\",\"v\":0}",
-      "sender": "664VrnURv1IKIiyjThflTe"
+      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"xsAcsiHPscGjB9Ngf8Yw9c27R4TpDeABeXNgH56m1GE\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"v\":0}",
+      "sender": "QUVUdohNGlFiF1kEoL71m_"
     },
     {
       "error": "join request MAC verification failed",
       "kind": "authentication",
       "name": "a bad MAC is reported first",
-      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"k1Po7j73JKHE2ilnNjWm4A\",\"key_package\":\"E5qmzkswLPN8JURKOVl-0LYF5LPgKlCfbF-w2mq0i7GHKidRH5CqE6RR3lWttejgMOjXrlAQGGpBOzXKzooZ0w\",\"mac\":\"Z2_Utsn4Q34NrzDa10w8XAgYFMB1ZQhRFjgZPeMl1Mw\",\"mailbox_id\":\"Da0YQbVndyL3v90g0FU1UX\",\"v\":0}",
-      "sender": "664VrnURv1IKIiyjThflTe"
+      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"x8AcsiHPscGjB9Ngf8Yw9c27R4TpDeABeXNgH56m1GE\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"v\":0}",
+      "sender": "QUVUdohNGlFiF1kEoL71m_"
     },
     {
       "error": "invalid key package: protocol version",
       "kind": "malformed",
       "name": "from its own mailbox it reaches the KeyPackage checks",
-      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"k1Po7j73JKHE2ilnNjWm4A\",\"key_package\":\"E5qmzkswLPN8JURKOVl-0LYF5LPgKlCfbF-w2mq0i7GHKidRH5CqE6RR3lWttejgMOjXrlAQGGpBOzXKzooZ0w\",\"mac\":\"Zm_Utsn4Q34NrzDa10w8XAgYFMB1ZQhRFjgZPeMl1Mw\",\"mailbox_id\":\"Da0YQbVndyL3v90g0FU1UX\",\"v\":0}",
-      "sender": "Da0YQbVndyL3v90g0FU1UX"
+      "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"xsAcsiHPscGjB9Ngf8Yw9c27R4TpDeABeXNgH56m1GE\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"v\":0}",
+      "sender": "ndPc6W_3EcIKijvs6SeIFk"
     }
   ],
-  "description": "SPEC 6.2 step 3: the inviter verifies a JoinRequest against the relay-authenticated sender of its envelope, which must be the request's mailbox_id (anyone with the link can MAC any KeyPackage). The check comes after the MAC (step 2) and before the KeyPackage is parsed, so `key_package` is placeholder bytes. Verify `request` (JoinRequest JSON) at `now` against the invite rebuilt from its parts (invite_id and secret in hex) with `sender`, and expect `error` and `kind`.",
+  "description": "SPEC 6.2 step 3: the inviter verifies a JoinRequest against the relay-authenticated sender of its envelope, which must be the request's mailbox_id (anyone with the link can MAC any KeyPackage). The check comes after the MAC (step 2) and before the KeyPackage is parsed, so `key_package` is placeholder bytes. Verify `request` (JoinRequest JSON) at `now` against the invite rebuilt from its parts (invite_id and secret in hex) with `sender`, and expect `error` and `kind`. `signatures` is SPEC 6.1's `sig`: Ed25519 under `sig_key` over `signing_input` (\"agentconnect/v0/join-request-sig\" then the MAC's input); check each case's `sig` over the input recomputed from its fields, and expect `valid`. `unsigned` has no `sig`, which proves nothing and isn't an error.",
   "generator": "core/src/vectors.rs (just vectors)",
   "invite": {
     "expires_at": 1735776000,
-    "invite_id": "9353e8ee3ef724a1c4da29673635a6e0",
+    "invite_id": "93032930c7d2dd51d382261741fa8370",
     "relay_host": "relay.example.org",
-    "secret": "227d16401b39bef06c7e81b475ae96c7c4909c9bc00a4bb1e0c007e3f439659c"
+    "secret": "e89f2f55f96c7ea03f5a81a51298f2b92b502ccd2b23f6261e579b40090123b4"
   },
   "now": 1735689600,
-  "seed": "a676be59a12d0770093c2bc83e8e06620ee9edda3efeb052fded9d93076438a0"
+  "seed": "4d2e6ae6b5a040f8208381e319d1770855e44528a475c5e29a7769696b557cd5",
+  "signatures": {
+    "cases": [
+      {
+        "name": "signed by the KeyPackage's key",
+        "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"xsAcsiHPscGjB9Ngf8Yw9c27R4TpDeABeXNgH56m1GE\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"sig\":\"-Eu6gO8RLLh5kDH0zpIhDT3xOYWII9SZ1FnBarWZSjHJcIIFT-iqU6SBf4Nf-WggDjByfmZUlvfkRIIlIJhqCA\",\"v\":0}",
+        "valid": true
+      },
+      {
+        "name": "signed by another key",
+        "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"xsAcsiHPscGjB9Ngf8Yw9c27R4TpDeABeXNgH56m1GE\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"sig\":\"QqbF5paPF4SIZZUu9FIpu6U9GHqAMu2yIlHHhgZ4qK96ftg4WwnL0TXmUHDRAIzfcXEv8dGlAAhb3crrlN6UDA\",\"v\":0}",
+        "valid": false
+      },
+      {
+        "name": "a changed field under a new MAC",
+        "request": "{\"display_name\":\"Mallory\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"LRFALAt-b4dViSNOWVI4kOnTwiX-Ce_PPzwQ5ay9gqA\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"sig\":\"-Eu6gO8RLLh5kDH0zpIhDT3xOYWII9SZ1FnBarWZSjHJcIIFT-iqU6SBf4Nf-WggDjByfmZUlvfkRIIlIJhqCA\",\"v\":0}",
+        "valid": false
+      },
+      {
+        "name": "the signature of another request's input",
+        "request": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"xsAcsiHPscGjB9Ngf8Yw9c27R4TpDeABeXNgH56m1GE\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"sig\":\"SdruEmU2sWb8GVfb1HGEcLw987Mx0Q_p7QzekMyMF_ik8B9qkfdsSZ0qCf373nb1yDg1ACQOq2jAEbFG55UODQ\",\"v\":0}",
+        "valid": false
+      }
+    ],
+    "sig_key": "100202a618fde6c678c79b6c4588428787187496f59c711a10a20785afd34d8d",
+    "signing_input": "6167656e74636f6e6e6563742f76302f6a6f696e2d726571756573742d7369676167656e74636f6e6e6563742f76302f6a6f696e2d726571756573740000001093032930c7d2dd51d382261741fa837000000040f784db049ebe3e4772c2da21f66a9d7cfbde74a209fa54e601a56e5eb623ab07ff58eb61222a0b00425f3b3c69a1a4b3c3309ebf8db7937ad2a79deeb34c20b1000000166e64506336575f334563494b696a767336536549466b0000000b426f622773206167656e74",
+    "unsigned": "{\"display_name\":\"Bob's agent\",\"invite_id\":\"kwMpMMfS3VHTgiYXQfqDcA\",\"key_package\":\"94TbBJ6-Pkdywtoh9mqdfPvedKIJ-lTmAaVuXrYjqwf_WOthIioLAEJfOzxpoaSzwzCev423k3rSp53us0wgsQ\",\"mac\":\"xsAcsiHPscGjB9Ngf8Yw9c27R4TpDeABeXNgH56m1GE\",\"mailbox_id\":\"ndPc6W_3EcIKijvs6SeIFk\",\"v\":0}"
+  }
 }

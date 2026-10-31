@@ -8,6 +8,7 @@ use crate::encoding::{b64, b64_decode, b64_decode_array};
 use crate::error::{Error, Result};
 
 const MAC_LABEL: &[u8] = b"agentconnect/v0/join-request";
+const SIG_LABEL: &[u8] = b"agentconnect/v0/join-request-sig";
 /// Maximum `display_name` length in characters (SPEC §6.1).
 pub const MAX_DISPLAY_NAME_CHARS: usize = 80;
 
@@ -36,7 +37,13 @@ fn mac(join_key: &[u8; 32], input: &MacInput<'_>) -> Hmac<Sha256> {
     // HMAC accepts keys of any length.
     let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(join_key)
         .unwrap_or_else(|_| unreachable!("HMAC accepts any key length"));
-    m.update(MAC_LABEL);
+    m.update(&mac_input_bytes(input));
+    m
+}
+
+/// `mac_input` of SPEC §6.1: the label, then each field length-prefixed.
+fn mac_input_bytes(input: &MacInput<'_>) -> Vec<u8> {
+    let mut out = MAC_LABEL.to_vec();
     for field in [
         input.invite_id.as_slice(),
         input.key_package,
@@ -46,10 +53,10 @@ fn mac(join_key: &[u8; 32], input: &MacInput<'_>) -> Hmac<Sha256> {
         // Every field is far below 4 GiB (KeyPackages are bounded by the
         // relay frame); saturate rather than wrap if that ever changes.
         let len = u32::try_from(field.len()).unwrap_or(u32::MAX);
-        m.update(&len.to_be_bytes());
-        m.update(field);
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(field);
     }
-    m
+    out
 }
 
 /// SPEC §6.1: at most 80 characters of one-line text (§13.1.2), since the
@@ -76,6 +83,10 @@ pub struct JoinRequest {
     pub mailbox_id: String,
     /// HMAC-SHA256 under `join_key`.
     pub mac: [u8; 32],
+    /// Ed25519 under the KeyPackage's leaf key: proves that the sender holds
+    /// that KeyPackage's private key, which the MAC doesn't (SPEC §6.1). The
+    /// MAC doesn't cover it, so a relay can strip it.
+    pub sig: Option<[u8; 64]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,6 +97,8 @@ struct JoinRequestJson {
     key_package: String,
     mailbox_id: String,
     mac: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sig: Option<String>,
 }
 
 impl JoinRequest {
@@ -98,6 +111,32 @@ impl JoinRequest {
             mailbox_id: &self.mailbox_id,
             display_name: &self.display_name,
         }
+    }
+
+    /// The input of `sig`: `"agentconnect/v0/join-request-sig" ‖ mac_input`.
+    #[must_use]
+    pub fn signing_input(&self) -> Vec<u8> {
+        [SIG_LABEL, &mac_input_bytes(&self.mac_input())].concat()
+    }
+
+    /// Strict Ed25519 verification of `sig` under `sig_key`. `Ok(false)` if
+    /// the request has no `sig`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadJoinSignature`] if it has one that doesn't verify.
+    pub fn verify_signature(&self, sig_key: &[u8; 32]) -> Result<bool> {
+        let Some(sig) = &self.sig else {
+            return Ok(false);
+        };
+        let key = ed25519_dalek::VerifyingKey::from_bytes(sig_key)
+            .map_err(|_| Error::BadJoinSignature)?;
+        key.verify_strict(
+            &self.signing_input(),
+            &ed25519_dalek::Signature::from_bytes(sig),
+        )
+        .map_err(|_| Error::BadJoinSignature)?;
+        Ok(true)
     }
 
     /// Verifies the MAC in constant time.
@@ -120,6 +159,7 @@ impl JoinRequest {
             key_package: b64(&self.key_package),
             mailbox_id: self.mailbox_id.clone(),
             mac: b64(&self.mac),
+            sig: self.sig.as_ref().map(|sig| b64(sig)),
         })
     }
 
@@ -149,6 +189,11 @@ impl JoinRequest {
             key_package: b64_decode(&raw.key_package, "key_package")?,
             mailbox_id: raw.mailbox_id,
             mac: b64_decode_array(&raw.mac, "mac")?,
+            sig: raw
+                .sig
+                .as_deref()
+                .map(|sig| b64_decode_array(sig, "sig"))
+                .transpose()?,
         })
     }
 }
@@ -177,6 +222,7 @@ mod tests {
             mac: [0; 32],
             key_package,
             mailbox_id: mailbox,
+            sig: None,
         };
         r.mac = join_request_mac(&key, &r.mac_input());
         r

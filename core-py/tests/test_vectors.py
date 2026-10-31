@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 import agentconnect_core as ac
 
@@ -26,6 +28,14 @@ def load(name: str) -> dict[str, Any]:
 
 def h(s: str) -> bytes:
     return bytes.fromhex(s)
+
+
+def unb64(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
 def lp(field: bytes) -> bytes:
@@ -90,6 +100,67 @@ def test_join_request_vectors(rng: random.Random) -> None:
             verifier.verify_join_request(case["request"].encode(), invite, case["sender"])
         assert str(e.value) == case["error"], case["name"]
         assert getattr(e.value, "kind", None) == case["kind"], case["name"]
+
+
+def join_signing_input(request: dict[str, str]) -> bytes:
+    """SPEC 6.1, from the formula: the label, then `mac_input`."""
+    return (
+        b"agentconnect/v0/join-request-sig"
+        + b"agentconnect/v0/join-request"
+        + lp(unb64(request["invite_id"]))
+        + lp(unb64(request["key_package"]))
+        + lp(request["mailbox_id"].encode())
+        + lp(request["display_name"].encode())
+    )
+
+
+def test_join_request_signature_vectors() -> None:
+    """SPEC 6.1: `sig` covers the MAC's input under its own label, and only
+    the KeyPackage's leaf key makes it."""
+    sigs = load("join-requests.json")["signatures"]
+    key = Ed25519PublicKey.from_public_bytes(h(sigs["sig_key"]))
+    assert sigs["cases"]
+    for case in sigs["cases"]:
+        request = json.loads(case["request"])
+        data = join_signing_input(request)
+        try:
+            key.verify(unb64(request["sig"]), data)
+            valid = True
+        except InvalidSignature:
+            valid = False
+        assert valid == case["valid"], case["name"]
+    valid_case = next(c for c in sigs["cases"] if c["valid"])
+    assert join_signing_input(json.loads(valid_case["request"])) == h(sigs["signing_input"])
+    assert "sig" not in json.loads(sigs["unsigned"])
+
+
+def test_a_joiner_signs_and_a_stripped_request_proves_nothing(rng: random.Random) -> None:
+    """The binding's whole path, with real KeyPackages."""
+
+    def client() -> ac.Client:
+        identity = ac.Identity._generate_for_testing(rng.getrandbits(64))
+        instance = identity._create_instance_for_testing(seed=rng.getrandbits(64))
+        return ac.Client._for_testing(None, instance.to_secret_bytes(), rng.getrandbits(64))
+
+    inviter, joiner = client(), client()
+    inviter.create_group("Ops", "Deploys")
+    invite = inviter.create_invite("relay.example.org", 3600)
+    link = ac.parse_invite_url(invite.url)
+    raw = joiner.create_join_request(link, "bob")
+    request = json.loads(raw)
+    verified = inviter.verify_join_request(raw, invite, request["mailbox_id"])
+    assert verified.possession_proven is True
+    stripped = {k: v for k, v in request.items() if k != "sig"}
+    verified = inviter.verify_join_request(
+        json.dumps(stripped).encode(), invite, request["mailbox_id"]
+    )
+    assert verified.possession_proven is False
+    flipped = bytearray(unb64(request["sig"]))
+    flipped[0] ^= 1
+    bad = {**request, "sig": b64(bytes(flipped))}
+    with pytest.raises(ac.AgentConnectError) as e:
+        inviter.verify_join_request(json.dumps(bad).encode(), invite, request["mailbox_id"])
+    assert getattr(e.value, "kind", None) == "authentication"
 
 
 def sas_participant(p: dict[str, str]) -> tuple[str, int, bytes]:

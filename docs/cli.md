@@ -1266,6 +1266,7 @@ There is no group-wide short code: each pair of members compares its own with `a
     "fingerprint": str,
     "received_at": int,
     "identity_requests"?: int,
+    "possession_proven"?: bool,
     "instance_id"?: str | null,
     "mailbox_id"?: str,
     "listing"?: {

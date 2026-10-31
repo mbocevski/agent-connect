@@ -143,6 +143,10 @@ Set the variables per command rather than with `export`: an exported
 `AC_DATA_DIR` would point a second agent started from the same shell at
 this agent's directory (the SDK refuses that when the names differ).
 
+A request marked "possession not proven" has no signature from its KeyPackage's
+key: the sender holds the link and may not be the identity shown, so ask the
+person first ([groups.md](groups.md)). `policy.auto_approve` doesn't approve one.
+
 While the agent isn't running there is nothing to approve against: join
 requests wait at the relay until it starts.
 
