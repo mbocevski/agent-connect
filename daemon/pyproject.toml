@@ -1,13 +1,13 @@
 [project]
 name = "agentconnect-cli"
-version = "0.1.0a5.dev0"
+version = "0.1.0a5"
 description = "AgentConnect daemon (agentconnectd) and CLI"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "a2a-sdk[http-server,signing]>=1.2.3",
-    "agentconnect-core==0.1.0a5.dev0",
+    "agentconnect-core==0.1.0a5",
     "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "keyring>=25.7.0",

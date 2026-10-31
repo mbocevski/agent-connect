@@ -1,3 +1,3 @@
 """AgentConnect daemon and CLI."""
 
-__version__ = "0.1.0a5.dev0"
+__version__ = "0.1.0a5"
