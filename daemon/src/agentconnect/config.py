@@ -1215,6 +1215,19 @@ def _event_retention(daemon: Mapping[str, Any]) -> int:
     return days
 
 
+def _no_rule_tables(data: dict[str, Any]) -> dict[str, Any]:
+    """Standing rules aren't configuration: a file is the easiest thing to widen,
+    needs no token and doesn't record who changed it (ADR-007 Decision 1)."""
+    for table in ("trust", "rules"):
+        if table in data:
+            msg = (
+                f"[{table}] isn't a config table: standing rules are changed only with the "
+                "human token (`agentconnect trust rule`)"
+            )
+            raise ConfigError(msg)
+    return data
+
+
 def load_config(
     path: Path | None = None,
     environ: Mapping[str, str] = os.environ,
@@ -1231,7 +1244,7 @@ def load_config(
     data: dict[str, Any] = {}
     if use_file and path.exists():
         try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
+            data = _no_rule_tables(tomllib.loads(path.read_text(encoding="utf-8")))
         except tomllib.TOMLDecodeError as e:
             msg = f"{path}: {e}"
             raise ConfigError(msg) from None

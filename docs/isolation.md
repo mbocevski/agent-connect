@@ -265,6 +265,20 @@ group and the setgid bit, for example
 and point `webhook.callback_socket` or `a2a.local_agent_socket` at a
 socket in it. Don't add agent users to `_agentconnect-recv`.
 
+## Standing rules
+
+Standing rules ([ADR-007](adr/007-autonomous-connections.md)), a person's decision
+that this daemon may approve matching connections on its own, count only in this
+mode. In a same-user install the agent can read the human token, so a rule would
+turn one injection into a standing connection. Creating, widening or enabling a
+rule there answers `409 needs_isolation`, whatever the token, and connections stay
+a person's to approve, one at a time. A database with rules opened outside this
+mode keeps them and doesn't use them, and the human hears so once per start
+(`rules_inert`). Narrowing still works everywhere: `agentconnect trust rule
+disable` and `trust rule remove`.
+
+No kind of rule can be created yet: the anchors that would use one come later.
+
 ## Agents
 
 Agents use the agent directory as their data directory:

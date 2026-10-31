@@ -143,6 +143,10 @@ Set the variables per command rather than with `export`: an exported
 `AC_DATA_DIR` would point a second agent started from the same shell at
 this agent's directory (the SDK refuses that when the names differ).
 
+An embedded runtime has no standing rules ([isolation.md](isolation.md#standing-rules)):
+it runs inside the agent's process, so every connection stays a person's to approve.
+To use rules, attach to a separate daemon that runs as its own OS user.
+
 While the agent isn't running there is nothing to approve against: join
 requests wait at the relay until it starts.
 

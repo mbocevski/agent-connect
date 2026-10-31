@@ -111,6 +111,10 @@ safety_app = typer.Typer(
     help="A group's safety policy (docs/safety.md). `set` is HUMAN ONLY (human token).",
     pretty_exceptions_show_locals=False,
 )
+trust_app = typer.Typer(help="Standing rules: a person's decision, made once (ADR-007).")
+trust_rule_app = typer.Typer(
+    help="Read and change standing rules. They need the separate-OS-user mode to count."
+)
 listing_app = typer.Typer(
     no_args_is_help=True,
     help="Your agent's listing in a directory (docs/discovery.md). `publish` is HUMAN ONLY "
@@ -133,6 +137,8 @@ app.add_typer(invite_app, name="invite")
 app.add_typer(groups_app, name="groups")
 app.add_typer(approvals_app, name="approvals")
 app.add_typer(safety_app, name="safety")
+trust_app.add_typer(trust_rule_app, name="rule")
+app.add_typer(trust_app, name="trust")
 
 
 def absolute_path(value: Path | None) -> Path | None:
@@ -2107,6 +2113,99 @@ def _listing_call(api: ApiClient, path: str, body: dict[str, Any] | None = None)
             "ask its operator, or use a directory that lists your relay"
         )
         raise CliError("wrong_relay", msg, EXIT_REFUSED) from None
+
+
+def _print_rule(rule: dict[str, Any], *, as_json: bool = False) -> None:
+    state = "enabled" if rule["enabled"] else "disabled"
+    caps = rule["caps"]
+    lifetime = caps["lifetime_secs"]
+    _say(f"{rule['name']}  {rule['kind']}, {state}, {rule['profile']}", as_json=as_json)
+    _say(
+        f"  caps  {caps['new_per_hour']} an hour, {caps['new_per_day']} a day, "
+        f"{caps['open_at_once']} at once, "
+        + ("no lifetime" if lifetime is None else f"lifetime {lifetime} s"),
+        as_json=as_json,
+    )
+    if rule["purpose"]:
+        _say(f"  purpose  {clean(rule['purpose'])}", as_json=as_json)
+
+
+@trust_rule_app.command("list", help=f"List the standing rules. {HUMAN_ONLY_HELP}")
+def trust_rule_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    with guard(as_json):
+        out = connect(config, human=True).request("GET", "/v0/trust/rules")
+        if as_json:
+            emit_json(out)
+            return
+        if not out["rules"]:
+            typer.echo("No standing rules.")
+        for rule in out["rules"]:
+            _print_rule(rule)
+
+
+@trust_rule_app.command("show", help=f"Show one standing rule. {HUMAN_ONLY_HELP}")
+def trust_rule_show(name: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    with guard(as_json):
+        rule = connect(config, human=True).request("GET", f"/v0/trust/rules/{name}")
+        if as_json:
+            emit_json(rule)
+            return
+        _print_rule(rule)
+        typer.echo(f"  fields  {clean(json.dumps(rule['fields'], sort_keys=True))}")
+
+
+def _commit_rule(
+    config: Path | None, body: dict[str, Any], *, yes: bool, as_json: bool
+) -> dict[str, Any]:
+    """Preview, confirm, then commit what the preview showed."""
+    _require_yes(as_json, yes, f"{body['action']} a rule")
+    api = connect(config, human=True)
+    preview = api.request("POST", "/v0/trust/rules/preview", body)
+    _print_rule(preview["after"], as_json=as_json)
+    if preview["widens"]:
+        _say("This lets in more than the rule does now.", as_json=as_json)
+    if not _confirm(f"{body['action'].capitalize()} {body['name']}?", yes=yes, as_json=as_json):
+        raise CliError("declined", "nothing changed", EXIT_REFUSED)
+    return api.request("POST", "/v0/trust/rules", {**body, "hash": preview["hash"]})
+
+
+@trust_rule_app.command("enable", help=f"Enable a rule again. {HUMAN_ONLY_HELP}")
+def trust_rule_enable(
+    name: str, yes: YesOpt = False, config: ConfigOpt = None, as_json: JsonOpt = False
+) -> None:
+    with guard(as_json):
+        rule = _commit_rule(config, {"action": "enable", "name": name}, yes=yes, as_json=as_json)
+        if as_json:
+            emit_json(rule)
+        else:
+            typer.echo(f"Enabled {name}.")
+
+
+@trust_rule_app.command(
+    "disable", help=f"Stop a rule at once. Works in any mode. {HUMAN_ONLY_HELP}"
+)
+def trust_rule_disable(name: str, config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
+    with guard(as_json):
+        rule = connect(config, human=True).request("POST", f"/v0/trust/rules/{name}/disable")
+        if as_json:
+            emit_json(rule)
+        else:
+            typer.echo(f"Disabled {name}.")
+
+
+@trust_rule_app.command("remove", help=f"Remove a rule. Works in any mode. {HUMAN_ONLY_HELP}")
+def trust_rule_remove(
+    name: str, yes: YesOpt = False, config: ConfigOpt = None, as_json: JsonOpt = False
+) -> None:
+    with guard(as_json):
+        _require_yes(as_json, yes, "remove a rule")
+        if not _confirm(f"Remove {name}?", yes=yes, as_json=as_json):
+            raise CliError("declined", "nothing changed", EXIT_REFUSED)
+        out = connect(config, human=True).request("DELETE", f"/v0/trust/rules/{name}")
+        if as_json:
+            emit_json(out)
+        else:
+            typer.echo(f"Removed {name}.")
 
 
 @listing_app.command("status")

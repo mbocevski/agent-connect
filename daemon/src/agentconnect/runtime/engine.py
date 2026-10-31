@@ -216,6 +216,10 @@ HUMAN_EVENTS = (
             # close itself, through the delivery gates (require_verified
             # included), never its reason ahead of them (SR-34).
             "close_requested",
+            # ADR-007: what the human's rules are, and whether they count, is
+            # the rule set's shape, which an injected agent could repeat.
+            "rule_changed",
+            "rules_inert",
         }
     )
     | KNOCK_OWNER_EVENTS
@@ -866,6 +870,11 @@ class Engine:
         self.listings = ListingManager(self)
         # Knocks, both sides: the owner's ledger and approvals, the knocker's knocks.
         self.knocks = KnockService(self)
+        # Standing rules: stored and changed by the human (ADR-007).
+        from agentconnect.runtime.trust import RuleService  # noqa: PLC0415 - import cycle
+
+        self.rules = RuleService(self)
+        self.rules_inert_told = False
         # SAS runs: the commit-then-reveal exchange behind the short code (SPEC 11).
         self.sas = SasService(self)
         # The inviter's JoinRequest replay ledger (SPEC 6.2, "Replays").
@@ -928,6 +937,7 @@ class Engine:
             # SPEC 11.8: tell the human, once, why its members are unverified.
             await self.emit(None, "verifications_reset", reason=VERIFICATIONS_RESET)
             self.store.kv_set(SAS_RESET_NOTICE, "")
+        await self.rules.announce_inert()
         LOG.info("daemon_started", identity=log.hid(self.me), keystore=self.keystore.kind)
 
     async def _supervised(self, name: str, worker: Callable[[], Awaitable[None]]) -> None:

@@ -1508,3 +1508,71 @@ def test_peer_strings_are_printed_without_control_sequences(held: Fake) -> None:
         out = held.run(*args).output
         assert "\x1b" not in out, args
         assert "\x07" not in out, args
+
+
+RULE = {
+    "name": "r1",
+    "kind": "fake",
+    "enabled": True,
+    "created_at": 1,
+    "changed_at": 1,
+    "caps": {"new_per_hour": 1, "new_per_day": 2, "open_at_once": 3, "lifetime_secs": None},
+    "profile": "standard",
+    "purpose": None,
+    "fields": {},
+}
+
+
+def test_trust_rules_are_read_and_changed_with_the_human_token(fake: Fake) -> None:
+    preview = {
+        "action": "enable",
+        "name": "r1",
+        "before": {**RULE, "enabled": False},
+        "after": RULE,
+        "widens": True,
+        "hash": "h1",
+    }
+    fake.routes |= {
+        "GET /v0/trust/rules": {"rules": [RULE]},
+        "GET /v0/trust/rules/r1": RULE,
+        "POST /v0/trust/rules/preview": preview,
+        "POST /v0/trust/rules": RULE,
+        "POST /v0/trust/rules/r1/disable": {**RULE, "enabled": False},
+        "DELETE /v0/trust/rules/r1": {"name": "r1", "status": "removed"},
+    }
+    code, data = fake.json("trust", "rule", "list")
+    assert (code, conforms(data, SCHEMAS["trust rule list"])) == (0, True)
+    assert "r1" in fake.run("trust", "rule", "show", "r1").stdout
+    code, data = fake.json("trust", "rule", "enable", "r1", "--yes")
+    assert (code, conforms(data, SCHEMAS["trust rule enable"])) == (0, True)
+    assert fake.posts("/v0/trust/rules")[-1][1]["hash"] == "h1"
+    code, data = fake.json("trust", "rule", "disable", "r1")
+    assert (code, data["enabled"]) == (0, False)
+    code, data = fake.json("trust", "rule", "remove", "r1", "--yes")
+    assert (code, data["status"]) == (0, "removed")
+    assert all(human for human, key, _ in fake.calls if "/trust/" in key)
+
+
+def test_enabling_a_rule_asks_first_and_stops_at_no(fake: Fake) -> None:
+    fake.routes["POST /v0/trust/rules/preview"] = {
+        "action": "enable",
+        "name": "r1",
+        "before": None,
+        "after": RULE,
+        "widens": True,
+        "hash": "h1",
+    }
+    result = fake.run("trust", "rule", "enable", "r1", input="n\n")
+    assert result.exit_code == 3
+    assert "lets in more" in result.output
+    assert not fake.posts("/v0/trust/rules")
+    assert fake.json("trust", "rule", "enable", "r1")[0] == 2
+
+
+def test_needs_isolation_reads_as_what_it_is(fake: Fake) -> None:
+    fake.routes["POST /v0/trust/rules/preview"] = ApiClientError(
+        409, "needs_isolation", "standing rules need the separate-OS-user mode"
+    )
+    result = fake.run("trust", "rule", "enable", "r1", "--yes")
+    assert result.exit_code != 0
+    assert "separate-OS-user mode" in result.output

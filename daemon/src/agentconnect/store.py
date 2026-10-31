@@ -220,6 +220,17 @@ CREATE TABLE IF NOT EXISTS approvals (
     kp_ref TEXT,
     instance_id TEXT
 );
+CREATE TABLE IF NOT EXISTS trust_rules (
+    name TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    changed_at INTEGER NOT NULL,
+    caps TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    purpose TEXT,
+    fields TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS joins (
     invite_id TEXT PRIMARY KEY,
     meta TEXT NOT NULL,
@@ -2170,6 +2181,58 @@ class Store:
 
     def set_invite_status(self, invite_id: str, status: str) -> None:
         self._db.execute("UPDATE invites SET status = ? WHERE invite_id = ?", (status, invite_id))
+
+    _RULE_COLUMNS = (
+        "name",
+        "kind",
+        "enabled",
+        "created_at",
+        "changed_at",
+        "caps",
+        "profile",
+        "purpose",
+        "fields",
+    )
+
+    def _rule(self, row: Any) -> dict[str, Any]:
+        rule = dict(zip(self._RULE_COLUMNS, row, strict=True))
+        rule["enabled"] = bool(rule["enabled"])
+        rule["caps"] = json.loads(rule["caps"])
+        rule["fields"] = json.loads(rule["fields"])
+        return rule
+
+    def trust_rule(self, name: str) -> dict[str, Any] | None:
+        row = self._one(
+            f"SELECT {', '.join(self._RULE_COLUMNS)} FROM trust_rules WHERE name = ?",  # noqa: S608
+            name,
+        )
+        return None if row is None else self._rule(row)
+
+    def trust_rules(self) -> list[dict[str, Any]]:
+        rows = self._all(
+            f"SELECT {', '.join(self._RULE_COLUMNS)} FROM trust_rules ORDER BY name"  # noqa: S608
+        )
+        return [self._rule(r) for r in rows]
+
+    def put_trust_rule(self, rule: dict[str, Any]) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO trust_rules (name, kind, enabled, created_at, changed_at, "
+            "caps, profile, purpose, fields) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                rule["name"],
+                rule["kind"],
+                int(rule["enabled"]),
+                rule["created_at"],
+                rule["changed_at"],
+                json.dumps(rule["caps"], sort_keys=True),
+                rule["profile"],
+                rule["purpose"],
+                json.dumps(rule["fields"], sort_keys=True),
+            ],
+        )
+
+    def delete_trust_rule(self, name: str) -> None:
+        self._db.execute("DELETE FROM trust_rules WHERE name = ?", [name])
 
     def add_approval(self, row: dict[str, Any]) -> bool:
         cur = self._db.execute(

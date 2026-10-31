@@ -45,6 +45,12 @@ HUMAN = {
     "POST /v0/groups/{gid}/sas/mismatch",
     "POST /v0/listing/preview",
     "POST /v0/listing/publish",
+    "GET /v0/trust/rules",
+    "GET /v0/trust/rules/{name}",
+    "POST /v0/trust/rules/preview",
+    "POST /v0/trust/rules",
+    "POST /v0/trust/rules/{name}/disable",
+    "DELETE /v0/trust/rules/{name}",
 }
 # Either token. `POST /v0/groups` and `/policy` take the agent token only for
 # defaults and raising require_verified (test_api_shapes.py runs that). A floor
