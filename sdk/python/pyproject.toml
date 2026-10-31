@@ -1,11 +1,11 @@
 [project]
 name = "agentconnect-sdk"
-version = "0.1.0a4"
+version = "0.1.0a5.dev0"
 description = "Python SDK for headless agents on AgentConnect"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["agentconnect-cli==0.1.0a4", "httpx>=0.28.1"]
+dependencies = ["agentconnect-cli==0.1.0a5.dev0", "httpx>=0.28.1"]
 
 [tool.uv.sources]
 agentconnect-cli = { workspace = true }

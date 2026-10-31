@@ -264,6 +264,23 @@ apply-ruleset:
 changelog-cut version date="":
     scripts/changelog-cut.sh {{ version }} {{ date }}
 
+# Set the version everywhere and update the lock files (version without the v: a release such as 0.1.0a5 in the release PR, or a development version such as 0.1.0a6.dev0)
+set-version version:
+    python3 scripts/set_version.py {{ version }}
+    just _lock-versions
+    python3 scripts/check_version.py
+
+# After a release: move main to the next development version (0.1.0a4 to 0.1.0a5.dev0) and update the lock files
+next-dev:
+    python3 scripts/set_version.py --next-dev
+    just _lock-versions
+    python3 scripts/check_version.py
+
+_lock-versions:
+    uv lock
+    cargo update --workspace
+    for p in core relay directory; do (cd "$p/fuzz" && cargo update -p "agentconnect-$p"); done
+
 # Verify a release's provenance and cosign signatures: every release file and both images (version without the v, e.g. 0.1.0a1)
 release-verify version:
     gh release download v{{ version }} --dir dist/verify-{{ version }} --clobber
