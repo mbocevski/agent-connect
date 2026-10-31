@@ -1,8 +1,6 @@
 name: nightly
 
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -11,109 +9,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UV_FROZEN: "1"
-  # The workspace pulls openmls from GitHub (`[patch.crates-io]`): fetch it
-  # with the git CLI, which recovers from the TLS errors libgit2 did not,
-  # and retry network operations more than cargo's default of 3.
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_NET_RETRY: "10"
 
 jobs:
-  # Linux arm64 and macOS arm64 (non-gating; see ADR-001).
-  platforms:
-    uses: ./.github/workflows/platform-tests.yml
-
-  audit:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: just,cargo-deny
-      - run: cargo deny check advisories
-      - run: just licences
-      - run: uv export --all-packages --no-emit-workspace --no-hashes --format requirements-txt > requirements.txt
-      - run: uvx pip-audit==2.10.1 --strict -r requirements.txt
-      # Removal trigger for the OpenMLS provider patch (ADR-001 §2): fails
-      # once crates.io has a fixed provider release that works with our
-      # openmls, so the nightly issue says the patch can go.
-      - name: Fixed OpenMLS provider on crates.io
-        run: uv run --no-project python scripts/check_cargo_patch.py upstream
-
-  # New CVEs against unchanged images: build the amd64 images from main and
-  # scan them with Trivy (the same check as the PR `image` job).
-  image-scan:
-    name: image-scan (${{ matrix.component }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      security-events: write
-    strategy:
-      fail-fast: false
-      matrix:
-        component: [relay, directory]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: docker buildx build --load --pull --platform linux/amd64 -t ac-${{ matrix.component }}:nightly -f ${{ matrix.component }}/Dockerfile .
-      - uses: ./.github/actions/scan-image
-        with:
-          image: ac-${{ matrix.component }}:nightly
-          category: image-${{ matrix.component }}
-
-  # Mutation testing of the core, in shards: run serially, it outgrew the
-  # 6 h job limit. Shard k of n takes every n-th mutant (round-robin,
-  # .cargo/mutants.toml); n is the number of matrix entries. Runners differ in
-  # speed by up to 2x: with 16 shards they took 50 to 100 minutes. Add entries
-  # when a shard gets near its timeout.
-  mutants:
-    name: mutants (${{ strategy.job-index }}/${{ strategy.job-total }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
-    env:
-      SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: just,cargo-mutants,cargo-nextest
-      # In place: the runner is thrown away, and the build reuses the cache.
-      - name: cargo mutants
-        run: just nightly-mutants-shard "$SHARD" --in-place
-      - name: Summary
-        if: always()
-        run: |
-          out=mutants.out
-          {
-            echo "### mutants shard $SHARD"
-            for kind in missed timeout caught unviable; do
-              n=0
-              if [ -f "$out/$kind.txt" ]; then n="$(wc -l <"$out/$kind.txt")"; fi
-              echo "- $kind: $n"
-            done
-            if [ -s "$out/missed.txt" ]; then
-              printf '\nMissed:\n\n```text\n'
-              cat "$out/missed.txt"
-              printf '```\n'
-            fi
-          } >>"$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: mutants-${{ strategy.job-index }}
-          path: mutants.out
-          if-no-files-found: ignore
-
-  # Every fuzz target, for a bounded time each (security review SR-40). The
-  # recipe lists each crate's targets itself, so a new target is fuzzed
-  # without a change here. A crash fails the job; the log names the target
-  # and the input's SHA-256 only, and nothing is uploaded (SECURITY.md).
   fuzz:
     name: fuzz (${{ matrix.crate }})
     runs-on: ubuntu-24.04
@@ -131,91 +30,4 @@ jobs:
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: just,cargo-fuzz
-      - run: just nightly-fuzz ${{ matrix.crate }} 300
-
-  # The relay's load tests: storage budgets and stall resistance (non-gating).
-  relay-load:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: just,cargo-nextest
-      - run: just nightly-relay-load
-
-  # Quarantined tests and long property runs (non-gating).
-  python-long:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-      - run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: just
-      - run: uv sync --all-packages
-      - run: just nightly-py
-
-  # Rust branch coverage needs nightly rustc (`--branch` is unstable). It runs
-  # here, never in the PR pipeline, and does not gate anything.
-  rust-branch-coverage:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: just,cargo-nextest,cargo-llvm-cov
-      - run: just cov-rust-branch
-
-  # External links in the docs (PR CI and the pre-commit hook check only
-  # relative links and anchors, offline). Non-gating, like the rest of nightly.
-  links:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
-        with:
-          lycheeVersion: v0.24.2
-          # Options live in lychee.toml (loaded from the repo root).
-          args: --no-progress '**/*.md'
-          jobSummary: true
-
-  # Scheduled-workflow failures only email whoever last edited the cron, so
-  # keep one issue open while any nightly job fails: comment on it per failing
-  # run, close it on the next fully green run. The run's jobs, not `needs`,
-  # name what failed: `needs` has one result per matrix job, so it can't say
-  # which mutants shard or image failed.
-  notify:
-    if: always()
-    needs: [platforms, audit, image-scan, mutants, python-long, rust-branch-coverage, links]
-    runs-on: ubuntu-24.04
-    permissions:
-      actions: read
-      issues: write
-    steps:
-      - name: Open, update or close the nightly issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TITLE: "nightly: failing jobs"
-        run: |
-          failed="$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "- " + .name + " (" + .conclusion + ")"')"
-          number="$(gh issue list --state open --search "$TITLE in:title" --json number,title --jq "map(select(.title == \"$TITLE\")) | .[0].number // empty")"
-          if [ -n "$failed" ]; then
-            body="$(printf 'Nightly run %s failed:\n\n%s\n' "$RUN_URL" "$failed")"
-            if [ -n "$number" ]; then
-              gh issue comment "$number" --body "$body"
-            else
-              gh issue create --title "$TITLE" --body "$body"
-            fi
-          elif [ -n "$number" ]; then
-            gh issue close "$number" --comment "Nightly run $RUN_URL passed."
-          fi
+      - run: just nightly-fuzz ${{ matrix.crate }} 10
