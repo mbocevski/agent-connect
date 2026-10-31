@@ -1070,7 +1070,14 @@ def approvals_list(config: ConfigOpt = None, as_json: JsonOpt = False) -> None:
     """List pending join requests with the joiner's name and fingerprint, knocks on
     your listing, and the messages the safety policy holds (`require_approval`)."""
     with guard(as_json):
-        api = connect(config, human=True)
+        try:
+            api = connect(config, human=True)
+        except ApiClientError as e:
+            # An agent's user in the separate-user mode: the route takes its
+            # token too, and shows only the agent's own held sends.
+            if e.code != "human_only":
+                raise
+            api = connect(config)
         listed = api.request("GET", "/v0/approvals")
         views = [_approval_view(api, a) for a in listed["approvals"]]
         held = list(listed.get("messages", []))

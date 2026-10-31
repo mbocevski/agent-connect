@@ -192,6 +192,13 @@ def map_api_error(e: ApiClientError) -> CliError:  # noqa: PLR0911
             "as the daemon's user, see docs/isolation.md",
             EXIT_REFUSED,
         )
+    if e.code == "token_unreadable":
+        return CliError(
+            "token_unreadable",
+            f"{e.message}. In the separate-user mode an agent sets AC_DATA_DIR to the agent "
+            "directory, and human commands run as the daemon's user, see docs/isolation.md",
+            EXIT_REFUSED,
+        )
     if e.code == "peer_mismatch":
         # Not the daemon's socket; the message names the path and the UIDs.
         return CliError("peer_mismatch", e.message, EXIT_REFUSED)
