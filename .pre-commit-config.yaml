@@ -20,7 +20,7 @@ repos:
       - id: check-shebang-scripts-are-executable
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.2
+    rev: v0.17.4
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -46,7 +46,7 @@ repos:
       - id: actionlint
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.51.1
+    rev: v1.52.0
     hooks:
       - id: typos
 
@@ -57,7 +57,7 @@ repos:
 
   # Docs: Markdown lint, offline link check, prose rules (CONTRIBUTING.md).
   - repo: https://github.com/rvben/rumdl-pre-commit
-    rev: v0.3.0
+    rev: v0.3.2
     hooks:
       - id: rumdl-check
 
@@ -77,13 +77,13 @@ repos:
         require_serial: true
 
   - repo: https://github.com/vale-cli/vale
-    rev: v3.25.1
+    rev: v3.26.0
     hooks:
       - id: vale
         types: [markdown]
 
   - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v4.4.0
+    rev: v4.5.0
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
