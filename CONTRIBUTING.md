@@ -200,13 +200,27 @@ Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
 (`v0.1.0a1`) and the Rust workspace carries the SemVer spelling
 (`0.1.0-alpha.1`).
 
-1. In a release PR, set the version in `core-py`, `daemon` and `sdk/python`
-   (`pyproject.toml`, the pins between them and `__version__`), in the root
-   `Cargo.toml`, in the README's install command and in the `blob/vX.Y.Z/`
-   links of the packages' READMEs (their PyPI pages), then update the lock
-   files: `uv lock`, `cargo update --workspace`, and `cargo update -p` for
-   the path crates in each `*/fuzz/Cargo.lock`. `scripts/check_version.py`
-   (in `just test`) fails until the versions all agree.
+Between releases `main` carries the next pre-release's development version:
+`0.1.0a5.dev0` after `0.1.0a4`, and `0.1.0-alpha.5.dev.0` in Cargo. A wheel
+built from `main` then never shares a version with a published one, so an
+installer can't mix a local `agentconnect-cli` with the `agentconnect-core` on
+PyPI: the exact pin between the packages finds no match and fails. The README's
+install command and the packages' `blob/vX.Y.Z/` links keep naming the last
+release, which is what users install. To install a locally built wheel, build
+and install both together (`uv pip install dist/agentconnect_core-*.whl
+dist/agentconnect_cli-*.whl`); an installer skips `.dev` versions by default.
+`uv sync` in a checkout needs no extra step.
+
+1. In a release PR, `just set-version X.Y.Z` sets the version in `core-py`,
+   `daemon` and `sdk/python` (`pyproject.toml`, the pins between them and
+   `__version__`), in the root `Cargo.toml`, in the README's install command
+   and in the `blob/vX.Y.Z/` links of the packages' READMEs (their PyPI
+   pages), then updates the lock files: `uv lock`, `cargo update
+   --workspace`, and `cargo update -p` for the path crates in each
+   `*/fuzz/Cargo.lock`. `scripts/check_version.py` (in `just test`) fails
+   until the versions all agree, and the `release` workflow refuses a `.devN`
+   version, a tag or a dry run, so a release PR that forgot this step fails
+   at its first job.
 2. In the same PR, `just changelog-cut X.Y.Z` turns `[Unreleased]` and the
    fragments in `changelog.d/` into `[X.Y.Z] - <today>`, with the fragments
    after the entries already under `[Unreleased]`, and deletes the
@@ -218,6 +232,12 @@ Versions are PEP 440 (`0.1.0a1`); the tag is the version with a `v`
    characters for a Release body.
 3. After it merges, run the `release` workflow by hand on `main` (the dry
    run: everything except publishing), then tag `vX.Y.Z` on `main`.
+4. After the tag, open a PR that runs `just next-dev`, which moves `main` on
+   to the next development version (`0.1.0a4` to `0.1.0a5.dev0`; a final
+   `0.1.0` goes to `0.1.1.dev0`, and `just set-version` sets any other
+   one) and updates the lock files. Title it `chore: start 0.1.0a5.dev0`.
+   The nightly run fails (`check_version.py --post-release`) while `main`
+   still carries a version that has a tag, so the step can't be forgotten.
 
 The tag builds the artifacts and the per-architecture images on every
 platform, signs the artifacts (Sigstore), verifies the signatures and

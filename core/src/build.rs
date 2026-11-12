@@ -5,18 +5,38 @@
 
 /// The release spelling of a Cargo version, as the tags, packages and
 /// images name it: `0.1.0-alpha.2` is `0.1.0a2`, `-beta.N` is `bN`,
-/// `-rc.N` is `rcN`; a version without a pre-release is unchanged.
+/// `-rc.N` is `rcN`, and the development version `main` carries between
+/// releases keeps its `.devN`: `0.1.0-alpha.5.dev.0` is `0.1.0a5.dev0` and
+/// `0.2.0-dev.0` is `0.2.0.dev0`. A version without a pre-release is
+/// unchanged.
 #[must_use]
 pub fn release_version(cargo: &str) -> String {
     let Some((base, pre)) = cargo.split_once('-') else {
         return cargo.to_owned();
     };
-    for (word, short) in [("alpha.", "a"), ("beta.", "b"), ("rc.", "rc")] {
-        if let Some(n) = pre.strip_prefix(word) {
-            return format!("{base}{short}{n}");
-        }
+    let (pre, dev) = match pre.split_once(".dev.") {
+        Some((pre, n)) => (pre, Some(n)),
+        None => match pre.strip_prefix("dev.") {
+            Some(n) => ("", Some(n)),
+            None => (pre, None),
+        },
+    };
+    let mut version = base.to_owned();
+    if !pre.is_empty() {
+        let Some((short, n)) = [("alpha.", "a"), ("beta.", "b"), ("rc.", "rc")]
+            .into_iter()
+            .find_map(|(word, short)| pre.strip_prefix(word).map(|n| (short, n)))
+        else {
+            return cargo.to_owned();
+        };
+        version.push_str(short);
+        version.push_str(n);
     }
-    cargo.to_owned()
+    if let Some(n) = dev {
+        version.push_str(".dev");
+        version.push_str(n);
+    }
+    version
 }
 
 /// A metric label value built from build-time input: kept when it is 1 to
@@ -62,6 +82,16 @@ mod tests {
         assert_eq!(release_version("1.0.0-rc.3"), "1.0.0rc3");
         assert_eq!(release_version("1.0.0"), "1.0.0");
         assert_eq!(release_version("1.0.0-dev"), "1.0.0-dev");
+    }
+
+    #[test]
+    fn development_versions_take_the_release_spelling_too() {
+        // What main carries between releases (scripts/check_version.py).
+        assert_eq!(release_version("0.1.0-alpha.5.dev.0"), "0.1.0a5.dev0");
+        assert_eq!(release_version("0.2.0-beta.1.dev.3"), "0.2.0b1.dev3");
+        assert_eq!(release_version("1.0.0-rc.2.dev.0"), "1.0.0rc2.dev0");
+        assert_eq!(release_version("0.2.0-dev.0"), "0.2.0.dev0");
+        assert_eq!(release_version("0.2.0-dev.12"), "0.2.0.dev12");
     }
 
     #[test]
