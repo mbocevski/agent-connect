@@ -2,9 +2,11 @@ name: ci
 
 on:
   pull_request:
-    # labeled and unlabeled start a fresh run, so the skip-* labels are read
-    # from the current label set (a re-run reuses the old event payload).
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # Labels are not triggers: the changelog and docs jobs read the skip-*
+    # labels from the API when they run, so a re-run of a failed job picks up
+    # a label added since, and opening a PR with labels (`gh pr create` adds
+    # them in a second call, after `opened`) starts one run, not two.
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   workflow_dispatch:
@@ -165,27 +167,52 @@ jobs:
   changelog:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      # The labels as they are now, not as the event payload had them.
       - env:
-          SKIP_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
-        run: scripts/check-changelog.sh "origin/${{ github.base_ref }}"
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          names="$(gh api "repos/$REPO/issues/$PR/labels" --paginate --jq '.[].name')"
+          for pair in skip-changelog:SKIP_CHANGELOG; do
+            if grep -qxF "${pair%%:*}" <<< "$names"; then value=true; else value=false; fi
+            echo "${pair##*:}=$value" >> "$GITHUB_ENV"
+          done
+      - run: scripts/check-changelog.sh "origin/${{ github.base_ref }}"
 
   # Docs must change with the user-facing code they describe (docs/MAP.toml).
   docs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      # The labels as they are now, not as the event payload had them.
       - env:
-          SKIP_DOCS: ${{ contains(github.event.pull_request.labels.*.name, 'skip-docs') }}
-          SKIP_README: ${{ contains(github.event.pull_request.labels.*.name, 'skip-readme') }}
-        run: uv run --no-project python scripts/check_docs.py "origin/${{ github.base_ref }}"
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          names="$(gh api "repos/$REPO/issues/$PR/labels" --paginate --jq '.[].name')"
+          for pair in skip-docs:SKIP_DOCS skip-readme:SKIP_README; do
+            if grep -qxF "${pair%%:*}" <<< "$names"; then value=true; else value=false; fi
+            echo "${pair##*:}=$value" >> "$GITHUB_ENV"
+          done
+      - run: uv run --no-project python scripts/check_docs.py "origin/${{ github.base_ref }}"
 
   # Commit messages and PR text must not carry AI-tool attribution.
   hygiene:

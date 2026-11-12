@@ -29,7 +29,7 @@ Python workspace (`uv sync --all-packages`), and all git hooks via prek.
    `CHANGELOG.md`; the release PR assembles the fragments into it.
 4. `just pr` pushes the branch and opens a PR, titled with the first
    commit's subject. Use a Conventional Commit PR title; it becomes the
-   squash commit.
+   squash commit. Labels go on the command line: `just pr skip-changelog`.
 5. If `main` moved on, run `just update-branch <pr-number>` from the branch's
    checkout. It rebases onto `origin/main`, re-signs every commit, checks the
    signatures and pushes with `--force-with-lease`. It stops on conflicts and
@@ -87,11 +87,12 @@ don't need a changelog fragment. For anything else that genuinely isn't
 user-facing, add the `skip-changelog` label to the PR. The label skips the
 requirement for a fragment, not the check that every fragment is well formed.
 
-Adding or removing a skip label (`skip-changelog`, `skip-docs`, `skip-readme`)
-starts a fresh CI run that reads the current labels and cancels any run still
-in progress for the PR. Re-running a job from the Actions tab does not pick up
-a label change, because a re-run reuses the original event payload. Any other
-label also starts a run, and that run executes the full pipeline.
+The changelog and docs checks read the skip labels (`skip-changelog`,
+`skip-docs`, `skip-readme`) from GitHub when they run, and a label never
+starts a run of its own. Add the labels when you open the PR (`just pr
+skip-changelog`). If you add one after a check has already failed, re-run
+the failed jobs (`gh run rerun <run-id> --failed`, or the Actions tab): a
+re-run reads the current labels.
 
 ### Docs that must change with code
 
