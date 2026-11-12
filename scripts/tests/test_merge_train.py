@@ -111,6 +111,17 @@ elif args[:2] == ["pr", "checks"]:
     n = args[2]
     log(f"gh pr checks {n}")
     print(json.dumps(take(state[n], "checks")))
+elif args[:2] == ["run", "list"]:
+    sha = args[args.index("--commit") + 1]
+    log(f"gh run list {sha[:7]}")
+    for pr in state.values():
+        if sha == pr["head"]:
+            if pr.get("runs_fail"):
+                print("HTTP 502", file=sys.stderr)
+                sys.exit(1)
+            print(json.dumps(take(pr, "runs") if "runs" in pr else []))
+            sys.exit(0)
+    print("[]")
 elif args[0] == "api" and "/compare/main..." in args[1]:
     sha = args[1].rsplit("...", 1)[1]
     for pr in state.values():
@@ -310,6 +321,100 @@ def test_a_cancelled_check_counts_as_failed(train: Train) -> None:
     result = train.run("1")
     assert result.returncode == 1
     assert "ci-ok" in result.stderr
+    assert train.recipes() == []
+
+
+def run_of(run: int, workflow: str = "ci") -> dict[str, Any]:
+    return {"databaseId": run, "workflowName": workflow}
+
+
+def check_of(name: str, bucket: str, run: int) -> dict[str, str]:
+    link = f"https://github.com/octo/repo/actions/runs/{run}/job/{run}0"
+    return {"name": name, "bucket": bucket, "link": link}
+
+
+def test_a_cancelled_superseded_run_doesnt_stop_the_train(train: Train) -> None:
+    """A newer run replaced it: the train waits for that one and judges it."""
+    superseded = [check_of("ci-ok", "cancel", 1), check_of("lint", "cancel", 1)]
+    train.prs(
+        p1={
+            "runs": [[run_of(2), run_of(1)]],
+            "checks": [superseded, superseded, [check_of("ci-ok", "pass", 2)]],
+        }
+    )
+    result = train.run("1")
+    assert result.returncode == 0, result.stderr
+    assert train.calls().count("sleep") == 2
+    assert train.recipes() == ["merge 1"]
+
+
+def test_a_failure_in_a_superseded_run_doesnt_stop_the_train(train: Train) -> None:
+    train.prs(
+        p1={
+            "runs": [[run_of(1), run_of(2)]],
+            "checks": [[check_of("lint", "fail", 1), check_of("ci-ok", "pass", 2)]],
+        }
+    )
+    result = train.run("1")
+    assert result.returncode == 0, result.stderr
+    assert train.recipes() == ["merge 1"]
+
+
+def test_a_pass_in_a_superseded_run_doesnt_count(train: Train) -> None:
+    train.prs(p1={"runs": [[run_of(2), run_of(1)]], "checks": [[check_of("ci-ok", "pass", 1)]]})
+    result = train.run("1", timeout=0)
+    assert result.returncode == 1
+    assert "timed out" in result.stderr
+    assert train.recipes() == []
+
+
+def test_a_cancel_in_the_newest_run_stops_the_train(train: Train) -> None:
+    train.prs(p1={"runs": [[run_of(2), run_of(1)]], "checks": [[check_of("ci-ok", "cancel", 2)]]})
+    result = train.run("1")
+    assert result.returncode == 1
+    assert "failed checks: ci-ok" in result.stderr
+    assert train.recipes() == []
+
+
+def test_each_workflow_has_its_own_newest_run(train: Train) -> None:
+    """Another workflow's run being newer says nothing about this one's."""
+    train.prs(
+        p1={
+            "runs": [[run_of(1, "ci"), run_of(2, "repro")]],
+            "checks": [[check_of("ci-ok", "pass", 1), check_of("build", "fail", 2)]],
+        }
+    )
+    result = train.run("1")
+    assert result.returncode == 1
+    assert "failed checks: build" in result.stderr
+
+
+def test_a_check_from_outside_the_known_runs_still_counts(train: Train) -> None:
+    train.prs(
+        p1={
+            "runs": [[run_of(2)]],
+            "checks": [
+                [
+                    check_of("ci-ok", "pass", 2),
+                    {
+                        "name": "scan",
+                        "bucket": "fail",
+                        "link": "https://github.com/octo/repo/runs/1",
+                    },
+                ]
+            ],
+        }
+    )
+    result = train.run("1")
+    assert result.returncode == 1
+    assert "failed checks: scan" in result.stderr
+
+
+def test_if_the_runs_cant_be_listed_it_waits_and_doesnt_merge(train: Train) -> None:
+    train.prs(p1={"runs_fail": True})
+    result = train.run("1", timeout=0)
+    assert result.returncode == 1
+    assert "timed out" in result.stderr
     assert train.recipes() == []
 
 
