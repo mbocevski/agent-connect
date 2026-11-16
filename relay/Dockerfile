@@ -1,6 +1,6 @@
 # Build from the repository root:  docker build -f relay/Dockerfile -t agentconnect-relay .
 
-FROM rust:1.99.1-bookworm AS build
+FROM rust:1.100.0-bookworm AS build
 # The openmls git dependency is fetched with the git CLI, and network
 # operations are retried (a build stage only: nothing of it is in the image).
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true CARGO_NET_RETRY=10
